@@ -77,12 +77,7 @@ class BlockPipInstallTest(unittest.TestCase):
 
 class ProtectFilesTest(unittest.TestCase):
     def test_blocks_protected_files(self):
-        for path in (
-            r"D:\proj\uv.lock",
-            "/home/u/proj/LICENSE",
-            "/p/License.md",
-            "/p/sub/uv.lock",
-        ):
+        for path in (r"D:\proj\uv.lock", "/home/u/proj/uv.lock", "/p/sub/UV.LOCK"):
             with self.subTest(path=path):
                 result = run_hook("protect_files.py", edit_payload(path))
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -91,7 +86,8 @@ class ProtectFilesTest(unittest.TestCase):
     def test_allows_normal_files(self):
         for path in (
             "/p/main.py",
-            "/p/license.py",
+            "/p/LICENSE",
+            r"D:\proj\License.md",
             "/p/uv.lock.bak",
             "/p/pyproject.toml",
         ):
