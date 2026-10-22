@@ -1,0 +1,7 @@
+# Install the git hook once per clone:  uv run pre-commit install
+# Scan the whole repo manually:          uv run pre-commit run --all-files
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
