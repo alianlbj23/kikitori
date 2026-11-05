@@ -28,9 +28,10 @@ ConnectionFactory = Callable[[str, str, int, float], http.client.HTTPConnection]
 """`(scheme, host, port, timeout)` → 尚未連線的 HTTP(S) 連線；測試可替換。"""
 
 
-def _default_connection(
+def default_connection(
     scheme: str, host: str, port: int, timeout: float
 ) -> http.client.HTTPConnection:
+    """建立（尚未連線的）HTTP 或 HTTPS 連線；HTTPS 驗證憑證。"""
     if scheme == "https":
         return http.client.HTTPSConnection(
             host, port, timeout=timeout, context=ssl.create_default_context()
@@ -83,7 +84,12 @@ def parse_model_list(raw: bytes) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _api_key(env: Mapping[str, str], api_key_env: str) -> str | None:
+def read_api_key(env: Mapping[str, str], api_key_env: str) -> str | None:
+    """環境變數中的 API 金鑰（去頭尾空白）；沒設定時 None。
+
+    Raises:
+        ValueError: 金鑰含非 ASCII 或控制字元（不能放進 HTTP 標頭）。
+    """
     key = env.get(api_key_env, "").strip()
     if not key:
         return None
@@ -98,7 +104,7 @@ def probe_translation_server(
     *,
     timeout: float = PROBE_TIMEOUT_SECS,
     env: Mapping[str, str] | None = None,
-    connect: ConnectionFactory = _default_connection,
+    connect: ConnectionFactory = default_connection,
 ) -> TranslationServerInfo:
     """`GET {base_url}/models`，回傳伺服器狀態；任何錯誤都記在 `error`，不丟例外。
 
@@ -135,7 +141,7 @@ def probe_translation_server(
     )
 
     try:
-        key = _api_key(env, api_key_env) if api_key_env else None
+        key = read_api_key(env, api_key_env) if api_key_env else None
     except ValueError as exc:
         return TranslationServerInfo(text, local, reachable=False, error=str(exc))
     headers = {"Accept": "application/json", "User-Agent": "kikitori"}

@@ -1,6 +1,7 @@
 # Spec: hardware（硬體偵測與模型組合）
 
-> 狀態：已採用（2026-11-05，使用者授權依建議自主實作，不等待審核）。
+> 狀態：已採用（2026-11-05，使用者授權依建議自主實作，不等待審核）。Milestone 12–14（多國語言）：推薦依語言、
+> 原因／警告／驗證訊息改為結構化訊息碼（見「訊息碼」）、Ollama 下載翻譯模型（見「Ollama 下載翻譯模型」）。
 > 上位文件：`docs/specs/app-architecture.md` 的 `hardware` 一節與引擎方法 `hardware.detect`、`models.list`、`models.download`；本文件不得與之矛盾。
 > 依據：`docs/specs/asr.md` 的「硬體等級推薦」、`docs/specs/translate.md` 的「依 VRAM 的推薦順序」、CTranslate2 官方文件（quantization、installation）、NVIDIA CUDA Compatibility 文件。
 
@@ -17,14 +18,17 @@
 讓第一次開啟 app 的使用者不需要懂模型，就能得到「這台電腦跑得動、品質最好」的組合，並清楚知道還缺什麼（cuBLAS、Ollama、翻譯模型）。成功標準：
 
 - `detect()` 在一般電腦上 1 秒內完成（本機實測 0.16 s），任何單項偵測失敗都不會讓整體失敗。
-- `recommend()` 對每個硬體等級給出與 `asr.md`／`translate.md` 一致的組合，原因與警告為可直接顯示的繁體中文。
+- `recommend()` 對每個硬體等級與語言組合給出與 `asr.md`／`translate.md` 一致的組合；原因與警告是結構化訊息
+  `{code, params, message}`（見「訊息碼」），UI 依介面語系組句，`message` 是英文備援。
 - 有 NVIDIA GPU 但缺 cuBLAS 的使用者按一個按鈕就能啟用 GPU，不必安裝 CUDA Toolkit。
 
 ## 對外介面（`src/kikitori/hardware/`）
 
 | 檔案 | 角色 | 主要名稱 |
 |---|---|---|
-| `types.py` | 凍結 dataclass 與 `to_dict()` | `HardwareInfo`、`CpuInfo`、`MemoryInfo`、`GpuInfo`、`CublasInfo`、`TranslationServerInfo`、`AsrChoice`、`ModelCombination`、`ValidationResult` |
+| `types.py` | 凍結 dataclass 與 `to_dict()` | `HardwareInfo`、`CpuInfo`、`MemoryInfo`、`GpuInfo`、`CublasInfo`、`TranslationServerInfo`、`LanguageSelection`、`AsrChoice`、`ModelCombination`、`ValidationResult` |
+| `messages.py` | 結構化訊息與訊息碼表（唯一來源） | `Message`、`message()`、`CATALOG` |
+| `ollama.py` | Ollama 原生 API：判斷是不是 Ollama、`/api/pull` 下載翻譯模型 | `ollama_version()`、`pull_model()`、`native_root()`、`validate_model_name()`、`OllamaUnreachableError`、`NotOllamaError`、`PullError`、`PullCancelledError` |
 | `system.py` | OS、CPU、RAM（各平台） | `detect_cpu()`、`detect_memory()`、`detect_apple_silicon()`、解析器 |
 | `nvidia.py` | `nvidia-smi` 與 cuBLAS 搜尋 | `query_nvidia_gpus()`、`find_cublas()`、`NvidiaSmiError` |
 | `translation_server.py` | `GET {base_url}/models` | `probe_translation_server()` |
@@ -38,10 +42,15 @@
 def detect(*, base_url="http://localhost:11434/v1", api_key_env="KIKITORI_TRANSLATE_API_KEY",
            cuda_library_dirs: Sequence[Path] = (), runtime_root: Path | None = None,
            nvidia_smi_timeout=5.0, probe_timeout=2.0) -> HardwareInfo
-def recommend(info: HardwareInfo, *, allow_restricted: bool = True) -> ModelCombination
+def recommend(info: HardwareInfo, *, allow_restricted: bool = True,
+              languages: LanguageSelection | None = None) -> ModelCombination
 def validate_combination(data: Mapping[str, Any], info: HardwareInfo, *,
                          downloaded_asr: Collection[str] | None = None,
-                         allow_restricted: bool = True) -> ValidationResult
+                         allow_restricted: bool = True,
+                         languages: LanguageSelection | None = None) -> ValidationResult
+def ollama_version(base_url, *, api_key_env="", timeout=2.0) -> str
+def pull_model(base_url, model, *, progress, cancel, api_key_env="",
+               connect_timeout=5.0, idle_timeout=120.0) -> None
 def models_overview(info, recommendation=None, *, cache_dir=None, runtime_root=None) -> dict
 def install_gpu_runtime(root=None, *, progress=None, cancel=None, timeout=30.0,
                         fetcher=None, wheel=None) -> Path
@@ -82,8 +91,39 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 | CPU 低核心 | 實體核心 ≤ 4 | asr.md |
 | Apple GPU 比例 | 統一記憶體 × 0.65，且不超過「總量 − ASR − 4 GiB」 | macOS 預設讓 GPU 使用約 2/3 記憶體 |
 
-- **主 GPU**：VRAM 最大的一張（CUDA 預設裝置順序為 FASTEST_FIRST，CTranslate2 用裝置 0，通常就是它）；多於一張時加警告。
-- **GPU 能否跑 ASR**：平台支援（Windows／Linux x86-64）、驅動 ≥ 525、compute capability ≥ 7.0（float16／int8）或剛好 6.1（只支援 int8，CTranslate2 quantization 文件）；其他情況 ASR 改 CPU 並加警告。可以跑但缺 cuBLAS → ASR 改 CPU、`gpu_runtime_missing = True`、警告「cuBLAS 未安裝，GPU 加速需要先下載…」（UI 顯示下載按鈕；安裝後重新 `detect()` 就會得到 GPU 組合）。
+- **主 GPU**：VRAM 最大的一張（CUDA 預設裝置順序為 FASTEST_FIRST，CTranslate2 用裝置 0，通常就是它）；多於一張時加警告 `multiple_gpus`。
+- **GPU 能否跑 ASR**：平台支援（Windows／Linux x86-64）、驅動 ≥ 525、compute capability ≥ 7.0（float16／int8）或剛好 6.1（只支援 int8，CTranslate2 quantization 文件）；其他情況 ASR 改 CPU 並加警告（`cuda_*`）。可以跑但缺 cuBLAS → ASR 改 CPU、`gpu_runtime_missing = True`、警告 `gpu_runtime_missing`（UI 顯示下載按鈕；安裝後重新 `detect()` 就會得到 GPU 組合）。
+
+### 語言（Milestone 12）
+
+`languages: LanguageSelection`（`mode`、`source_language`、`target_language`、`partner_language`，皆為語言清單的語言碼，
+收聽語言可為 `"auto"`）；引擎由設定組出（`engine/hardware_service.py` 的 `language_selection()`，模式取設定的 `mode`）。
+`languages=None`（舊呼叫端）時不看語言：ASR 只選多語言模型、翻譯模型不檢查語言組合。
+
+- **辨識語言**（`spoken_languages`）：影片翻譯為收聽語言（`auto` 時為空＝任何語言）；口譯為（我的語言, 對方語言）。
+- **ASR 仍依硬體等級挑**：每個等級的即時／完整模型是 `ASR_CANDIDATES` 的候選清單，第一個「支援全部辨識語言」的模型
+  （asr registry 的 `ModelSpec.supports()`）勝出；最後一個候選一定是多語言模型。所以只支援單一語言的模型（例如之後加入的
+  日語特化模型）放在多語言模型前面時，只在辨識語言全是它支援的語言時才被推薦；`auto` 要求支援全部 19 個 Whisper 語言。
+- **品質提示**：辨識語言用推薦的**完整**模型是 C 級（`languages/catalog.py` 的 `asr_quality`）→ 每個語言一則警告
+  `asr_language_quality_low {model, language}`。`auto` 時不提示（不知道會聽到什麼語言）。不換模型：品質等級只是提示，
+  硬體放不下更大的模型。
+- **翻譯方向**（`translation_pairs`）：影片翻譯為（收聽語言 → 字幕語言）；兩者是同一個 Whisper 語言（例如 zh-CN → zh-TW）
+  時為空——不需要翻譯模型；`auto` 為（清單中其他每個 Whisper 語言 → 字幕語言）。口譯為兩個方向。
+
+### ASR 品質等級（`languages/catalog.py` 的 `asr_quality`）
+
+出處：`research_notes/VTuber 直播模型選型調查/language_coverage.md`。A ≤ 10%、B 10–20%、C > 20%（WER；中日泰為 CER）。
+
+| 模型 | 依據 | C 級的語言 |
+|---|---|---|
+| large-v3 | OpenAI README 的 FLEURS 與 Common Voice 15，取較差者 | vi（CV15 39.8） |
+| large-v3-turbo | turbo 公告圖，同上 | ar、hi、vi、th |
+| medium | 論文 Table 13（FLEURS）與 large-v3 等級取較差者 | ar、hi、vi |
+| small | 論文 Table 13 的推論分級 | zh-TW、zh-CN、ar、hi、vi、th |
+| base | 同上 | 除 en、es（A）與 de、pt、it（B）外全部 |
+| tiny | 論文 Table 13 | 除 en、es（B）外全部 |
+
+沒有資料的模型（之後新增的 registry 模型）回傳 None、不提示；`tests/test_hardware_recommend.py` 檢查 registry 的每個模型都有資料。
 
 ### ASR 等級（與 asr.md 一致）
 
@@ -102,19 +142,149 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 
 ### 翻譯模型
 
-- 翻譯伺服器不在本機 → `translation_fast/final = None`，原因說明要在設定頁選該服務的模型。
+- 翻譯伺服器不在本機 → `translation_fast/final = None`、`translation_status = "remote"`、原因 `translation_remote`（在設定頁選該服務的模型）。不檢查語言。
 - 可給翻譯的 VRAM：有 NVIDIA GPU 時 = 主 GPU VRAM − 1024 − ASR 在 GPU 上的用量（ASR 在 CPU 時 Ollama 仍可用整張卡，Ollama 自帶 CUDA runtime）；Apple Silicon 用上表公式；其他 → None（CPU）。
-- 呼叫 `translate.recommend_translation_models(budget, installed, allow_restricted)`（非商用的 Sakura 一律不推薦；`allow_restricted=False` 排除 HY-MT）。`installed` 為伺服器回報的模型（無法取得時 None）。
-- 另以 `installed=None` 算出「理想」選擇：實際選擇不同時加原因「已安裝的模型中選 X；安裝 Y 品質較好」；選中的模型沒裝 → 警告「建議的翻譯模型「X」尚未安裝」。伺服器連不上 → 警告「Ollama 是否已啟動？」。模型權重大於可用 VRAM → 警告 Ollama 會部分用 CPU。CPU 推論且 RAM < 8 GiB → 警告。
+- 翻譯方向為空（同一個 Whisper 語言）→ `translation_status = "not_needed"`、模型為 None、原因 `translation_not_needed`（不檢查安裝、不提示下載）。
+- 呼叫 `translate.recommend_translation_models(budget, installed, allow_restricted, pairs)`（非商用的 Sakura 一律不推薦；`allow_restricted=False` 排除 HY-MT）：在這個 VRAM 等級的推薦順序中，略過不支援全部方向的模型（`translate.supports()`），挑第一個。`installed` 為伺服器回報的模型（無法取得時 None）。等級內沒有任何模型支援 → `translation_status = "unsupported"`、模型為 None、警告 `translation_unsupported {source_language, target_language}`（第一個沒有任何可推薦模型支援的方向；`auto` 時 `source_language` 為 `"auto"`）。目前的預設組（Qwen3.5、HY-MT1.5）都支援 20 種語言，實際上只有之後加入特化模型時才會發生。
+- 收聽語言為 `auto` → 原因 `source_language_auto`（翻譯模型依「任何語言 → 字幕語言」挑選）。
+- 另以 `installed=None` 算出「理想」選擇：實際選擇不同時加原因 `translation_better_model_available`；選中的模型沒裝 → 警告 `translation_model_not_installed`（Ollama 時 UI 可用 `models.pull_translation` 下載）。伺服器連不上 → 警告 `translation_server_unreachable`。模型權重大於可用 VRAM → 警告 `translation_model_exceeds_budget`。CPU 推論且 RAM < 8 GiB → 警告 `low_ram_for_translation`。
+- `ModelCombination` 另有 `translation_status`（`recommended`／`remote`／`not_needed`／`unsupported`）與 `languages`（推薦依據的語言選擇，`to_dict()` 為物件或 null）。
 
 ## 手動覆寫（`validate_combination()`）
 
 輸入與 `ModelCombination.to_dict()` 同形狀（`device` 另可為 `auto`、`compute_type` 可為 null）。純函式，格式錯誤也以 `errors` 回報。
+`errors`／`warnings` 都是結構化訊息（code 見「訊息碼」的「組合驗證」）。帶 `languages` 時另檢查：ASR 模型不支援辨識語言
+（`asr_model_language_unsupported`）、完整模型對辨識語言是 C 級（`asr_language_quality_low`）、已知的翻譯模型不支援語言組合
+（`translation_model_language_unsupported`；不認得的模型不檢查）。
 
 | 類別 | 檢查 |
 |---|---|
 | errors | 不是物件；未知的 ASR id；`device` 不是 auto／cpu／cuda；`compute_type` 不是 CTranslate2 認得的值；`cpu_threads` 不是 0–256 整數；選 cuda 但沒有 NVIDIA GPU、GPU 不支援（平台、驅動、compute capability）或缺 cuBLAS；翻譯模型名稱不是 1–200 字的可列印字串 |
 | warnings | `auto` 時 GPU 不可用而會用 CPU；CPU 上用 float16 等 CPU 不支援的精度（CTranslate2 會自動轉型）；compute capability < 7.0 用 float16／int8_float16；CPU 上用 medium 以上；ASR 模型未下載；即時模型比完整模型大；兩條路徑都是 no_speech 不可用的模型；ASR + 翻譯合計超過「VRAM − 1024」；CPU 上 ASR 超過一半 RAM；翻譯模型不在伺服器上；非商用授權；地區限制（`allow_restricted=False`）；本機伺服器上即時與完整翻譯用不同模型（換模型 1.5–18 s） |
+
+## 訊息碼
+
+`recommend()` 的 `reasons`／`warnings`、`validate_combination()` 的 `errors`／`warnings`，以及引擎
+`settings.preview_languages` 的 `messages`，一律是結構化訊息：
+
+```jsonc
+{"code": "translation_model_not_installed", "params": {"model": "qwen3.5:9b"},
+ "message": "The recommended translation model qwen3.5:9b is not installed yet"}
+```
+
+- `code`：穩定的識別碼，UI 依介面語系查字典組句；**既有 code 的意義與參數不改**，要改就新增 code。
+- `params`：只有基本型別（str／int／float），單位寫在名稱裡（`vram_mb`、`need_mb` 為 MiB 整數；`ram_gb`、`budget_gb`、
+  `model_gb` 為 GB 浮點數）。`path` 為 `"fast_asr"`（即時路徑）或 `"final_asr"`（完整路徑）；`field` 為 `"translation_fast"`
+  或 `"translation_final"`；`language`、`source_language`、`target_language` 為語言清單的語言碼（`source_language` 可為
+  `"auto"`），UI 以介面語系顯示語言名稱；`model`、`better_model`、`fast_model`、`final_model` 為模型名稱（不翻譯）。
+- `message`：英文備援（下表的範本套上參數；浮點數依範本格式化），給紀錄檔、CLI 與 UI 不認得的 code。
+- 唯一來源是 `src/kikitori/hardware/messages.py` 的 `CATALOG`；`tests/test_hardware_messages.py` 檢查下表與它逐字一致
+  （code、參數名稱與順序、英文範本）。
+
+**推薦：ASR（`reasons`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `asr_gpu` | `gpu_name` str, `vram_mb` int, `fast_model` str, `final_model` str, `compute_type` str | {gpu_name} ({vram_mb} MiB VRAM): {fast_model} for live subtitles, {final_model} for final subtitles ({compute_type}) | 推薦 GPU 等級的 ASR：顯示卡、即時／完整模型與精度 |
+| `asr_gpu_int8_saves_vram` | — | int8_float16 halves the VRAM used by speech recognition, leaving more for the translation model | 4 GB 等級用 int8_float16，省 VRAM 給翻譯模型 |
+| `asr_final_no_speech_unreliable` | `final_model` str, `fast_model` str | {final_model} cannot tell speech from silence (no_speech); {fast_model}'s no_speech and the voice detector filter non-speech instead | 完整模型（large-v3-turbo）的 no_speech 不可用，改用即時模型的值與 VAD 過濾 |
+| `asr_large_v3_remote_translation` | `final_model` str | Translation does not run on this computer, so final subtitles use {final_model} (similar quality, reliable no_speech, about 0.33 s per sentence) | VRAM ≥ 11 GiB 且翻譯不在本機：完整路徑改用 large-v3 |
+| `asr_apple_silicon` | `fast_model` str, `final_model` str | Apple Silicon: speech recognition runs on the CPU on macOS; {fast_model} for live subtitles, {final_model} for final subtitles | Apple Silicon：ASR 在 CPU |
+| `asr_apple_silicon_untested` | — | Apple Silicon latency has not been measured yet; using the same models as a CPU with 16 GB of RAM or more | Apple Silicon 延遲未實測，比照 CPU ≥ 16 GB |
+| `asr_cpu` | `fast_model` str, `final_model` str | Speech recognition runs on the CPU (16 GB of RAM or more): {fast_model} for live subtitles, {final_model} for final subtitles | 沒有可用 GPU、RAM ≥ 16 GB：CPU 等級 |
+| `asr_cpu_large_models_slow` | — | medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles | medium 以上在 CPU 太慢 |
+| `asr_cpu_low` | `fast_model` str, `final_model` str | Lightweight models keep latency and memory low: {fast_model} for live subtitles, {final_model} for final subtitles | 低階 CPU 等級的模型（前面另有 `cpu_low_ram`／`cpu_few_cores`／`cpu_info_incomplete` 說明原因） |
+| `cpu_low_ram` | `ram_gb` float | {ram_gb:.1f} GB of RAM is less than 16 GB | 低階 CPU 等級的原因：RAM 不足 16 GB |
+| `cpu_few_cores` | `physical_cores` int, `max_cores` int | {physical_cores} physical CPU cores (at most {max_cores}) | 低階 CPU 等級的原因：實體核心太少 |
+| `cpu_info_incomplete` | — | The hardware information is incomplete | 低階 CPU 等級的原因：硬體資訊不完整 |
+
+**推薦：ASR（`warnings`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `multiple_gpus` | `gpu_count` int, `gpu_name` str | {gpu_count} NVIDIA GPUs found; using {gpu_name}, the one with the most VRAM | 多張 GPU，以 VRAM 最大的計算 |
+| `cuda_platform_unsupported` | — | CTranslate2 has no CUDA build for this platform (Windows and Linux x86-64 only); speech recognition uses the CPU | 平台沒有 CTranslate2 CUDA（macOS、ARM Linux），ASR 用 CPU |
+| `cuda_driver_too_old` | `driver_version` str, `min_driver` int | NVIDIA driver {driver_version} is too old (CUDA 12 needs {min_driver} or newer); speech recognition uses the CPU until the driver is updated | NVIDIA 驅動太舊，ASR 用 CPU |
+| `cuda_compute_capability_unknown` | — | Cannot read the GPU's compute capability (the driver may be too old); speech recognition uses the CPU | 讀不到 compute capability，ASR 用 CPU |
+| `cuda_compute_capability_unsupported` | `gpu_name` str, `compute_capability` str | {gpu_name} (compute capability {compute_capability}) does not support CTranslate2's float16/int8 acceleration; speech recognition uses the CPU | GPU 太舊（< 7.0 且不是 6.1），ASR 用 CPU |
+| `gpu_runtime_missing` | — | cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU | 缺 cuBLAS：UI 顯示「下載 GPU 執行環境」按鈕（`gpu_runtime_missing=true`） |
+| `asr_vram_insufficient` | `need_mb` int | Not enough VRAM for the speech recognition models (about {need_mb} MiB needed); speech recognition uses the CPU | VRAM 放不下 ASR 模型，改用 CPU |
+| `memory_unknown` | — | Cannot read the amount of memory; using the lightest speech recognition models | 讀不到 RAM 大小，用最輕量的組合 |
+| `asr_low_quality_model` | `model` str | {model} makes noticeably more recognition errors | 低階組合的即時模型（tiny）錯字明顯較多 |
+| `asr_language_quality_low` | `model` str, `language` str | {model} recognizes {language} poorly (error rate above 20% on public benchmarks) | 辨識語言用這個模型是 C 級（錯誤率 > 20%）；每個語言一則 |
+
+**推薦：翻譯（`reasons`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `translation_remote` | `base_url` str | The translation server is not on this computer ({base_url}); choose one of its models in Settings | 翻譯伺服器不在本機：不推薦翻譯模型（`translation_status=remote`） |
+| `translation_cpu` | — | No usable GPU: the translation model runs on the CPU, so the smallest model is chosen (CPU speed not measured) | 沒有可用 GPU：翻譯模型在 CPU，選最小的 |
+| `translation_budget_vram` | `budget_gb` float | About {budget_gb:.1f} GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve | 扣掉 ASR 與 1 GB 保留後可給翻譯模型的 VRAM |
+| `translation_budget_unified` | `budget_gb` float | About {budget_gb:.1f} GB of unified memory is left for the translation model after speech recognition and the system reserve | Apple Silicon：可給翻譯模型的統一記憶體 |
+| `translation_same_model` | — | Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5-18 s | 即時與完整翻譯用同一個模型的理由 |
+| `translation_different_models` | — | Live and final translation use different models | 即時與完整翻譯用不同模型 |
+| `translation_better_model_available` | `model` str, `better_model` str | Chose {model} from the installed models; installing {better_model} gives better quality | 已安裝的模型中選了 `model`；安裝 `better_model` 品質較好 |
+| `translation_not_needed` | `source_language` str, `target_language` str | {source_language} and {target_language} are the same spoken language: no translation model is needed, only script conversion | 收聽與字幕是同一個 Whisper 語言：不需要翻譯模型（`translation_status=not_needed`） |
+| `source_language_auto` | `target_language` str | The listening language is detected automatically: the translation model is chosen to translate any language into {target_language} | 收聽語言自動偵測：翻譯模型依「任何語言 → 字幕語言」挑選 |
+
+**推薦：翻譯（`warnings`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `translation_server_unreachable` | `base_url` str | Cannot connect to the translation server {base_url} (is Ollama running?); installed models cannot be checked | 連不上翻譯伺服器（Ollama 沒開？） |
+| `translation_model_list_unavailable` | `error` str | Cannot get the translation server's model list: {error} | 伺服器有回應但拿不到模型清單（`error` 為英文診斷） |
+| `low_ram_for_translation` | — | Less than 8 GB of RAM: running the translation model and speech recognition together may not fit | RAM < 8 GB，翻譯模型與 ASR 可能放不下 |
+| `translation_model_not_installed` | `model` str | The recommended translation model {model} is not installed yet | 推薦的翻譯模型還沒裝（Ollama 可用 `models.pull_translation` 下載） |
+| `translation_model_exceeds_budget` | `model` str, `model_gb` float, `budget_gb` float | {model} needs about {model_gb:.1f} GB, more than the {budget_gb:.1f} GB available; Ollama will run part of it on the CPU, which is slower | 模型權重大於可用 VRAM，Ollama 會部分用 CPU |
+| `translation_unsupported` | `source_language` str, `target_language` str | No recommended translation model supports {source_language} -> {target_language} | 這個 VRAM 等級沒有推薦模型支援這個語言組合（`translation_status=unsupported`）；`source_language` 可能是 "auto" |
+
+**組合驗證（`errors`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `combination_not_object` | — | The model combination must be an object | `models.validate` 的組合不是物件 |
+| `asr_path_not_object` | `path` str | {path} must be an object | `fast_asr`／`final_asr` 不是物件 |
+| `asr_model_unknown` | `path` str, `model` str, `available` str | {path}: unknown speech recognition model {model} (available: {available}) | 未知的 ASR 模型（`available` 為逗號分隔的 id） |
+| `asr_device_invalid` | `path` str | {path}: device must be auto, cpu or cuda | `device` 不是 auto／cpu／cuda |
+| `asr_compute_type_not_string` | `path` str | {path}: compute_type must be a string or null | `compute_type` 不是字串或 null |
+| `asr_cpu_threads_invalid` | `path` str | {path}: cpu_threads must be an integer from 0 to 256 | `cpu_threads` 不是 0–256 的整數 |
+| `asr_cuda_no_gpu` | `path` str | {path}: CUDA is selected but no NVIDIA GPU was found | 選了 CUDA 但沒有 NVIDIA GPU |
+| `asr_cuda_platform_unsupported` | `path` str | {path}: CUDA is selected but CTranslate2 has no CUDA build for this platform (Windows and Linux x86-64 only) | 選了 CUDA 但平台不支援（同 `cuda_platform_unsupported` 加 `path`） |
+| `asr_cuda_driver_too_old` | `path` str, `driver_version` str, `min_driver` int | {path}: CUDA is selected but NVIDIA driver {driver_version} is too old (CUDA 12 needs {min_driver} or newer) | 選了 CUDA 但驅動太舊 |
+| `asr_cuda_compute_capability_unknown` | `path` str | {path}: CUDA is selected but the GPU's compute capability is unknown (the driver may be too old) | 選了 CUDA 但讀不到 compute capability |
+| `asr_cuda_compute_capability_unsupported` | `path` str, `gpu_name` str, `compute_capability` str | {path}: CUDA is selected but {gpu_name} (compute capability {compute_capability}) does not support CTranslate2's float16/int8 acceleration | 選了 CUDA 但 GPU 太舊 |
+| `asr_cuda_cublas_missing` | `path` str | {path}: CUDA is selected but cuBLAS is not installed; download the GPU runtime first | 選了 CUDA 但缺 cuBLAS |
+| `asr_compute_type_unknown` | `path` str, `compute_type` str, `available` str | {path}: unknown compute type {compute_type} (available: {available}) | CTranslate2 不認得的精度 |
+| `translation_model_name_invalid` | `field` str, `max_chars` int | {field} must be a model name of 1-{max_chars} characters or null | 翻譯模型名稱不是 1–200 字的可列印字串 |
+
+**組合驗證（`warnings`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `asr_auto_uses_cpu` | `path` str | {path}: auto will use the CPU (the GPU cannot run speech recognition now) | `device=auto` 時實際會用 CPU |
+| `asr_compute_type_cpu_fallback` | `path` str, `compute_type` str | {path}: the CPU does not support {compute_type}; CTranslate2 will use another type (usually float32, slower) | CPU 不支援這個精度，CTranslate2 自動改用其他精度 |
+| `asr_compute_type_gpu_fallback` | `path` str, `compute_type` str, `compute_capability` str | {path}: compute capability {compute_capability} does not support {compute_type}; CTranslate2 will use float32 or int8_float32 (slower, more VRAM) | GPU 不支援這個精度（compute capability < 7.0） |
+| `asr_model_slow_on_cpu` | `path` str, `model` str | {path}: {model} needs 3.6 s or more per sentence on a CPU; subtitles will lag noticeably | medium 以上在 CPU 每句 3.6 s 以上 |
+| `asr_model_not_downloaded` | `path` str, `model` str | {path}: speech recognition model {model} is not downloaded yet; it is downloaded before starting | ASR 模型尚未下載 |
+| `asr_model_language_unsupported` | `path` str, `model` str, `language` str | {path}: {model} cannot recognize {language} | 只支援特定語言的 ASR 模型不支援這個辨識語言 |
+| `asr_fast_larger_than_final` | `fast_model` str, `final_model` str | The live model {fast_model} is larger than the final model {final_model}: live subtitles may be slower than final ones | 即時模型比完整模型大 |
+| `asr_no_speech_unavailable` | `fast_model` str, `final_model` str | Neither {fast_model} nor {final_model} can filter non-speech with no_speech; singing and noise are more likely to be transcribed | 兩條路徑的模型都不能用 no_speech 過濾 |
+| `translation_model_not_on_server` | `model` str | The translation server does not have {model} | 翻譯伺服器上沒有這個模型 |
+| `translation_model_language_unsupported` | `model` str, `source_language` str, `target_language` str | {model} does not support {source_language} -> {target_language} | 選的翻譯模型（已知的預設組）不支援這個語言組合 |
+| `translation_license_non_commercial` | `model` str, `license` str | The license of {model} ({license}) forbids commercial use | 授權禁止商業用途（例如 Sakura） |
+| `translation_license_region_restricted` | `model` str, `license` str, `regions` str | The license of {model} ({license}) does not apply in {regions} | 授權不適用於這些地區（`regions` 為逗號分隔的 EU、UK、KR） |
+| `translation_models_differ` | — | Live and final translation use different models: the local Ollama takes 1.5-18 s each time it switches models | 本機即時與完整翻譯用不同模型（換模型很慢） |
+| `vram_overflow` | `need_mb` int, `available_mb` int, `gpu_name` str | Speech recognition and translation need about {need_mb} MiB of VRAM, more than the {available_mb} MiB available on {gpu_name}; they may be slow or fail to load | ASR 與翻譯模型合計超過可用 VRAM |
+| `asr_ram_over_half` | — | The speech recognition models on the CPU use more than half of the RAM | CPU 上的 ASR 模型用掉超過一半 RAM |
+
+**語言預覽（`messages`）**
+
+| code | params | English（`message`） | 意義 |
+|---|---|---|---|
+| `translation_disabled` | — | Translation is off: only the original text is shown and no translation model is needed | 只顯示原文：不需要翻譯模型（`settings.preview_languages` 的 `messages`） |
+
+翻譯預設組的 `label` 不再帶任何語言的說明（例如 Sakura 是 `Sakura-GalTransl 7B v3`）；「非商用」等標示由 UI 依
+`commercial_use`／`excluded_regions` 以介面語系顯示。
 
 ## GPU 執行環境（cuBLAS）
 
@@ -156,6 +326,34 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 - **UI 要求**：按鈕旁顯示「這會從 PyPI 下載 NVIDIA cuBLAS（約 570 MB），使用即表示同意 NVIDIA CUDA EULA」與連結 `https://docs.nvidia.com/cuda/eula/index.html`（`GpuRuntimeStatus.license_url`）；使用者確認後才呼叫 `install_gpu_runtime()`。`License.txt` 保留在安裝目錄。
 - 若之後要改成隨安裝檔散布，需重新評估 Attachment A 的條件並先問使用者。
 
+## Ollama 下載翻譯模型（`ollama.py`，Milestone 13）
+
+翻譯伺服器是 Ollama 時，引擎可以替使用者下載翻譯模型（`models.pull_translation`）；其他 OpenAI 相容伺服器只能提示使用者
+自行安裝。全部用標準庫 `http.client`（不經 proxy；`localhost` 依序試 127.0.0.1、::1，理由同翻譯伺服器探測）。
+
+- **原生 API 的位置**（`native_root()`）：設定存的是 OpenAI 相容端點，例如 `http://host:11434/v1`；去掉路徑結尾的 `/v1`
+  就是 Ollama 原生 API 的根（反向代理的前綴保留，例如 `http://h/ollama/v1` → `/ollama/api/...`）。
+- **是不是 Ollama**（`ollama_version()`）：`GET {root}/api/version`，timeout 2 s。連不上 → `OllamaUnreachableError`；有回應但
+  狀態碼不是 200、不是 JSON、沒有 1–50 字的可列印 `version` 字串 → `NotOllamaError`（例如 LM Studio、vLLM 回 404）。
+- **下載**（`pull_model()`）：`POST {root}/api/pull`，body `{"model": <名稱>, "stream": true}`。回應是 NDJSON（chunked），
+  每行一個物件：`{"status": "pulling manifest"}`、`{"status": "pulling <digest>", "digest": "sha256:<64 hex>", "total": N,
+  "completed": M}`、`{"status": "verifying sha256 digest"}`、`{"status": "writing manifest"}`、`{"status": "success"}`，或
+  `{"error": "<訊息>"}`。
+  - 模型名稱（`validate_model_name()`）：1–200 字，只允許英數與 `._:/-`、第一個字元是英數、不得含 `..`。
+  - 每行最多 64 KiB、必須是 JSON 物件；`status` 必須是 ≤ 200 字的字串；`error` 必須是字串（截斷 300 字、只留可列印字元後
+    放進 `PullError`）。進度欄位逐一驗證：`digest` 符合 `sha256:` 格式、`total` 為 0–10¹³ 的整數、`completed` 為非負整數
+    （大於 total 時以 total 計）；不合法的進度行略過（不中斷）。
+  - 進度：各層（digest）的 completed／total 加總後回報 `(completed, total)`，只在改變時回報；新的層出現時 total 會變大。
+  - 收到 `success` 才算完成；串流在那之前結束 → `PullError`。HTTP 狀態碼不是 200 → `PullError("HTTP <code> from /api/pull: <error>")`。
+  - **逾時**：連線 5 s；讀取以 0.2 s 的 socket 逾時輪詢，累計 120 s 沒收到任何資料 → `PullError("no data … within 120 s")`
+    （驗證數 GB 的 SHA-256 時 Ollama 會安靜十幾秒）。
+  - **取消**：`cancel`（`threading.Event`）在每次輪詢檢查，最多延遲約 0.2 s 就丟 `PullCancelledError`。不用「另一條執行緒
+    關閉 socket」：Windows 上 `shutdown()` 不會喚醒另一條執行緒中卡在 `recv()` 的讀取（實測），而 `makefile()` 持有參照時
+    `close()` 也不會真的關閉；也不能直接對 `makefile()` 用 socket 逾時，它逾時一次之後就不能再讀。所以回應改由一個輪詢的
+    讀取器（`_PollingSocket`／`_PollingReader`）提供給 `http.client.HTTPResponse`。
+  - 金鑰：`api_key_env` 的環境變數有值才送 `Authorization: Bearer …`（Ollama 不需要），不出現在例外或 log。
+  - 已安裝的模型也可以 pull（Ollama 只檢查 manifest，很快回報 success）。
+
 ## `models.list` 總覽（`models_overview()`）
 
 ```jsonc
@@ -177,15 +375,27 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 ```
 
 `translation.models` 為 translate 預設組與伺服器上已安裝模型的聯集；`installed` 在伺服器連不上時為 null；不認得的模型 `known=false`、授權欄位為 null。
+`label` 是模型名稱（不含任何語言的說明）；`models.pull_translation` 完成後引擎清掉偵測快取，下一次 `models.list` 的 `installed` 就會是 true。
 
 ## 引擎整合（Milestone 6 已接線，協定細節見 `pipeline-engine.md`）
 
 - `hardware.detect` → `detect(base_url=s.translation.base_url, api_key_env=s.translation.api_key_env, cuda_library_dirs=s.asr.cuda_library_dirs)` + `recommend(info, allow_restricted=s.translation.allow_restricted)`，與 `hardware_report()` 相同的 `{"hardware": HardwareInfo.to_dict(), "recommendation": ModelCombination.to_dict()}`（拆開呼叫是為了快取 `HardwareInfo` 給下面三個方法重用）；`hardware` 保留舊欄位 `cpu_count`、`ram_bytes`、`gpus`、`apple_silicon`、`os`、`os_version`、`machine`。在引擎的背景工作執行緒上執行，不佔用讀 stdin 的執行緒。
 - `models.list` → `models_overview(info, recommend(info))`，另保留第一版的 `translation.base_url／installed／error／presets`。
 - `models.download {"model": "gpu-runtime", "accept_license": true}`（`GPU_RUNTIME_ID`）→ `install_gpu_runtime(progress=..., cancel=...)`，進度用同一個 `download_progress` 事件（`model = "gpu-runtime"`）。沒有 `accept_license: true` 時回 `license_not_accepted`（訊息含 EULA 網址）；`engine.shutdown` 時取消。
-- `models.validate` → `validate_combination(combination_from_settings(設定), info, downloaded_asr=已下載的 ASR, allow_restricted=設定)`。
+- 推薦一律帶語言：`HardwareService.recommendation(settings)` → `recommend(info, allow_restricted=…, languages=language_selection(settings))`，
+  所以 `hardware.detect`、`models.list`、`settings.apply_recommendation`、`settings.preview_recommendation` 都依設定中的語言與 `mode`。
+- `models.validate` → `validate_combination(combination_from_settings(設定), info, downloaded_asr=已下載的 ASR, allow_restricted=設定, languages=language_selection(設定))`。
+- `settings.preview_languages`（Milestone 12）→ `HardwareService.preview_languages(候選設定, 目前設定)`：候選設定是目前設定合併了要預覽的語言（與
+  模式）；回傳推薦、`patch`、每個模型的安裝狀態與下載大小（ASR 取 `ModelCatalog` 的大小；翻譯模型取預設組 `approx_vram_gb` × 10⁹ 的約略值，
+  不認得的模型為 null）、`messages`。不存檔、不下載。協定細節見 `pipeline-engine.md`。
+- `models.pull_translation`（Milestone 13）→ `EngineServices.translation_models.server_state()`（`probe_translation_server()` + `ollama_version()`）
+  確認是可連的 Ollama 後，在背景執行緒呼叫 `pull_model()`；結束（成功或失敗）時清掉偵測快取。
+- `session.start` 的翻譯模型檢查（Milestone 13）：同一個 `server_state()`，伺服器是可連的 Ollama 而設定的翻譯模型沒裝時，session 以
+  `translation_model_missing` 結束（見 `pipeline-engine.md`）。
 - `settings.apply_recommendation` → `recommend(info)` 轉成設定（`engine/hardware_service.py` 的 `recommendation_patch()`）後存檔；`only_if_new` 時只在還沒有設定檔時寫入（第一次執行的自動套用）。
-- `settings.preview_recommendation` → 同一個 `recommendation_patch()`，不存檔，另回 `differs`（與目前設定比較）與 `fingerprint`（`recommendation_fingerprint()`：patch 的 SHA-256 前 16 字元）。
+- `settings.preview_recommendation` → 同一個 `recommendation_patch()`，不存檔，另回 `differs`（與目前設定比較）與 `fingerprint`（`recommendation_fingerprint()`：
+  `{"patch": patch, "languages": 推薦依據的語言}` 正規化 JSON 的 SHA-256 前 16 字元；換語言就換指紋，即使 patch 相同——新語言可能有新的提示，例如辨識品質較低）。
+  Milestone 12 起指紋包含語言，所以升級後之前「不要再提醒」過的推薦會再提醒一次。
 - **自動推薦（UI）**：預設設定是安全的 CPU 組合（base／small），所以不能只靠「套用建議組合」按鈕：第一次執行（`settings.get` 的 `is_new`）UI 等 `hardware.detect` 完成後自動 `settings.apply_recommendation {"only_if_new": true}` 並說明選了什麼；之後（啟動、GPU 執行環境安裝後引擎重啟、進入模型頁）以 `settings.preview_recommendation` 檢查，`differs` 時提示「有更適合這台電腦的組合」（可「不要再提醒」，以指紋記在設定的 `ui`）。推薦的 ASR 模型沒下載時提示一鍵下載，不自動下載。細節見 `ui.md`「自動推薦」。
 - 建立 pipeline 時（`pipeline/factory.py`）：每條路徑 `load_transcriber(..., device=s.asr.device, compute_type=s.asr.<role>_compute_type, cpu_threads=…, cuda_library_dirs=s.asr.cuda_library_dirs + [installed_runtime_dir()])`；`cpu_threads` 為 null 時用 `auto_cpu_threads()`（device=cuda 時 0）。
 - 地區限制：設定 `translation.allow_restricted` 預設 **false**（引擎不知道使用者所在地，預設不推薦 HY-MT；使用者在設定頁確認不在歐盟／英國／南韓後才打開）。
@@ -223,7 +433,11 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
  "warnings": []}
 ```
 
-cuBLAS 安裝前同一台機器得到 `tier: "cpu"`（base／small CPU int8、各 4 執行緒）、`gpu_runtime_missing: true`、翻譯 `qwen3.5:9b`（10.94 GB 可用）與警告「cuBLAS 未安裝…」。
+（上面是 Milestone 12 之前的格式。之後 `reasons` 的每一項是訊息物件，例如
+`{"code": "asr_gpu", "params": {"gpu_name": "NVIDIA GeForce RTX 5070", "vram_mb": 12227, "fast_model": "small", "final_model": "large-v3-turbo", "compute_type": "float16"}, "message": "…"}`、
+`{"code": "translation_budget_vram", "params": {"budget_gb": 8.21}, "message": "…"}`；另有 `translation_status` 與 `languages`。）
+
+cuBLAS 安裝前同一台機器得到 `tier: "cpu"`（base／small CPU int8、各 4 執行緒）、`gpu_runtime_missing: true`、翻譯 `qwen3.5:9b`（10.94 GB 可用）與警告 `gpu_runtime_missing`。
 
 GPU 執行環境實裝：下載 567,544,208 bytes 約 60 s、SHA-256 相符，解出 `cublas64_12.dll`、`cublasLt64_12.dll`、`License.txt`；之後 `load_transcriber("small", device="cuda", compute_type="float16", cuda_library_dirs=info.cublas.library_dirs)` 2.1 s 載入（含暖機），2 s 噪音辨識 0.10 s。
 
@@ -242,7 +456,12 @@ Lint：uv run ruff check
 - `test_hardware_system.py`：`/proc/meminfo`、`/proc/cpuinfo`（SMT、雙插槽、ARM）、sysfs topology、`GetLogicalProcessorInformationEx` 緩衝區、`vm_stat`、sysctl（假 reader，含 Rosetta）、讀取失敗回報；Windows 上另跑一次真的 API。
 - `test_hardware_nvidia.py`：CSV 解析（單張、多張、`[N/A]`、壞行、名稱含逗號、超大值、超過 64 行）、假 runner（正常、逾時、找不到程式、驅動錯誤、舊驅動重查、垃圾輸出、沒有 GPU）、`nvidia-smi` 位置、cuBLAS 搜尋（設定／執行環境／PATH、分散兩目錄、缺檔、權限錯誤、不支援平台）、系統目錄清單。
 - `test_hardware_translation_server.py`：本機 HTTP 伺服器（Ollama 格式、401、金鑰不外洩、壞 JSON、過大、連不上、不合法 URL）。
-- `test_hardware_recommend.py`：每個等級、驅動／compute capability、多 GPU、遠端翻譯、Ollama 連不上、模型未安裝、只裝 Sakura、地區限制、覆寫驗證的每條規則。
+- `test_hardware_recommend.py`：每個等級、驅動／compute capability、多 GPU、遠端翻譯、Ollama 連不上、模型未安裝、只裝 Sakura、地區限制、覆寫驗證的每條規則（以訊息碼與參數斷言）；
+  語言：`LanguageSelection` 的方向與辨識語言、C 級提示（含口譯兩個語言）、`auto`、同一個 Whisper 語言（`not_needed`）、不支援的語言組合（`unsupported`）、遠端伺服器、
+  單一語言 ASR 模型只在該語言被選、registry 每個模型都有品質資料、驗證的語言檢查。
+- `test_hardware_messages.py`：訊息的參數檢查（缺少、多餘、型別、NaN、bool）、英文範本可套用、本文件「訊息碼」表與 `CATALOG` 逐字一致。
+- `test_hardware_ollama.py`：本機 HTTP 伺服器以 chunked NDJSON 模擬 Ollama：版本偵測、不是 Ollama、連不上、各層進度加總、`error` 行、HTTP 錯誤、沒有 `success`、
+  不合法的行、壞掉的進度欄位被略過、讀取逾時、取消卡住的讀取、取消時不送請求、金鑰只在有值時送、`native_root()`、模型名稱驗證。
 - `test_hardware_gpu_runtime.py`：本機 HTTP 伺服器提供假的小 wheel（zip）：成功、已安裝不重下、雜湊不符、成員大小不符、缺成員、解壓失敗後重試不重下、不是 zip、中斷續傳、取消、拒絕非 https、壞掉的安裝會重裝。
 - `test_hardware_detect.py`：`detect()` 組合與錯誤回報、`hardware_report()` 形狀、`models_overview()`。
 

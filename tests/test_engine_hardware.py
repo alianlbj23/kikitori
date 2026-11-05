@@ -17,11 +17,17 @@ from kikitori.engine.deferred import DeferredRunner
 from kikitori.engine.hardware_service import (
     HardwareService,
     combination_from_settings,
+    language_selection,
     recommendation_patch,
     recommendation_preview,
 )
 from kikitori.engine.testing import FakeHardwareProvider, FakeModelCatalog
-from kikitori.hardware import AsrChoice, HardwareInfo, ModelCombination
+from kikitori.hardware import (
+    AsrChoice,
+    HardwareInfo,
+    LanguageSelection,
+    ModelCombination,
+)
 
 WAIT = 10.0
 
@@ -114,6 +120,40 @@ class DeferredRunnerTest(unittest.TestCase):
 
     def test_close_without_work(self) -> None:
         DeferredRunner(_Recorder().send).close(WAIT)
+
+    def test_after_runs_once_the_success_response_is_written(self) -> None:
+        out = _Recorder()
+        runner = DeferredRunner(out.send)
+        self.addCleanup(runner.close, WAIT)
+        order: list[str] = []
+        done = threading.Event()
+
+        def after() -> None:
+            # 回應已經寫出：UI 先拿到回應，才收到之後的事件
+            order.append(f"after:{len(out.messages)}")
+            done.set()
+
+        def failing() -> Mapping[str, Any]:
+            raise p.ProtocolError(p.INVALID_PARAMS, "nope")
+
+        runner.submit(1, "a", failing, lambda: order.append("never"))
+        runner.submit(2, "b", lambda: {"ok": True}, after)
+        self.assertTrue(done.wait(WAIT))
+        self.assertEqual(order, ["after:2"])
+
+    def test_failing_after_is_logged_and_the_worker_survives(self) -> None:
+        out = _Recorder()
+        runner = DeferredRunner(out.send)
+        self.addCleanup(runner.close, WAIT)
+
+        def boom() -> None:
+            raise RuntimeError("cannot start thread")
+
+        with self.assertLogs("kikitori.engine.deferred", "ERROR"):
+            runner.submit(1, "a", dict, boom)
+            runner.submit(2, "b", lambda: {"ok": True})
+            messages = out.wait(2)
+        self.assertEqual(messages[1], {"id": 2, "result": {"ok": True}})
 
 
 class _CountingProvider(FakeHardwareProvider):
@@ -317,6 +357,125 @@ class PreviewTest(unittest.TestCase):
     def test_result_is_json(self) -> None:
         preview = recommendation_preview(Settings(), _gpu_rec())
         self.assertEqual(json.loads(json.dumps(preview)), preview)
+
+    def test_fingerprint_changes_with_the_languages(self) -> None:
+        # 同一份 patch、不同語言：「不要再提醒」過的推薦，換語言後要能再提醒
+        ja = dataclasses.replace(_gpu_rec(), languages=LanguageSelection("media", "ja"))
+        ko = dataclasses.replace(_gpu_rec(), languages=LanguageSelection("media", "ko"))
+        a = recommendation_preview(Settings(), ja)
+        b = recommendation_preview(Settings(), ko)
+        self.assertEqual(a["patch"], b["patch"])
+        self.assertNotEqual(a["fingerprint"], b["fingerprint"])
+
+
+class LanguageAwareServiceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.catalog = FakeModelCatalog()
+        self.service = HardwareService(FakeHardwareProvider(self.catalog), self.catalog)
+
+    def test_recommendation_follows_the_settings_languages(self) -> None:
+        settings = Settings().merged(
+            {"source_language": "zh-CN", "target_language": "zh-TW"}
+        )
+        _, rec = self.service.recommendation(settings)
+        self.assertEqual(rec.translation_status, "not_needed")
+        self.assertEqual(
+            rec.languages, LanguageSelection("media", "zh-CN", "zh-TW", "ja")
+        )
+        interpret = Settings().merged({"mode": "interpret", "partner_language": "en"})
+        _, rec = self.service.recommendation(interpret)
+        self.assertEqual(rec.languages.mode if rec.languages else None, "interpret")
+
+    def test_language_selection_from_settings(self) -> None:
+        settings = Settings().merged({"source_language": "auto"})
+        self.assertEqual(
+            language_selection(settings),
+            LanguageSelection("media", "auto", "zh-TW", "ja"),
+        )
+        self.assertEqual(language_selection(settings, "interpret").mode, "interpret")
+
+    def test_validate_checks_languages(self) -> None:
+        settings = Settings().merged(
+            {
+                "source_language": "ko",
+                "translation": {
+                    "fast_model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"
+                },
+            }
+        )
+        result = self.service.validate(settings)
+        self.assertIn(
+            "translation_model_language_unsupported",
+            [w["code"] for w in result["warnings"]],
+        )
+
+    def test_preview_languages_reports_models_and_sizes(self) -> None:
+        current = Settings()
+        candidate = current.merged({"source_language": "ko", "target_language": "es"})
+        preview = self.service.preview_languages(candidate, current)
+        self.assertEqual(json.loads(json.dumps(preview)), preview)
+        self.assertEqual(
+            preview["languages"],
+            {
+                "mode": "media",
+                "source_language": "ko",
+                "target_language": "es",
+                "partner_language": "ja",
+            },
+        )
+        rec = preview["recommendation"]
+        self.assertEqual(rec["languages"]["source_language"], "ko")
+        asr = {m["model"]: m for m in preview["models"]["asr"]}
+        self.assertEqual(asr["base"]["roles"], ["fast"])
+        self.assertTrue(asr["base"]["installed"])
+        self.assertEqual(asr["base"]["download_bytes"], 0)
+        translation = preview["models"]["translation"]
+        self.assertEqual(
+            [(m["model"], m["roles"], m["installed"]) for m in translation],
+            [("qwen3.5:4b", ["fast", "final"], True)],
+        )
+        self.assertGreater(translation[0]["size_bytes"], 0)
+        self.assertTrue(preview["translation_needed"])
+        self.assertEqual(preview["download_bytes"], 0)
+        self.assertTrue(preview["download_size_known"])
+        # 合併後的設定是「套用語言＋推薦模型」的樣子；與目前設定不同
+        self.assertEqual(preview["settings"]["source_language"], "ko")
+        self.assertTrue(preview["differs"])
+        self.assertRegex(preview["fingerprint"], r"^[0-9a-f]{16}$")
+
+    def test_preview_counts_missing_models(self) -> None:
+        current = Settings()
+        candidate = current.merged(
+            {"asr": {"final_model": "fake-missing"}, "source_language": "en"}
+        )
+        provider = FakeHardwareProvider(self.catalog)
+        service = HardwareService(provider, self.catalog)
+        info = provider.detect(candidate)
+        no_models = dataclasses.replace(
+            info,
+            translation_server=dataclasses.replace(info.translation_server, models=()),
+        )
+        provider.detect = lambda settings: no_models  # type: ignore[method-assign]
+        preview = service.preview_languages(candidate, current)
+        translation = preview["models"]["translation"][0]
+        self.assertFalse(translation["installed"])
+        self.assertEqual(translation["download_bytes"], translation["size_bytes"])
+        self.assertEqual(preview["download_bytes"], translation["size_bytes"])
+
+    def test_preview_with_translation_off_needs_no_translation_model(self) -> None:
+        current = Settings().merged({"translation": {"enabled": False}})
+        preview = self.service.preview_languages(current, current)
+        self.assertFalse(preview["translation_needed"])
+        self.assertIn("translation_disabled", [m["code"] for m in preview["messages"]])
+        self.assertEqual(preview["download_bytes"], 0)
+
+    def test_same_language_needs_no_translation_model(self) -> None:
+        current = Settings()
+        candidate = current.merged({"source_language": "zh-CN"})
+        preview = self.service.preview_languages(candidate, current)
+        self.assertFalse(preview["translation_needed"])
+        self.assertEqual(preview["models"]["translation"], [])
+        self.assertNotIn("translation", preview["patch"])
 
 
 if __name__ == "__main__":

@@ -3,10 +3,12 @@
 import unittest
 
 from kikitori.languages import (
+    ASR_QUALITY_MODELS,
     LANGUAGES,
     WHISPER_CODES,
     Language,
     UnknownLanguageError,
+    asr_quality,
     get_language,
     language_codes,
     normalize_language,
@@ -114,6 +116,61 @@ class NormalizeTest(unittest.TestCase):
 
     def test_unknown_language_error_is_value_error(self) -> None:
         self.assertTrue(issubclass(UnknownLanguageError, ValueError))
+
+
+class AsrQualityTest(unittest.TestCase):
+    """依 research_notes 的 language_coverage.md 分級（A ≤ 10%、B 10–20%、C > 20%）。"""
+
+    def test_every_language_has_a_tier_for_every_model_family(self) -> None:
+        for lang in LANGUAGES:
+            with self.subTest(code=lang.code):
+                self.assertEqual(set(lang.asr_quality), set(ASR_QUALITY_MODELS))
+                self.assertLessEqual(set(lang.asr_quality.values()), {"A", "B", "C"})
+
+    def test_large_v3_tiers_use_the_worse_benchmark(self) -> None:
+        # vi：FLEURS 8.6 但 Common Voice 15 為 39.8 → C；ja、fr 為 B（邊緣）
+        self.assertEqual(asr_quality("vi", "large-v3"), "C")
+        self.assertEqual(asr_quality("ja", "large-v3"), "B")
+        self.assertEqual(asr_quality("th", "large-v3"), "A")
+        self.assertEqual(asr_quality("en", "large-v3"), "A")
+
+    def test_turbo_degrades_thai_arabic_hindi(self) -> None:
+        for code in ("th", "ar", "hi", "vi"):
+            with self.subTest(code=code):
+                self.assertEqual(asr_quality(code, "large-v3-turbo"), "C")
+        self.assertEqual(asr_quality("en", "large-v3-turbo"), "B")
+        self.assertEqual(asr_quality("ko", "large-v3-turbo"), "A")
+
+    def test_small_and_base(self) -> None:
+        self.assertEqual(asr_quality("zh-TW", "small"), "C")
+        self.assertEqual(asr_quality("pt", "small"), "A")
+        self.assertEqual(asr_quality("ja", "small"), "B")
+        self.assertEqual(asr_quality("es", "base"), "A")
+        self.assertEqual(asr_quality("de", "base"), "B")
+        self.assertEqual(asr_quality("ja", "base"), "C")
+        self.assertEqual(asr_quality("en", "tiny"), "B")
+        self.assertEqual(asr_quality("ja", "tiny"), "C")
+
+    def test_smaller_models_are_never_better_than_large_v3(self) -> None:
+        # 沒有 v3 世代數字的模型以「論文數字與 large-v3 中較差者」保守分級
+        order = {"A": 0, "B": 1, "C": 2}
+        for lang in LANGUAGES:
+            for model in ("tiny", "base", "small", "medium"):
+                with self.subTest(code=lang.code, model=model):
+                    self.assertGreaterEqual(
+                        order[lang.asr_quality[model]],
+                        order[lang.asr_quality["large-v3"]],
+                    )
+
+    def test_aliases_and_unknown_model(self) -> None:
+        self.assertEqual(asr_quality("zh-Hant", "small"), "C")
+        self.assertIsNone(asr_quality("ja", "kotoba-whisper"))
+        with self.assertRaises(UnknownLanguageError):
+            asr_quality("xx", "small")
+
+    def test_quality_mapping_is_read_only(self) -> None:
+        with self.assertRaises(TypeError):
+            get_language("ja").asr_quality["small"] = "A"  # type: ignore[index]
 
 
 class WhisperCodeTest(unittest.TestCase):

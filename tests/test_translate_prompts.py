@@ -1,6 +1,8 @@
 """翻譯模組中不碰網路的部分：請求驗證、提示詞、預設組、後處理、VRAM 推薦。"""
 
+import dataclasses
 import unittest
+from unittest import mock
 
 from kikitori.languages import WHISPER_CODES, get_language, language_codes
 from kikitori.translate.errors import InvalidRequestError
@@ -19,6 +21,7 @@ from kikitori.translate.postprocess import (
 )
 from kikitori.translate.presets import (
     PRESETS,
+    NoSupportingModelError,
     TranslationModelChoice,
     preset_for_model,
     recommend_translation_models,
@@ -574,6 +577,56 @@ class RecommendTest(unittest.TestCase):
         for bad in [-1.0, float("nan"), float("inf")]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 recommend_translation_models(bad)
+
+    def test_language_pairs_filter_candidates(self) -> None:
+        # 全部預設組都支援 20 種語言時，語言組合不影響 VRAM 順序
+        self.assertEqual(
+            recommend_translation_models(8.0, pairs=[("ko", "es")]),
+            TranslationModelChoice("qwen3.5:9b", "qwen3.5:9b"),
+        )
+        # 只支援部分語言的模型被略過，改選下一個支援的
+        qwen9 = PRESETS["qwen3.5:9b"]
+        narrow = dataclasses.replace(qwen9, languages=frozenset({"ja", "zh-TW"}))
+        with mock.patch.dict(PRESETS, {"qwen3.5:9b": narrow}):
+            self.assertEqual(
+                recommend_translation_models(8.0, pairs=[("ko", "es")]).final,
+                "qwen3.5:4b",
+            )
+            self.assertEqual(
+                recommend_translation_models(8.0, pairs=[("ja", "zh-TW")]).final,
+                "qwen3.5:9b",
+            )
+
+    def test_both_directions_must_be_supported(self) -> None:
+        # Sakura 只做日 → 中；就算允許也不會被選（非商用），這裡改用假的單向預設組
+        one_way = dataclasses.replace(
+            PRESETS["qwen3.5:4b"], pairs=frozenset({("ja", "zh-TW")})
+        )
+        with mock.patch.dict(PRESETS, {"qwen3.5:4b": one_way}):
+            choice = recommend_translation_models(
+                4.0, pairs=[("ja", "zh-TW"), ("zh", "ja")]
+            )
+        self.assertEqual(choice.final, "hy-mt1.5-1.8b:latest")
+
+    def test_no_supporting_model_raises(self) -> None:
+        narrow = {
+            name: dataclasses.replace(p, languages=frozenset({"ja", "zh-TW"}))
+            for name, p in PRESETS.items()
+        }
+        with (
+            mock.patch.dict(PRESETS, narrow),
+            self.assertRaises(NoSupportingModelError) as ctx,
+        ):
+            recommend_translation_models(8.0, pairs=[("ko", "es")])
+        self.assertEqual(ctx.exception.pairs, (("ko", "es"),))
+        self.assertTrue(issubclass(NoSupportingModelError, ValueError))
+
+    def test_sakura_label_has_no_localized_suffix(self) -> None:
+        # 非商用標示由 UI 依 commercial_use 顯示（介面多語系），名稱本身不帶中文
+        label = PRESETS["hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"].label
+        self.assertEqual(label, "Sakura-GalTransl 7B v3")
+        for preset in PRESETS.values():
+            self.assertTrue(preset.label.isascii(), preset.label)
 
 
 if __name__ == "__main__":

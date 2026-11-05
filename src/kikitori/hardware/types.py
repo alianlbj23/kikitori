@@ -8,9 +8,22 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from kikitori.hardware.messages import Message
+from kikitori.languages import WHISPER_CODES, UnknownLanguageError, get_language
+
 OsName = Literal["windows", "macos", "linux", "other"]
 AsrDeviceChoice = Literal["cpu", "cuda"]
 CublasSource = Literal["configured", "runtime", "system"]
+TranslationStatus = Literal["recommended", "remote", "not_needed", "unsupported"]
+"""翻譯模型推薦的結果：
+
+- `recommended`：選了支援這個語言組合的模型。
+- `remote`：翻譯伺服器不在本機，不推薦（使用者在設定頁選該服務的模型）。
+- `not_needed`：收聽與字幕語言是同一個 Whisper 語言（只做字形轉換）。
+- `unsupported`：這個 VRAM 等級的推薦模型都不支援這個語言組合。
+"""
+SelectionMode = Literal["media", "interpret"]
+AUTO_SOURCE = "auto"
 
 
 @dataclass(frozen=True)
@@ -186,6 +199,90 @@ class HardwareInfo:
 
 
 @dataclass(frozen=True)
+class LanguageSelection:
+    """推薦依據的語言選擇（與設定檔的語言欄位相同的語言碼）。
+
+    Attributes:
+        mode: "media"（影片翻譯）或 "interpret"（即時口譯）。
+        source_language: 影片翻譯的收聽語言或 "auto"；口譯不使用。
+        target_language: 字幕語言；口譯時是「我的語言」。
+        partner_language: 口譯的對方語言；影片翻譯不使用。
+
+    Raises:
+        ValueError: 模式或語言碼不合法（語言碼必須是正規化後的清單語言碼）。
+    """
+
+    mode: SelectionMode
+    source_language: str = AUTO_SOURCE
+    target_language: str = "zh-TW"
+    partner_language: str = "ja"
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("media", "interpret"):
+            raise ValueError(f"mode must be media or interpret, got {self.mode!r}")
+        for name in ("source_language", "target_language", "partner_language"):
+            value = getattr(self, name)
+            if name == "source_language" and value == AUTO_SOURCE:
+                continue
+            try:
+                code = get_language(value).code
+            except UnknownLanguageError as exc:
+                raise ValueError(f"{name}: {exc}") from None
+            if code != value:
+                raise ValueError(f"{name}: expected {code!r}, got {value!r}")
+
+    @property
+    def spoken_languages(self) -> tuple[str, ...]:
+        """會被辨識的語言（清單語言碼）；影片翻譯的 "auto" 為空（任何語言）。"""
+        if self.mode == "interpret":
+            return (self.target_language, self.partner_language)
+        if self.source_language == AUTO_SOURCE:
+            return ()
+        return (self.source_language,)
+
+    @property
+    def asr_whisper_codes(self) -> tuple[str, ...]:
+        """ASR 模型必須支援的 Whisper 語言；"auto" 時是清單涵蓋的全部語言。"""
+        if not self.spoken_languages:
+            return WHISPER_CODES
+        return tuple(
+            dict.fromkeys(get_language(c).whisper_code for c in self.spoken_languages)
+        )
+
+    @property
+    def translation_pairs(self) -> tuple[tuple[str, str], ...]:
+        """翻譯模型必須支援的（原文, 譯文）方向；只做字形轉換的方向不列入。
+
+        口譯：對方語言 → 我的語言、我的語言 → 對方語言。影片翻譯：收聽語言 → 字幕語言；
+        "auto" 時是清單中每個其他 Whisper 語言 → 字幕語言（原文語言要到辨識時才知道）。
+        """
+        target = get_language(self.target_language)
+        if self.mode == "interpret":
+            return (
+                (self.partner_language, self.target_language),
+                (self.target_language, self.partner_language),
+            )
+        if self.source_language == AUTO_SOURCE:
+            return tuple(
+                (code, target.code)
+                for code in WHISPER_CODES
+                if code != target.whisper_code
+            )
+        if get_language(self.source_language).whisper_code == target.whisper_code:
+            return ()
+        return ((self.source_language, self.target_language),)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON 化。"""
+        return {
+            "mode": self.mode,
+            "source_language": self.source_language,
+            "target_language": self.target_language,
+            "partner_language": self.partner_language,
+        }
+
+
+@dataclass(frozen=True)
 class AsrChoice:
     """一條路徑的 ASR 模型與運算設定（對應 `load_transcriber()` 的參數）。
 
@@ -223,8 +320,10 @@ class ModelCombination:
         translation_final: 完整路徑翻譯模型；同上。
         translation_budget_gb: 估計可給翻譯模型的 VRAM（GB）；CPU 推論時為 None。
         gpu_runtime_missing: 有可用的 NVIDIA GPU 但缺 cuBLAS；UI 應顯示下載按鈕。
-        reasons: 為什麼這樣選（繁體中文）。
-        warnings: 需要使用者注意的事（繁體中文）。
+        reasons: 為什麼這樣選（結構化訊息，UI 依介面語系組句）。
+        warnings: 需要使用者注意的事（結構化訊息）。
+        translation_status: 翻譯模型推薦的結果（見 `TranslationStatus`）。
+        languages: 推薦依據的語言選擇；None 表示沒有考慮語言（舊呼叫端）。
     """
 
     tier: str
@@ -234,8 +333,10 @@ class ModelCombination:
     translation_final: str | None
     translation_budget_gb: float | None = None
     gpu_runtime_missing: bool = False
-    reasons: tuple[str, ...] = field(default=())
-    warnings: tuple[str, ...] = field(default=())
+    reasons: tuple[Message, ...] = field(default=())
+    warnings: tuple[Message, ...] = field(default=())
+    translation_status: TranslationStatus = "recommended"
+    languages: LanguageSelection | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON 化。"""
@@ -247,17 +348,19 @@ class ModelCombination:
             "translation_final": self.translation_final,
             "translation_budget_gb": self.translation_budget_gb,
             "gpu_runtime_missing": self.gpu_runtime_missing,
-            "reasons": list(self.reasons),
-            "warnings": list(self.warnings),
+            "reasons": [m.to_dict() for m in self.reasons],
+            "warnings": [m.to_dict() for m in self.warnings],
+            "translation_status": self.translation_status,
+            "languages": None if self.languages is None else self.languages.to_dict(),
         }
 
 
 @dataclass(frozen=True)
 class ValidationResult:
-    """手動選擇的組合驗證結果；`errors` 為空才可使用。"""
+    """手動選擇的組合驗證結果（結構化訊息）；`errors` 為空才可使用。"""
 
-    errors: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
+    errors: tuple[Message, ...] = ()
+    warnings: tuple[Message, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -268,6 +371,6 @@ class ValidationResult:
         """JSON 化。"""
         return {
             "ok": self.ok,
-            "errors": list(self.errors),
-            "warnings": list(self.warnings),
+            "errors": [m.to_dict() for m in self.errors],
+            "warnings": [m.to_dict() for m in self.warnings],
         }

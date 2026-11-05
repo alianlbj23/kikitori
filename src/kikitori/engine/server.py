@@ -23,7 +23,7 @@ from kikitori.capture.errors import (
     PermissionDeniedError,
 )
 from kikitori.capture.types import AudioSource, DeviceKind
-from kikitori.config import SettingsError, check_interpret_languages
+from kikitori.config import Settings, SettingsError, check_interpret_languages
 from kikitori.engine import protocol as p
 from kikitori.engine.deferred import Deferred, DeferredRunner
 from kikitori.engine.hardware_service import HardwareService, recommendation_patch
@@ -40,8 +40,15 @@ from kikitori.engine.services import (
     platform_name,
 )
 from kikitori.hardware import GPU_RUNTIME_ID
+from kikitori.hardware.ollama import validate_model_name
+from kikitori.languages import LANGUAGES
 from kikitori.pipeline import MODES, Mode, Pipeline, PipelineState, SubtitleUpdate
-from kikitori.pipeline.factory import UnknownModelError, pipeline_config
+from kikitori.pipeline.factory import (
+    UnknownModelError,
+    pipeline_config,
+    translation_needed,
+)
+from kikitori.translate.presets import normalize_model_name
 
 ENGINE_NAME = "kikitori-engine"
 STOP_TIMEOUT = 5.0
@@ -51,6 +58,15 @@ PROGRESS_INTERVAL = 0.25
 MAX_DEVICE_ID_CHARS = 512
 
 KIND_FOR_MODE: dict[Mode, DeviceKind] = {"media": "loopback", "interpret": "microphone"}
+PREVIEW_LANGUAGE_PARAMS = (
+    "source_language",
+    "target_language",
+    "partner_language",
+    "mode",
+)
+
+DownloadKind = str
+"""`download_progress` 的 `kind`："asr"、"gpu_runtime" 或 "translation"。"""
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +108,13 @@ class _Session:
         self.pipeline: Pipeline | None = None
         self.terminal_sent = False
         self.loader: threading.Thread | None = None
+        # 載入期間收到的 session.set_translation：pipeline 建好時套用（受 lock 保護）
+        self.translation_override: bool | None = None
 
 
 class _Download:
-    def __init__(self, model: str) -> None:
+    def __init__(self, kind: DownloadKind, model: str) -> None:
+        self.kind = kind
         self.model = model
         self.cancel = threading.Event()
         self.thread: threading.Thread | None = None
@@ -124,7 +143,8 @@ class EngineServer:
         self._session_lock = threading.Lock()
         self._session: _Session | None = None
         self._next_session_id = 1
-        self._downloads: dict[str, _Download] = {}
+        # 以 (kind, model) 為鍵：ASR 模型 id 與翻譯模型名稱是不同的命名空間
+        self._downloads: dict[tuple[DownloadKind, str], _Download] = {}
         self._downloads_lock = threading.Lock()
         # 偵測硬體可能要數秒：在背景工作執行緒上處理，stdin 仍能立即處理 session.stop 等。
         self._deferred = DeferredRunner(self._send)
@@ -137,13 +157,17 @@ class EngineServer:
             "models.list": self._models_list,
             "models.download": self._models_download,
             "models.validate": self._models_validate,
+            "models.pull_translation": self._models_pull_translation,
+            "languages.list": self._languages_list,
             "devices.list": self._devices_list,
             "settings.get": self._settings_get,
             "settings.set": self._settings_set,
             "settings.apply_recommendation": self._settings_apply_recommendation,
             "settings.preview_recommendation": self._settings_preview_recommendation,
+            "settings.preview_languages": self._settings_preview_languages,
             "session.start": self._session_start,
             "session.stop": self._session_stop,
+            "session.set_translation": self._session_set_translation,
             "engine.shutdown": self._engine_shutdown,
         }
 
@@ -222,7 +246,7 @@ class EngineServer:
             return
         if isinstance(result, Deferred):
             # 回應由工作執行緒在完成時寫出（以 id 對應，可能晚於之後的請求）。
-            self._deferred.submit(request.id, request.method, result.job)
+            self._deferred.submit(request.id, request.method, result.job, result.after)
             return
         self._send(p.response(request.id, result))
         actions, self._after_response = self._after_response, []
@@ -260,11 +284,19 @@ class EngineServer:
         detail: str | None,
         session_id: int | None,
         code: str | None,
+        data: Mapping[str, Any] | None = None,
     ) -> None:
-        self._send_event(
-            "status",
-            {"state": state, "detail": detail, "session_id": session_id, "code": code},
-        )
+        event: dict[str, Any] = {
+            "state": state,
+            "detail": detail,
+            "session_id": session_id,
+            "code": code,
+        }
+        # data 只在有內容時出現（例如 translation_model_missing 的模型清單），
+        # 其他 status 事件的形狀與之前完全相同
+        if data is not None:
+            event["data"] = dict(data)
+        self._send_event("status", event)
 
     # --- engine / hardware / devices / settings --------------------------------
 
@@ -285,6 +317,24 @@ class EngineServer:
         # 設定在收到請求時取出：之後的 settings.set 不影響這次偵測
         settings = self._services.settings_store.get()
         return Deferred(lambda: self._hardware.report(settings))
+
+    def _languages_list(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        # 語言清單只在 languages/catalog.py；UI 不自己維護一份
+        return {
+            "languages": [
+                {
+                    "code": lang.code,
+                    "english_name": lang.english_name,
+                    "native_name": lang.native_name,
+                    "whisper_code": lang.whisper_code,
+                    "rtl": lang.rtl,
+                    "no_space": lang.no_space,
+                    "asr_quality": dict(lang.asr_quality),
+                }
+                for lang in LANGUAGES
+            ]
+        }
 
     def _devices_list(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)
@@ -364,6 +414,27 @@ class EngineServer:
         # 轉換規則只在引擎：UI 用 differs 決定是否提示「有更適合的組合」，不自己比較
         return Deferred(job)
 
+    def _settings_preview_languages(self, params: dict[str, Any]) -> Deferred:
+        p.reject_unknown_params(params, PREVIEW_LANGUAGE_PARAMS)
+        if "mode" in params and params["mode"] not in MODES:
+            raise p.ProtocolError(
+                p.INVALID_PARAMS,
+                f"mode must be one of {list(MODES)}, got {params['mode']!r}",
+            )
+        # 語言碼的驗證與正規化沿用設定（別名、口譯不能同一個 Whisper 語言），
+        # 不合法時與 settings.set 一樣回 invalid_settings；合併結果只用來預覽，不存檔。
+        try:
+            candidate = self._services.settings_store.get().merged(dict(params))
+        except SettingsError as exc:
+            raise p.ProtocolError(p.INVALID_SETTINGS, str(exc)) from exc
+
+        def job() -> Mapping[str, Any]:
+            # differs 與 preview_recommendation 相同，比對執行當下的設定
+            current = self._services.settings_store.get()
+            return self._hardware.preview_languages(candidate, current)
+
+        return Deferred(job)
+
     # --- models -----------------------------------------------------------------
 
     def _models_list(self, params: dict[str, Any]) -> Deferred:
@@ -414,7 +485,11 @@ class EngineServer:
         def download(progress: ProgressCallback, cancel: threading.Event) -> None:
             catalog.download(model, progress, cancel)
 
-        return self._start_download(model, known[model].size_bytes, download)
+        thread = self._register_download(
+            "asr", model, known[model].size_bytes, download
+        )
+        self._after_response.append(thread.start)
+        return {"model": model, "started": True}
 
     def _download_gpu_runtime(self, params: dict[str, Any]) -> Mapping[str, Any]:
         """NVIDIA cuBLAS：使用者必須明確同意 NVIDIA EULA（`accept_license: true`）。"""
@@ -447,26 +522,78 @@ class EngineServer:
                 # 不論成功與否，cuBLAS 的狀態可能變了；下一次偵測不能用舊結果
                 self._hardware.invalidate()
 
-        return self._start_download(GPU_RUNTIME_ID, status.download_bytes or 0, install)
+        thread = self._register_download(
+            "gpu_runtime", GPU_RUNTIME_ID, status.download_bytes or 0, install
+        )
+        self._after_response.append(thread.start)
+        return {"model": GPU_RUNTIME_ID, "started": True}
 
-    def _start_download(
-        self, model: str, expected_total: int, job: DownloadJob
-    ) -> Mapping[str, Any]:
+    def _models_pull_translation(self, params: dict[str, Any]) -> Deferred:
+        """Ollama 的 `/api/pull`：替使用者下載翻譯模型（進度同 `download_progress`）。"""
+        p.reject_unknown_params(params, ("model",))
+        try:
+            model = validate_model_name(params.get("model"))
+        except ValueError as exc:
+            raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
+        settings = self._services.settings_store.get()
+        translation = self._services.translation_models
+        started: list[threading.Thread] = []
+
+        def pull(progress: ProgressCallback, cancel: threading.Event) -> None:
+            try:
+                translation.pull(settings, model, progress, cancel)
+            finally:
+                # 伺服器上的模型可能變了：推薦與總覽不能用舊的偵測結果
+                self._hardware.invalidate()
+
+        def job() -> Mapping[str, Any]:
+            # 要連線檢查伺服器（數秒），所以在背景工作執行緒上；錯誤以錯誤碼回應，
+            # UI 才能分辨「沒開 Ollama」與「不是 Ollama（請自行安裝）」。
+            state = translation.server_state(settings)
+            base_url = settings.translation.base_url
+            if not state.reachable:
+                raise p.ProtocolError(
+                    p.TRANSLATION_SERVER_UNREACHABLE,
+                    f"cannot connect to the translation server {base_url}"
+                    + (f": {state.error}" if state.error else ""),
+                )
+            if not state.is_ollama:
+                raise p.ProtocolError(
+                    p.PULL_UNSUPPORTED,
+                    f"the translation server {base_url} is not Ollama; "
+                    f"install {model} on that server yourself",
+                )
+            started.append(self._register_download("translation", model, 0, pull))
+            return {"model": model, "started": True}
+
+        def start() -> None:
+            for thread in started:
+                thread.start()
+
+        return Deferred(job, after=start)
+
+    def _register_download(
+        self, kind: DownloadKind, model: str, expected_total: int, job: DownloadJob
+    ) -> threading.Thread:
+        """登記一個下載並建立（尚未啟動的）執行緒；呼叫端在回應寫出後才啟動它。
+
+        Raises:
+            ProtocolError: `download_in_progress`（同一個模型已在下載）。
+        """
         with self._downloads_lock:
-            if model in self._downloads:
+            if (kind, model) in self._downloads:
                 raise p.ProtocolError(
                     p.DOWNLOAD_IN_PROGRESS, f"{model} is already downloading"
                 )
-            download = _Download(model)
-            self._downloads[model] = download
+            download = _Download(kind, model)
+            self._downloads[(kind, model)] = download
         download.thread = threading.Thread(
             target=self._run_download,
             args=(download, expected_total, job),
-            name=f"download-{model}",
+            name=f"download-{kind}-{model}",
             daemon=True,
         )
-        self._after_response.append(download.thread.start)
-        return {"model": model, "started": True}
+        return download.thread
 
     def _run_download(
         self, download: _Download, expected_total: int, job: DownloadJob
@@ -480,6 +607,7 @@ class EngineServer:
                 "download_progress",
                 {
                     "model": download.model,
+                    "kind": download.kind,
                     "downloaded_bytes": downloaded,
                     "total_bytes": size,
                     "state": state,
@@ -513,7 +641,7 @@ class EngineServer:
                 logger.error("cannot report download failure: protocol output closed")
         finally:
             with self._downloads_lock:
-                self._downloads.pop(download.model, None)
+                self._downloads.pop((download.kind, download.model), None)
 
     # --- session ----------------------------------------------------------------
 
@@ -578,6 +706,18 @@ class EngineServer:
     ) -> None:
         try:
             self._session_status(session, "loading", None, None)
+            missing = self._missing_translation_models(settings, session.mode)
+            if missing:
+                # 先於載入 ASR（數秒）回報：UI 以 models.pull_translation 下載後重試
+                self._session_failed(
+                    session,
+                    "translation_model_missing",
+                    "translation model(s) not installed on the Ollama server: "
+                    f"{', '.join(missing)}; download them with "
+                    "models.pull_translation",
+                    data={"models": missing},
+                )
+                return
             try:
                 components = self._services.build_components(settings, session.mode)
             except UnknownModelError as exc:
@@ -609,6 +749,8 @@ class EngineServer:
                 if session.cancelled.is_set():
                     return
                 session.pipeline = pipeline
+                if session.translation_override is not None:
+                    pipeline.set_translation_enabled(session.translation_override)
                 try:
                     pipeline.start(source)
                 except CaptureError as exc:
@@ -645,11 +787,86 @@ class EngineServer:
             )
         self._session_status(session, state, detail, code)
 
-    def _session_failed(self, session: _Session, code: str, message: str) -> None:
-        self._session_status(session, "error", message, code)
+    def _missing_translation_models(self, settings: Settings, mode: Mode) -> list[str]:
+        """這個 session 會用到、但 Ollama 上沒有的翻譯模型。
+
+        只有確定「伺服器是 Ollama、連得上、而且列得出已安裝的模型」時才回報缺少：那時
+        UI 可以用 `models.pull_translation` 補上再重試。連不上或不是 Ollama 時照常開始——
+        字幕的原文不依賴翻譯，每句翻譯失敗只顯示原文並提醒一次（pipeline 的既有行為）；
+        使用者可能正要開 Ollama，或用的是其他服務，不該因此無法開始。只顯示原文或不需要
+        翻譯的語言組合根本不檢查（不連線）。
+        """
+        if not translation_needed(settings, mode):
+            return []
+        try:
+            state = self._services.translation_models.server_state(settings)
+        except Exception:
+            # 檢查只是為了提早提示；檢查本身的程式錯誤不能讓 session 開不起來
+            logger.exception("cannot check the translation server")
+            return []
+        if not state.reachable or not state.is_ollama or state.installed is None:
+            logger.info(
+                "not checking translation models (reachable=%s, ollama=%s): %s",
+                state.reachable,
+                state.is_ollama,
+                state.error,
+            )
+            return []
+        installed = {normalize_model_name(m) for m in state.installed}
+        t = settings.translation
+        return [
+            model
+            for model in dict.fromkeys((t.fast_model, t.final_model))
+            if normalize_model_name(model) not in installed
+        ]
+
+    def _session_set_translation(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        """執行中切換「顯示翻譯」，並存進設定的 `translation.enabled`。"""
+        p.reject_unknown_params(params, ("enabled",))
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            raise p.ProtocolError(
+                p.INVALID_PARAMS, f"enabled must be true or false, got {enabled!r}"
+            )
+        # 先存設定：存不進去就回錯誤、不切換，畫面與設定才不會不一致
+        try:
+            self._services.settings_store.update({"translation": {"enabled": enabled}})
+        except SettingsError as exc:
+            raise p.ProtocolError(p.INVALID_SETTINGS, str(exc)) from exc
+        except OSError as exc:
+            logger.error("cannot save settings: %s", exc)
+            raise p.ProtocolError(
+                p.SETTINGS_IO_ERROR, f"cannot save settings: {exc}"
+            ) from exc
+        with self._session_lock:
+            session = self._session
+        applied_to = None
+        if session is not None:
+            with session.lock:
+                # 還在載入（pipeline 尚未建立）時記下來，建好時套用
+                session.translation_override = enabled
+                pipeline = session.pipeline
+            if pipeline is not None:
+                pipeline.set_translation_enabled(enabled)
+            applied_to = session.id
+        return {**self._settings_result(), "session_id": applied_to}
+
+    def _session_failed(
+        self,
+        session: _Session,
+        code: str,
+        message: str,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._session_status(session, "error", message, code, data)
 
     def _session_status(
-        self, session: _Session, state: str, detail: str | None, code: str | None
+        self,
+        session: _Session,
+        state: str,
+        detail: str | None,
+        code: str | None,
+        data: Mapping[str, Any] | None = None,
     ) -> None:
         """送出這個 session 的狀態；結束狀態（idle／error）只送一次並釋放 session。"""
         terminal = state in ("idle", "error")
@@ -666,7 +883,7 @@ class EngineServer:
                 # 執行緒參照，執行緒結束時以參照計數立即釋放。不取 session.lock：
                 # `_load_session` 持有它時也可能走到這裡（啟動失敗）。
                 session.pipeline = None
-        self._send_status(state, detail, session.id, code)
+        self._send_status(state, detail, session.id, code, data)
 
     def _session_stop(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)

@@ -1,9 +1,13 @@
-"""依硬體推薦模型組合，以及驗證使用者手動選擇的組合。
+"""依硬體與語言推薦模型組合，以及驗證使用者手動選擇的組合。
 
 位於 hardware 模組的決策層，兩個函式都是純函式（只讀 `HardwareInfo`，不做 I/O），
 方便窮舉測試。ASR 的等級表來自 `docs/specs/asr.md`（本機 RTX 5070／Ryzen 7 5700X
 實測），翻譯模型的順序來自 `translate.recommend_translation_models()`；本模組負責把
 兩者接起來：ASR 先佔 VRAM，剩下的才分給同一張 GPU 上的本機 LLM（Ollama）。
+
+語言只影響「能不能用」與提示，不改變硬體等級：ASR 模型依硬體挑（只支援單一語言的模型
+只在該語言時才會被選）、語言品質低時加警告；翻譯模型在支援這個語言組合的預設組中依
+VRAM 順序挑。原因與警告都是結構化訊息（`messages.py`），由 UI 依介面語系組句。
 """
 
 from collections.abc import Collection, Mapping
@@ -11,20 +15,26 @@ from dataclasses import dataclass
 from typing import Any
 
 from kikitori.asr.registry import MODELS, ModelSpec
+from kikitori.hardware.messages import Message, message
 from kikitori.hardware.types import (
     AsrChoice,
     AsrDeviceChoice,
     CpuInfo,
     GpuInfo,
     HardwareInfo,
+    LanguageSelection,
     ModelCombination,
+    TranslationStatus,
     ValidationResult,
 )
+from kikitori.languages import WHISPER_CODES, asr_quality, get_language
 from kikitori.translate.presets import (
     PRESETS,
+    NoSupportingModelError,
     normalize_model_name,
     preset_for_model,
     recommend_translation_models,
+    supports,
 )
 
 MIB = 1024 * 1024
@@ -67,6 +77,24 @@ _FP16_TYPES = frozenset({"float16", "bfloat16", "float32"})
 CPU_SLOW_FAST_MODELS = frozenset({"medium", "large-v3-turbo", "large-v3"})
 CPU_SLOW_FINAL_MODELS = frozenset({"medium", "large-v3-turbo", "large-v3"})
 MAX_TRANSLATION_MODEL_CHARS = 200
+LOW_QUALITY_TIER = "C"
+
+ASR_CANDIDATES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "nvidia_8gb": (("small",), ("large-v3-turbo",)),
+    "nvidia_8gb_large": (("small",), ("large-v3",)),
+    "nvidia_4gb": (("base",), ("large-v3-turbo",)),
+    "nvidia_lt4gb": (("base",), ("small",)),
+    "cpu": (("base",), ("small",)),
+    "cpu_low": (("tiny",), ("base",)),
+    "apple_silicon": (("base",), ("small",)),
+}
+"""每個硬體等級的（即時, 完整）候選模型，越前面越優先。
+
+只支援單一語言的模型（例如之後加入的日語特化模型）放在多語言模型前面：辨識語言全部
+在它支援的範圍內才選它，否則選下一個。最後一個一定是多語言模型（測試檢查），所以
+「自動偵測」與其他語言永遠有模型可用。`nvidia_8gb_large` 是 `nvidia_8gb` 在 VRAM
+寬裕、翻譯不在本機時的變體（回報的 tier 仍是 `nvidia_8gb`）。
+"""
 
 
 # --- 共用的小工具 --------------------------------------------------------------
@@ -110,18 +138,26 @@ def primary_gpu(info: HardwareInfo) -> GpuInfo | None:
     return max(info.gpus, key=lambda g: g.memory_total_mb)
 
 
-def _cuda_problem(info: HardwareInfo, gpu: GpuInfo) -> str | None:
-    """這張 GPU 不能跑 CTranslate2 CUDA 的原因；可以時回傳 None。"""
+def _cuda_problem(info: HardwareInfo, gpu: GpuInfo) -> Message | None:
+    """這張 GPU 不能跑 CTranslate2 CUDA 的原因（`cuda_*` 訊息）；可以時回傳 None。"""
     if not info.cublas.supported_platform:
-        return "此平台的 CTranslate2 沒有 CUDA 版本（只支援 Windows／Linux x86-64），ASR 改用 CPU"
+        return message("cuda_platform_unsupported")
     driver = gpu.driver_major
     if driver is not None and driver < MIN_DRIVER_MAJOR:
-        return f"NVIDIA 驅動 {gpu.driver_version} 太舊（CUDA 12 需要 {MIN_DRIVER_MAJOR} 以上），ASR 改用 CPU；更新驅動後可用 GPU"
+        return message(
+            "cuda_driver_too_old",
+            driver_version=gpu.driver_version or "",
+            min_driver=MIN_DRIVER_MAJOR,
+        )
     cc = gpu.compute_capability_tuple
     if cc is None:
-        return "無法取得 GPU 的 compute capability（驅動可能太舊），ASR 改用 CPU"
+        return message("cuda_compute_capability_unknown")
     if cc < (7, 0) and cc != (6, 1):
-        return f"{gpu.name}（compute capability {gpu.compute_capability}）不支援 CTranslate2 的 float16／int8 加速，ASR 改用 CPU"
+        return message(
+            "cuda_compute_capability_unsupported",
+            gpu_name=gpu.name,
+            compute_capability=gpu.compute_capability or "",
+        )
     return None
 
 
@@ -140,6 +176,15 @@ def _gb(mb: float) -> float:
     return round(mb / 1024, 2)
 
 
+def _pick_model(candidates: tuple[str, ...], whisper_codes: tuple[str, ...]) -> str:
+    """第一個支援全部辨識語言的候選；都不支援時用最後一個（多語言模型）。"""
+    for model in candidates:
+        spec = MODELS.get(model)
+        if spec is not None and all(spec.supports(code) for code in whisper_codes):
+            return model
+    return candidates[-1]
+
+
 # --- 推薦 ----------------------------------------------------------------------
 
 
@@ -148,96 +193,128 @@ class _AsrPlan:
     tier: str
     fast: AsrChoice
     final: AsrChoice
-    reasons: tuple[str, ...]
+    reasons: tuple[Message, ...]
 
 
-def _cpu_plan(info: HardwareInfo, warnings: list[str]) -> _AsrPlan:
+def _models(slot: str, whisper_codes: tuple[str, ...]) -> tuple[str, str]:
+    fast, final = ASR_CANDIDATES[slot]
+    return _pick_model(fast, whisper_codes), _pick_model(final, whisper_codes)
+
+
+def _cpu_plan(
+    info: HardwareInfo, whisper_codes: tuple[str, ...], warnings: list[Message]
+) -> _AsrPlan:
     threads = cpu_threads_per_model(info.cpu)
     total = info.memory.total_bytes
     cores = info.cpu.physical_cores or (
         info.cpu.logical_cores // 2 if info.cpu.logical_cores else None
     )
     if info.apple_silicon:
+        fast, final = _models("apple_silicon", whisper_codes)
         return _AsrPlan(
             "apple_silicon",
-            AsrChoice("base", "cpu", "int8", threads),
-            AsrChoice("small", "cpu", "int8", threads),
+            AsrChoice(fast, "cpu", "int8", threads),
+            AsrChoice(final, "cpu", "int8", threads),
             (
-                "Apple Silicon：CTranslate2 在 macOS 只有 CPU（Accelerate），即時用 base、完整用 small",
-                "Apple Silicon 的延遲尚未實測，暫比照「CPU、RAM ≥ 16 GB」",
+                message("asr_apple_silicon", fast_model=fast, final_model=final),
+                message("asr_apple_silicon_untested"),
             ),
         )
     if total is None:
-        warnings.append("無法取得記憶體大小，先用最輕量的 ASR 組合")
+        warnings.append(message("memory_unknown"))
     high = (
         total is not None
         and total >= CPU_HIGH_RAM_MIN_BYTES
         and (cores is None or cores > CPU_LOW_MAX_CORES)
     )
     if high:
+        fast, final = _models("cpu", whisper_codes)
         return _AsrPlan(
             "cpu",
-            AsrChoice("base", "cpu", "int8", threads),
-            AsrChoice("small", "cpu", "int8", threads),
+            AsrChoice(fast, "cpu", "int8", threads),
+            AsrChoice(final, "cpu", "int8", threads),
             (
-                "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
-                "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
+                message("asr_cpu", fast_model=fast, final_model=final),
+                message("asr_cpu_large_models_slow"),
             ),
         )
-    why = []
+    why: list[Message] = []
     if total is not None and total < CPU_HIGH_RAM_MIN_BYTES:
-        why.append(f"RAM {total / GIB:.1f} GB < 16 GB")
+        why.append(message("cpu_low_ram", ram_gb=round(total / GIB, 1)))
     if cores is not None and cores <= CPU_LOW_MAX_CORES:
-        why.append(f"實體核心 {cores} ≤ {CPU_LOW_MAX_CORES}")
-    reason = "、".join(why) or "硬體資訊不完整"
-    warnings.append("低階 CPU 組合：tiny 的辨識品質明顯較差（錯字多）")
+        why.append(
+            message("cpu_few_cores", physical_cores=cores, max_cores=CPU_LOW_MAX_CORES)
+        )
+    if not why:
+        why.append(message("cpu_info_incomplete"))
+    fast, final = _models("cpu_low", whisper_codes)
+    warnings.append(message("asr_low_quality_model", model=fast))
     return _AsrPlan(
         "cpu_low",
-        AsrChoice("tiny", "cpu", "int8", threads),
-        AsrChoice("base", "cpu", "int8", threads),
-        (f"{reason}：即時用 tiny、完整用 base，降低延遲與記憶體",),
+        AsrChoice(fast, "cpu", "int8", threads),
+        AsrChoice(final, "cpu", "int8", threads),
+        (*why, message("asr_cpu_low", fast_model=fast, final_model=final)),
     )
 
 
-def _gpu_plan(gpu: GpuInfo, translation_local: bool) -> _AsrPlan:
+def _gpu_plan(
+    gpu: GpuInfo, translation_local: bool, whisper_codes: tuple[str, ...]
+) -> _AsrPlan:
     total = gpu.memory_total_mb
     cc = gpu.compute_capability_tuple
     pascal = cc == (6, 1)  # 只支援 int8（CTranslate2 文件：float16 需要 7.0 以上）
-    vram = f"{gpu.name}（{total / 1024:.1f} GB VRAM）"
-    if total >= TIER_8GB_MIN_MB:
-        ctype = "int8" if pascal else "float16"
-        final = "large-v3-turbo"
+
+    def plan(tier: str, slot: str, ctype: str, *extra: Message) -> _AsrPlan:
+        fast, final = _models(slot, whisper_codes)
         reasons = [
-            f"{vram}：即時用 small、完整用 large-v3-turbo（本機實測 0.13 s＋0.15 s）",
-            "large-v3-turbo 的 no_speech 不可用，以 small 的 no_speech 與 VAD 輔助過濾",
+            message(
+                "asr_gpu",
+                gpu_name=gpu.name,
+                vram_mb=total,
+                fast_model=fast,
+                final_model=final,
+                compute_type=ctype,
+            ),
+            *extra,
         ]
-        if total >= LARGE_V3_MIN_MB and not translation_local:
-            final = "large-v3"
-            reasons = [
-                f"{vram}，翻譯不在本機：完整路徑改用 large-v3（品質相當、no_speech 可用，約 0.33 s）",
-            ]
+        fast_spec, final_spec = MODELS.get(fast), MODELS.get(final)
+        if (
+            final_spec is not None
+            and not final_spec.no_speech_reliable
+            and fast_spec is not None
+            and fast_spec.no_speech_reliable
+        ):
+            reasons.append(
+                message(
+                    "asr_final_no_speech_unreliable",
+                    final_model=final,
+                    fast_model=fast,
+                )
+            )
         return _AsrPlan(
-            "nvidia_8gb",
-            AsrChoice("small", "cuda", ctype),
+            tier,
+            AsrChoice(fast, "cuda", ctype),
             AsrChoice(final, "cuda", ctype),
             tuple(reasons),
         )
+
+    if total >= TIER_8GB_MIN_MB:
+        ctype = "int8" if pascal else "float16"
+        if total >= LARGE_V3_MIN_MB and not translation_local:
+            final = _models("nvidia_8gb_large", whisper_codes)[1]
+            return plan(
+                "nvidia_8gb",
+                "nvidia_8gb_large",
+                ctype,
+                message("asr_large_v3_remote_translation", final_model=final),
+            )
+        return plan("nvidia_8gb", "nvidia_8gb", ctype)
     ctype = "int8" if pascal else "int8_float16"
     if total >= TIER_4GB_MIN_MB:
-        return _AsrPlan(
-            "nvidia_4gb",
-            AsrChoice("base", "cuda", ctype),
-            AsrChoice("large-v3-turbo", "cuda", ctype),
-            (
-                f"{vram}：即時用 base、完整用 large-v3-turbo，以 int8_float16 省一半 VRAM 給翻譯模型",
-            ),
+        return plan(
+            "nvidia_4gb", "nvidia_4gb", ctype, message("asr_gpu_int8_saves_vram")
         )
-    return _AsrPlan(
-        "nvidia_lt4gb",
-        AsrChoice("base", "cuda", ctype),
-        AsrChoice("small", "cuda", ctype),
-        (f"{vram}：即時用 base、完整用 small（int8_float16）",),
-    )
+    return plan("nvidia_lt4gb", "nvidia_lt4gb", ctype)
 
 
 def _translation_budget_mb(
@@ -262,49 +339,105 @@ def _translation_budget_mb(
     return None
 
 
+def _unsupported_pair(
+    pairs: tuple[tuple[str, str], ...], allow_restricted: bool
+) -> tuple[str, str]:
+    """要回報的組合：第一個「沒有任何可推薦模型支援」的方向；都個別支援時用第一個。"""
+    usable = [
+        p
+        for p in PRESETS.values()
+        if p.commercial_use and (allow_restricted or not p.excluded_regions)
+    ]
+    for source, target in pairs:
+        if not any(supports(p, source, target) for p in usable):
+            return source, target
+    return pairs[0]
+
+
+@dataclass(frozen=True)
+class _TranslationPlan:
+    fast: str | None
+    final: str | None
+    budget_gb: float | None
+    status: TranslationStatus
+
+
 def _recommend_translation(
     info: HardwareInfo,
     gpu: GpuInfo | None,
     plan: _AsrPlan,
     allow_restricted: bool,
-    reasons: list[str],
-    warnings: list[str],
-) -> tuple[str | None, str | None, float | None]:
+    languages: LanguageSelection | None,
+    reasons: list[Message],
+    warnings: list[Message],
+) -> _TranslationPlan:
     server = info.translation_server
     if not server.is_local:
-        reasons.append(
-            f"翻譯伺服器不在本機（{server.base_url}），不推薦翻譯模型；請在設定頁選擇該服務提供的模型"
-        )
-        return None, None, None
+        reasons.append(message("translation_remote", base_url=server.base_url))
+        return _TranslationPlan(None, None, None, "remote")
 
     budget_mb = _translation_budget_mb(info, gpu, plan)
     budget_gb = None if budget_mb is None else _gb(budget_mb)
+    pairs: tuple[tuple[str, str], ...] | None = None
+    if languages is not None:
+        pairs = languages.translation_pairs
+        if not pairs:
+            reasons.append(
+                message(
+                    "translation_not_needed",
+                    source_language=languages.source_language,
+                    target_language=languages.target_language,
+                )
+            )
+            return _TranslationPlan(None, None, budget_gb, "not_needed")
+        if languages.mode == "media" and languages.source_language == "auto":
+            reasons.append(
+                message(
+                    "source_language_auto", target_language=languages.target_language
+                )
+            )
+
     installed: tuple[str, ...] | None = server.models
     if not server.reachable:
         warnings.append(
-            f"無法連線到翻譯伺服器 {server.base_url}（Ollama 是否已啟動？）；無法確認已安裝的模型"
+            message("translation_server_unreachable", base_url=server.base_url)
         )
     elif installed is None:
-        warnings.append(f"無法取得翻譯伺服器的模型清單：{server.error}")
-
-    choice = recommend_translation_models(budget_gb, installed, allow_restricted)
-    ideal = recommend_translation_models(budget_gb, None, allow_restricted)
-    if budget_gb is None:
-        reasons.append(
-            "沒有可用的 GPU：翻譯模型在 CPU 執行，選最小的模型（CPU 速度未實測）"
+        warnings.append(
+            message("translation_model_list_unavailable", error=server.error or "")
         )
+
+    try:
+        choice = recommend_translation_models(
+            budget_gb, installed, allow_restricted, pairs
+        )
+        ideal = recommend_translation_models(budget_gb, None, allow_restricted, pairs)
+    except NoSupportingModelError:
+        # 不看語言（pairs 為 None）時每個等級都有可推薦的模型，只有語言篩選會走到這裡
+        assert pairs is not None and languages is not None
+        source, target = _unsupported_pair(pairs, allow_restricted)
+        warnings.append(
+            message(
+                "translation_unsupported",
+                source_language=_shown_source(source, languages),
+                target_language=target,
+            )
+        )
+        return _TranslationPlan(None, None, budget_gb, "unsupported")
+
+    if budget_gb is None:
+        reasons.append(message("translation_cpu"))
         total = info.memory.total_bytes
         if total is not None and total < LOW_RAM_FOR_LLM_BYTES:
-            warnings.append("RAM 小於 8 GB，本機翻譯模型與 ASR 同時執行可能不夠用")
+            warnings.append(message("low_ram_for_translation"))
+    elif gpu is None:
+        reasons.append(message("translation_budget_unified", budget_gb=budget_gb))
     else:
-        where = "統一記憶體" if gpu is None else "VRAM"
-        reasons.append(
-            f"扣掉 ASR 與 {DESKTOP_VRAM_RESERVE_MB / 1024:.0f} GB 保留後，約 {budget_gb:.1f} GB {where} 可給翻譯模型"
-        )
+        reasons.append(message("translation_budget_vram", budget_gb=budget_gb))
     reasons.append(
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
+        message("translation_same_model")
         if choice.fast == choice.final
-        else "即時與完整翻譯使用不同模型"
+        else message("translation_different_models")
     )
 
     available = (
@@ -314,9 +447,13 @@ def _recommend_translation(
         ((choice.fast, ideal.fast), (choice.final, ideal.final))
     ):
         if available is not None and model not in available:
-            warnings.append(f"建議的翻譯模型「{model}」尚未安裝，請先在 Ollama 安裝")
+            warnings.append(message("translation_model_not_installed", model=model))
         elif model != best:
-            reasons.append(f"已安裝的模型中選「{model}」；安裝「{best}」品質較好")
+            reasons.append(
+                message(
+                    "translation_better_model_available", model=model, better_model=best
+                )
+            )
         preset = PRESETS.get(model)
         if (
             budget_gb is not None
@@ -324,67 +461,101 @@ def _recommend_translation(
             and preset.approx_vram_gb > budget_gb
         ):
             warnings.append(
-                f"「{model}」約需 {preset.approx_vram_gb} GB，超過可用的 {budget_gb:.1f} GB，"
-                "Ollama 會把部分運算放到 CPU，速度較慢"
+                message(
+                    "translation_model_exceeds_budget",
+                    model=model,
+                    model_gb=preset.approx_vram_gb,
+                    budget_gb=budget_gb,
+                )
             )
-    return choice.fast, choice.final, budget_gb
+    return _TranslationPlan(choice.fast, choice.final, budget_gb, "recommended")
 
 
-def recommend(info: HardwareInfo, *, allow_restricted: bool = True) -> ModelCombination:
-    """依偵測結果推薦 ASR 與翻譯模型組合（純函式）。
+def _shown_source(source: str, languages: LanguageSelection) -> str:
+    """訊息裡的原文語言：自動偵測時是 "auto"（方向裡的是 Whisper 語言碼，例如 "zh"，
+    不分繁簡，UI 無法顯示成清單語言），其他情況本來就是清單語言碼。"""
+    if languages.mode == "media" and languages.source_language == "auto":
+        return "auto"
+    return source
+
+
+def _language_quality_warnings(
+    languages: LanguageSelection, model: str
+) -> list[Message]:
+    """辨識語言用這個模型品質為 C 級時的警告（每個語言一則）。"""
+    return [
+        message("asr_language_quality_low", model=model, language=code)
+        for code in languages.spoken_languages
+        if asr_quality(code, model) == LOW_QUALITY_TIER
+    ]
+
+
+def recommend(
+    info: HardwareInfo,
+    *,
+    allow_restricted: bool = True,
+    languages: LanguageSelection | None = None,
+) -> ModelCombination:
+    """依偵測結果與語言選擇推薦 ASR 與翻譯模型組合（純函式）。
 
     Args:
         info: `detect()` 的結果。
         allow_restricted: False 時不推薦有地區限制授權的翻譯模型（例如使用者在
             歐盟、英國、南韓時排除 HY-MT）。非商用授權的模型一律不推薦。
+        languages: 收聽／字幕語言（影片翻譯）或兩個方向（口譯）。None 時不看語言
+            （ASR 只用多語言模型、翻譯模型不檢查語言組合）。
 
     Returns:
-        `ModelCombination`；`reasons`／`warnings` 為繁體中文，可直接顯示。
+        `ModelCombination`；`reasons`／`warnings` 為結構化訊息（`messages.py`）。
     """
-    reasons: list[str] = []
-    warnings: list[str] = []
+    reasons: list[Message] = []
+    warnings: list[Message] = []
     gpu = primary_gpu(info)
     gpu_runtime_missing = False
     plan: _AsrPlan | None = None
+    # 不看語言時要求支援全部語言，等於只選多語言模型（與加入語言前的行為相同）
+    whisper_codes = (
+        languages.asr_whisper_codes if languages is not None else WHISPER_CODES
+    )
 
     if gpu is not None:
         if len(info.gpus) > 1:
             warnings.append(
-                f"偵測到 {len(info.gpus)} 張 NVIDIA GPU，以 VRAM 最大的 {gpu.name} 計算"
+                message("multiple_gpus", gpu_count=len(info.gpus), gpu_name=gpu.name)
             )
         problem = _cuda_problem(info, gpu)
         if problem is not None:
             warnings.append(problem)
         elif not info.cublas.available:
             gpu_runtime_missing = True
-            warnings.append(
-                "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
-            )
+            warnings.append(message("gpu_runtime_missing"))
         else:
-            plan = _gpu_plan(gpu, info.translation_server.is_local)
+            plan = _gpu_plan(gpu, info.translation_server.is_local, whisper_codes)
             need = asr_vram_need_mb((plan.fast, plan.final))
             if need > gpu.memory_total_mb - DESKTOP_VRAM_RESERVE_MB:
-                warnings.append(
-                    f"VRAM 不足以放 ASR 模型（需要約 {need / 1024:.1f} GB），ASR 改用 CPU"
-                )
+                warnings.append(message("asr_vram_insufficient", need_mb=need))
                 plan = None
     if plan is None:
-        plan = _cpu_plan(info, warnings)
+        plan = _cpu_plan(info, whisper_codes, warnings)
     reasons.extend(plan.reasons)
+    if languages is not None:
+        warnings.extend(_language_quality_warnings(languages, plan.final.model))
 
-    fast_t, final_t, budget = _recommend_translation(
-        info, gpu, plan, allow_restricted, reasons, warnings
+    translation = _recommend_translation(
+        info, gpu, plan, allow_restricted, languages, reasons, warnings
     )
     return ModelCombination(
         tier=plan.tier,
         fast_asr=plan.fast,
         final_asr=plan.final,
-        translation_fast=fast_t,
-        translation_final=final_t,
-        translation_budget_gb=budget,
+        translation_fast=translation.fast,
+        translation_final=translation.final,
+        translation_budget_gb=translation.budget_gb,
         gpu_runtime_missing=gpu_runtime_missing,
         reasons=tuple(reasons),
         warnings=tuple(warnings),
+        translation_status=translation.status,
+        languages=languages,
     )
 
 
@@ -392,10 +563,10 @@ def recommend(info: HardwareInfo, *, allow_restricted: bool = True) -> ModelComb
 
 
 def _parse_asr(
-    data: object, path: str, errors: list[str]
+    data: object, path: str, errors: list[Message]
 ) -> tuple[str, str, str | None, int] | None:
     if not isinstance(data, Mapping):
-        errors.append(f"{path} 必須是物件")
+        errors.append(message("asr_path_not_object", path=path))
         return None
     model = data.get("model")
     device = data.get("device", "auto")
@@ -404,21 +575,26 @@ def _parse_asr(
     ok = True
     if not isinstance(model, str) or model not in MODELS:
         errors.append(
-            f"{path}.model：未知的 ASR 模型 {str(model)[:50]!r}（可用：{', '.join(MODELS)}）"
+            message(
+                "asr_model_unknown",
+                path=path,
+                model=str(model)[:50],
+                available=", ".join(MODELS),
+            )
         )
         ok = False
     if device not in ("auto", "cpu", "cuda"):
-        errors.append(f"{path}.device 必須是 auto、cpu 或 cuda")
+        errors.append(message("asr_device_invalid", path=path))
         ok = False
     if compute_type is not None and not isinstance(compute_type, str):
-        errors.append(f"{path}.compute_type 必須是字串或 null")
+        errors.append(message("asr_compute_type_not_string", path=path))
         ok = False
     if (
         isinstance(threads, bool)
         or not isinstance(threads, int)
         or not 0 <= threads <= 256
     ):
-        errors.append(f"{path}.cpu_threads 必須是 0–256 的整數")
+        errors.append(message("asr_cpu_threads_invalid", path=path))
         ok = False
     if not ok:
         return None
@@ -432,8 +608,8 @@ def _check_asr_device(
     model: str,
     device: str,
     compute_type: str | None,
-    errors: list[str],
-    warnings: list[str],
+    errors: list[Message],
+    warnings: list[Message],
 ) -> AsrDeviceChoice:
     """檢查裝置與精度；回傳實際會用的裝置（auto 依硬體判斷）。"""
     gpu = primary_gpu(info)
@@ -442,13 +618,14 @@ def _check_asr_device(
     )
     if device == "cuda":
         if gpu is None:
-            errors.append(f"{path}：選了 CUDA，但沒有偵測到 NVIDIA GPU")
+            errors.append(message("asr_cuda_no_gpu", path=path))
         elif (problem := _cuda_problem(info, gpu)) is not None:
-            errors.append(f"{path}：選了 CUDA，但 {problem}")
+            # 與推薦的 `cuda_*` 訊息同一組參數，另加 path（code 加上 `asr_` 前綴）
+            errors.append(message(f"asr_{problem.code}", path=path, **problem.params))
         elif not info.cublas.available:
-            errors.append(f"{path}：選了 CUDA，但 cuBLAS 未安裝；請先下載 GPU 執行環境")
+            errors.append(message("asr_cuda_cublas_missing", path=path))
     elif device == "auto" and gpu is not None and not cuda_ok:
-        warnings.append(f"{path}：auto 會使用 CPU（GPU 目前無法用於 ASR）")
+        warnings.append(message("asr_auto_uses_cpu", path=path))
     actual: AsrDeviceChoice = (
         "cuda" if device == "cuda" or (device == "auto" and cuda_ok) else "cpu"
     )
@@ -456,13 +633,21 @@ def _check_asr_device(
     if compute_type is not None:
         if compute_type not in ALL_COMPUTE_TYPES:
             errors.append(
-                f"{path}.compute_type：未知的精度 {compute_type[:30]!r}"
-                f"（可用：{', '.join(sorted(ALL_COMPUTE_TYPES))}）"
+                message(
+                    "asr_compute_type_unknown",
+                    path=path,
+                    compute_type=compute_type[:30],
+                    available=", ".join(sorted(ALL_COMPUTE_TYPES)),
+                )
             )
         elif actual == "cpu" and compute_type not in CPU_COMPUTE_TYPES:
             # CTranslate2 不會報錯，而是自動轉成 CPU 支援的型別（官方 quantization 文件）
             warnings.append(
-                f"{path}：CPU 不支援 {compute_type}，CTranslate2 會自動改用其他精度（通常是 float32，較慢）"
+                message(
+                    "asr_compute_type_cpu_fallback",
+                    path=path,
+                    compute_type=compute_type,
+                )
             )
         elif actual == "cuda" and gpu is not None:
             cc = gpu.compute_capability_tuple
@@ -472,20 +657,22 @@ def _check_asr_device(
                 and compute_type in ("float16", "int8_float16")
             ):
                 warnings.append(
-                    f"{path}：compute capability {gpu.compute_capability} 不支援 {compute_type}，"
-                    "CTranslate2 會改用 float32 或 int8_float32（較慢、較耗 VRAM）"
+                    message(
+                        "asr_compute_type_gpu_fallback",
+                        path=path,
+                        compute_type=compute_type,
+                        compute_capability=gpu.compute_capability or "",
+                    )
                 )
     if actual == "cpu":
         slow = CPU_SLOW_FAST_MODELS if path == "fast_asr" else CPU_SLOW_FINAL_MODELS
         if model in slow:
-            warnings.append(
-                f"{path}：{model} 在 CPU 上每句要 3.6 s 以上，字幕會明顯延遲"
-            )
+            warnings.append(message("asr_model_slow_on_cpu", path=path, model=model))
     return actual
 
 
 def _translation_name(
-    data: Mapping[str, Any], key: str, errors: list[str]
+    data: Mapping[str, Any], key: str, errors: list[Message]
 ) -> str | None:
     value = data.get(key)
     if value is None:
@@ -497,10 +684,53 @@ def _translation_name(
         or not value.isprintable()
     ):
         errors.append(
-            f"{key} 必須是 1–{MAX_TRANSLATION_MODEL_CHARS} 字的模型名稱或 null"
+            message(
+                "translation_model_name_invalid",
+                field=key,
+                max_chars=MAX_TRANSLATION_MODEL_CHARS,
+            )
         )
         return None
     return value.strip()
+
+
+def _language_checks(
+    languages: LanguageSelection,
+    chosen: list[tuple[str, AsrChoice]],
+    translation_models: list[str],
+    warnings: list[Message],
+) -> None:
+    """語言相關的警告：ASR 不支援辨識語言、品質 C 級、翻譯模型不支援語言組合。"""
+    for path, choice in chosen:
+        spec = MODELS[choice.model]
+        for code in languages.spoken_languages:
+            if not spec.supports(get_language(code).whisper_code):
+                warnings.append(
+                    message(
+                        "asr_model_language_unsupported",
+                        path=path,
+                        model=choice.model,
+                        language=code,
+                    )
+                )
+    finals = [c for path, c in chosen if path == "final_asr"]
+    if finals:
+        warnings.extend(_language_quality_warnings(languages, finals[0].model))
+    for name in translation_models:
+        preset = preset_for_model(name)
+        if preset.license == "unknown":
+            continue  # 不認得的模型不知道支援哪些語言，不猜
+        for source, target in languages.translation_pairs:
+            if not supports(preset, source, target):
+                warnings.append(
+                    message(
+                        "translation_model_language_unsupported",
+                        model=name,
+                        source_language=_shown_source(source, languages),
+                        target_language=target,
+                    )
+                )
+                break
 
 
 def validate_combination(
@@ -509,6 +739,7 @@ def validate_combination(
     *,
     downloaded_asr: Collection[str] | None = None,
     allow_restricted: bool = True,
+    languages: LanguageSelection | None = None,
 ) -> ValidationResult:
     """驗證使用者手動選的組合（純函式）；格式錯誤也以 `errors` 回報，不丟例外。
 
@@ -519,16 +750,17 @@ def validate_combination(
         info: `detect()` 的結果。
         downloaded_asr: 已下載的 ASR 模型 id；None 表示不檢查。
         allow_restricted: False 時，選了有地區限制授權的翻譯模型會產生警告。
+        languages: 目前的語言選擇；None 表示不做語言相關的檢查。
 
     Returns:
-        `errors`（無法使用）與 `warnings`（可用但要注意），皆為繁體中文。
+        `errors`（無法使用）與 `warnings`（可用但要注意），皆為結構化訊息。
     """
-    errors: list[str] = []
-    warnings: list[str] = []
+    errors: list[Message] = []
+    warnings: list[Message] = []
     if not isinstance(data, Mapping):
-        return ValidationResult(errors=("組合必須是物件",))
+        return ValidationResult(errors=(message("combination_not_object"),))
 
-    chosen: list[AsrChoice] = []
+    chosen: list[tuple[str, AsrChoice]] = []
     for key in ("fast_asr", "final_asr"):
         parsed = _parse_asr(data.get(key), key, errors)
         if parsed is None:
@@ -538,20 +770,32 @@ def validate_combination(
             info, key, model, device, compute_type, errors, warnings
         )
         if downloaded_asr is not None and model not in downloaded_asr:
-            warnings.append(f"{key}：ASR 模型 {model} 尚未下載，開始前會先下載")
+            warnings.append(message("asr_model_not_downloaded", path=key, model=model))
         default_type = "float16" if actual == "cuda" else "int8"
-        chosen.append(AsrChoice(model, actual, compute_type or default_type, threads))
+        chosen.append(
+            (key, AsrChoice(model, actual, compute_type or default_type, threads))
+        )
 
     if len(chosen) == 2:
-        fast, final = chosen
+        fast, final = chosen[0][1], chosen[1][1]
         if MODELS[fast.model].approx_cpu_ram_mb > MODELS[final.model].approx_cpu_ram_mb:
-            warnings.append("即時模型比完整模型大：即時字幕可能比完整翻譯還慢")
+            warnings.append(
+                message(
+                    "asr_fast_larger_than_final",
+                    fast_model=fast.model,
+                    final_model=final.model,
+                )
+            )
         if (
             not MODELS[final.model].no_speech_reliable
             and not MODELS[fast.model].no_speech_reliable
         ):
             warnings.append(
-                "兩條路徑的模型都無法用 no_speech 過濾非語音，歌聲或雜音較容易被誤辨識"
+                message(
+                    "asr_no_speech_unavailable",
+                    fast_model=fast.model,
+                    final_model=final.model,
+                )
             )
 
     fast_t = _translation_name(data, "translation_fast", errors)
@@ -562,17 +806,31 @@ def validate_combination(
         if server.models is None
         else {normalize_model_name(m) for m in server.models}
     )
-    for name in dict.fromkeys(m for m in (fast_t, final_t) if m is not None):
+    translation_models = list(
+        dict.fromkeys(m for m in (fast_t, final_t) if m is not None)
+    )
+    for name in translation_models:
         if installed is not None and normalize_model_name(name) not in installed:
-            warnings.append(f"翻譯伺服器上沒有「{name}」")
+            warnings.append(message("translation_model_not_on_server", model=name))
         preset = preset_for_model(name)
         if preset.license == "unknown":
             continue
         if not preset.commercial_use:
-            warnings.append(f"「{name}」的授權（{preset.license}）禁止商業用途")
+            warnings.append(
+                message(
+                    "translation_license_non_commercial",
+                    model=name,
+                    license=preset.license,
+                )
+            )
         if preset.excluded_regions and not allow_restricted:
             warnings.append(
-                f"「{name}」的授權（{preset.license}）不適用於 {'、'.join(preset.excluded_regions)}"
+                message(
+                    "translation_license_region_restricted",
+                    model=name,
+                    license=preset.license,
+                    regions=",".join(preset.excluded_regions),
+                )
             )
     if (
         fast_t
@@ -580,11 +838,14 @@ def validate_combination(
         and normalize_model_name(fast_t) != normalize_model_name(final_t)
         and server.is_local
     ):
-        warnings.append("即時與完整翻譯用不同模型：本機 Ollama 換模型每次要 1.5–18 秒")
+        warnings.append(message("translation_models_differ"))
+    if languages is not None:
+        _language_checks(languages, chosen, translation_models, warnings)
 
+    choices = [c for _, c in chosen]
     gpu = primary_gpu(info)
-    if gpu is not None and chosen:
-        need = asr_vram_need_mb(chosen)
+    if gpu is not None and choices:
+        need = asr_vram_need_mb(choices)
         if server.is_local:
             llm = max(
                 (
@@ -595,12 +856,17 @@ def validate_combination(
                 default=0.0,
             )
             need += int(llm * 1024)
-        if need > gpu.memory_total_mb - DESKTOP_VRAM_RESERVE_MB:
+        available_mb = gpu.memory_total_mb - DESKTOP_VRAM_RESERVE_MB
+        if need > available_mb:
             warnings.append(
-                f"ASR 與翻譯模型合計約需 {need / 1024:.1f} GB VRAM，超過 {gpu.name} 可用的 "
-                f"{(gpu.memory_total_mb - DESKTOP_VRAM_RESERVE_MB) / 1024:.1f} GB；可能變慢或載入失敗"
+                message(
+                    "vram_overflow",
+                    need_mb=need,
+                    available_mb=available_mb,
+                    gpu_name=gpu.name,
+                )
             )
     total_ram = info.memory.total_bytes
-    if total_ram is not None and asr_ram_need_mb(chosen) * MIB > total_ram * 0.5:
-        warnings.append("CPU 上的 ASR 模型會用掉超過一半的 RAM")
+    if total_ram is not None and asr_ram_need_mb(choices) * MIB > total_ram * 0.5:
+        warnings.append(message("asr_ram_over_half"))
     return ValidationResult(errors=tuple(errors), warnings=tuple(warnings))

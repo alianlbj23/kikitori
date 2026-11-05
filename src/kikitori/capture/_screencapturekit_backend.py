@@ -40,7 +40,9 @@ logger = logging.getLogger(__name__)
 
 BACKEND = "screencapturekit"
 DEVICE_ID = f"{BACKEND}:loopback:system"
-DEVICE_NAME = "系統聲音（ScreenCaptureKit）"
+# 裝置名稱會原樣顯示在 UI 的裝置選單；UI 有多種介面語系，所以用英文（與其他平台的
+# 裝置名稱一樣是系統提供的名稱，不由引擎翻譯）。
+DEVICE_NAME = "System audio (ScreenCaptureKit)"
 MIN_MACOS_MAJOR = 13  # SCStreamConfiguration.capturesAudio 從 macOS 13 開始
 CAPTURE_RATE = 48000
 # 要求單聲道：由系統降混音，就不必判斷 CMSampleBuffer 是交錯還是平面格式。

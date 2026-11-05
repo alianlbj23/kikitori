@@ -274,7 +274,12 @@ class BasicProtocolTest(EngineTestCase):
         )
         self.assertEqual(rec["final_asr"]["model"], "small")
         self.assertEqual(rec["translation_fast"], "qwen3.5:4b")
-        self.assertTrue(any("cuBLAS" in w for w in rec["warnings"]))
+        warning = rec["warnings"][0]
+        self.assertEqual(set(warning), {"code", "params", "message"})
+        self.assertIn("gpu_runtime_missing", [w["code"] for w in rec["warnings"]])
+        self.assertTrue(all(isinstance(r["message"], str) for r in rec["reasons"]))
+        self.assertEqual(rec["translation_status"], "recommended")
+        self.assertEqual(rec["languages"]["source_language"], "ja")
 
     def test_models_list(self) -> None:
         result = self.engine.request("models.list")["result"]
@@ -433,6 +438,7 @@ class DownloadProtocolTest(EngineTestCase):
         )
         self.assertEqual(done["state"], "done")
         self.assertEqual(done["downloaded_bytes"], done["total_bytes"])
+        self.assertEqual((first["kind"], done["kind"]), ("asr", "asr"))
         asr = {m["id"]: m for m in self.engine.request("models.list")["result"]["asr"]}
         self.assertTrue(asr["fake-missing"]["downloaded"])
 
@@ -587,7 +593,13 @@ class ValidateProtocolTest(EngineTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["errors"], [])
         # 預設 device=auto，但這台假電腦缺 cuBLAS：會提醒實際用 CPU
-        self.assertTrue(any("CPU" in w for w in result["warnings"]))
+        self.assertEqual(
+            [(w["code"], w["params"]) for w in result["warnings"]],
+            [
+                ("asr_auto_uses_cpu", {"path": "fast_asr"}),
+                ("asr_auto_uses_cpu", {"path": "final_asr"}),
+            ],
+        )
 
     def test_candidate_is_checked_without_saving(self) -> None:
         candidate = {
@@ -598,10 +610,16 @@ class ValidateProtocolTest(EngineTestCase):
             "result"
         ]
         self.assertFalse(result["ok"])
-        joined = "\n".join(result["errors"])
-        self.assertIn("cuBLAS", joined)
-        self.assertIn("fake-missing", joined)  # 不在 asr registry
-        self.assertTrue(any("qwen3.5:9b" in w for w in result["warnings"]))
+        errors = [(e["code"], e["params"].get("path")) for e in result["errors"]]
+        self.assertIn(("asr_cuda_cublas_missing", "fast_asr"), errors)
+        self.assertIn(("asr_model_unknown", "final_asr"), errors)  # 不在 asr registry
+        self.assertIn(
+            {
+                "code": "translation_model_not_on_server",
+                "params": {"model": "qwen3.5:9b"},
+            },
+            [{k: w[k] for k in ("code", "params")} for w in result["warnings"]],
+        )
         settings = self.engine.request("settings.get")["result"]["settings"]
         self.assertEqual(settings["asr"]["device"], "auto")
 
@@ -768,6 +786,111 @@ class SettingsMigrationProtocolTest(EngineTestCase):
         )
         self.assertEqual(saved["schema_version"], 3)
         self.assertEqual(saved["asr"]["fast_compute_type"], "int8")
+
+
+class LanguageProtocolTest(EngineTestCase):
+    """Milestone 12–14 的方法：語言清單、語言預覽、翻譯模型下載、只顯示原文。"""
+
+    def test_languages_list(self) -> None:
+        languages = self.engine.request("languages.list")["result"]["languages"]
+        self.assertEqual(
+            [lang["code"] for lang in languages][:4], ["ja", "en", "zh-TW", "zh-CN"]
+        )
+        self.assertEqual(len(languages), 20)
+        self.assertIn("large-v3-turbo", languages[0]["asr_quality"])
+
+    def test_preview_languages_does_not_write_settings(self) -> None:
+        result = self.engine.request(
+            "settings.preview_languages",
+            {"source_language": "th", "target_language": "en"},
+        )["result"]
+        self.assertFalse((self.config_dir / "settings.json").exists())
+        self.assertEqual(result["languages"]["source_language"], "th")
+        self.assertEqual(
+            set(result),
+            {
+                "languages",
+                "recommendation",
+                "patch",
+                "settings",
+                "differs",
+                "fingerprint",
+                "models",
+                "translation_needed",
+                "download_bytes",
+                "download_size_known",
+                "messages",
+            },
+        )
+        # small 對泰語辨識品質低（C 級）：以訊息碼提示
+        warnings = result["recommendation"]["warnings"]
+        self.assertIn(
+            {"model": "small", "language": "th"},
+            [w["params"] for w in warnings if w["code"] == "asr_language_quality_low"],
+        )
+        settings = self.engine.request("settings.get")["result"]["settings"]
+        self.assertEqual(settings["source_language"], "ja")
+
+    def test_pull_translation_model_then_start(self) -> None:
+        self.engine.request(
+            "settings.set", {"translation": {"final_model": "qwen3.5:9b"}}
+        )
+        session_id = self.engine.request("session.start", {"mode": "media"})["result"][
+            "session_id"
+        ]
+        error = self.engine.wait_event(
+            "status", lambda d: d["session_id"] == session_id and d["state"] == "error"
+        )
+        self.assertEqual(error["code"], "translation_model_missing")
+        self.assertEqual(error["data"], {"models": ["qwen3.5:9b"]})
+        response = self.engine.request(
+            "models.pull_translation", {"model": "qwen3.5:9b"}
+        )
+        self.assertEqual(response["result"], {"model": "qwen3.5:9b", "started": True})
+        done = self.engine.wait_event(
+            "download_progress",
+            lambda d: d["kind"] == "translation" and d["state"] != "downloading",
+        )
+        self.assertEqual((done["model"], done["state"]), ("qwen3.5:9b", "done"))
+        retry = self.engine.request("session.start", {"mode": "media"})["result"][
+            "session_id"
+        ]
+        self.engine.wait_event(
+            "status", lambda d: d["session_id"] == retry and d["state"] == "idle"
+        )
+
+    def test_original_only_session_and_toggle(self) -> None:
+        result = self.engine.request("session.set_translation", {"enabled": False})[
+            "result"
+        ]
+        self.assertIsNone(result["session_id"])
+        self.assertFalse(result["settings"]["translation"]["enabled"])
+        session_id = self.engine.request("session.start", {"mode": "media"})["result"][
+            "session_id"
+        ]
+        self.engine.wait_event(
+            "status", lambda d: d["session_id"] == session_id and d["state"] == "idle"
+        )
+        finals = [
+            m["data"]
+            for m in self.engine.seen
+            if m.get("event") == "subtitle" and m["data"]["is_final"]
+        ]
+        self.assertEqual([f["translation"] for f in finals], ["", ""])
+        self.assertEqual(finals[0]["original"], "final1")
+        # 執行中切換：回應帶這個 session 的 id
+        running = self.engine.request("session.start", {"mode": "interpret"})["result"][
+            "session_id"
+        ]
+        self.engine.wait_event(
+            "status", lambda d: d["session_id"] == running and d["state"] == "running"
+        )
+        toggled = self.engine.request("session.set_translation", {"enabled": True})
+        self.assertEqual(toggled["result"]["session_id"], running)
+        self.assertError(
+            self.engine.request("session.set_translation", {"enabled": "on"}),
+            "invalid_params",
+        )
 
 
 class SessionProtocolTest(EngineTestCase):

@@ -2,9 +2,14 @@
 
 import json
 import unittest
+from collections.abc import Sequence
 from dataclasses import replace
+from unittest import mock
 
+from kikitori.asr.registry import MODELS, ModelSpec
+from kikitori.hardware.messages import Message
 from kikitori.hardware.recommend import (
+    ASR_CANDIDATES,
     CUDA_CONTEXT_MB,
     asr_vram_need_mb,
     recommend,
@@ -16,9 +21,12 @@ from kikitori.hardware.types import (
     CublasInfo,
     GpuInfo,
     HardwareInfo,
+    LanguageSelection,
     MemoryInfo,
     TranslationServerInfo,
 )
+from kikitori.languages import ASR_QUALITY_MODELS
+from kikitori.translate.presets import PRESETS
 
 GIB = 1024**3
 ALL_MODELS = (
@@ -29,6 +37,14 @@ ALL_MODELS = (
     "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
 )
 LOCAL = "http://localhost:11434/v1"
+
+
+def codes(messages: Sequence[Message]) -> list[str]:
+    return [m.code for m in messages]
+
+
+def pairs(messages: Sequence[Message]) -> list[tuple[str, dict[str, object]]]:
+    return [(m.code, m.params) for m in messages]
 
 
 def gpu(
@@ -116,7 +132,7 @@ class RecommendTierTest(unittest.TestCase):
         rec = recommend(make_info(gpus=(gpu(4096, "8.6", name="RTX 3050"),)))
         self.assertEqual(rec.tier, "nvidia_4gb")
         self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
-        self.assertTrue(any("部分運算放到 CPU" in w for w in rec.warnings))
+        self.assertIn("translation_model_exceeds_budget", codes(rec.warnings))
 
     def test_nvidia_under_4gb_uses_base_and_small(self) -> None:
         rec = recommend(make_info(gpus=(gpu(2048, "7.5", name="MX450"),)))
@@ -128,7 +144,7 @@ class RecommendTierTest(unittest.TestCase):
         rec = recommend(make_info(gpus=(gpu(1024, "7.5", name="Tiny"),)))
         self.assertEqual(rec.tier, "cpu")
         self.assertEqual(rec.fast_asr.device, "cpu")
-        self.assertTrue(any("VRAM 不足" in w for w in rec.warnings))
+        self.assertIn("asr_vram_insufficient", codes(rec.warnings))
 
     def test_cpu_high_ram(self) -> None:
         rec = recommend(make_info(ram_gb=32, physical=8))
@@ -146,7 +162,7 @@ class RecommendTierTest(unittest.TestCase):
         self.assertEqual(rec.tier, "cpu_low")
         self.assertEqual(rec.fast_asr.model, "tiny")
         self.assertEqual(rec.final_asr.model, "base")
-        self.assertTrue(any("RAM 8.0 GB" in r for r in rec.reasons))
+        self.assertIn(("cpu_low_ram", {"ram_gb": 8.0}), pairs(rec.reasons))
 
     def test_cpu_four_cores(self) -> None:
         rec = recommend(make_info(ram_gb=32, physical=4, logical=8))
@@ -157,13 +173,13 @@ class RecommendTierTest(unittest.TestCase):
         rec = recommend(make_info(ram_gb=4, physical=2, logical=4))
         self.assertEqual(rec.tier, "cpu_low")
         self.assertEqual(rec.fast_asr.cpu_threads, 1)
-        self.assertTrue(any("8 GB" in w for w in rec.warnings))
+        self.assertIn("low_ram_for_translation", codes(rec.warnings))
 
     def test_unknown_ram_is_conservative(self) -> None:
         rec = recommend(make_info(ram_gb=None, physical=None, logical=None))
         self.assertEqual(rec.tier, "cpu_low")
         self.assertEqual(rec.fast_asr.cpu_threads, 0)
-        self.assertTrue(any("記憶體" in w for w in rec.warnings))
+        self.assertIn("memory_unknown", codes(rec.warnings))
 
     def test_apple_silicon(self) -> None:
         rec = recommend(
@@ -176,7 +192,7 @@ class RecommendTierTest(unittest.TestCase):
         self.assertEqual(rec.final_asr.model, "small")
         self.assertIsNotNone(rec.translation_budget_gb)
         self.assertEqual(rec.translation_final, "qwen3.5:9b")
-        self.assertTrue(any("未實測" in r for r in rec.reasons))
+        self.assertIn("asr_apple_silicon_untested", codes(rec.reasons))
 
     def test_apple_silicon_8gb_gets_smallest_translation(self) -> None:
         rec = recommend(
@@ -190,7 +206,7 @@ class RecommendTierTest(unittest.TestCase):
         rec = recommend(make_info(gpus=(gpu(),), cublas=False))
         self.assertTrue(rec.gpu_runtime_missing)
         self.assertEqual(rec.fast_asr.device, "cpu")
-        self.assertTrue(any("cuBLAS 未安裝" in w for w in rec.warnings))
+        self.assertIn("gpu_runtime_missing", codes(rec.warnings))
         # Ollama 仍可用整張卡
         self.assertAlmostEqual(
             rec.translation_budget_gb or 0, (12227 - 1024) / 1024, places=1
@@ -200,7 +216,10 @@ class RecommendTierTest(unittest.TestCase):
         rec = recommend(make_info(gpus=(gpu(driver="472.12"),)))
         self.assertEqual(rec.fast_asr.device, "cpu")
         self.assertFalse(rec.gpu_runtime_missing)
-        self.assertTrue(any("驅動" in w for w in rec.warnings))
+        self.assertIn(
+            ("cuda_driver_too_old", {"driver_version": "472.12", "min_driver": 525}),
+            pairs(rec.warnings),
+        )
 
     def test_unknown_compute_capability(self) -> None:
         rec = recommend(make_info(gpus=(gpu(cc=None),)))
@@ -209,7 +228,13 @@ class RecommendTierTest(unittest.TestCase):
     def test_maxwell_not_supported(self) -> None:
         rec = recommend(make_info(gpus=(gpu(4096, "5.2", name="GTX 970"),)))
         self.assertEqual(rec.fast_asr.device, "cpu")
-        self.assertTrue(any("5.2" in w for w in rec.warnings))
+        self.assertIn(
+            (
+                "cuda_compute_capability_unsupported",
+                {"gpu_name": "GTX 970", "compute_capability": "5.2"},
+            ),
+            pairs(rec.warnings),
+        )
 
     def test_pascal_6_1_uses_int8(self) -> None:
         rec = recommend(make_info(gpus=(gpu(8192, "6.1", name="GTX 1080"),)))
@@ -221,7 +246,7 @@ class RecommendTierTest(unittest.TestCase):
             make_info(gpus=(gpu(),), os="linux", machine="aarch64", supported=False)
         )
         self.assertEqual(rec.fast_asr.device, "cpu")
-        self.assertTrue(any("x86-64" in w for w in rec.warnings))
+        self.assertIn("cuda_platform_unsupported", codes(rec.warnings))
 
     def test_multiple_gpus_use_largest(self) -> None:
         rec = recommend(
@@ -233,7 +258,9 @@ class RecommendTierTest(unittest.TestCase):
             )
         )
         self.assertEqual(rec.tier, "nvidia_8gb")
-        self.assertTrue(any("2 張" in w and "Big" in w for w in rec.warnings))
+        self.assertIn(
+            ("multiple_gpus", {"gpu_count": 2, "gpu_name": "Big"}), pairs(rec.warnings)
+        )
 
     def test_remote_translation_uses_large_v3_and_no_translation_model(self) -> None:
         rec = recommend(
@@ -262,21 +289,34 @@ class RecommendTranslationTest(unittest.TestCase):
     def test_ollama_unreachable_recommends_top_choice_with_warning(self) -> None:
         rec = recommend(make_info(gpus=(gpu(),), reachable=False))
         self.assertEqual(rec.translation_final, "qwen3.5:9b")
-        self.assertTrue(any("Ollama 是否已啟動" in w for w in rec.warnings))
-        self.assertFalse(any("尚未安裝" in w for w in rec.warnings))
+        self.assertIn("translation_server_unreachable", codes(rec.warnings))
+        self.assertNotIn("translation_model_not_installed", codes(rec.warnings))
 
     def test_best_not_installed_picks_best_installed(self) -> None:
         rec = recommend(
             make_info(gpus=(gpu(),), models=("hy-mt1.5-7b:latest", "qwen3.5:4b"))
         )
         self.assertEqual(rec.translation_final, "qwen3.5:4b")
-        self.assertTrue(any("qwen3.5:9b" in r and "品質較好" in r for r in rec.reasons))
-        self.assertFalse(any("尚未安裝" in w for w in rec.warnings))
+        self.assertIn(
+            (
+                "translation_better_model_available",
+                {"model": "qwen3.5:4b", "better_model": "qwen3.5:9b"},
+            ),
+            pairs(rec.reasons),
+        )
+        self.assertNotIn("translation_model_not_installed", codes(rec.warnings))
 
     def test_nothing_installed_warns(self) -> None:
         rec = recommend(make_info(gpus=(gpu(),), models=()))
         self.assertEqual(rec.translation_final, "qwen3.5:9b")
-        self.assertEqual(sum("尚未安裝" in w for w in rec.warnings), 1)
+        self.assertEqual(
+            [
+                m.params
+                for m in rec.warnings
+                if m.code == "translation_model_not_installed"
+            ],
+            [{"model": "qwen3.5:9b"}],
+        )
 
     def test_only_sakura_installed_never_recommended(self) -> None:
         rec = recommend(
@@ -285,7 +325,7 @@ class RecommendTranslationTest(unittest.TestCase):
             )
         )
         self.assertNotIn("Sakura", rec.translation_final or "")
-        self.assertTrue(any("尚未安裝" in w for w in rec.warnings))
+        self.assertIn("translation_model_not_installed", codes(rec.warnings))
 
     def test_restricted_region_excludes_hy_mt(self) -> None:
         rec = recommend(make_info(ram_gb=32), allow_restricted=False)
@@ -294,7 +334,7 @@ class RecommendTranslationTest(unittest.TestCase):
     def test_tag_less_installed_name_matches(self) -> None:
         rec = recommend(make_info(ram_gb=32, models=("hy-mt1.5-1.8b",)))
         self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
-        self.assertFalse(any("尚未安裝" in w for w in rec.warnings))
+        self.assertNotIn("translation_model_not_installed", codes(rec.warnings))
 
     def test_server_error_without_model_list(self) -> None:
         info = make_info(gpus=(gpu(),))
@@ -305,7 +345,10 @@ class RecommendTranslationTest(unittest.TestCase):
             ),
         )
         rec = recommend(info)
-        self.assertTrue(any("HTTP 500" in w for w in rec.warnings))
+        self.assertIn(
+            ("translation_model_list_unavailable", {"error": "HTTP 500"}),
+            pairs(rec.warnings),
+        )
 
     def test_to_dict_is_json(self) -> None:
         rec = recommend(make_info(gpus=(gpu(),)))
@@ -313,6 +356,221 @@ class RecommendTranslationTest(unittest.TestCase):
         self.assertEqual(data["fast_asr"]["model"], "small")
         self.assertEqual(data["tier"], "nvidia_8gb")
         self.assertIsInstance(data["reasons"], list)
+        self.assertEqual(set(data["reasons"][0]), {"code", "params", "message"})
+        self.assertEqual(data["translation_status"], "recommended")
+        self.assertIsNone(data["languages"])
+
+
+def langs(
+    mode: str = "media",
+    source: str = "ja",
+    target: str = "zh-TW",
+    partner: str = "ja",
+) -> LanguageSelection:
+    return LanguageSelection(mode, source, target, partner)  # type: ignore[arg-type]
+
+
+JA_ONLY = ModelSpec(
+    id="fake-ja-only",
+    repo_id="example/fake-ja-only",
+    revision="0" * 40,
+    files=(),
+    languages=("ja",),
+    n_mels=128,
+    speed_tier="slow",
+    license="MIT",
+    approx_cpu_ram_mb=2000,
+    approx_gpu_vram_mb=2300,
+    approx_gpu_vram_int8_mb=1240,
+)
+
+
+class LanguageSelectionTest(unittest.TestCase):
+    def test_pairs_per_mode(self) -> None:
+        self.assertEqual(langs().translation_pairs, (("ja", "zh-TW"),))
+        self.assertEqual(
+            langs("interpret", target="zh-TW", partner="en").translation_pairs,
+            (("en", "zh-TW"), ("zh-TW", "en")),
+        )
+        self.assertEqual(langs(source="zh-CN").translation_pairs, ())
+        auto = langs(source="auto", target="es").translation_pairs
+        self.assertEqual(len(auto), 18)
+        self.assertNotIn(("es", "es"), auto)
+
+    def test_spoken_languages_and_whisper_codes(self) -> None:
+        self.assertEqual(langs(source="ko").spoken_languages, ("ko",))
+        self.assertEqual(
+            langs("interpret", target="zh-TW", partner="ja").asr_whisper_codes,
+            ("zh", "ja"),
+        )
+        self.assertEqual(langs(source="auto").spoken_languages, ())
+        self.assertEqual(len(langs(source="auto").asr_whisper_codes), 19)
+
+    def test_rejects_unnormalized_or_unknown_codes(self) -> None:
+        for bad in (
+            {"mode": "karaoke"},
+            {"target_language": "zh"},
+            {"source_language": "xx"},
+            {"target_language": "zh-hant"},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                LanguageSelection(**{"mode": "media", **bad})  # type: ignore[arg-type]
+
+
+class RecommendLanguageTest(unittest.TestCase):
+    def test_selection_is_echoed(self) -> None:
+        rec = recommend(make_info(gpus=(gpu(),)), languages=langs(source="ko"))
+        self.assertEqual(rec.languages, langs(source="ko"))
+        self.assertEqual(rec.to_dict()["languages"]["source_language"], "ko")
+        self.assertEqual(rec.translation_status, "recommended")
+
+    def test_c_tier_listening_language_warns(self) -> None:
+        # large-v3-turbo 在 Common Voice 15 的泰語錯誤率 20.8% → C
+        rec = recommend(
+            make_info(gpus=(gpu(),)), languages=langs(source="th", target="en")
+        )
+        self.assertEqual(rec.final_asr.model, "large-v3-turbo")
+        self.assertIn(
+            ("asr_language_quality_low", {"model": "large-v3-turbo", "language": "th"}),
+            pairs(rec.warnings),
+        )
+
+    def test_a_or_b_tier_does_not_warn(self) -> None:
+        rec = recommend(
+            make_info(gpus=(gpu(),)), languages=langs(source="ko", target="es")
+        )
+        self.assertNotIn("asr_language_quality_low", codes(rec.warnings))
+        self.assertEqual(rec.translation_final, "qwen3.5:9b")
+
+    def test_interpret_checks_both_languages(self) -> None:
+        rec = recommend(
+            make_info(gpus=(gpu(),)),
+            languages=langs("interpret", target="zh-TW", partner="vi"),
+        )
+        low = [m.params for m in rec.warnings if m.code == "asr_language_quality_low"]
+        self.assertEqual(low, [{"model": "large-v3-turbo", "language": "vi"}])
+
+    def test_auto_source_recommends_for_the_target_only(self) -> None:
+        rec = recommend(
+            make_info(gpus=(gpu(),)), languages=langs(source="auto", target="zh-TW")
+        )
+        self.assertIn(
+            ("source_language_auto", {"target_language": "zh-TW"}), pairs(rec.reasons)
+        )
+        self.assertNotIn("asr_language_quality_low", codes(rec.warnings))
+        self.assertEqual(rec.translation_status, "recommended")
+        self.assertEqual(rec.translation_final, "qwen3.5:9b")
+
+    def test_same_whisper_language_needs_no_translation_model(self) -> None:
+        rec = recommend(
+            make_info(gpus=(gpu(),)), languages=langs(source="zh-CN", target="zh-TW")
+        )
+        self.assertEqual(rec.translation_status, "not_needed")
+        self.assertIsNone(rec.translation_fast)
+        self.assertIsNone(rec.translation_final)
+        self.assertIn(
+            (
+                "translation_not_needed",
+                {"source_language": "zh-CN", "target_language": "zh-TW"},
+            ),
+            pairs(rec.reasons),
+        )
+        self.assertNotIn("translation_model_not_installed", codes(rec.warnings))
+
+    def test_unsupported_pair_is_signalled(self) -> None:
+        narrow = {
+            name: replace(p, languages=frozenset({"ja", "zh-TW", "en"}))
+            for name, p in PRESETS.items()
+        }
+        with mock.patch.dict(PRESETS, narrow):
+            rec = recommend(
+                make_info(gpus=(gpu(),)), languages=langs(source="ja", target="th")
+            )
+        self.assertEqual(rec.translation_status, "unsupported")
+        self.assertIsNone(rec.translation_final)
+        self.assertIn(
+            (
+                "translation_unsupported",
+                {"source_language": "ja", "target_language": "th"},
+            ),
+            pairs(rec.warnings),
+        )
+        # 推薦了「沒有模型」：不再提示「建議的模型尚未安裝」
+        self.assertNotIn("translation_model_not_installed", codes(rec.warnings))
+
+    def test_remote_server_is_not_checked_for_languages(self) -> None:
+        rec = recommend(
+            make_info(gpus=(gpu(),), local=False, base_url="https://x.example/v1"),
+            languages=langs(source="ko", target="es"),
+        )
+        self.assertEqual(rec.translation_status, "remote")
+        self.assertIn("translation_remote", codes(rec.reasons))
+
+    def test_single_language_asr_model_only_for_its_language(self) -> None:
+        candidates = dict(ASR_CANDIDATES)
+        candidates["nvidia_8gb"] = (("small",), ("fake-ja-only", "large-v3-turbo"))
+        info = make_info(gpus=(gpu(),))
+        with (
+            mock.patch.dict(MODELS, {"fake-ja-only": JA_ONLY}),
+            mock.patch.dict(ASR_CANDIDATES, candidates),
+        ):
+            ja = recommend(info, languages=langs(source="ja"))
+            en = recommend(info, languages=langs(source="en", target="ja"))
+            auto = recommend(info, languages=langs(source="auto"))
+            both = recommend(
+                info, languages=langs("interpret", target="zh-TW", partner="ja")
+            )
+            legacy = recommend(info)
+        self.assertEqual(ja.final_asr.model, "fake-ja-only")
+        for rec in (en, auto, both, legacy):
+            self.assertEqual(rec.final_asr.model, "large-v3-turbo")
+
+    def test_every_registry_model_has_quality_data_and_tiers_end_multilingual(
+        self,
+    ) -> None:
+        self.assertLessEqual(set(MODELS), set(ASR_QUALITY_MODELS))
+        for tier, slots in ASR_CANDIDATES.items():
+            for candidates in slots:
+                with self.subTest(tier=tier, candidates=candidates):
+                    self.assertEqual(
+                        MODELS[candidates[-1]].languages, ("multilingual",)
+                    )
+
+
+class ValidateLanguageTest(unittest.TestCase):
+    def test_translation_model_must_support_the_pair(self) -> None:
+        sakura = "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"
+        info = make_info(gpus=(gpu(),))
+        data = combo(translation=sakura)
+        result = validate_combination(data, info, languages=langs(source="ko"))
+        self.assertIn(
+            (
+                "translation_model_language_unsupported",
+                {"model": sakura, "source_language": "ko", "target_language": "zh-TW"},
+            ),
+            pairs(result.warnings),
+        )
+        ok = validate_combination(data, info, languages=langs(source="ja"))
+        self.assertNotIn("translation_model_language_unsupported", codes(ok.warnings))
+
+    def test_low_quality_language_and_single_language_asr(self) -> None:
+        info = make_info()
+        data = combo(fast="base", final="small", device="cpu", translation=None)
+        result = validate_combination(data, info, languages=langs(source="th"))
+        self.assertIn(
+            ("asr_language_quality_low", {"model": "small", "language": "th"}),
+            pairs(result.warnings),
+        )
+        with mock.patch.dict(MODELS, {"fake-ja-only": JA_ONLY}):
+            data = combo(fast="base", final="fake-ja-only", device="cpu")
+            result = validate_combination(data, info, languages=langs(source="ko"))
+        self.assertIn(
+            (
+                "asr_model_language_unsupported",
+                {"path": "final_asr", "model": "fake-ja-only", "language": "ko"},
+            ),
+            pairs(result.warnings),
+        )
 
 
 class VramNeedTest(unittest.TestCase):
@@ -354,16 +612,17 @@ class ValidateCombinationTest(unittest.TestCase):
     def test_unknown_asr_model(self) -> None:
         result = validate_combination(combo(fast="huge"), make_info(gpus=(gpu(),)))
         self.assertFalse(result.ok)
-        self.assertIn("fast_asr.model", result.errors[0])
+        self.assertEqual(result.errors[0].code, "asr_model_unknown")
+        self.assertEqual(result.errors[0].params["path"], "fast_asr")
 
     def test_cuda_without_gpu(self) -> None:
         result = validate_combination(combo(), make_info())
         self.assertFalse(result.ok)
-        self.assertTrue(any("沒有偵測到 NVIDIA GPU" in e for e in result.errors))
+        self.assertIn(("asr_cuda_no_gpu", {"path": "fast_asr"}), pairs(result.errors))
 
     def test_cuda_without_cublas(self) -> None:
         result = validate_combination(combo(), make_info(gpus=(gpu(),), cublas=False))
-        self.assertTrue(any("cuBLAS" in e for e in result.errors))
+        self.assertIn("asr_cuda_cublas_missing", codes(result.errors))
 
     def test_cuda_on_macos(self) -> None:
         info = make_info(os="macos", machine="arm64", apple=True, supported=False)
@@ -376,7 +635,7 @@ class ValidateCombinationTest(unittest.TestCase):
             make_info(gpus=(gpu(),), cublas=False),
         )
         self.assertTrue(result.ok)
-        self.assertTrue(any("auto 會使用 CPU" in w for w in result.warnings))
+        self.assertIn("asr_auto_uses_cpu", codes(result.warnings))
 
     def test_bad_device_and_types(self) -> None:
         data = {
@@ -386,7 +645,16 @@ class ValidateCombinationTest(unittest.TestCase):
             "translation_final": 5,
         }
         result = validate_combination(data, make_info())
-        self.assertEqual(len(result.errors), 5)
+        self.assertEqual(
+            codes(result.errors),
+            [
+                "asr_device_invalid",
+                "asr_model_unknown",
+                "asr_cpu_threads_invalid",
+                "translation_model_name_invalid",
+                "translation_model_name_invalid",
+            ],
+        )
 
     def test_not_a_mapping(self) -> None:
         self.assertFalse(validate_combination([], make_info()).ok)  # type: ignore[arg-type]
@@ -400,7 +668,7 @@ class ValidateCombinationTest(unittest.TestCase):
         result = validate_combination(
             combo(compute_type="int4"), make_info(gpus=(gpu(),))
         )
-        self.assertTrue(any("int4" in e for e in result.errors))
+        self.assertIn("int4", [e.params.get("compute_type") for e in result.errors])
 
     def test_float16_on_cpu_is_warning(self) -> None:
         result = validate_combination(
@@ -408,45 +676,57 @@ class ValidateCombinationTest(unittest.TestCase):
             make_info(),
         )
         self.assertTrue(result.ok)
-        self.assertTrue(any("CPU 不支援 float16" in w for w in result.warnings))
+        self.assertIn(
+            (
+                "asr_compute_type_cpu_fallback",
+                {"path": "fast_asr", "compute_type": "float16"},
+            ),
+            pairs(result.warnings),
+        )
 
     def test_float16_on_pascal_is_warning(self) -> None:
         result = validate_combination(
             combo(compute_type="float16"), make_info(gpus=(gpu(8192, "6.1"),))
         )
         self.assertTrue(result.ok)
-        self.assertTrue(any("6.1" in w for w in result.warnings))
+        self.assertIn("asr_compute_type_gpu_fallback", codes(result.warnings))
 
     def test_large_model_on_cpu_warns(self) -> None:
         result = validate_combination(
             combo(fast="large-v3", final="large-v3", device="cpu"), make_info()
         )
         self.assertTrue(result.ok)
-        self.assertGreaterEqual(sum("3.6 s" in w for w in result.warnings), 2)
+        self.assertEqual(codes(result.warnings).count("asr_model_slow_on_cpu"), 2)
 
     def test_fast_larger_than_final_and_both_unreliable(self) -> None:
         result = validate_combination(
             combo(fast="large-v3-turbo", final="large-v3-turbo"),
             make_info(gpus=(gpu(),)),
         )
-        self.assertTrue(any("no_speech" in w for w in result.warnings))
+        self.assertIn("asr_no_speech_unavailable", codes(result.warnings))
         result = validate_combination(
             combo(fast="medium", final="small"), make_info(gpus=(gpu(),))
         )
-        self.assertTrue(any("即時模型比完整模型大" in w for w in result.warnings))
+        self.assertIn("asr_fast_larger_than_final", codes(result.warnings))
 
     def test_not_downloaded_warning(self) -> None:
         result = validate_combination(
             combo(), make_info(gpus=(gpu(),)), downloaded_asr={"small"}
         )
-        self.assertTrue(any("large-v3-turbo 尚未下載" in w for w in result.warnings))
+        self.assertIn(
+            (
+                "asr_model_not_downloaded",
+                {"path": "final_asr", "model": "large-v3-turbo"},
+            ),
+            pairs(result.warnings),
+        )
 
     def test_vram_overflow_warning(self) -> None:
         result = validate_combination(
             combo(fast="large-v3", final="large-v3", compute_type="float16"),
             make_info(gpus=(gpu(8188, "8.9"),)),
         )
-        self.assertTrue(any("VRAM" in w for w in result.warnings))
+        self.assertIn("vram_overflow", codes(result.warnings))
 
     def test_translation_checks(self) -> None:
         info = make_info(gpus=(gpu(),), models=("qwen3.5:9b",))
@@ -455,24 +735,47 @@ class ValidateCombinationTest(unittest.TestCase):
         data["translation_final"] = "hy-mt1.5-7b"
         result = validate_combination(data, info, allow_restricted=False)
         self.assertTrue(result.ok)
-        joined = "\n".join(result.warnings)
-        self.assertIn("禁止商業用途", joined)
-        self.assertIn("不適用於 EU、UK、KR", joined)
-        self.assertIn("翻譯伺服器上沒有", joined)
-        self.assertIn("1.5–18 秒", joined)
+        found = pairs(result.warnings)
+        self.assertIn(
+            (
+                "translation_license_non_commercial",
+                {
+                    "model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+                    "license": "CC BY-NC-SA 4.0",
+                },
+            ),
+            found,
+        )
+        self.assertIn(
+            (
+                "translation_license_region_restricted",
+                {
+                    "model": "hy-mt1.5-7b",
+                    "license": "Tencent HY Community License",
+                    "regions": "EU,UK,KR",
+                },
+            ),
+            found,
+        )
+        self.assertIn("translation_model_not_on_server", codes(result.warnings))
+        self.assertIn("translation_models_differ", codes(result.warnings))
 
     def test_unknown_translation_model_has_no_license_warning(self) -> None:
         info = make_info(gpus=(gpu(),), models=("my-model",))
         data = combo(translation="my-model")
         result = validate_combination(data, info)
         self.assertTrue(result.ok)
-        self.assertFalse(any("授權" in w for w in result.warnings))
+        self.assertFalse(
+            any(c.startswith("translation_license") for c in codes(result.warnings))
+        )
 
     def test_result_to_dict(self) -> None:
         result = validate_combination(combo(fast="x"), make_info())
         data = result.to_dict()
         self.assertFalse(data["ok"])
         self.assertIsInstance(data["errors"], list)
+        self.assertEqual(data["errors"][0]["code"], "asr_model_unknown")
+        self.assertIsInstance(data["errors"][0]["message"], str)
 
 
 if __name__ == "__main__":

@@ -28,9 +28,12 @@ class Deferred:
 
     Attributes:
         job: 在工作執行緒上執行，回傳結果物件；丟 `ProtocolError` 會變成錯誤回應。
+        after: 成功回應寫出之後才執行（同一條工作執行緒）；例如啟動背景下載，讓 UI
+            一定先拿到回應、才收到進度事件。工作失敗時不執行。
     """
 
     job: Job
+    after: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class _Task:
     request_id: int
     method: str
     job: Job
+    after: Callable[[], None] | None = None
 
 
 class DeferredRunner:
@@ -61,7 +65,13 @@ class DeferredRunner:
         self._thread: threading.Thread | None = None
         self._closed = False
 
-    def submit(self, request_id: int, method: str, job: Job) -> None:
+    def submit(
+        self,
+        request_id: int,
+        method: str,
+        job: Job,
+        after: Callable[[], None] | None = None,
+    ) -> None:
         """排入一個工作；第一次呼叫時才啟動執行緒（大多數 session 用不到它）。
 
         Raises:
@@ -75,7 +85,7 @@ class DeferredRunner:
                     target=self._run, name=self._name, daemon=True
                 )
                 self._thread.start()
-            self._queue.put(_Task(request_id, method, job))
+            self._queue.put(_Task(request_id, method, job, after))
 
     def close(self, timeout: float) -> None:
         """不再接受新工作；等目前的工作在 `timeout` 秒內結束，尚未開始的直接丟棄。
@@ -108,7 +118,10 @@ class DeferredRunner:
             if task is None:
                 return
             try:
-                self._send(self._execute(task))
+                response = self._execute(task)
+                self._send(response)
+                if task.after is not None and "result" in response:
+                    self._run_after(task)
             except ChannelClosedError:
                 logger.error("%s: protocol output closed", task.method)
                 return
@@ -127,6 +140,14 @@ class DeferredRunner:
                 except ChannelClosedError:
                     logger.error("%s: protocol output closed", task.method)
                     return
+
+    def _run_after(self, task: _Task) -> None:
+        assert task.after is not None
+        try:
+            task.after()
+        except Exception:
+            # 回應已經寫出，無法再改成錯誤；記錄下來，工作執行緒繼續服務之後的請求
+            logger.exception("%s: follow-up after the response failed", task.method)
 
     def _execute(self, task: _Task) -> dict[str, Any]:
         try:

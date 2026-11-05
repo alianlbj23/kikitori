@@ -31,6 +31,10 @@ LICENSE_NOT_ACCEPTED = "license_not_accepted"
 """`models.download gpu-runtime` 沒有帶 `accept_license: true`（NVIDIA EULA）。"""
 GPU_RUNTIME_UNSUPPORTED = "gpu_runtime_unsupported"
 """這個平台沒有 GPU 執行環境（只有 Windows／Linux x86-64）。"""
+PULL_UNSUPPORTED = "pull_unsupported"
+"""`models.pull_translation`：翻譯伺服器不是 Ollama，引擎無法替使用者下載模型。"""
+TRANSLATION_SERVER_UNREACHABLE = "translation_server_unreachable"
+"""`models.pull_translation`：連不上翻譯伺服器。"""
 INTERNAL_ERROR = "internal_error"
 
 

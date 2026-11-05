@@ -1,6 +1,7 @@
 # Spec: pipeline-engine（雙路徑協調器、設定檔、stdio 引擎）
 
-> 狀態：已採用（2026-11-05，Milestone 4，使用者授權自主實作）；Milestone 6（2026-11-05）接上 hardware 模組，變更列在「協定變更（Milestone 6）」。
+> 狀態：已採用（2026-11-05，Milestone 4，使用者授權自主實作）；Milestone 6（2026-11-05）接上 hardware 模組，變更列在「協定變更（Milestone 6）」；
+> Milestone 12–14（多國語言：依語言推薦、訊息碼、延後下載翻譯模型、只顯示原文）的變更列在「協定變更（Milestone 12–14）」。
 > 上層約定：`docs/specs/app-architecture.md` 的 pipeline、config、engine 協定各節；本文件不得與之矛盾，只補充架構規格沒寫死的細節。
 > 依賴的模組：`vad-segmenter.md`、`translate.md`、`capture.md`、`asr.md`（只透過 `kikitori.asr.types` 與 `pipeline/factory.py` 的接縫）。
 
@@ -67,7 +68,15 @@ class Pipeline:
     def feed(self, audio) -> None
     def end_of_stream(self) -> None
     def run_pending(self) -> None
+    # 只顯示原文（兩種模式都可用、任何執行緒）
+    translation_enabled: bool
+    def set_translation_enabled(self, enabled: bool) -> None
 ```
+
+- `set_translation_enabled(enabled)`（Milestone 14）：執行中開關翻譯。之後才決定路由的句子依新狀態處理（每句在路由時讀一次旗標；
+  bool 的讀寫是原子的，worker 讀到舊值或新值都是合法狀態，不需要鎖）；已送出的字幕不補翻、也不清掉譯文。元件的保溫工作有
+  `set_active()` 時一併切換（見「ASR 接縫」的 `attach_keep_warm()`）：關閉翻譯就不再送保溫請求，開啟時保溫工作在背景先預熱一次
+  （不阻塞呼叫端）。`enabled` 不是 bool → `TypeError`。
 
 - `on_status(state, detail)`：`running`（`start()` 後）、`idle`（正常結束或 `stop()`）、`error`（致命錯誤，detail 為訊息）；每次執行只會送出一個結束狀態。送出 `error` 前 `error` 屬性已設為該例外（`on_status` 的簽名不變；需要例外類型的呼叫端在回呼中讀這個屬性）。
 - `on_log(level, message)`：可恢復的警告（例如翻譯失敗）。
@@ -249,7 +258,9 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `capture_unavailable` | 這台機器無法擷取（`BackendUnavailableError`） |
 | `capture_error`／`permission_denied`／`device_lost` | `devices.list`／`session.start` 的其他擷取錯誤 |
 | `unknown_model` | `models.download` 的模型不在清單中（ASR id 或 `gpu-runtime`） |
-| `download_in_progress` | 同一個模型（或 GPU 執行環境）已在下載 |
+| `download_in_progress` | 同一個模型（或 GPU 執行環境、或同名的翻譯模型）已在下載；ASR 與翻譯模型的名稱分開計算 |
+| `pull_unsupported` | `models.pull_translation`：翻譯伺服器不是 Ollama（沒有 `/api/version`），無法替使用者下載；請使用者在該服務自行安裝 |
+| `translation_server_unreachable` | `models.pull_translation`：連不上翻譯伺服器 |
 | `license_not_accepted` | `models.download {"model": "gpu-runtime"}` 沒有帶 `"accept_license": true`；`message` 含 NVIDIA EULA 網址 `https://docs.nvidia.com/cuda/eula/index.html` |
 | `gpu_runtime_unsupported` | 這個平台沒有 GPU 執行環境（只有 Windows／Linux x86-64；macOS、ARM 回這個） |
 | `internal_error` | 未預期的例外（traceback 寫 stderr；訊息只有例外類別與簡短說明） |
@@ -264,19 +275,23 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `hardware.detect`（背景） | — | `{"hardware": HardwareInfo, "recommendation": ModelCombination}`，形狀見下方與 `hardware.md`；一律重新偵測 |
 | `models.list`（背景） | — | `{"asr": [...], "gpu_runtime": {...}, "translation": {...}}`，見下方 |
 | `models.download` | `{"model": <ASR id>}` 或 `{"model": "gpu-runtime", "accept_license": true}` | `{"model", "started": true}`；在背景下載，進度以 `download_progress` 事件回報 |
-| `models.validate`（背景） | `{"settings"?: 部分設定物件}` | `{"ok": bool, "errors": [字串], "warnings": [字串]}` |
+| `models.validate`（背景） | `{"settings"?: 部分設定物件}` | `{"ok": bool, "errors": [訊息], "warnings": [訊息]}`（訊息為 `{code, params, message}`，見 `hardware.md`「訊息碼」） |
+| `models.pull_translation`（背景） | `{"model": 翻譯模型名稱}` | `{"model", "started": true}`；翻譯伺服器是 Ollama 時在背景下載，進度以 `download_progress`（`kind: "translation"`）回報 |
+| `languages.list` | — | `{"languages": [{code, english_name, native_name, whisper_code, rtl, no_space, asr_quality}]}` |
 | `devices.list` | — | `{"devices": [DeviceInfo]}` |
 | `settings.get` | — | `{"settings": {...}, "path": 設定檔路徑, "is_new": bool}` |
 | `settings.set` | 部分設定物件（深度合併） | 同 `settings.get` |
 | `settings.apply_recommendation`（背景） | `{"only_if_new"?: bool}` | `{"settings", "path", "is_new", "applied": 寫入的部分設定 \| null, "recommendation": ModelCombination}` |
 | `settings.preview_recommendation`（背景） | — | `{"patch": 套用會寫入的部分設定, "recommendation": ModelCombination, "differs": bool, "fingerprint": 16 個十六進位字元}`（不存檔） |
+| `settings.preview_languages`（背景） | `{"source_language"?, "target_language"?, "partner_language"?, "mode"?}` | 這組語言的推薦組合、每個模型是否已安裝與下載大小（不存檔、不下載），見下方 |
 | `session.start` | `{"mode": "media"\|"interpret", "device_id"?: str \| null}` | `{"session_id": int}` |
 | `session.stop` | — | `{}`（沒有 session 也回 `{}`） |
+| `session.set_translation` | `{"enabled": bool}` | `{"settings", "path", "is_new", "session_id": 套用到的 session id \| null}`；存進設定 `translation.enabled`，執行中的 session 立即切換 |
 | `engine.shutdown` | — | `{}`，之後結束 |
 
-- 會啟動背景工作的方法（`session.start`、`models.download`）在**回應寫出之後**才啟動背景執行緒，所以 UI 一定先拿到 `session_id`，才收到該 session 的事件。
+- 會啟動背景工作的方法（`session.start`、`models.download`、`models.pull_translation`）在**回應寫出之後**才啟動背景執行緒，所以 UI 一定先拿到 `session_id`（或 `started: true`），才收到該 session（或該下載）的事件。`models.pull_translation` 是背景方法：背景工作執行緒寫出回應後才啟動下載執行緒（`Deferred.after`）。
 - `settings.set` 在 session 執行中也可呼叫，新設定從下一個 session 生效。
-- `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → 建立元件（載入模型可能要數秒；之後預熱翻譯模型，見 factory 的 `build_session_components()`）→ 開裝置 → `status running`（本機翻譯服務在執行中另有保溫，見 `attach_keep_warm()`）。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
+- `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → **翻譯模型檢查**（見下）→ 建立元件（載入模型可能要數秒；之後預熱翻譯模型，見 factory 的 `build_session_components()`）→ 開裝置 → `status running`（本機翻譯服務在執行中另有保溫，見 `attach_keep_warm()`）。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
 - **背景方法**（表中標「背景」）：會執行 `nvidia-smi`、連線翻譯伺服器（最久數秒），所以不在讀 stdin 的主執行緒上處理，而是交給**一條**背景工作執行緒（`engine/deferred.py`），完成時才寫出回應。
   - 背景方法之間：依收到的順序執行與回應（不會同時跑兩次偵測）。
   - 與其他方法之間：以 `id` 對應，回應可能晚於之後送出的請求（例如 `hardware.detect` 進行中送 `session.stop`，`session.stop` 先回應）。
@@ -290,24 +305,59 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   - **GPU 執行環境**（`"model": "gpu-runtime"`）：NVIDIA cuBLAS 12 的 wheel（約 570 MB，從 PyPI 下載，NVIDIA CUDA Toolkit EULA）。UI 必須先顯示授權說明與連結（`models.list` 的 `gpu_runtime.license`／`license_url`），使用者同意後才送 `{"model": "gpu-runtime", "accept_license": true}`；檢查順序：`accept_license` 不是布林 → `invalid_params`；平台不支援 → `gpu_runtime_unsupported`（不論是否同意，因為不會下載任何 NVIDIA 檔案）；省略或 `false` → `license_not_accepted`（訊息含 EULA 網址）。背景執行 `hardware.install_gpu_runtime()`，`download_progress` 的 `model` 為 `"gpu-runtime"`、`total_bytes` 為 wheel 大小；下載完成後還要驗證與解壓（數秒，期間沒有進度事件）才送 `done`。已安裝時立即送 `done`。
   - `engine.shutdown`／stdin EOF 時以 `cancel` 事件取消下載（GPU 執行環境會送 `state: "error"`、`error` 含 `DownloadCancelledError`，`.part` 保留供續傳）。
   - 裝好 GPU 執行環境後，下一個 session 自動用到它（factory 每次建立元件都檢查）。但若這個引擎行程先前已經嘗試過 CUDA 而失敗（例如 `device=auto` 在沒有 cuBLAS 時跑過 session），asr 在同一行程內不再嘗試 CUDA——UI 應在安裝完成後重啟引擎（沒有 session 在跑時）。
-- `models.validate`：設定頁「檢查組合」。`settings` 是要檢查的部分設定，與目前設定深度合併後（**不存檔**）轉成組合交給 `hardware.validate_combination()`（`downloaded_asr` 為已下載的 ASR 模型、`allow_restricted` 取自合併後的設定）；省略時檢查目前設定。合併後的設定不合法 → `invalid_settings`（與 `settings.set` 相同）；`settings` 不是物件 → `invalid_params`。`errors` 非空時 `ok=false`（例如選 cuda 但缺 cuBLAS、未知的 ASR 模型）；是否阻擋儲存由 UI 決定。訊息為繁體中文。
+- `models.validate`：設定頁「檢查組合」。`settings` 是要檢查的部分設定，與目前設定深度合併後（**不存檔**）轉成組合交給 `hardware.validate_combination()`（`downloaded_asr` 為已下載的 ASR 模型、`allow_restricted` 與語言（`mode`、`source_language`、`target_language`、`partner_language`）取自合併後的設定）；省略時檢查目前設定。合併後的設定不合法 → `invalid_settings`（與 `settings.set` 相同）；`settings` 不是物件 → `invalid_params`。`errors` 非空時 `ok=false`（例如選 cuda 但缺 cuBLAS、未知的 ASR 模型）；是否阻擋儲存由 UI 決定。`errors`／`warnings` 是結構化訊息 `{code, params, message}`（code 與參數見 `hardware.md`「訊息碼」；`message` 為英文備援）。
 - `settings.apply_recommendation`：把目前硬體的推薦組合寫進設定（深度合併並存檔，等同 `settings.set`），回應帶實際寫入的 `applied` 與 `recommendation`。對應規則：`asr.fast_model／final_model` ← 推薦模型；`asr.device` ← 推薦的裝置（`cuda`／`cpu`，不用 `auto`：推薦 CPU（例如缺 cuBLAS）時若存 auto，asr 會先試 CUDA 而失敗，之後整個行程都不再試）；`asr.*_compute_type` ← 推薦精度；`asr.*_cpu_threads` ← 推薦值，0 存成 null；`translation.fast_model／final_model` ← 推薦模型（推薦為 null，即翻譯伺服器不在本機時，不改）；`cuda_library_dirs`、`allow_restricted` 與其他欄位不動。設定檔無法寫入 → `settings_io_error`。UI 也可以只顯示 `hardware.detect` 的推薦、讓使用者修改後用 `settings.set` 存，但「套用推薦」一律用這個方法，讓轉換規則只存在引擎裡。
   - `only_if_new: true`（第一次執行的自動套用）：只在 `is_new` 時寫入（`SettingsStore.update_if_new()`，檢查與寫入同一把鎖）；設定已存過（使用者在偵測期間存了組合、切換了模式…）時不寫入，回應的 `applied` 為 `null`，`settings` 是目前設定。不是布林 → `invalid_params`。
+- `languages.list`：語言清單（`languages/catalog.py`，20 種，順序固定）。每項 `{code, english_name, native_name, whisper_code, rtl, no_space, asr_quality}`；`asr_quality` 是 ASR 模型 id → `"A"`／`"B"`／`"C"`（`hardware.md`「ASR 品質等級」；A ≤ 10%、B 10–20%、C > 20% 錯誤率）。立即回應；有參數 → `invalid_params`。UI 的語言選單只用這份清單，不自己維護。
+- `settings.preview_languages`（Milestone 12，背景）：語言選單每次選擇時呼叫，回答「選這組語言會用哪些模型、要下載什麼」。**不寫設定、不下載。**
+  - 參數全部選填：`source_language`、`target_language`、`partner_language`（語言清單的語言碼，接受別名，`source_language` 可為 `"auto"`）、`mode`（`media`／`interpret`，省略時用設定的 `mode`）。未知參數或 `mode` 不合法 → `invalid_params`；語言碼不合法、口譯時兩個語言是同一個 Whisper 語言 → `invalid_settings`（與 `settings.set` 相同的驗證與訊息）。
+  - 結果：
+    ```jsonc
+    {"languages": {"mode": "media", "source_language": "ko", "target_language": "es", "partner_language": "ja"},  // 正規化後
+     "recommendation": ModelCombination,          // 依這組語言的推薦（含訊息碼、translation_status、languages）
+     "patch": {"asr": {...}, "translation": {...}},  // 套用推薦會寫入的模型設定（同 settings.preview_recommendation）
+     "settings": {...},                           // 目前設定 + 這組語言 + patch 的完整設定（預覽用）
+     "differs": true,                             // settings 與目前設定不同
+     "fingerprint": "3f9c0d1e2a4b5c6d",           // 同 preview_recommendation（含語言）
+     "models": {
+       "asr": [{"model": "base", "roles": ["fast"], "installed": true, "size_bytes": 145…, "download_bytes": 0}, …],
+       "translation": [{"model": "qwen3.5:9b", "roles": ["fast", "final"], "installed": false,  // 伺服器連不上時 null
+                        "size_bytes": 6600000000, "size_approximate": true, "download_bytes": 6600000000}]},
+     "translation_needed": true,                  // false：只顯示原文，或收聽／字幕是同一個 Whisper 語言
+     "download_bytes": 6600000000,                // 需要下載的合計（已知大小的部分）
+     "download_size_known": true,                 // 有任何需要的模型大小未知時 false
+     "messages": [{"code": "translation_disabled", "params": {}, "message": "…"}]}  // 預覽本身的提示
+    ```
+  - ASR 的大小取自模型清單（registry 的檔案大小）；翻譯模型的大小是預設組的權重大小（`approx_vram_gb` × 10⁹，約略值，`size_approximate: true`），不認得的模型為 null。`translation_needed=false` 時 `models.translation` 為空、下載合計不含翻譯模型。`installed` 為 null（伺服器連不上）時 `download_bytes` 照列大小（可能要下載）。
+  - UI 儲存時：「同時改用推薦的模型」勾選 → `settings.set({...languages, ...patch})`；取消勾選 → 只存 `languages` 的欄位。
+  - 與其他背景方法相同，參數在收到請求時與當時的設定合併；`differs` 比對執行當下的設定。重用 10 秒的偵測快取。
+- `models.pull_translation`（Milestone 13，背景）：替使用者在 Ollama 下載翻譯模型（`hardware.md`「Ollama 下載翻譯模型」）。
+  - `model`：1–200 字，只允許英數與 `._:/-`、第一個字元英數、不含 `..`（不在 `models.list` 的模型也可以，例如使用者自訂的模型）；不合法或有其他參數 → `invalid_params`（主執行緒立即回應）。
+  - 背景工作：先檢查翻譯伺服器（`GET /v1/models` 與 Ollama 的 `GET /api/version`，各 2 秒逾時）。連不上 → `translation_server_unreachable`；不是 Ollama → `pull_unsupported`；同一個翻譯模型已在下載 → `download_in_progress`。否則回 `{"model", "started": true}`，寫出回應後才啟動下載執行緒。
+  - 進度：`download_progress {"model": 名稱, "kind": "translation", "downloaded_bytes", "total_bytes", "state", "error"}`。`total_bytes` 是目前已知各層的合計，**下載途中可能變大**（Ollama 逐層回報）；第一筆是 `0／0`。`done` 時兩者相等。失敗（Ollama 回報的錯誤、120 秒沒有資料、斷線）→ `state: "error"`，`error` 為英文 `"<例外類別>: <訊息>"`（Ollama 的錯誤訊息原文，例如 `PullError: Ollama: pull model manifest: file does not exist`）。`engine.shutdown`／stdin EOF 時取消（`error` 含 `PullCancelledError`）。
+  - 結束（成功或失敗）時清掉偵測快取：之後的 `models.list`、推薦、預覽看得到新模型。
+- `session.start` 的**翻譯模型檢查**（Milestone 13）：載入 ASR **之前**，若這個 session 需要翻譯（`translation.enabled=true`，且不是「影片翻譯、收聽與字幕同一個 Whisper 語言」），引擎檢查翻譯伺服器（同上，最多數秒；仍在 `loading`）。伺服器是**連得上的 Ollama** 而設定的 `translation.fast_model`／`final_model` 有任一個沒裝 → `status error`，`code: "translation_model_missing"`，`data: {"models": [缺少的模型名稱]}`（依 fast、final 順序、去重）。UI 對每個模型呼叫 `models.pull_translation`，全部 `done` 後再 `session.start`。
+  - 連不上伺服器、不是 Ollama、或拿不到模型清單時**照常開始**，不檢查：字幕的原文不依賴翻譯；使用者可能正要開 Ollama、或用其他服務（只能自行安裝模型）；這時沿用既有行為——每句翻譯失敗只顯示原文，並以 `log` warning 提醒一次（連續相同的失敗只提醒一次）。檢查本身的程式錯誤只記 log，也照常開始。
+  - 只顯示原文（`translation.enabled=false`）時完全不連翻譯伺服器、不檢查模型、不預熱、不保溫（Milestone 14）。
+- `session.set_translation`（Milestone 14）：「顯示翻譯」開關。`enabled` 必須是布林（否則 `invalid_params`）。先存進設定 `translation.enabled`（無法寫入 → `settings_io_error`，此時不切換）；有 session 時立即套用到它的 pipeline（`Pipeline.set_translation_enabled`）：之後的句子依新狀態處理，已顯示的句子不補翻。session 還在 `loading` 時記下來，pipeline 建好、開始之前套用。回應是 `settings.get` 的結果加 `session_id`（套用到的 session；沒有 session 時 null）。
+  - 執行中**開啟**翻譯：該 session 開始時沒有預熱（只顯示原文時不預熱），所以本機翻譯服務會在背景先預熱一次、之後照常保溫（不阻塞回應；需要 `translation.keep_warm_secs > 0`）。翻譯伺服器不可用時沿用「翻譯失敗只顯示原文＋提醒一次」；不做 `translation_model_missing` 檢查（session 已在執行）。
+  - 執行中**關閉**翻譯：不再呼叫翻譯伺服器，也不再送保溫請求（不佔 GPU）。
 - `settings.get`／`settings.set`／`settings.apply_recommendation` 的 `is_new`：`SettingsStore.is_new`（見「讀寫」）。UI 以它判斷第一次執行、自動套用推薦。
-- `settings.preview_recommendation`：`settings.apply_recommendation`「會」寫入什麼，不存檔。`patch` 與 `applied` 出自同一個 `recommendation_patch()`；`differs` = 合併 `patch` 後的設定 ≠ 目前設定（只有推薦涵蓋的欄位會影響）；`fingerprint` = `patch` 的正規化 JSON（鍵排序）的 SHA-256 前 16 個十六進位字元，推薦改變時跟著改變，UI 以它記住「不要再提醒」。與其他背景方法不同，設定在**執行時**才讀取（預覽可能排在其他背景請求之後，`differs` 要對照 UI 收到回應時的設定）。重用 10 秒的偵測快取。
+- **推薦依語言**（Milestone 12）：`hardware.detect`、`models.list`、`settings.apply_recommendation`、`settings.preview_recommendation` 的推薦都依目前設定的語言與 `mode`（`hardware.md`「語言」）。`ModelCombination` 的 `reasons`／`warnings` 是訊息物件，另有 `translation_status`（`recommended`／`remote`／`not_needed`／`unsupported`）與 `languages`（`{mode, source_language, target_language, partner_language}`）。`translation_status` 為 `not_needed`／`unsupported` 時 `translation_fast/final` 為 null，`settings.apply_recommendation` 不改翻譯模型。
+- `settings.preview_recommendation`：`settings.apply_recommendation`「會」寫入什麼，不存檔。`patch` 與 `applied` 出自同一個 `recommendation_patch()`；`differs` = 合併 `patch` 後的設定 ≠ 目前設定（只有推薦涵蓋的欄位會影響）；`fingerprint` = `{"patch": patch, "languages": 推薦依據的語言}` 的正規化 JSON（鍵排序）的 SHA-256 前 16 個十六進位字元，推薦或語言改變時跟著改變，UI 以它記住「不要再提醒」（Milestone 12 起包含語言，升級後舊的「不要再提醒」會再提醒一次）。與其他背景方法不同，設定在**執行時**才讀取（預覽可能排在其他背景請求之後，`differs` 要對照 UI 收到回應時的設定）。重用 10 秒的偵測快取。
 
 ### 事件
 
 | 事件 | 內容 |
 |---|---|
 | `subtitle` | `SubtitleUpdate` 的全部欄位 + `session_id` |
-| `status` | `{"state": "idle"\|"loading"\|"running"\|"error", "detail": 字串 \| null, "session_id": int \| null, "code": 字串 \| null}` |
-| `download_progress` | `{"model", "downloaded_bytes", "total_bytes", "state": "downloading"\|"done"\|"error", "error": 字串 \| null}` |
+| `status` | `{"state": "idle"\|"loading"\|"running"\|"error", "detail": 字串 \| null, "session_id": int \| null, "code": 字串 \| null, "data"?: 物件}`（`data` 只在有內容時出現，目前只有 `translation_model_missing`） |
+| `download_progress` | `{"model", "kind": "asr"\|"gpu_runtime"\|"translation", "downloaded_bytes", "total_bytes", "state": "downloading"\|"done"\|"error", "error": 字串 \| null}` |
 | `log` | `{"level": "debug"\|"info"\|"warning"\|"error", "message"}` |
 
 - 引擎啟動完成後先送一筆 `status idle`。
-- `status error` 的 `code`：`model_not_downloaded`、`unknown_model`、`device_not_found`、`permission_denied`、`device_lost`、`capture_unavailable`、`capture_error`、`pipeline_error`、`load_error`。session 執行中的錯誤依 `Pipeline.error`：擷取錯誤（`CaptureError` 子類別，例如錄音中拔掉 USB 裝置的 `DeviceLostError`）用與 `session.start` 相同的擷取 code，其他是 `pipeline_error`。明確指定 `asr.device="cuda"` 而同一行程 CUDA 曾失敗時，asr 丟出的 `RuntimeError` 訊息（要求重啟引擎）原樣放在 `load_error` 的 `detail`。
-- `download_progress` 節流：每 0.25 秒或每 1% 最多一筆；開始（0）與結束（`done`／`error`）一定送。
+- `status error` 的 `code`：`model_not_downloaded`、`unknown_model`、`translation_model_missing`（`data: {"models": [...]}`，見 `session.start`）、`device_not_found`、`permission_denied`、`device_lost`、`capture_unavailable`、`capture_error`、`pipeline_error`、`load_error`。session 執行中的錯誤依 `Pipeline.error`：擷取錯誤（`CaptureError` 子類別，例如錄音中拔掉 USB 裝置的 `DeviceLostError`）用與 `session.start` 相同的擷取 code，其他是 `pipeline_error`。明確指定 `asr.device="cuda"` 而同一行程 CUDA 曾失敗時，asr 丟出的 `RuntimeError` 訊息（要求重啟引擎）原樣放在 `load_error` 的 `detail`。
+- `download_progress` 節流：每 0.25 秒或每 1% 最多一筆；開始（0）與結束（`done`／`error`）一定送。`kind`（Milestone 13 新增）分辨同名的 ASR 模型與翻譯模型：`asr`（`models.download` 的 ASR 模型）、`gpu_runtime`（`model` 為 `"gpu-runtime"`）、`translation`（`models.pull_translation`）。
 - `log`：`kikitori` logger 的 INFO 以上同時寫 stderr 與 `log` 事件（訊息由各模組產生，翻譯模組已遮蔽金鑰；引擎自己不記錄設定中的環境變數值）。
 - `subtitle`／`status` 帶 `session_id`，UI 可丟掉舊 session 的遲到事件。`state`、`code`、`session_id`、`error` 是相對架構規格的**新增欄位**（只增不改）。
 
@@ -318,10 +368,11 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 可注入的服務（測試與之後的里程碑）
 
-`EngineServices`：`settings_store`、`list_devices`、`open_source`、`build_components(settings, mode)`、`hardware`（`HardwareProvider`：`detect(settings) -> HardwareInfo`、`models_overview(info, rec)`、`gpu_runtime_status()`、`install_gpu_runtime(progress, cancel)`）、`models`（`ModelCatalog`：`asr_models()`、`download(model_id, progress, cancel)`）。
+`EngineServices`：`settings_store`、`list_devices`、`open_source`、`build_components(settings, mode)`、`hardware`（`HardwareProvider`：`detect(settings) -> HardwareInfo`、`models_overview(info, rec)`、`gpu_runtime_status()`、`install_gpu_runtime(progress, cancel)`）、`models`（`ModelCatalog`：`asr_models()`、`download(model_id, progress, cancel)`）、`translation_models`（`TranslationModels`：`server_state(settings) -> TranslationServerState{reachable, is_ollama, installed, error}`、`pull(settings, model, progress, cancel)`；預設實作 `DefaultTranslationModels` 呼叫 `hardware.translation_server` 與 `hardware.ollama`）。
 
 - 預設實作：真實 capture、`pipeline/factory.py`、`DefaultHardwareProvider`（直接呼叫 `kikitori.hardware`）。推薦與組合驗證是純函式，由 `engine/hardware_service.py` 直接呼叫，不經 provider。
 - **假模式**：環境變數 `KIKITORI_ENGINE_FAKE=1` 時改用 `kikitori/engine/testing.py`：合成音訊（`fake:loopback:speech` 兩段「人聲」後結束、`fake:microphone:endless` 只有靜音不會結束）、依振幅判斷的 `VoiceModel`、回固定文字的 ASR 與翻譯、會回報進度的假下載。`engine.info` 的 `fake` 為 true，啟動時記 warning。只給測試與 UI 開發用。
+- **假翻譯伺服器**（`FakeTranslationServer`，同時是 `translation_models`，並提供假硬體偵測結果的 `translation_server`）：已安裝 `qwen3.5:4b`；`pull` 分四段回報 4 MiB 後把模型加入已安裝清單（`models.list`、推薦、`session.start` 的檢查都看得到）。`fake-broken-pull:1b` 在一半時失敗、`fake-slow-pull:1b` 每段等 0.5 秒（測取消）。環境變數 `KIKITORI_ENGINE_FAKE_TRANSLATION` 選情境：`ollama`（預設）、`openai`（可連但不是 Ollama：`pull_unsupported`、`session.start` 不檢查）、`offline`（連不上：`translation_server_unreachable`、`session.start` 照常開始）。
 - **假硬體**（`FakeHardwareProvider`）：偵測結果固定，推薦／驗證／總覽走真的 hardware 程式碼；GPU 執行環境以真的 `install_gpu_runtime()` 安裝假 wheel（記憶體中的小 zip、假 fetcher，不連網）到行程專屬的暫存目錄，所以安裝後 cuBLAS 變成可用、推薦改為 GPU 等級。環境變數 `KIKITORI_ENGINE_FAKE_HARDWARE` 選情境：`nvidia`（預設：8 GB GPU、缺 cuBLAS、本機翻譯伺服器裝了 qwen3.5:4b）、`apple`（Apple Silicon，`gpu-runtime` 不支援）、`slow-runtime`（下載慢，測取消）、`broken-runtime`（下載內容雜湊不符）。
 
 ### 協定變更（Milestone 6）
@@ -364,7 +415,41 @@ UI 流程見 `ui.md`「自動推薦」。
 
 1. 設定新增 `source_language`（預設 `"ja"`，可為 `"auto"`）與 `translation.enabled`（預設 true）；`target_language`、`partner_language` 可為語言清單內任一語言（口譯模式下 `partner_language` 的 Whisper 語言不能和 `target_language` 相同）。`settings.set` 的 patch 帶 `schema_version` 時必須是 3。
 2. `subtitle` 事件的 `target_language` 可能是清單內任一語言；只顯示原文時 `translation` 為空字串。
-3. 尚未實作（後續 milestone）：`languages.list`、`settings.preview_languages`、`models.pull_translation`、`session.set_translation`、推薦依語言。
+3. 已在 Milestone 12–14 實作：`languages.list`、`settings.preview_languages`、`models.pull_translation`、`session.set_translation`、推薦依語言（見下一節）。
+
+### 協定變更（Milestone 12–14）
+
+`protocol_version` 維持 1；設定 schema 維持 3。給 UI（`app/`、`app/dev/fake_engine.py`）的完整清單：
+
+1. **訊息碼（不相容的形狀變更）**：`hardware.detect`／`settings.apply_recommendation`／`settings.preview_recommendation`／`settings.preview_languages`
+   的 `recommendation.reasons`／`warnings`，與 `models.validate` 的 `errors`／`warnings`，從字串陣列改為訊息物件陣列
+   `[{"code": str, "params": {str: str|int|float}, "message": 英文}]`。完整的 code、參數與英文範本見 `hardware.md`「訊息碼」（UI 依那張表建字典；
+   不認得的 code 顯示 `message`）。翻譯預設組的 `label` 不再帶「（非商用）」，改由 UI 依 `commercial_use` 顯示。
+2. **推薦依語言**：上述推薦都依設定的 `mode` 與語言；`recommendation` 新增 `translation_status`（`recommended`／`remote`／`not_needed`／`unsupported`）與
+   `languages`（物件或 null）。`fingerprint` 改為包含語言（升級後舊的「不要再提醒」會再提醒一次）。
+3. **新方法** `languages.list`（立即）、`settings.preview_languages`（背景）、`models.pull_translation`（背景）、`session.set_translation`（立即）。
+4. **新錯誤碼**：`pull_unsupported`、`translation_server_unreachable`（`models.pull_translation`）；`download_in_progress` 也用於同名翻譯模型。
+5. **`status` 事件**：新 code `translation_model_missing`，並新增選填欄位 `data`（此 code 時為 `{"models": [...]}`；其他 status 沒有 `data`）。
+6. **`download_progress` 事件**：新增 `kind`（`asr`／`gpu_runtime`／`translation`），既有欄位不變；翻譯模型的 `total_bytes` 可能在下載中變大。
+7. **只顯示原文**：`translation.enabled=false` 時 `session.start` 不連翻譯伺服器；`session.set_translation` 執行中切換並存檔。
+8. **建議 UI 流程**：語言選單 → `settings.preview_languages`（顯示推薦與「已安裝／第一次使用時下載約 X GB」，`translation_status=unsupported` 時說明原因）→
+   儲存 `settings.set`；開始字幕 → `session.start` → 收到 `status error` 的 `model_not_downloaded`（`models.download`）或 `translation_model_missing`
+   （對 `data.models` 逐一 `models.pull_translation`；`pull_unsupported` 時請使用者自行安裝）→ 全部 `done` 後自動重試 `session.start`；
+   「顯示翻譯」開關 → `session.set_translation`。
+
+```json
+{"id": 7, "method": "settings.preview_languages", "params": {"source_language": "ko", "target_language": "es"}}
+{"id": 8, "method": "session.start", "params": {"mode": "media"}}
+{"id": 8, "result": {"session_id": 3}}
+{"event": "status", "data": {"state": "loading", "detail": null, "session_id": 3, "code": null}}
+{"event": "status", "data": {"state": "error", "detail": "translation model(s) not installed on the Ollama server: qwen3.5:9b; download them with models.pull_translation", "session_id": 3, "code": "translation_model_missing", "data": {"models": ["qwen3.5:9b"]}}}
+{"id": 9, "method": "models.pull_translation", "params": {"model": "qwen3.5:9b"}}
+{"id": 9, "result": {"model": "qwen3.5:9b", "started": true}}
+{"event": "download_progress", "data": {"model": "qwen3.5:9b", "kind": "translation", "downloaded_bytes": 0, "total_bytes": 0, "state": "downloading", "error": null}}
+{"event": "download_progress", "data": {"model": "qwen3.5:9b", "kind": "translation", "downloaded_bytes": 6591…, "total_bytes": 6591…, "state": "done", "error": null}}
+{"id": 10, "method": "session.set_translation", "params": {"enabled": false}}
+{"id": 10, "result": {"settings": {"...": "..."}, "path": "...", "is_new": false, "session_id": 4}}
+```
 
 ## 入口
 
@@ -378,6 +463,7 @@ UI 流程見 `ui.md`「自動推薦」。
 
 - `create_transcriber(model_id, *, device, role, candidate_languages, forced_language=None, compute_type, cpu_threads, cuda_library_dirs) -> Transcriber`：`load_transcriber(spec, device=..., compute_type=..., cpu_threads=..., options=FAST_DECODE/FINAL_DECODE + candidate_languages + forced_language, cuda_library_dirs=..., download=False)`；模型未下載 → `FileNotFoundError`（引擎轉成 `model_not_downloaded`）。
 - `asr_languages(settings, mode) -> AsrLanguages(forced_language, candidate_languages)`：見「語言規則」。
+- `translation_needed(settings, mode)`：這個 session 會不會用到翻譯模型（關閉翻譯、或影片翻譯的收聽與字幕同一個 Whisper 語言時 False）；`session.start` 依它決定要不要檢查翻譯伺服器上的模型。
 - `warm_up_request(settings, mode)`：預熱／保溫的請求，方向與 session 相同（口譯：對方語言 → 我的語言；影片：收聽語言 → 字幕語言，`auto` 時取完整路徑模型支援的第一個語言），短句取自 19 個 Whisper 語言各一句的表。關閉翻譯或收聽與字幕語言同一個 Whisper 語言時為 None：`warm_up_translation()` 不預熱、`attach_keep_warm()` 不加保溫。
 - `asr_cuda_library_dirs(settings)`：`asr.cuda_library_dirs` 在前，再加上 `hardware.installed_runtime_dir()`（已安裝時、不重複）；檢查失敗只記 warning。
 - `resolve_cpu_threads(value, device)`：設定值；null 時 `device="cuda"` 回 0，否則 `hardware.auto_cpu_threads()`。
@@ -385,7 +471,7 @@ UI 流程見 `ui.md`「自動推薦」。
 - `create_transcript_filter(no_speech_threshold)`：asr 的 `rejection_reason` + `FilterConfig`。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`is_downloaded`、`download_model`、`default_cache_dir`。
 - `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`），最後 `attach_keep_warm()`。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
-- `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務或設為 0 時原樣回傳，不包裝也不送請求。逐步模式（測試、smoke）不啟動。
+- `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務或設為 0 時原樣回傳，不包裝也不送請求。逐步模式（測試、smoke）不啟動。**只顯示原文**（`translation.enabled=false`，Milestone 14）時保溫是「不動作」的（`KeepWarm(active=False)`）：不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled(True)` → `KeepWarm.set_active(True)`）時才建立執行緒並先在背景預熱一次（以「開啟翻譯後」的設定組請求），之後照常保溫；再關閉就停止送請求。翻譯器在 session 開始時就要包好（活動才記得到），所以不能等開啟時才建立。不需要翻譯的語言組合（影片翻譯、收聽與字幕同一個 Whisper 語言）仍原樣回傳。
 - `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
 
 ## Tech Stack
@@ -453,6 +539,7 @@ experiments/pipeline_smoke/
 - engine（Milestone 6）：子行程測 `hardware.detect`（假 GPU、缺 cuBLAS 的推薦）、`models.list`（新舊欄位）、背景請求的回應順序、`gpu-runtime` 授權閘門（缺少／false／非布林、ASR 帶 `accept_license`）、安裝進度與安裝後推薦改為 GPU、雜湊不符的 `error` 事件、不支援的平台、`engine.shutdown` 取消下載與 `download_in_progress`、`models.validate`（目前設定、候選設定不存檔、參數錯誤）、`settings.apply_recommendation`（安裝前 CPU、安裝後 CUDA、存檔）、v1 設定檔遷移；同行程測背景工作執行緒（FIFO、錯誤碼、結束時丟棄）、偵測快取（假時鐘、設定改變、清除）、`allow_restricted`、設定與推薦組合的轉換。
 - factory：兩條路徑各自的 `compute_type`／`cpu_threads`、cuBLAS 目錄（設定 + GPU 執行環境、不重複、檢查失敗只記 warning）、自動執行緒（mock `load_transcriber` 與 hardware）；預熱的順序（ASR → 預熱 → 保溫）、保溫只給本機服務、`keep_warm_secs = 0` 關閉、保溫請求與預熱相同且失敗時丟出帶模型名稱的 `WarmUpError`。
 - keep_warm（`tests/test_keep_warm.py`，假時鐘，背景執行緒的等待注入成「推進假時鐘」，不真的睡）：閒置未滿不送、滿了才送且之後每個間隔一次、翻譯活動延後下一次、`stop()` 後不再送、失敗的 warning 限流與恢復的 info、`stop()` 立即喚醒等待且不等進行中的請求、`ActivityTranslator` 在 `translate`／`stream` 的開始與結束（含例外）回報 `begin`／`end`、請求進行中不送保溫、程式錯誤也限流。pipeline：保溫在 worker 之前啟動，`stop()`、讀完、錯誤都會停止，擷取開不起來時不啟動，啟動失敗只是 warning，逐步模式不啟動。
+- Milestone 12–14：`tests/test_engine_languages.py`（同行程、假服務）測 `languages.list`、`settings.preview_languages`（不寫檔、不下載、別名與模式、參數錯誤）、`session.set_translation`（沒有 session 只存設定、執行中切換 pipeline、載入中切換在 pipeline 建好時套用、參數錯誤）、`models.pull_translation`（進度事件與 `kind`、回應先於事件、完成後 `models.list` 已安裝、失敗事件、`download_in_progress`、結束時取消、名稱驗證、ASR 與翻譯名稱不衝突、連不上與不是 Ollama 的錯誤碼）、`translation_model_missing`（載入 ASR 之前回報、下載後重試成功、關閉翻譯與同語言不檢查、連不上或不是 Ollama 時照常開始）；`test_engine.py` 以子行程測同樣的方法與事件；`test_pipeline.py` 以計數的假翻譯器測關閉時不呼叫、執行中開啟後恢復呼叫、關閉後停止、保溫工作跟著切換；`test_keep_warm.py` 測不動作的保溫（不建立執行緒、不送請求）、開啟時在背景立即預熱、重新開啟再預熱、停止後不再建立；`test_engine_hardware.py` 測依語言的推薦、驗證、`preview_languages` 的模型與大小、指紋含語言、`Deferred.after`。
 - 不連網、不開真實裝置、不載入真模型。
 
 ## Boundaries

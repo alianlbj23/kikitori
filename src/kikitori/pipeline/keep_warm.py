@@ -31,6 +31,10 @@ class KeepWarm:
     `ping` 本身也算活動，所以閒置期間每 `interval` 秒送一次。`ping` 在背景執行緒上
     執行，不會擋住 pipeline；`TranslationError` 記 warning（限流），其他例外記 error，
     兩者都不會讓執行緒結束。
+
+    只顯示原文（翻譯關閉）時是「不動作」（`active=False`）：不送任何請求，`start()` 也
+    不建立執行緒，翻譯伺服器完全不被打擾。執行中開啟翻譯（`set_active(True)`）時才建立
+    執行緒，並先在背景送一次預熱——session 開始時沒有預熱過，模型多半還沒載入。
     """
 
     def __init__(
@@ -41,15 +45,17 @@ class KeepWarm:
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
         warn_interval: float = WARN_INTERVAL,
+        active: bool = True,
     ) -> None:
         """
         Args:
             ping: 送一次保溫請求；失敗時丟 `TranslationError`（應自帶逾時，見 `factory`）。
             interval: 閒置多少秒才送（> 0）。
             clock: 單調時鐘（秒）；測試可注入假時鐘。
-            wait: 背景執行緒等待 `timeout` 秒，提早被 `stop()` 喚醒時回傳 True；
-                預設是內部 stop event 的 `wait`。測試可注入「推進假時鐘」的版本。
+            wait: 背景執行緒等待 `timeout` 秒（`stop()`、`set_active(True)` 會提早
+                喚醒），已停止時回傳 True。測試可注入「推進假時鐘」的版本。
             warn_interval: 連續失敗時 warning 的最短間隔（秒）。
+            active: False 表示翻譯目前關閉：不送請求，直到 `set_active(True)`。
 
         Raises:
             ValueError: `interval` 不是正的有限數。
@@ -60,7 +66,9 @@ class KeepWarm:
         self.interval = float(interval)
         self._clock = clock
         self._stop = threading.Event()
-        self._wait = wait or self._stop.wait
+        # 讓等待中的背景執行緒提早醒來：stop() 與 set_active(True)（要立即預熱）
+        self._wake = threading.Event()
+        self._wait = wait or self._default_wait
         self._warn_interval = warn_interval
         self._lock = threading.Lock()
         self._last_activity = clock()
@@ -68,6 +76,9 @@ class KeepWarm:
         self._last_warning: float | None = None
         self._failing = False
         self._thread: threading.Thread | None = None
+        self._started = False
+        self._active = active
+        self._ping_requested = False
 
     # --- 活動 -------------------------------------------------------------------
 
@@ -98,8 +109,48 @@ class KeepWarm:
 
     # --- 排程 -------------------------------------------------------------------
 
+    @property
+    def active(self) -> bool:
+        """翻譯是否開啟（關閉時不送任何請求）。"""
+        with self._lock:
+            return self._active
+
+    def set_active(self, active: bool) -> None:
+        """翻譯開啟或關閉（執行緒安全、不阻塞）。
+
+        從關閉變成開啟時，要求背景執行緒立即送一次預熱；已 `start()` 但還沒有執行緒
+        （以關閉狀態開始的 session）時在這裡建立。`stop()` 之後不再建立。
+        """
+        with self._lock:
+            turned_on = active and not self._active
+            self._active = active
+            if turned_on:
+                self._ping_requested = True
+            spawn = (
+                active
+                and self._started
+                and self._thread is None
+                and not self._stop.is_set()
+            )
+        if spawn:
+            self._spawn()
+        self._wake.set()
+
     def tick(self) -> float:
-        """閒置滿 `interval` 就送一次；回傳下次該檢查前要等幾秒。"""
+        """要求預熱時立即送；否則閒置滿 `interval` 才送。回傳下次該檢查前要等幾秒。
+
+        翻譯關閉時什麼都不送。
+        """
+        if self._stop.is_set():
+            return self.interval
+        with self._lock:
+            if not self._active:
+                return self.interval
+            requested, self._ping_requested = self._ping_requested, False
+        if requested:
+            logger.info("translation turned on; warming up the translation model")
+            self.ping_now()
+            return self.interval
         idle = self.idle_for()
         if idle < self.interval:
             return self.interval - idle
@@ -164,18 +215,29 @@ class KeepWarm:
         return thread is not None and thread.is_alive()
 
     def start(self) -> None:
-        """啟動背景執行緒；閒置時間從現在算起。
+        """開始排程；閒置時間從現在算起。翻譯關閉時先不建立執行緒（見 `set_active()`）。
 
         Raises:
             RuntimeError: 已經啟動過，或無法建立執行緒。
         """
-        if self._thread is not None:
-            raise RuntimeError("KeepWarm can only be started once")
+        with self._lock:
+            if self._started:
+                raise RuntimeError("KeepWarm can only be started once")
+            self._started = True
+            spawn = self._active
         self.touch()
-        self._thread = threading.Thread(
-            target=self._run, name="translation-keep-warm", daemon=True
-        )
-        self._thread.start()
+        if spawn:
+            self._spawn()
+
+    def _spawn(self) -> None:
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(
+                target=self._run, name="translation-keep-warm", daemon=True
+            )
+            thread = self._thread
+        thread.start()
 
     def stop(self, timeout: float = 0.5) -> None:
         """停止排程；可重複呼叫。
@@ -184,12 +246,20 @@ class KeepWarm:
         自行結束，之後不會再送。`timeout` 只是給它一點時間乾淨地結束。
         """
         self._stop.set()
-        thread = self._thread
+        self._wake.set()
+        with self._lock:
+            thread = self._thread
         if thread is None or thread is threading.current_thread():
             return
         thread.join(timeout)
         if thread.is_alive():
             logger.debug("keep-warm request still in flight; it ends on its own")
+
+    def _default_wait(self, timeout: float) -> bool:
+        self._wake.wait(timeout)
+        # 先清旗標再看 stop：清掉之後才設定的喚醒會留到下一次等待，不會遺失
+        self._wake.clear()
+        return self._stop.is_set()
 
     def _run(self) -> None:
         while not self._wait(self.tick()):

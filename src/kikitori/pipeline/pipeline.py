@@ -159,6 +159,10 @@ class Pipeline:
         self._source: AudioSource | None = None
         self._threads: list[threading.Thread] = []
         self._keep_warm_started = False
+        # 執行中可切換的「是否翻譯」（session.set_translation）：每句在決定路由時讀一次，
+        # 所以之後的句子依新狀態處理、已送出的句子不受影響。bool 的讀寫是原子的，worker
+        # 讀到舊值或新值都是合法的狀態，不需要鎖。
+        self._translation_enabled = config.translation_enabled
 
     # --- 公開狀態 -------------------------------------------------------------
 
@@ -176,6 +180,37 @@ class Pipeline:
         """
         with self._state_lock:
             return self._error
+
+    @property
+    def translation_enabled(self) -> bool:
+        """目前是否翻譯（初始值為 `PipelineConfig.translation_enabled`）。"""
+        return self._translation_enabled
+
+    def set_translation_enabled(self, enabled: bool) -> None:
+        """執行中開關翻譯（執行緒安全，可在任何執行緒、任何時候呼叫）。
+
+        之後才決定路由的句子依新狀態處理；已送出的字幕不補翻、也不清掉譯文。元件有保溫
+        工作且支援 `set_active()` 時一併切換：關閉翻譯時不再對翻譯伺服器送保溫請求（不佔
+        GPU），開啟時由保溫工作在背景先送一次預熱（不阻塞呼叫端）。
+
+        Raises:
+            TypeError: `enabled` 不是 bool。
+        """
+        if not isinstance(enabled, bool):
+            raise TypeError(f"enabled must be bool, got {type(enabled).__name__}")
+        self._translation_enabled = enabled
+        logger.info("translation %s", "enabled" if enabled else "disabled")
+        set_active = getattr(self._components.keep_warm, "set_active", None)
+        if not callable(set_active):
+            return
+        try:
+            set_active(enabled)
+        except Exception as exc:  # 保溫只是加速；切換本身已生效，記錄並回報
+            logger.warning("cannot switch the keep-warm task", exc_info=exc)
+            self._log(
+                "warning",
+                f"cannot switch the keep-warm task: {type(exc).__name__}: {exc}",
+            )
 
     @property
     def dropped_partials(self) -> int:
@@ -558,7 +593,7 @@ class Pipeline:
             detected,
             self._config.target_language,
             self._config.partner_language,
-            self._config.translation_enabled,
+            self._translation_enabled,
         )
         if decision.action == "unsupported":
             self._warn(

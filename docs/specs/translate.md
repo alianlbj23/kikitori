@@ -212,11 +212,17 @@ system 訊息寫規則、user 訊息放前文與待翻句子。目標 `zh-TW`、
 
 ### 依 VRAM 的推薦順序（給 hardware 模組使用）
 
-`recommend_translation_models(vram_budget_gb, installed=None, allow_restricted=True)` 回傳 `TranslationModelChoice(fast=..., final=...)`：
+`recommend_translation_models(vram_budget_gb, installed=None, allow_restricted=True, pairs=None)` 回傳 `TranslationModelChoice(fast=..., final=...)`：
 
 - `vram_budget_gb` 是**可分給翻譯模型的 VRAM**（hardware 模組先扣掉 ASR 模型），`None` 或 0 表示沒有 GPU。負數或非有限數丟 `ValueError`。
 - 依等級的順序清單挑第一個已安裝的模型（`installed=None` 表示不檢查；名稱不帶 tag 視同 `:latest`）；都沒裝就回傳清單第一個（讓 UI 提示下載）。
 - 非商用授權的模型一律不推薦；`allow_restricted=False` 時再排除有地區限制的模型（例如使用者在歐盟、英國、南韓）。
+- `pairs`（Milestone 12）：必須全部支援的（原文, 譯文）方向（`supports()`；原文可為 Whisper 或清單語言碼）。hardware 依語言選擇傳入：
+  影片翻譯一個方向、口譯兩個方向、收聽語言 `auto` 時為「其他每個 Whisper 語言 → 字幕語言」。不支援的模型直接略過，順序仍依 VRAM 等級
+  （不跨等級找：更大的放不下、更小的品質較差）；等級內沒有任何模型支援 → 丟 `NoSupportingModelError`（`ValueError` 子類別，`pairs`
+  屬性為要求的方向），hardware 轉成 `translation_status = "unsupported"` 與訊息 `translation_unsupported`。同一個 Whisper 語言的方向
+  （不需要翻譯）不應傳入（`supports()` 對它回傳 False）。
+- 預設組的 `label` 只是模型名稱（例如 `Sakura-GalTransl 7B v3`），不帶任何語言的說明；「非商用」由 UI 依 `commercial_use` 以介面語系顯示。
 
 | 等級（可給翻譯的 VRAM） | 即時路徑（fast）順序 | 完整路徑（final）順序 |
 |---|---|---|

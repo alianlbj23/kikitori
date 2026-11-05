@@ -191,6 +191,11 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 
 - `cpu_threads`：小模型用預設值即可；small 以上設為實體核心數（上限 8）約快 8%。即時與完整模型同時在 CPU 執行時，建議兩者合計不超過實體核心數（例如 4＋4）。
 - 語言：所有建議模型都是多語模型，語言清單的 20 種語言共用；影片翻譯指定收聽語言時以 `DecodeOptions(forced_language=...)` 固定，`auto` 時以 `candidate_languages` 限在語言清單的 Whisper 語言；口譯模式限在（我的語言, 對方語言），例如 `("zh", "ja")`。
+- 依語言的品質（Milestone 12）：每個 registry 模型對每個語言的錯誤率等級（A／B／C）記在 `languages/catalog.py` 的 `asr_quality`
+  （出處與表格見 `hardware.md`「ASR 品質等級」）。推薦**不因語言換模型**（硬體放不下更大的模型），只在辨識語言用推薦的完整模型是 C 級
+  （錯誤率 > 20%，例如 turbo 的泰語、阿拉伯語、印地語、越南語；small 的中文）時提示。只支援單一語言的模型（`ModelSpec.languages`
+  不是 `("multilingual",)`，例如之後加入的日語特化模型）由 `ModelSpec.supports()` 判斷，只在辨識語言全在它支援的範圍內才會被推薦
+  （`hardware/recommend.py` 的 `ASR_CANDIDATES`）。新增 registry 模型時要一併在 `asr_quality` 補上等級（測試檢查）。
 
 ## 測試策略
 

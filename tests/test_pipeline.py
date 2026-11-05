@@ -519,6 +519,78 @@ class TranslationDisabledTest(unittest.TestCase):
                 self.assertEqual(h.logs, [])
 
 
+class TranslationToggleTest(unittest.TestCase):
+    """執行中切換「顯示翻譯」：之後的句子依新狀態處理，已送出的句子不補翻。"""
+
+    def run_utterance(self, h: Harness) -> None:
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+
+    def calls(self, h: Harness) -> int:
+        return len(h.fast_tr.requests) + len(h.final_tr.requests)
+
+    def test_turning_translation_on_resumes_translator_calls(self) -> None:
+        h = Harness(translation_enabled=False)
+        self.assertFalse(h.pipeline.translation_enabled)
+        self.run_utterance(h)
+        self.assertEqual(self.calls(h), 0)
+        h.pipeline.set_translation_enabled(True)
+        self.assertTrue(h.pipeline.translation_enabled)
+        self.run_utterance(h)
+        self.assertGreater(len(h.final_tr.requests), 0)
+        first, second = h.finals()
+        self.assertEqual((first.utterance_id, first.translation), (1, ""))
+        self.assertEqual(second.translation, "<zh-TW>final2")
+        # 第一句沒有被補翻：之後沒有任何 utterance 1 的更新
+        later = h.updates[h.updates.index(first) + 1 :]
+        self.assertNotIn(1, [u.utterance_id for u in later])
+
+    def test_turning_translation_off_stops_translator_calls(self) -> None:
+        h = Harness()
+        self.run_utterance(h)
+        before = self.calls(h)
+        self.assertGreater(before, 0)
+        h.pipeline.set_translation_enabled(False)
+        self.run_utterance(h)
+        self.assertEqual(self.calls(h), before)
+        self.assertEqual(h.finals()[0].translation, "<zh-TW>final1")
+        self.assertEqual(h.finals()[1].translation, "")
+        self.assertEqual(h.logs, [])
+
+    def test_toggle_controls_the_keep_warm_task(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep, translation_enabled=False)
+        h.pipeline.set_translation_enabled(True)
+        h.pipeline.set_translation_enabled(False)
+        self.assertEqual(keep.calls, ["active:True", "active:False"])
+
+    def test_keep_warm_without_set_active_is_fine(self) -> None:
+        class NoToggle:
+            # 只實作 BackgroundTask 的 start／stop（沒有 set_active）：切換照樣生效
+            def start(self) -> None:
+                pass
+
+            def stop(self, timeout: float = 0.5) -> None:
+                pass
+
+        h = Harness(keep_warm=NoToggle())  # type: ignore[arg-type]
+        h.pipeline.set_translation_enabled(False)
+        self.assertFalse(h.pipeline.translation_enabled)
+
+    def test_rejects_non_bool(self) -> None:
+        h = Harness()
+        with self.assertRaises(TypeError):
+            h.pipeline.set_translation_enabled(1)  # type: ignore[arg-type]
+
+    def test_threaded_toggle_while_running(self) -> None:
+        h = Harness(translation_enabled=False)
+        source = StoppableSource()
+        h.pipeline.start(source)
+        h.pipeline.set_translation_enabled(True)
+        h.pipeline.stop(timeout=WAIT)
+        self.assertTrue(h.pipeline.translation_enabled)
+
+
 class ContextTest(unittest.TestCase):
     def test_media_context_and_asr_prompt(self) -> None:
         h = Harness()
@@ -900,6 +972,9 @@ class RecordingKeepWarm:
 
     def stop(self, timeout: float = 0.5) -> None:
         self.calls.append("stop")
+
+    def set_active(self, active: bool) -> None:
+        self.calls.append(f"active:{active}")
 
 
 class KeepWarmLifecycleTest(unittest.TestCase):

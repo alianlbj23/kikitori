@@ -377,6 +377,22 @@ def _is_local_server(settings: Settings) -> bool:
     return is_loopback_host(urlsplit(settings.translation.base_url).hostname or "")
 
 
+def translation_needed(settings: Settings, mode: Mode) -> bool:
+    """這個 session 會不會用到翻譯模型（不看模型支援哪些語言）。
+
+    只顯示原文，或影片翻譯的收聽語言與字幕語言是同一個 Whisper 語言（只做字形轉換）時
+    不需要；口譯一定要（兩個語言的 Whisper 語言必定不同），收聽語言為 "auto" 時也要。
+    """
+    if not settings.translation.enabled:
+        return False
+    if mode == "interpret" or settings.source_language == AUTO_LANGUAGE:
+        return True
+    return (
+        get_language(settings.source_language).whisper_code
+        != get_language(settings.target_language).whisper_code
+    )
+
+
 def warm_up_request(settings: Settings, mode: Mode) -> TranslationRequest | None:
     """預熱／保溫用的翻譯請求；這個 session 不會用到翻譯模型時回傳 None。
 
@@ -481,22 +497,33 @@ def attach_keep_warm(
     session 執行中翻譯請求停了 `translation.keep_warm_secs` 秒（例如影片長時間沒有對白），
     就送一次與開場預熱相同的請求，模型才不會被 Ollama 卸載（OpenAI 相容端點不能指定
     `keep_alive`）。遠端服務或設定為 0 時原樣回傳：不對可能付費的 API 多送請求。保溫在
-    `Pipeline.start()` 啟動、pipeline 結束時停止。只顯示原文或不需要翻譯的語言組合
-    也原樣回傳。
+    `Pipeline.start()` 啟動、pipeline 結束時停止。不需要翻譯的語言組合（例如繁中影片配
+    簡中字幕）也原樣回傳。
+
+    只顯示原文（`translation.enabled=false`）時保溫是「不動作」的（`active=False`）：
+    不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled`）時
+    才啟用，並先在背景預熱一次——這個 session 開始時沒有預熱，模型多半尚未載入。翻譯器
+    在 session 開始時就得包好，活動才記得到，所以不能等到開啟翻譯時才建立。
     """
     interval = settings.translation.keep_warm_secs
+    enabled = settings.translation.enabled
+    # 預熱的方向與「開啟翻譯後」的 session 相同；關閉翻譯時 warm_up_request 會回傳 None
+    as_enabled = (
+        settings if enabled else settings.merged({"translation": {"enabled": True}})
+    )
     if (
         interval == 0
-        or warm_up_request(settings, mode) is None
+        or warm_up_request(as_enabled, mode) is None
         or not _is_local_server(settings)
     ):
         return components
     keep_warm = KeepWarm(
         lambda: ping_translation_models(
-            settings, mode, make_translator=make_translator
+            as_enabled, mode, make_translator=make_translator
         ),
         float(interval),
         clock=clock,
+        active=enabled,
     )
     return replace(
         components,

@@ -205,6 +205,76 @@ class ThreadTest(unittest.TestCase):
             keep.start()
 
 
+class ActiveTest(unittest.TestCase):
+    """只顯示原文時保溫不動作；執行中開啟翻譯時在背景立即預熱一次（不阻塞）。"""
+
+    def test_inactive_never_pings_even_when_idle(self) -> None:
+        clock = FakeClock()
+        ping = Pinger(clock)
+        keep = KeepWarm(ping, INTERVAL, clock=clock, active=False)
+        self.assertFalse(keep.active)
+        clock.advance(10 * INTERVAL)
+        self.assertEqual(keep.tick(), INTERVAL)
+        self.assertEqual(ping.at, [])
+
+    def test_inactive_start_creates_no_thread(self) -> None:
+        keep = KeepWarm(lambda: None, 3600.0, active=False)
+        keep.start()
+        self.addCleanup(keep.stop, WAIT)
+        self.assertFalse(keep.is_running)
+
+    def test_activating_pings_promptly_in_the_background(self) -> None:
+        pinged = threading.Event()
+        keep = KeepWarm(pinged.set, 3600.0, active=False)
+        keep.start()
+        self.addCleanup(keep.stop, WAIT)
+        keep.set_active(True)  # 不等預熱完成就返回
+        self.assertTrue(pinged.wait(WAIT))
+        self.assertTrue(keep.is_running)
+
+    def test_reactivating_a_running_task_pings_again(self) -> None:
+        count = 0
+        second = threading.Event()
+
+        def ping() -> None:
+            nonlocal count
+            count += 1
+            if count == 2:
+                second.set()
+
+        keep = KeepWarm(ping, 3600.0, active=False)
+        keep.start()
+        self.addCleanup(keep.stop, WAIT)
+        keep.set_active(True)
+        keep.set_active(False)
+        keep.set_active(True)
+        self.assertTrue(second.wait(WAIT))
+
+    def test_deactivated_stops_scheduled_pings(self) -> None:
+        clock = FakeClock()
+        ping = Pinger(clock)
+        keep = KeepWarm(ping, INTERVAL, clock=clock)
+        keep.set_active(False)
+        clock.advance(INTERVAL)
+        keep.tick()
+        self.assertEqual(ping.at, [])
+        keep.set_active(True)  # 尚未 start：只記下要預熱，不建立執行緒
+        self.assertFalse(keep.is_running)
+        keep.tick()
+        self.assertEqual(len(ping.at), 1)
+
+    def test_activating_before_start_or_after_stop(self) -> None:
+        pinged = threading.Event()
+        keep = KeepWarm(pinged.set, 3600.0, active=False)
+        keep.set_active(True)
+        keep.start()  # start 時已是 active：照常建立執行緒並先預熱
+        self.assertTrue(pinged.wait(WAIT))
+        keep.stop(timeout=WAIT)
+        keep.set_active(False)
+        keep.set_active(True)  # 停止後不再建立執行緒
+        self.assertFalse(keep.is_running)
+
+
 class _Translator:
     def __init__(self) -> None:
         self.error: Exception | None = None

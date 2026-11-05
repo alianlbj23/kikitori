@@ -6,10 +6,13 @@ ASR 的語言範圍，translate 用它驗證請求、組提示詞與決定字形
 """
 
 from kikitori.languages.catalog import (
+    ASR_QUALITY_MODELS,
     LANGUAGES,
     WHISPER_CODES,
+    AsrQuality,
     Language,
     UnknownLanguageError,
+    asr_quality,
     get_language,
     language_codes,
     normalize_language,
@@ -18,10 +21,13 @@ from kikitori.languages.catalog import (
 )
 
 __all__ = [
+    "ASR_QUALITY_MODELS",
     "LANGUAGES",
     "WHISPER_CODES",
+    "AsrQuality",
     "Language",
     "UnknownLanguageError",
+    "asr_quality",
     "get_language",
     "language_codes",
     "normalize_language",

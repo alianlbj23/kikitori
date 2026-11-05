@@ -1,10 +1,11 @@
-"""引擎依賴的外部服務：設定、裝置、音訊來源、pipeline 元件、硬體偵測、模型清單。
+"""引擎依賴的外部服務：設定、裝置、音訊來源、pipeline 元件、硬體偵測、模型清單、翻譯模型。
 
 位於 engine 與其他模組之間。伺服器只透過 `EngineServices` 使用這些功能，所以
 測試能換成假的實作（見 `testing.py`）。預設實作用真實的 capture、`pipeline.factory`
-與 `kikitori.hardware`（偵測、模型總覽、GPU 執行環境安裝）。
+與 `kikitori.hardware`（偵測、模型總覽、GPU 執行環境安裝、Ollama 下載翻譯模型）。
 """
 
+import logging
 import sys
 import threading
 from collections.abc import Callable
@@ -23,6 +24,8 @@ from kikitori.pipeline.factory import AsrModelInfo
 from kikitori.pipeline.types import Mode, PipelineComponents
 
 ProgressCallback = Callable[[int, int], None]
+
+logger = logging.getLogger(__name__)
 
 
 class HardwareProvider(Protocol):
@@ -68,6 +71,41 @@ class ModelCatalog(Protocol):
 
 
 @dataclass(frozen=True)
+class TranslationServerState:
+    """翻譯伺服器現在能不能替使用者下載模型。
+
+    Attributes:
+        reachable: 有收到 HTTP 回應。
+        is_ollama: 是 Ollama（有原生的 `/api/version`），才能用 `/api/pull` 下載。
+        installed: 伺服器回報的模型名稱；取不到時為 None。
+        error: 連不上或回應不對的原因（英文，不含金鑰）。
+    """
+
+    reachable: bool
+    is_ollama: bool
+    installed: tuple[str, ...] | None = None
+    error: str | None = None
+
+
+class TranslationModels(Protocol):
+    """翻譯伺服器上的模型：狀態與下載（`models.pull_translation`、`session.start` 的檢查）。"""
+
+    def server_state(self, settings: Settings) -> TranslationServerState:
+        """連線檢查翻譯伺服器（最久數秒）；任何錯誤都放進結果，不丟例外。"""
+        ...
+
+    def pull(
+        self,
+        settings: Settings,
+        model: str,
+        progress: ProgressCallback,
+        cancel: threading.Event,
+    ) -> None:
+        """請 Ollama 下載模型；`cancel` 被設定時停止。失敗時丟例外。"""
+        ...
+
+
+@dataclass(frozen=True)
 class EngineServices:
     """伺服器需要的全部外部功能。
 
@@ -78,6 +116,7 @@ class EngineServices:
         build_components: `(settings, mode)` → pipeline 元件（可能要載入模型數秒）。
         hardware: 硬體偵測、模型總覽與 GPU 執行環境。
         models: ASR 模型清單與下載。
+        translation_models: 翻譯伺服器的狀態與（Ollama）模型下載。
         fake: 是否為測試用的假服務（回報在 `engine.info`）。
     """
 
@@ -87,6 +126,7 @@ class EngineServices:
     build_components: Callable[[Settings, Mode], PipelineComponents]
     hardware: HardwareProvider
     models: ModelCatalog
+    translation_models: TranslationModels
     fake: bool = False
 
 
@@ -155,6 +195,55 @@ class DefaultModelCatalog:
         download_asr_model(model_id, progress, cancel)
 
 
+class DefaultTranslationModels:
+    """真實的實作：`GET {base_url}/models` 判斷可連與已安裝的模型，再以 Ollama 原生的
+    `/api/version` 判斷能不能下載（`kikitori.hardware.ollama`）。"""
+
+    def server_state(self, settings: Settings) -> TranslationServerState:
+        """見 `TranslationModels.server_state()`。"""
+        from kikitori.hardware.ollama import (
+            NotOllamaError,
+            OllamaUnreachableError,
+            ollama_version,
+        )
+        from kikitori.hardware.translation_server import probe_translation_server
+
+        t = settings.translation
+        info = probe_translation_server(t.base_url, t.api_key_env)
+        if not info.reachable:
+            return TranslationServerState(False, False, None, info.error)
+        try:
+            version = ollama_version(t.base_url, api_key_env=t.api_key_env)
+        except NotOllamaError as exc:
+            logger.info("translation server is not Ollama: %s", exc)
+            return TranslationServerState(True, False, info.models, str(exc))
+        except (OllamaUnreachableError, ValueError) as exc:
+            # 剛剛還連得上：伺服器在兩個請求之間關掉了
+            logger.info("translation server went away: %s", exc)
+            return TranslationServerState(False, False, None, str(exc))
+        logger.debug("translation server is Ollama %s", version)
+        return TranslationServerState(True, True, info.models, info.error)
+
+    def pull(
+        self,
+        settings: Settings,
+        model: str,
+        progress: ProgressCallback,
+        cancel: threading.Event,
+    ) -> None:
+        """見 `hardware.ollama.pull_model()`。"""
+        from kikitori.hardware.ollama import pull_model
+
+        t = settings.translation
+        pull_model(
+            t.base_url,
+            model,
+            progress=progress,
+            cancel=cancel,
+            api_key_env=t.api_key_env,
+        )
+
+
 def default_services() -> EngineServices:
     """正式使用的服務：真實 capture、設定檔、factory 與 hardware 模組。"""
     from kikitori.capture import list_devices, open_source
@@ -167,4 +256,5 @@ def default_services() -> EngineServices:
         build_components=build_session_components,
         hardware=DefaultHardwareProvider(),
         models=DefaultModelCatalog(),
+        translation_models=DefaultTranslationModels(),
     )

@@ -13,11 +13,77 @@
 規格見 `docs/specs/languages-i18n.md`。
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
+from typing import Literal
+
+AsrQuality = Literal["A", "B", "C"]
+"""Whisper 在公開基準上的錯誤率等級：A ≤ 10%、B 10–20%、C > 20%（WER；中日泰為 CER）。"""
 
 
 class UnknownLanguageError(ValueError):
     """語言碼不在清單內（或不是字串）。"""
+
+
+# --- 各 ASR 模型（asr registry 的 id）對每個語言的辨識品質等級 -----------------------
+#
+# 出處：research_notes/VTuber 直播模型選型調查/language_coverage.md（2026-11-05）。
+# 推薦時用它提示「這個語言用這個模型辨識品質較低」，所以寧可低估：
+#
+# - large-v3、large-v3-turbo：OpenAI README 的 large-v3 圖與 turbo 公告圖（FLEURS 與
+#   Common Voice 15），取兩個資料集中「較差」的值分級（§1.2 主表的「分級 v3／turbo」）。
+#   vi 在 FLEURS 是 8.6、Common Voice 15 卻是 39.8，依規則為 C；turbo 圖沒收錄 vi
+#   （large-v3 已 > 20%），同樣是 C。
+# - small、base：Whisper 論文 Table 13（FLEURS）的逐尺寸數字（§1.3「推論的分級」）。
+#   這些模型沒有 v3 世代、也沒有 Common Voice 15 的數字，而 Common Voice 普遍更差，
+#   所以只會高估、不會低估；表中每一格都不比 large-v3 好。
+# - tiny、medium：同一張 Table 13（§1.3 表格），再與 large-v3 的等級取較差者
+#   （例如 medium 的 ja FLEURS 7.1 是 A，但 large-v3 的 ja 只有 B，就記 B）：較小的
+#   模型實際上不會比 large-v3 好，只看 FLEURS 會過度樂觀。
+# 未列出的模型（之後新增的模型）沒有資料，`asr_quality()` 回傳 None，推薦不提示。
+_A, _B, _C = "A", "B", "C"
+_LANGUAGE_ORDER = (
+    "ja",
+    "en",
+    "zh-TW",
+    "zh-CN",
+    "ko",
+    "es",
+    "fr",
+    "de",
+    "pt",
+    "ru",
+    "it",
+    "ar",
+    "hi",
+    "id",
+    "vi",
+    "th",
+    "tr",
+    "pl",
+    "nl",
+    "uk",
+)
+# 每列依 _LANGUAGE_ORDER：ja en zh-TW zh-CN ko es fr de pt ru it ar hi id vi th tr pl nl uk
+_QUALITY_ROWS: dict[str, tuple[str, ...]] = {
+    "large-v3": (_B, _A, _A, _B, _A, _A, _B, _A, _A, _A, _A, _B, _B, _A, _C, _A, _B, _A, _A, _B),
+    "large-v3-turbo": (_B, _B, _B, _B, _A, _A, _B, _A, _A, _A, _A, _C, _C, _A, _C, _C, _B, _A, _A, _B),
+    "medium": (_B, _A, _B, _B, _B, _A, _B, _A, _A, _A, _A, _C, _C, _B, _C, _B, _B, _A, _A, _B),
+    "small": (_B, _A, _C, _C, _B, _A, _B, _B, _A, _B, _A, _C, _C, _B, _C, _C, _B, _B, _B, _B),
+    "base": (_C, _A, _C, _C, _C, _A, _C, _B, _B, _C, _B, _C, _C, _C, _C, _C, _C, _C, _C, _C),
+    "tiny": (_C, _B, _C, _C, _C, _B, _C, _C, _C, _C, _C, _C, _C, _C, _C, _C, _C, _C, _C, _C),
+}  # fmt: skip
+
+ASR_QUALITY_MODELS: tuple[str, ...] = tuple(_QUALITY_ROWS)
+"""有品質等級資料的 ASR 模型（asr registry 的 id）。"""
+
+
+def _quality(code: str) -> Mapping[str, AsrQuality]:
+    index = _LANGUAGE_ORDER.index(code)
+    return MappingProxyType(
+        {model: row[index] for model, row in _QUALITY_ROWS.items()}  # type: ignore[misc]
+    )
 
 
 @dataclass(frozen=True)
@@ -32,6 +98,8 @@ class Language:
         no_space: 書寫時詞與詞之間不加空白（中、日、泰）。
         script_conversion: 輸出要套用的 OpenCC 設定名稱（不含 ".json"）；None 表示不轉換。
         rtl: 由右到左書寫。
+        asr_quality: ASR 模型（asr registry 的 id）→ 這個語言的辨識品質等級
+            （唯讀；來源見本模組的 `_QUALITY_ROWS`）。
     """
 
     code: str
@@ -41,6 +109,9 @@ class Language:
     no_space: bool = False
     script_conversion: str | None = None
     rtl: bool = False
+    asr_quality: Mapping[str, AsrQuality] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 LANGUAGES: tuple[Language, ...] = (
@@ -81,6 +152,9 @@ LANGUAGES: tuple[Language, ...] = (
     Language("nl", "Dutch", "Nederlands", "nl"),
     Language("uk", "Ukrainian", "Українська", "uk"),
 )
+
+# 品質等級集中在 `_QUALITY_ROWS` 一張表（方便對照研究筆記），這裡再併進每個語言。
+LANGUAGES = tuple(replace(lang, asr_quality=_quality(lang.code)) for lang in LANGUAGES)
 
 _BY_CODE: dict[str, Language] = {lang.code: lang for lang in LANGUAGES}
 
@@ -177,3 +251,14 @@ def whisper_language_name(whisper_code: str) -> str:
     return next(
         lang.english_name for lang in LANGUAGES if lang.whisper_code == whisper_code
     )
+
+
+def asr_quality(code: str, model: str) -> AsrQuality | None:
+    """`model`（asr registry 的 id）辨識 `code`（清單語言碼，含別名）的品質等級。
+
+    沒有資料的模型回傳 None（呼叫端不提示，而不是猜一個等級）。
+
+    Raises:
+        UnknownLanguageError: 語言碼不在清單內。
+    """
+    return get_language(code).asr_quality.get(model)

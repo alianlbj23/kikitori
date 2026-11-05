@@ -153,7 +153,8 @@ PRESETS: dict[str, ModelPreset] = {
         _qwen("qwen3.5:9b", "Qwen3.5 9B", 6.6, "Qwen3.5-9B"),
         ModelPreset(
             model="hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
-            label="Sakura-GalTransl 7B v3（非商用）",
+            # 非商用標示由 UI 依 commercial_use 以介面語系顯示，名稱不帶任何語言的說明。
+            label="Sakura-GalTransl 7B v3",
             prompt_style="sakura",
             temperature=0.3,
             top_p=0.8,
@@ -258,10 +259,24 @@ RECOMMENDATION_TIERS: tuple[RecommendationTier, ...] = (
 )
 
 
+class NoSupportingModelError(ValueError):
+    """這個 VRAM 等級的推薦模型都不支援要求的語言組合。
+
+    Attributes:
+        pairs: 要求的（原文, 譯文）組合。
+    """
+
+    def __init__(self, pairs: tuple[tuple[str, str], ...]) -> None:
+        shown = ", ".join(f"{s} -> {t}" for s, t in pairs)
+        super().__init__(f"no recommended translation model supports {shown}")
+        self.pairs = pairs
+
+
 def recommend_translation_models(
     vram_budget_gb: float | None,
     installed: Collection[str] | None = None,
     allow_restricted: bool = True,
+    pairs: Collection[tuple[str, str]] | None = None,
 ) -> TranslationModelChoice:
     """依可用 VRAM 推薦翻譯模型。
 
@@ -271,9 +286,13 @@ def recommend_translation_models(
             讓 UI 提示下載。
         allow_restricted: False 時排除有地區限制（例如使用者在歐盟）的模型。
             非商用授權的模型一律不推薦。
+        pairs: 必須全部支援的（原文, 譯文）組合（見 `supports()`；原文可為 Whisper 或
+            清單語言碼）；None 表示不看語言。口譯時兩個方向都要列入。不支援的模型直接
+            略過，順序仍依 VRAM 等級（不跨等級找：更大的模型放不下，更小的品質較差）。
 
     Raises:
         ValueError: VRAM 為負數或不是有限數。
+        NoSupportingModelError: 這個等級沒有模型支援 `pairs`。
     """
     budget = 0.0 if vram_budget_gb is None else float(vram_budget_gb)
     if not math.isfinite(budget) or budget < 0:
@@ -285,13 +304,21 @@ def recommend_translation_models(
         None if installed is None else {normalize_model_name(m) for m in installed}
     )
 
+    required = None if pairs is None else tuple(pairs)
+
     def pick(order: tuple[str, ...]) -> str:
         allowed = [
             m
             for m in order
             if PRESETS[m].commercial_use
             and (allow_restricted or not PRESETS[m].excluded_regions)
+            and (
+                required is None
+                or all(supports(PRESETS[m], src, tgt) for src, tgt in required)
+            )
         ]
+        if not allowed:
+            raise NoSupportingModelError(required or ())
         if available is not None:
             for model in allowed:
                 if model in available:

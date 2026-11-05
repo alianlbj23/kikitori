@@ -4,6 +4,7 @@
 """
 
 import tempfile
+import threading
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -550,12 +551,62 @@ class KeepWarmTest(unittest.TestCase):
             factory.attach_keep_warm(components, settings, "media"), components
         )
 
-    def test_translation_disabled_gets_no_keep_warm(self) -> None:
-        components = _components()
+    def test_translation_disabled_gets_a_dormant_keep_warm(self) -> None:
+        # 只顯示原文：保溫「不動作」（不建立執行緒、不送請求），執行中開啟翻譯時
+        # （session.set_translation）才由 pipeline 啟用並先預熱一次
         settings = Settings().merged({"translation": {"enabled": False}})
+        result = factory.attach_keep_warm(_components(), settings, "media")
+        keep = result.keep_warm
+        assert isinstance(keep, factory.KeepWarm)
+        self.assertFalse(keep.active)
+        keep.start()
+        self.addCleanup(keep.stop, 1.0)
+        self.assertFalse(keep.is_running)
+
+    def test_dormant_keep_warm_warms_up_when_translation_is_turned_on(self) -> None:
+        log: list = []
+        pinged = threading.Event()
+
+        def make(config: TranslatorConfig) -> _RecordingTranslator:
+            pinged.set()
+            return _RecordingTranslator(config, log, fail=False)
+
+        settings = Settings().merged({"translation": {"enabled": False}})
+        result = factory.attach_keep_warm(
+            _components(), settings, "media", make_translator=make
+        )
+        keep = result.keep_warm
+        assert isinstance(keep, factory.KeepWarm)
+        keep.start()
+        self.addCleanup(keep.stop, 1.0)
+        keep.set_active(True)
+        self.assertTrue(pinged.wait(5.0))
+        keep.stop(1.0)
+        # 預熱請求與開啟翻譯後的 session 方向相同
+        self.assertEqual(log[0][1].target_language, "zh-TW")
+
+    def test_same_language_media_never_needs_a_keep_warm(self) -> None:
+        components = _components()
+        settings = Settings().merged(
+            {"source_language": "zh-CN", "translation": {"enabled": False}}
+        )
         self.assertIs(
             factory.attach_keep_warm(components, settings, "media"), components
         )
+
+    def test_translation_needed(self) -> None:
+        # session.start 依它決定要不要檢查翻譯伺服器上的模型
+        base = Settings()
+        self.assertTrue(factory.translation_needed(base, "media"))
+        self.assertTrue(factory.translation_needed(base, "interpret"))
+        off = base.merged({"translation": {"enabled": False}})
+        self.assertFalse(factory.translation_needed(off, "media"))
+        self.assertFalse(factory.translation_needed(off, "interpret"))
+        same = base.merged({"source_language": "zh-CN"})
+        self.assertFalse(factory.translation_needed(same, "media"))
+        self.assertTrue(factory.translation_needed(same, "interpret"))
+        auto = base.merged({"source_language": "auto"})
+        self.assertTrue(factory.translation_needed(auto, "media"))
 
     def test_translation_disabled_session_never_calls_the_translator(self) -> None:
         # 只顯示原文：預熱、保溫、pipeline 都不呼叫翻譯器（以計數的假翻譯器確認）
@@ -569,7 +620,11 @@ class KeepWarmTest(unittest.TestCase):
         components = factory.attach_keep_warm(
             _components(), settings, "media", make_translator=make
         )
-        self.assertIsNone(components.keep_warm)
+        keep = components.keep_warm
+        assert isinstance(keep, factory.KeepWarm)
+        keep.start()
+        keep.tick()
+        keep.stop(1.0)
         self.assertEqual(calls, [])
 
     def test_disabled_by_zero(self) -> None:
