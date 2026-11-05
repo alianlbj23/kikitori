@@ -95,7 +95,7 @@
 
 - 翻譯模型改在模型頁的「自訂組合」選擇（第一階段在設定頁），讓同一份表單涵蓋整個組合、一起經過 `models.validate`（授權、是否在伺服器上、記憶體）。
 - 授權地區說明：部分翻譯模型（例如騰訊 HY-MT）的授權不適用於歐盟、英國與南韓；kikitori 無法得知使用者所在地，所以預設不推薦。勾選後建議組合才會考慮這些模型；不勾選仍可在自訂組合手動選用，但檢查會顯示警告。改變這個勾選後，建議組合會在下次進入模型頁時重新計算。
-- **關於**：顯示「本程式內含的 Intel® OpenMP 等第三方元件依其各自授權條款提供；不得對其進行逆向工程。」（Intel EULA for Developer Tools 的再散布條件，見 `packaging-ci.md`）。正式版顯示 `<資源目錄>/kikitori-engine/THIRD_PARTY_LICENSES` 的完整路徑（可選取）與「開啟第三方授權資料夾」按鈕；開發版沒有內附引擎，改為說明正式版的位置。路徑由 Rust 的 `app_about` 指令算出；開啟由 `open_third_party_licenses` 指令完成——它不接受任何參數、只開這個資料夾，所以不需要給前端 opener 的路徑權限。
+- **關於**：顯示「本程式內含的 Intel® OpenMP 等第三方元件依其各自授權條款提供；不得對其進行逆向工程。」（Intel EULA for Developer Tools 的再散布條件，見 `packaging-ci.md`）。正式版有兩個授權資料夾，各自一行顯示完整路徑（可選取）與一個按鈕：程式本身 `<資源目錄>/licenses`（kikitori 的 LICENSE、Tauri／Rust crate 與前端 npm 套件的授權全文、MPL-2.0 crate 的原始碼取得方式；`packaging-ci.md`「app 的第三方授權聲明」）→「開啟程式的第三方授權資料夾」；語音引擎 `<資源目錄>/kikitori-engine/THIRD_PARTY_LICENSES` →「開啟引擎的第三方授權資料夾」。只顯示實際存在的資料夾；兩者都不在（開發版）時改為說明正式版的位置。路徑由 Rust 的 `app_about` 指令算出（`app_licenses`、`engine_licenses`，不存在時為 `null`）；開啟由 `open_third_party_licenses {folder: "app" | "engine"}` 完成——前端只能傳這兩個名稱之一（serde enum，其他值在反序列化時就被拒絕），路徑一律在 Rust 端決定，所以不需要給前端 opener 的路徑權限。
 - 只存環境變數名稱，金鑰本身不經過 UI、不寫入任何檔案。
 - 儲存前先在前端驗證（網址必須 http/https、變數名稱 `^[A-Za-z_][A-Za-z0-9_]*$`、數值範圍），錯誤顯示在欄位下方。引擎回傳 `invalid_settings` 時依訊息中的欄位路徑（例如 `translation.base_url: …`）標到對應欄位。
 - 字幕外觀存在設定檔的 `subtitle` 物件（引擎原樣保存、不解讀）；儲存後同時透過 `overlay_set_style` 推給字幕視窗。
@@ -166,7 +166,7 @@
 | `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、`updater:default`、`process:allow-restart`、`opener:allow-open-url`（scope 只有 `https://docs.nvidia.com/cuda/eula/index.html`）、全部引擎與字幕視窗指令、`app_about`、`open_third_party_licenses`（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
 | `overlay`（`capabilities/overlay.json`） | 事件 listen／unlisten、`start-dragging`、`start-resize-dragging`、`overlay_get_state`、`overlay_set_visible` |
 
-opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端開這一個網址；沒有 `allow-default-urls`、沒有 `open-path`／`reveal-item-in-dir`。第三方授權資料夾由 Rust 指令以 opener 的 Rust API 開啟（路徑在 Rust 端決定）。`combination.test.ts` 檢查 capability 裡的 opener 權限正好是這一筆。
+opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端開這一個網址；沒有 `allow-default-urls`、沒有 `open-path`／`reveal-item-in-dir`。兩個授權資料夾由 Rust 指令以 opener 的 Rust API 開啟（前端只選 `app`／`engine`，路徑在 Rust 端決定）。`combination.test.ts` 檢查 capability 裡的 opener 權限正好是這一筆。
 
 另設 CSP：`default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self'`；前端不使用 `innerHTML`，引擎傳來的文字一律以 `textContent` 顯示。
 
@@ -180,8 +180,8 @@ opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端�
 ## 打包與引擎資源
 
 - 引擎是 PyInstaller **one-folder**（`kikitori-engine[.exe]`、`_internal/`、`THIRD_PARTY_LICENSES/`），由 `uv run python packaging/engine/build.py` 放到 `src-tauri/binaries/kikitori-engine/`（已列入 `.gitignore`），以 Tauri `bundle.resources` 整個資料夾帶進安裝檔（決定與量測見 `packaging-ci.md`）。不用 `externalBin`（只能帶單一執行檔）。
-- **正式打包的設定另外放**：`src-tauri/tauri.sidecar.conf.json` 只有 `{"bundle": {"resources": {"binaries/kikitori-engine/": "kikitori-engine/"}}}`，打包時合併：`npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`。理由：`cargo build`（tauri-build）會檢查 resources 路徑存在；若寫進 `tauri.conf.json`，每個 `cargo test`、`cargo clippy`、`tauri dev`、除錯版建置都得先建置 170 MB 的引擎或放佔位目錄。分開之後，開發與 CI 的 Rust job 不需要引擎；正式打包若忘了先建置引擎，會在建置時就失敗，而不是做出沒有引擎的安裝檔。檔名沿用第一階段的 `tauri.sidecar.conf.json`，以免 CI／文件的引用失效。
-- 正式版從資源目錄啟動引擎（見「引擎指令的選擇」），設定頁「關於」顯示並可開啟 `kikitori-engine/THIRD_PARTY_LICENSES`。
+- **正式打包的設定另外放**：`src-tauri/tauri.sidecar.conf.json` 只有 `{"bundle": {"resources": {"binaries/kikitori-engine/": "kikitori-engine/", "licenses/": "licenses/"}}}`（`licenses/` 由 `packaging/app/licenses.py` 產生，見 `packaging-ci.md`），打包時合併：`npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`。理由：`cargo build`（tauri-build）會檢查 resources 路徑存在；若寫進 `tauri.conf.json`，每個 `cargo test`、`cargo clippy`、`tauri dev`、除錯版建置都得先建置 170 MB 的引擎或放佔位目錄。分開之後，開發與 CI 的 Rust job 不需要引擎；正式打包若忘了先建置引擎，會在建置時就失敗，而不是做出沒有引擎的安裝檔。檔名沿用第一階段的 `tauri.sidecar.conf.json`，以免 CI／文件的引用失效。
+- 正式版從資源目錄啟動引擎（見「引擎指令的選擇」），設定頁「關於」顯示並可開啟 `licenses/`（程式本身）與 `kikitori-engine/THIRD_PARTY_LICENSES`（引擎）。
 - 打包後要在各平台確認：Linux／macOS 安裝後的執行檔保有執行權限、macOS 簽章不破壞 PyInstaller 的 ad-hoc 簽章（`packaging-ci.md` 的 release 步驟）。
 - 版本號 `0.1.0` 與 `pyproject.toml` 一致（`package.json`、`Cargo.toml`、`tauri.conf.json`；由 `scripts/sync_version.py` 同步）。
 
@@ -222,9 +222,9 @@ npm run tauri dev
 
 | 指令（在 `app/` 或 `app/src-tauri/`） | 內容 |
 |---|---|
-| `npm test` | vitest：字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、格式化 |
+| `npm test` | vitest：字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化 |
 | `npm run build` | `tsc` 型別檢查 + `vite build` |
-| `cargo test` | 協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；正式版資源目錄的引擎路徑與覆寫、`about_info`、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
+| `cargo test` | 協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；正式版資源目錄的引擎路徑與覆寫、`about_info`（兩個授權資料夾各自只在存在時回報；`licenses` 與 `tauri.sidecar.conf.json` 的資源名稱一致；`LicenseFolder` 只接受 `app`／`engine`）、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
 | `cargo clippy --all-targets -- -D warnings` | lint |
 
 ## 各平台需要實機確認的地方

@@ -61,6 +61,7 @@ import type {
   DownloadProgressEvent,
   EngineState,
   HardwareReport,
+  LicenseFolder,
   Mode,
   ModelsList,
   OverlaySnapshot,
@@ -172,7 +173,8 @@ const el = {
   aboutEngine: byId("about-engine"),
   aboutLicense: byId("about-license"),
   aboutThirdParty: byId("about-third-party"),
-  openLicenses: byId<HTMLButtonElement>("open-licenses"),
+  openAppLicenses: byId<HTMLButtonElement>("open-app-licenses"),
+  openEngineLicenses: byId<HTMLButtonElement>("open-engine-licenses"),
   checkUpdate: byId<HTMLButtonElement>("check-update"),
   updateStatus: byId("update-status"),
 };
@@ -1163,19 +1165,32 @@ async function pushOverlayStyle(): Promise<void> {
 function renderAbout(): void {
   const a = state.about;
   el.aboutLicense.textContent = a ? `kikitori 以 ${a.license} 授權發布。` : "";
-  if (a?.third_party_licenses) {
-    replace(el.aboutThirdParty, "第三方元件的授權全文：", h("span", { class: "url" }, a.third_party_licenses));
-    el.openLicenses.hidden = false;
+  const app = a?.app_licenses ?? null;
+  const engine = a?.engine_licenses ?? null;
+  if (app || engine) {
+    // Each folder is listed on its own line so its path stays selectable.
+    replace(
+      el.aboutThirdParty,
+      "第三方元件的授權全文：",
+      app && h("br"),
+      app && "程式本身（Tauri／Rust 套件、前端套件，以及 kikitori 的 LICENSE）：",
+      app && h("span", { class: "url" }, app),
+      engine && h("br"),
+      engine && "語音引擎（Python 套件）：",
+      engine && h("span", { class: "url" }, engine),
+    );
   } else {
     el.aboutThirdParty.textContent =
-      "開發版沒有內附引擎。正式版的第三方授權全文在安裝目錄的 kikitori-engine/THIRD_PARTY_LICENSES 資料夾。";
-    el.openLicenses.hidden = true;
+      "開發版沒有內附授權資料夾。正式版的授權全文在安裝目錄的 licenses（程式本身）與 " +
+      "kikitori-engine/THIRD_PARTY_LICENSES（語音引擎）資料夾。";
   }
+  el.openAppLicenses.hidden = !app;
+  el.openEngineLicenses.hidden = !engine;
 }
 
-async function openLicenses(): Promise<void> {
+async function openLicenses(folder: LicenseFolder): Promise<void> {
   try {
-    await api.openThirdPartyLicenses();
+    await api.openThirdPartyLicenses(folder);
   } catch (e) {
     reportError("無法開啟授權資料夾，請依上面的路徑自行開啟", e);
   }
@@ -1346,7 +1361,8 @@ function wire(): void {
     e.preventDefault();
     void submitSettings();
   });
-  el.openLicenses.addEventListener("click", () => void openLicenses());
+  el.openAppLicenses.addEventListener("click", () => void openLicenses("app"));
+  el.openEngineLicenses.addEventListener("click", () => void openLicenses("engine"));
   el.checkUpdate.addEventListener("click", () => void manualUpdateCheck());
 }
 

@@ -9,6 +9,7 @@
 | 項目 | 位置 |
 |---|---|
 | PyInstaller 打包（引擎 `kikitori-engine`） | `packaging/engine/` |
+| app（Tauri 執行檔、前端 bundle）的第三方授權聲明 | `packaging/app/` |
 | 版本號同步 | `scripts/sync_version.py` |
 | CI（測試、lint、版本檢查、三平台打包 + 冒煙測試） | `.github/workflows/test.yml` |
 | Tauri 前端／Rust 的 CI、發布 | `.github/workflows/app.yml`、`.github/workflows/release.yml`（見 `release-update.md`） |
@@ -129,6 +130,62 @@ Linux（Debian bookworm 容器、x86_64）one-folder：269 MB（`du`），啟動
 - oneMKL（靜態連結）：Intel Simplified Software License（可再散布、須附條款、禁止逆向工程），全文已附。
 - NVIDIA cuDNN 載入器：不打包（見上）。
 
+## app 的第三方授權聲明（`packaging/app/`）
+
+引擎的 `THIRD_PARTY_LICENSES/` 只涵蓋 PyInstaller 打包的 Python 元件。Tauri 執行檔編譯進去的 Rust crate、前端 bundle 內的 npm 套件，以及 kikitori 自己的 LICENSE 另外整理成 `licenses/`，隨安裝檔散布（MIT／Apache-2.0 等要求散布時附上授權聲明；MPL-2.0 §3.2 還要求告知取得原始碼的方式）。
+
+| 檔案 | 角色 |
+|---|---|
+| `packaging/app/licenses.py` | 產生與檢查 `licenses/`（只用標準庫）。不帶參數是互動選單；CI 用 `--out`、`--check-bundle` |
+| `packaging/app/license_overrides/<npm 套件名>/` | npm 套件沒附授權全文時的補充檔（目前是 `@tauri-apps/plugin-opener`、`plugin-process`、`plugin-updater`：npm 套件只有 `LICENSE.spdx`；來源見各目錄的 `SOURCE.md`） |
+| `app/src-tauri/about.toml` | cargo-about 設定（範圍與允許的授權） |
+| `app/src-tauri/tauri.sidecar.conf.json` | `bundle.resources` 的 `"licenses/": "licenses/"`，與引擎目錄一起帶進安裝檔 |
+
+### 範圍
+
+- **Rust**：`cargo about generate --format json`，三個發布平台（與 `deny.toml` 相同）的 **normal 依賴**，三平台聯集（每個安裝檔都附同一份，多列無害）。排除 `build-dependencies`（只在建置機器上執行，不連結進執行檔）與 `dev-dependencies`（只給測試）。proc-macro 在依賴圖上是 normal 依賴，cargo-about 不區分它是否連結進執行檔，所以**保留**（寧可多列）：例如四個 Servo 的 MPL-2.0 crate 只經 `tauri-macros`（proc-macro）→ `tauri-codegen` → `tauri-utils` → `dom_query` 進入依賴圖，實際上可能沒有連結進執行檔，仍照列並附原始碼說明。kikitori 自己的 crate（本機路徑、`source` 為空）不列，由 `kikitori/LICENSE` 涵蓋。
+- **npm**：`package-lock.json` 從根的 `dependencies`（含 `optionalDependencies`、`peerDependencies`）依 Node 的解析規則走出的遞移閉包，也就是 `@tauri-apps/api` 與三個外掛；devDependencies 不列。例外：**Vite**（把自己的 modulepreload polyfill 寫進 bundle，`dist/assets/*.js` 實測可見）與 **Rolldown**（Vite 的 bundler，某些模組型態會輸出執行期 helper；目前的 bundle 沒有，為了之後改程式不會漏掉而列入）。Vite 的 `LICENSE.md` 本身已含它內嵌依賴的授權。
+- 讀 `node_modules/<套件>/package.json` 的名稱、版本與 `license`（必須與 lock 相同，不同就要求 `npm ci`），複製套件最上層的 `LICENSE*`／`COPYING*`／`NOTICE*` 等檔案（與引擎相同的檔名規則）。`*.spdx` 只是 metadata，不算全文；沒有全文時用 `license_overrides/<套件名>/`，兩邊都沒有 → **失敗**。
+- 每個 crate 都必須至少對應到一份授權全文，否則失敗（`cargo about --fail` 也會在無法判定授權時失敗）。沒附授權檔的 crate（例如 Tauri 外掛、`windows-*`）由 cargo-about 填入該 SPDX 授權的標準全文。
+- 以 MPL 授權使用的 crate（雙授權時選了別的授權的不算）必須來自 crates.io，否則失敗；每個都寫進 `MPL-2.0-SOURCE.txt`（名稱、版本、crates.io 頁面、`.crate` 下載網址、上游 repository）。
+
+### 輸出（`app/src-tauri/licenses/`，不進 repo）
+
+| 檔案 | 內容 |
+|---|---|
+| `README.txt` | 目錄說明，並指向引擎的 `kikitori-engine/THIRD_PARTY_LICENSES/` |
+| `kikitori/LICENSE` | kikitori 本身（MIT，repo 根目錄的 `LICENSE`） |
+| `rust/NOTICES.txt` | crate 清單（名稱、版本、採用的授權），接著每份授權全文與使用它的 crate |
+| `rust/MPL-2.0-SOURCE.txt` | MPL-2.0 crate 的原始碼取得方式（2026-11-05：cssparser 0.37.0、cssparser-macros 0.7.1、dtoa-short 0.3.5、option-ext 0.2.0、selectors 0.38.0） |
+| `npm/NOTICES.txt` | npm 套件清單與各自授權檔的全文 |
+| `manifest.json` | 機器可讀的清單；`generator` 欄位讓程式只清空自己產生過的目錄（`--out` 指錯時不會刪掉別的東西） |
+
+**產生而不提交**：依賴升級時提交的檔案會過期，而且沒有東西會提醒；改成每次發布建置都從 `Cargo.lock`／`package-lock.json` 當場產生，永遠與該次建置一致。開發用的 `cargo build`／`tauri dev` 不讀 `tauri.sidecar.conf.json`，所以這個目錄不存在也不影響；本機要用 sidecar 設定跑 `tauri build` 時，先執行本程式（與先跑 `build.py` 相同）。
+
+在安裝後的位置（`<資源目錄>/licenses/`）：Windows 是安裝目錄，Linux deb／AppImage 是 `/usr/lib/kikitori/`，macOS 是 `kikitori.app/Contents/Resources/`。「關於」頁可開啟它與引擎的授權資料夾（`ui.md`）。
+
+### cargo-about
+
+| 項目 | 值 |
+|---|---|
+| 版本 | 0.9.2（2026-08-18 發布；0.9.3 發布未滿兩週，不採用）。MIT OR Apache-2.0 |
+| 取得方式 | GitHub Release 的預建發行檔，核對 SHA-256（與 cargo-deny 相同的做法） |
+| `x86_64-unknown-linux-musl.tar.gz` | `9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af` |
+| `x86_64-pc-windows-msvc.tar.gz` | `1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748` |
+| `aarch64-apple-darwin.tar.gz` | `ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e` |
+
+雜湊與 Release 附的 `.sha256` 相符（2026-11-05 下載核對）。本機可用同樣的發行檔，或 `cargo install --locked --features cli cargo-about@0.9.2`。
+
+```text
+uv run python packaging/app/licenses.py                                  互動選單
+uv run python packaging/app/licenses.py --out app/src-tauri/licenses     產生（CI）
+uv run python packaging/app/licenses.py --check-bundle <資源目錄>         檢查安裝後的兩份授權資料夾
+```
+
+`--check-bundle` 確認 `licenses/` 的每個檔案、`manifest.json` 由本程式產生、每個 MPL crate 在 `MPL-2.0-SOURCE.txt` 都有說明，以及引擎的 `kikitori-engine/THIRD_PARTY_LICENSES/README.txt` 存在。
+
+CI：`app.yml` 的 `licenses` job 每次 push 都產生一次（確認產生得出來，結果寫進 step summary）；`release.yml` 每個平台在 `tauri build` 前產生、安裝後以 `--check-bundle` 檢查（見 `release-update.md`）。
+
 ## 版本號同步（`scripts/sync_version.py`）
 
 單一來源 `pyproject.toml` 的 `[project].version`，必須是 SemVer（Cargo／Tauri 的要求）。
@@ -165,15 +222,16 @@ CI runner 沒有音訊裝置、Ollama、模型與本機忽略的資料：測試�
 1. `uv sync --locked`、`build.py --smoke`（放到 `app/src-tauri/binaries/kikitori-engine/`）。
 2. `tauri build`（resources 帶入引擎目錄），以 `TAURI_SIGNING_PRIVATE_KEY`（GitHub Secrets）簽更新器檔案。
 3. 對安裝後的引擎再跑 `smoke_test.py --binary <path> --self-check`（確認執行權限與 macOS 簽章）。
-4. 建立 GitHub Release（tag = `v<pyproject 版本>`），附 `latest.json`、簽章與各平台安裝檔；`THIRD_PARTY_LICENSES` 隨引擎目錄進安裝檔。
+4. 建立 GitHub Release（tag = `v<pyproject 版本>`），附 `latest.json`、簽章與各平台安裝檔；`THIRD_PARTY_LICENSES` 隨引擎目錄進安裝檔，app 的 `licenses/`（Rust、npm、kikitori 的 LICENSE）在 `tauri build` 前產生、同樣以 resources 帶入。
 5. 權限只在建立 release 的 job 給 `contents: write`。
 
 ## 測試
 
 ```text
-uv run python -m unittest tests.test_packaging_build tests.test_packaging_licenses tests.test_sync_version
+uv run python -m unittest tests.test_packaging_build tests.test_packaging_licenses tests.test_sync_version tests.test_app_licenses
 ```
 
 - `test_sync_version.py`：暫存目錄的假 repo（每種目標檔）、check／sync／bump、只改版本字串、CRLF 保留、錯誤路徑（非 SemVer、壞 JSON、缺欄位、Cargo.lock 沒有本程式）、`uv lock`（假 runner：成功、失敗、逾時、沒有 uv）、選單。
 - `test_packaging_build.py`：禁止／系統檔名規則、target triple（參數、環境變數、rustc 輸出、rustc 缺少或逾時、格式驗證、推算表）、PyInstaller 指令、建置流程（假 PyInstaller：成功、失敗、逾時、缺執行檔、含禁止檔案）、sidecar 放置（one-folder／one-file，不動其他檔案）、選單與參數、`entry.py`（未知參數、自我檢查的錯誤彙整、原始碼環境下全部檢查通過）、對開發環境引擎跑完整冒煙測試。
 - `test_packaging_licenses.py`：假 dist-info（PathDistribution）的對應、授權檔複製與相對路徑、override、缺授權、系統函式庫標註、輸出覆寫、PyInstaller 一律列入。
+- `test_app_licenses.py`：暫存目錄的假 `package-lock.json`／`node_modules`：正式依賴閉包（巢狀解析、往上層找、dev 套件排除、optional／peer、缺依賴、壞 lock、link）、實際的 `app/package-lock.json` 只走到 `@tauri-apps/*`、Vite 列入、`.spdx` 不算全文、override、`npm ci` 提示（缺檔、版本不符）、缺 `license`；假 cargo-about JSON：略過本機 crate、MPL 判定（雙授權選 MIT 時不算）、缺全文、非 crates.io 的 MPL crate、壞資料；cargo-about 指令（假 runner：成功、未安裝、壞 JSON、逾時、找不到 cargo）；輸出目錄（內容、只覆寫自己產生的目錄、缺 LICENSE）；`--check-bundle`（完整、缺檔、缺 MPL 說明、他人的 manifest）；選單與參數。提交的 override 都有全文與 `SOURCE.md`。

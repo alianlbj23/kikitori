@@ -19,6 +19,7 @@ import type {
   DeviceInfo,
   DownloadProgressEvent,
   HardwareReport,
+  LicenseFolder,
   LogEvent,
   Mode,
   ModelsList,
@@ -100,8 +101,9 @@ export const api = {
   async about(): Promise<AboutInfo> {
     return parseAbout(await invoke("app_about"));
   },
-  async openThirdPartyLicenses(): Promise<void> {
-    await invoke("open_third_party_licenses");
+  /** Opens a bundled license folder; Rust computes the path from the name. */
+  async openThirdPartyLicenses(folder: LicenseFolder): Promise<void> {
+    await invoke("open_third_party_licenses", { folder });
   },
   /** Opens the NVIDIA CUDA EULA; the opener permission allows no other URL. */
   async openNvidiaEula(): Promise<void> {

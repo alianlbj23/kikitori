@@ -11,6 +11,7 @@
 | 發布（gate、測試、三平台打包、簽章驗證、Release） | `.github/workflows/release.yml` |
 | 發布判斷、整理安裝檔、驗證簽章、產生 `latest.json` | `scripts/release.py`（測試：`tests/test_release.py`） |
 | Rust 依賴授權規則 | `app/src-tauri/deny.toml` |
+| app 的第三方授權聲明（Rust、npm、kikitori 的 LICENSE） | `packaging/app/licenses.py`、`app/src-tauri/about.toml`（見 `packaging-ci.md`） |
 | 版本號同步 | `scripts/sync_version.py`（見 `packaging-ci.md`） |
 
 ## 與上位文件的差異
@@ -23,7 +24,7 @@
 | job | 矩陣 | 步驟 |
 |---|---|---|
 | `checks` | windows-latest、ubuntu-latest、macos-latest | Linux 先裝 Tauri v2 依賴（WebKitGTK 4.1 等，依 v2.tauri.app 的清單）→ `npm ci` → `npm run typecheck` → `npm test`（vitest）→ `npm run build` → `cargo fmt --check` → `cargo clippy --locked --all-targets -- -D warnings` → `cargo test --locked` |
-| `licenses` | ubuntu-latest | 下載 cargo-deny 0.20.2 發行檔（核對 SHA-256）→ `cargo-deny --locked check licenses` |
+| `licenses` | ubuntu-latest | 下載 cargo-deny 0.20.2 發行檔（核對 SHA-256）→ `cargo-deny --locked check licenses` → 下載 cargo-about 0.9.2 發行檔（核對 SHA-256）→ `npm ci` → `packaging/app/licenses.py --out`（確認 app 的第三方授權聲明產生得出來，README 與 MPL 原始碼說明寫進 step summary） |
 
 - `cargo test` 的端到端測試以真的子行程執行引擎（`uv run kikitori engine`、`app/dev/fake_engine.py`），所以 job 先裝 uv 並 `uv sync --locked`；不略過這些測試。
 - 前端要先 `npm run build`：`tauri::generate_context!` 在編譯時嵌入 `app/dist`。
@@ -43,7 +44,9 @@
 
 本機執行（cargo-deny 0.20.2 發行檔解壓後）：`cd app/src-tauri && cargo-deny --locked check licenses`。
 
-**已知缺口（待處理）**：MIT／Apache-2.0／MPL-2.0 等授權要求散布執行檔時附上授權聲明（MPL-2.0 §3.2 還要告知取得原始碼的方式）。引擎有 `THIRD_PARTY_LICENSES/`，但 Rust（Tauri）與前端 npm 依賴目前沒有產生聲明檔；發布第一個正式版前應補上（例如以 `cargo about` 產生，放進 bundle resources，並在「關於」頁連結）。
+### 散布時的授權聲明
+
+MIT／Apache-2.0／MPL-2.0 等授權要求散布執行檔時附上授權聲明，MPL-2.0 §3.2 還要告知取得原始碼的方式。引擎有自己的 `THIRD_PARTY_LICENSES/`；Rust crate、前端 npm 套件與 kikitori 自己的 LICENSE 由 `packaging/app/licenses.py`（cargo-about 0.9.2 ＋ `package-lock.json`）在每次發布建置時產生成 `licenses/`，以 `bundle.resources` 放進安裝檔，`rust/MPL-2.0-SOURCE.txt` 列出上表五個 MPL-2.0 crate 的 crates.io 與上游原始碼位置。範圍、輸出與工具雜湊見 `packaging-ci.md`「app 的第三方授權聲明」；「關於」頁可開啟兩個資料夾（`ui.md`）。新增 MPL 例外時不必改產生程式：以 MPL 使用的 crate 會自動列入原始碼說明（只接受 crates.io 來源，否則產生失敗）。
 
 ## 發布：`release.yml`
 
@@ -100,15 +103,15 @@ gate ──┬─ test（重用 test.yml）────────────�
 
 Linux 在 ubuntu-22.04 建置：AppImage／deb 依賴建置機的 glibc，舊版 Ubuntu 能涵蓋較多發行版。
 
-步驟：`uv sync --locked` → `build.py --smoke`（建置引擎、冒煙測試、放到 `app/src-tauri/binaries/kikitori-engine/`）→ `npm ci` → 準備更新器簽章金鑰 → `npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json --bundles …`（引擎以 `bundle.resources` 帶入）→ Linux 若 Tauri 沒有簽 deb，以 `tauri signer sign --app-version <v>` 補簽 → 安裝後冒煙測試 → `release.py collect` 以固定名稱整理 → 上傳 `bundle-<平台>` artifact。
+步驟：`uv sync --locked` → `build.py --smoke`（建置引擎、冒煙測試、放到 `app/src-tauri/binaries/kikitori-engine/`）→ `npm ci` → 下載該平台的 cargo-about 0.9.2 發行檔（核對 matrix 裡的 SHA-256）→ `packaging/app/licenses.py --out app/src-tauri/licenses`（app 的第三方授權聲明）→ 準備更新器簽章金鑰 → `npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json --bundles …`（引擎與 `licenses/` 以 `bundle.resources` 帶入）→ Linux 若 Tauri 沒有簽 deb，以 `tauri signer sign --app-version <v>` 補簽 → 安裝後冒煙測試 → `release.py collect` 以固定名稱整理 → 上傳 `bundle-<平台>` artifact。
 
-安裝後冒煙測試（`smoke_test.py --binary <路徑> --self-check --expect-version <v>`，對打包**之後**的引擎）：
+安裝後冒煙測試（`smoke_test.py --binary <路徑> --self-check --expect-version <v>`，對打包**之後**的引擎；同一個資源目錄再跑 `packaging/app/licenses.py --check-bundle <資源目錄>`，確認 `licenses/` 與 `kikitori-engine/THIRD_PARTY_LICENSES/` 都在安裝檔裡、每個 MPL crate 都有原始碼說明）：
 
 | 平台 | 做法 |
 |---|---|
-| Windows | NSIS 安裝檔 `/S /D=<暫存目錄>` 靜默安裝，對安裝目錄的 `kikitori-engine\kikitori-engine.exe` 測試 |
-| Linux | `apt-get install ./kikitori_<v>_amd64.deb`，檢查 `/usr/lib/kikitori/kikitori-engine/kikitori-engine` 有執行權限並測試；AppImage 以 `--appimage-extract` 解開，對 `squashfs-root/usr/lib/kikitori/kikitori-engine/` 同樣檢查 |
-| macOS | 對 `.app`、掛載的 DMG 內的 `.app`、更新用 tarball 解開的 `.app` 各做：`codesign --verify --deep --strict`、引擎執行權限、引擎本身的 `codesign --verify --strict`、冒煙測試 |
+| Windows | NSIS 安裝檔 `/S /D=<暫存目錄>` 靜默安裝，對安裝目錄的 `kikitori-engine\kikitori-engine.exe` 測試；授權資料夾以安裝目錄為資源目錄 |
+| Linux | `apt-get install ./kikitori_<v>_amd64.deb`，檢查 `/usr/lib/kikitori/kikitori-engine/kikitori-engine` 有執行權限並測試；AppImage 以 `--appimage-extract` 解開，對 `squashfs-root/usr/lib/kikitori/kikitori-engine/` 同樣檢查；授權資料夾以 `/usr/lib/kikitori`、`squashfs-root/usr/lib/kikitori` 為資源目錄 |
+| macOS | 對 `.app`、掛載的 DMG 內的 `.app`、更新用 tarball 解開的 `.app` 各做：`codesign --verify --deep --strict`、引擎執行權限、引擎本身的 `codesign --verify --strict`、冒煙測試、授權資料夾（`Contents/Resources`） |
 
 macOS 不做付費簽章與公證：`tauri.conf.json` 的 `bundle.macOS.signingIdentity` 設為 `"-"`（ad-hoc 簽章；Apple Silicon 上所有程式碼都必須有簽章）。PyInstaller 已對引擎的每個 Mach-O 做 ad-hoc 簽章，上面的 codesign 檢查確認 Tauri 簽 `.app` 時沒有破壞它們。
 
@@ -203,7 +206,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 
 ## 需要實機確認
 
-- 三平台從 Release 下載安裝、啟動、引擎啟動（正式資源目錄路徑）、「關於」頁的第三方授權資料夾。
+- 三平台從 Release 下載安裝、啟動、引擎啟動（正式資源目錄路徑）、「關於」頁的兩個授權資料夾按鈕實際在檔案管理員開啟（`licenses/` 與 `kikitori-engine/THIRD_PARTY_LICENSES/`；CI 只檢查檔案在安裝檔內）。
 - 自動更新的完整一輪：裝 `v<n>` → 發布 `v<n+1>` → app 偵測、下載、驗證、安裝、重新啟動後版本正確。第一個 Release 之後才能測（需要兩個版本）。
 - macOS：下載的 DMG 在 Gatekeeper 的實際提示（應是「無法驗證開發者」而非「已損毀」）、強制打開後能正常執行、自動更新替換 `.app` 後引擎仍可執行（ad-hoc 簽章、執行權限）、螢幕錄製權限在更新後是否要重新授權（ad-hoc 簽章的程式每版簽章不同，TCC 可能視為新程式）。
 - Linux：AppImage 在沒有 `libfuse2` 的發行版、Wayland 桌面；deb 更新時 pkexec 的提示；AppImage 自我更新需要對檔案所在目錄的寫入權限。

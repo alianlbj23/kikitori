@@ -293,9 +293,14 @@ export interface AppliedRecommendation {
 /** `app_about`: license facts for the settings page. */
 export interface AboutInfo {
   license: string;
+  /** kikitori's LICENSE plus Rust/npm notices (`<resources>/licenses`); null in development builds. */
+  app_licenses: string | null;
   /** Bundled engine's third-party license folder; null in development builds. */
-  third_party_licenses: string | null;
+  engine_licenses: string | null;
 }
+
+/** Argument of `open_third_party_licenses`: which bundled folder to open. */
+export type LicenseFolder = "app" | "engine";
 
 /** Error object returned by every Tauri command (Rust `RequestError`). */
 export type CommandError =

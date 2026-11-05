@@ -461,7 +461,8 @@ export function parseAbout(v: unknown): AboutInfo {
   const o = obj(v, p);
   return {
     license: str(o, "license", p, 100),
-    third_party_licenses: optStr(o, "third_party_licenses", p),
+    app_licenses: optStr(o, "app_licenses", p),
+    engine_licenses: optStr(o, "engine_licenses", p),
   };
 }
 

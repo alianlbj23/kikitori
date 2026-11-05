@@ -124,13 +124,27 @@ describe("command results", () => {
   });
 
   it("parses app_about", () => {
-    expect(parseAbout({ license: "MIT", third_party_licenses: null })).toEqual({
+    expect(parseAbout({ license: "MIT", app_licenses: null, engine_licenses: null })).toEqual({
       license: "MIT",
-      third_party_licenses: null,
+      app_licenses: null,
+      engine_licenses: null,
     });
-    expect(parseAbout({ license: "MIT", third_party_licenses: "C:/k/kikitori-engine/THIRD_PARTY_LICENSES" })
-      .third_party_licenses).toContain("THIRD_PARTY_LICENSES");
-    expect(() => parseAbout({ third_party_licenses: null })).toThrow(ValidationError);
+    expect(
+      parseAbout({
+        license: "MIT",
+        app_licenses: "C:/k/licenses",
+        engine_licenses: "C:/k/kikitori-engine/THIRD_PARTY_LICENSES",
+      }),
+    ).toEqual({
+      license: "MIT",
+      app_licenses: "C:/k/licenses",
+      engine_licenses: "C:/k/kikitori-engine/THIRD_PARTY_LICENSES",
+    });
+    // A release built without one of the folders still parses.
+    expect(parseAbout({ license: "MIT", app_licenses: "/usr/lib/kikitori/licenses" }).engine_licenses).toBeNull();
+    expect(() => parseAbout({ app_licenses: null })).toThrow(ValidationError);
+    expect(() => parseAbout({ license: "MIT", app_licenses: 3 })).toThrow(ValidationError);
+    expect(() => parseAbout({ license: "MIT", engine_licenses: ["x"] })).toThrow(ValidationError);
   });
 });
 

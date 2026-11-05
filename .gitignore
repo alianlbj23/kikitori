@@ -16,3 +16,5 @@ experiments/silero_reset/data/
 /build/
 /dist/
 /app/src-tauri/binaries/
+# app 的第三方授權聲明（packaging/app/licenses.py 在發布建置時產生，隨安裝檔散布）
+/app/src-tauri/licenses/

@@ -27,7 +27,8 @@ allow = [
 
 # MPL-2.0 是「檔案層級」的 copyleft：只有這些 crate 自己的原始檔受約束，不影響 kikitori 其他程式碼
 # 的授權。我們原樣使用（不修改），原始碼在 crates.io 公開可取得；散布執行檔時依 MPL-2.0 §3.2
-# 告知取得原始碼的方式（第三方授權聲明）。都是 Tauri 本身的依賴，無法移除：
+# 告知取得原始碼的方式（packaging/app/licenses.py 產生、隨安裝檔散布的
+# licenses/rust/MPL-2.0-SOURCE.txt）。都是 Tauri 本身的依賴，無法移除：
 # - cssparser、cssparser-macros、dtoa-short、selectors：Servo 專案，經 tauri-utils → dom_query
 #   （tauri-codegen 在建置時處理 HTML）。
 # - option-ext：經 tauri → dirs → dirs-sys。

@@ -131,6 +131,7 @@ Python 引擎（`src/kikitori/`）：
 | 部分 | 一句話 |
 |---|---|
 | `packaging/engine/` | 用 PyInstaller 把引擎打包成資料夾，並產生第三方授權目錄。 |
+| `packaging/app/` | 發布建置時產生 app 本身（Rust crate、前端 npm 套件、kikitori 的 LICENSE）的第三方授權目錄。 |
 | `scripts/sync_version.py` | 版本號只在 `pyproject.toml` 改一次，同步到 app 的四個檔案。 |
 | `.github/workflows/test.yml` | 三平台跑 Python 測試、lint、版本檢查、引擎打包與冒煙測試。 |
 | `experiments/` | 一次性的實驗與基準測試，結果寫在各自的 README。不屬於正式程式。 |

@@ -97,14 +97,20 @@ jobs:
           - platform: windows
             os: windows-latest
             bundles: nsis
+            cargo_about: x86_64-pc-windows-msvc
+            cargo_about_sha256: 1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748
           # 在較舊的 Ubuntu 建置，AppImage／deb 需要的 glibc 較低，能在較多發行版執行。
           - platform: linux
             os: ubuntu-22.04
             bundles: appimage,deb
+            cargo_about: x86_64-unknown-linux-musl
+            cargo_about_sha256: 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
           # macos-latest 是 Apple Silicon（arm64）。
           - platform: macos
             os: macos-latest
             bundles: app,dmg
+            cargo_about: aarch64-apple-darwin
+            cargo_about_sha256: ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -113,6 +119,8 @@ jobs:
       BUNDLES: ${{ matrix.bundles }}
       PLATFORM: ${{ matrix.platform }}
       BUNDLE_DIR: app/src-tauri/target/release/bundle
+      # 與 app.yml 相同的版本；各平台發行檔的 SHA-256 在 matrix。
+      CARGO_ABOUT_VERSION: "0.9.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -161,6 +169,31 @@ jobs:
       - name: npm ci
         working-directory: app
         run: npm ci
+
+      - name: Install cargo-about (pinned, checksum verified)
+        env:
+          TARGET: ${{ matrix.cargo_about }}
+          SHA256: ${{ matrix.cargo_about_sha256 }}
+        run: |
+          set -euo pipefail
+          name="cargo-about-${CARGO_ABOUT_VERSION}-${TARGET}"
+          curl --fail --silent --show-error --location --max-time 120 \
+            -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/${name}.tar.gz"
+          actual="$(uv run --no-project python -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$RUNNER_TEMP/$name.tar.gz")"
+          if [ "$actual" != "$SHA256" ]; then
+            echo "::error::cargo-about checksum mismatch: $actual"
+            exit 1
+          fi
+          # 相對路徑：Windows 上 GNU tar 會把 "D:\..." 的 "D:" 當成遠端主機。
+          (cd "$RUNNER_TEMP" && tar -xzf "$name.tar.gz")
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Third-party notices for the app (Rust crates, npm packages, kikitori LICENSE)
+        # tauri.sidecar.conf.json 的 bundle.resources 把這個目錄放進安裝檔（licenses/）。
+        run: |
+          cargo about --version
+          uv run python packaging/app/licenses.py --out app/src-tauri/licenses
 
       - name: "Updater signing key (publish: from GitHub Secrets)"
         if: env.MODE == 'publish'
@@ -226,6 +259,9 @@ jobs:
           if (-not (Test-Path $engine)) { throw "engine not installed at $engine" }
           uv run python packaging/engine/smoke_test.py --binary $engine --self-check --expect-version $env:VERSION
           if ($LASTEXITCODE -ne 0) { throw "smoke test failed ($LASTEXITCODE)" }
+          # 第三方授權：licenses/（app）與 kikitori-engine/THIRD_PARTY_LICENSES/（引擎）。
+          uv run python packaging/app/licenses.py --check-bundle $dir
+          if ($LASTEXITCODE -ne 0) { throw "license folders incomplete ($LASTEXITCODE)" }
 
       - name: "Smoke test (Linux): installed deb and extracted AppImage"
         if: runner.os == 'Linux'
@@ -237,6 +273,7 @@ jobs:
           engine=/usr/lib/kikitori/kikitori-engine/kikitori-engine
           test -x "$engine" || { echo "::error::$engine is missing or not executable"; exit 1; }
           uv run python packaging/engine/smoke_test.py --binary "$engine" --self-check --expect-version "$VERSION"
+          uv run python packaging/app/licenses.py --check-bundle /usr/lib/kikitori
 
           appimage="$GITHUB_WORKSPACE/$BUNDLE_DIR/appimage/kikitori_${VERSION}_amd64.AppImage"
           test -x "$appimage" || { echo "::error::AppImage is not executable"; exit 1; }
@@ -244,6 +281,7 @@ jobs:
           engine="$RUNNER_TEMP/squashfs-root/usr/lib/kikitori/kikitori-engine/kikitori-engine"
           test -x "$engine" || { echo "::error::$engine is missing or not executable"; exit 1; }
           uv run python packaging/engine/smoke_test.py --binary "$engine" --self-check --expect-version "$VERSION"
+          uv run python packaging/app/licenses.py --check-bundle "$RUNNER_TEMP/squashfs-root/usr/lib/kikitori"
 
       - name: "Smoke test (macOS): signatures, .app, DMG and the updater tarball"
         if: runner.os == 'macOS'
@@ -258,6 +296,7 @@ jobs:
             test -x "$engine" || { echo "::error::$engine is missing or not executable"; exit 1; }
             codesign --verify --strict --verbose=2 "$engine"
             uv run python packaging/engine/smoke_test.py --binary "$engine" --self-check --expect-version "$VERSION"
+            uv run python packaging/app/licenses.py --check-bundle "$app/Contents/Resources"
           }
           check "$BUNDLE_DIR/macos/kikitori.app"
 
