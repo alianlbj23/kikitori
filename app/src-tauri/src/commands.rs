@@ -16,6 +16,8 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::connection::RequestError;
 use crate::engine::{BridgeStatus, EngineBridge, third_party_licenses_dir};
+use crate::obs::{ObsContent, ObsOutput, ObsStatus};
+use crate::output::{self, OutputFolder};
 use crate::overlay::{OVERLAY_LABEL, OverlaySnapshot, OverlayState, OverlayStyle};
 
 type CmdResult<T> = Result<T, RequestError>;
@@ -487,6 +489,86 @@ pub fn open_third_party_licenses(app: AppHandle, folder: LicenseFolder) -> CmdRe
         })
 }
 
+/// The user's Documents folder (Tauri path API); `None` when the OS has none.
+pub fn documents_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .document_dir()
+        .map_err(|e| log::error!("cannot resolve the Documents folder: {e}"))
+        .ok()
+}
+
+/// Where transcripts and the OBS text go, for the settings page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutputInfo {
+    /// `<Documents>/kikitori/transcripts`; `None` without a Documents folder.
+    pub transcripts_dir: Option<String>,
+    /// `<Documents>/kikitori/obs/subtitle.txt`.
+    pub obs_file: Option<String>,
+}
+
+pub fn output_info_for(documents: Option<&Path>) -> OutputInfo {
+    OutputInfo {
+        transcripts_dir: documents
+            .map(|d| display_path(&output::folder_path(d, OutputFolder::Transcripts))),
+        obs_file: documents.map(|d| display_path(&output::obs_file_path(d))),
+    }
+}
+
+#[tauri::command]
+pub fn output_info(app: AppHandle) -> OutputInfo {
+    output_info_for(documents_dir(&app).as_deref())
+}
+
+/// Saves an exported transcript into `<Documents>/kikitori/transcripts/` and
+/// returns its full path. The webview only names the file (validated by
+/// [`output::validate_transcript_name`]); the folder is decided here.
+#[tauri::command]
+pub async fn transcript_save(
+    app: AppHandle,
+    file_name: String,
+    contents: String,
+) -> CmdResult<String> {
+    // Checked before touching the disk, so a bad name never creates folders.
+    output::validate_transcript_name(&file_name).map_err(invalid)?;
+    let documents =
+        documents_dir(&app).ok_or_else(|| invalid("the Documents folder could not be found"))?;
+    let dir = output::folder_path(&documents, OutputFolder::Transcripts);
+    // File I/O off the async runtime's workers.
+    tauri::async_runtime::spawn_blocking(move || {
+        output::save_transcript(&dir, &file_name, &contents)
+    })
+    .await
+    .map_err(|e| invalid(format!("the save task failed: {e}")))?
+    .map(|path| display_path(&path))
+    .map_err(invalid)
+}
+
+/// Opens the transcripts or OBS folder in the file manager (created first, so
+/// the button works before anything was saved). Takes only a folder name.
+#[tauri::command]
+pub fn open_output_folder(app: AppHandle, folder: OutputFolder) -> CmdResult<()> {
+    let documents =
+        documents_dir(&app).ok_or_else(|| invalid("the Documents folder could not be found"))?;
+    let dir = output::folder_path(&documents, folder);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        log::error!("cannot create {}: {e}", dir.display());
+        invalid(format!("cannot create the folder: {e}"))
+    })?;
+    let shown = display_path(&dir);
+    app.opener()
+        .open_path(shown.clone(), None::<String>)
+        .map_err(|e| {
+            log::error!("cannot open {shown}: {e}");
+            invalid(format!("cannot open the folder: {e}"))
+        })
+}
+
+/// Turns the OBS text output on or off (`settings.subtitle.obs_output`).
+#[tauri::command]
+pub fn obs_set_output(obs: State<'_, ObsOutput>, content: ObsContent) -> ObsStatus {
+    obs.set_content(content)
+}
+
 #[tauri::command]
 pub fn overlay_get_state(overlay: State<'_, OverlayState>) -> OverlaySnapshot {
     overlay.snapshot()
@@ -502,9 +584,12 @@ fn broadcast_overlay(app: &AppHandle, overlay: &OverlayState) {
 pub fn overlay_set_style(
     app: AppHandle,
     overlay: State<'_, OverlayState>,
+    obs: State<'_, ObsOutput>,
     style: OverlayStyle,
 ) -> CmdResult<OverlaySnapshot> {
-    overlay.set_style(style).map_err(invalid)?;
+    overlay.set_style(style.clone()).map_err(invalid)?;
+    // The OBS text mirrors the overlay: same line count and idle clearing.
+    obs.set_style(&style);
     broadcast_overlay(&app, &overlay);
     Ok(overlay.snapshot())
 }
@@ -528,9 +613,11 @@ pub fn overlay_set_locale(
 pub fn overlay_set_show_translation(
     app: AppHandle,
     overlay: State<'_, OverlayState>,
+    obs: State<'_, ObsOutput>,
     enabled: bool,
 ) -> OverlaySnapshot {
     overlay.set_show_translation(enabled);
+    obs.set_show_translation(enabled);
     broadcast_overlay(&app, &overlay);
     overlay.snapshot()
 }
@@ -837,5 +924,31 @@ mod tests {
             json!({"mode": "interpret", "device_id": "mic-1"})
         );
         assert!(serde_json::from_value::<Mode>(json!("karaoke")).is_err());
+    }
+
+    #[test]
+    fn output_paths_live_under_documents_or_are_absent() {
+        assert_eq!(
+            output_info_for(None),
+            OutputInfo {
+                transcripts_dir: None,
+                obs_file: None
+            }
+        );
+        let docs = Path::new("Docs");
+        let info = output_info_for(Some(docs));
+        assert_eq!(
+            info.transcripts_dir.as_deref(),
+            Some(display_path(&docs.join("kikitori").join("transcripts")).as_str())
+        );
+        assert_eq!(
+            info.obs_file.as_deref(),
+            Some(display_path(&docs.join("kikitori").join("obs").join("subtitle.txt")).as_str())
+        );
+        assert_eq!(
+            serde_json::from_value::<ObsContent>(json!("both")).unwrap(),
+            ObsContent::Both
+        );
+        assert!(serde_json::from_value::<ObsContent>(json!("everything")).is_err());
     }
 }

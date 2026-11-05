@@ -1,6 +1,6 @@
 # Spec: ui（Tauri 桌面程式）
 
-> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。之後加上自動推薦（第一次執行自動套用、更適合的組合提示、缺少模型的一鍵下載；見「自動推薦」）。Milestone 15 第一階段（2026-11-05）：介面多語系的機制、全部介面文字抽到字典（zh-TW 基準、English），見「介面多語系」。第二階段（2026-11-05）：對齊 Milestone 12–14 的引擎協定——全部引擎訊息碼的字典、任意語言組合的語言選單與推薦預覽、開始時才下載缺少的模型、「顯示翻譯」開關與只顯示原文的字幕（見「語言選單」「開始前下載缺少的模型」「只顯示原文」）。
+> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。之後加上自動推薦（第一次執行自動套用、更適合的組合提示、缺少模型的一鍵下載；見「自動推薦」）。Milestone 15 第一階段（2026-11-05）：介面多語系的機制、全部介面文字抽到字典（zh-TW 基準、English），見「介面多語系」。第二階段（2026-11-05）：對齊 Milestone 12–14 的引擎協定——全部引擎訊息碼的字典、任意語言組合的語言選單與推薦預覽、開始時才下載缺少的模型、「顯示翻譯」開關與只顯示原文的字幕（見「語言選單」「開始前下載缺少的模型」「只顯示原文」）。競品比較後的補強（2026-11-06，`competitive-features.md` F1／F5／F6／F8 的 UI 與 Rust 部分）：匯出字幕紀錄與每次自動存檔、字幕視窗的閱讀節奏、OBS 文字檔輸出、翻譯服務連不上時的引導、兩個新的全域快速鍵與「複製診斷資訊」（見「匯出字幕紀錄」「閱讀節奏」「OBS 文字檔」「翻譯服務連不上時」「診斷資訊」）。
 > 上層約定：`docs/specs/app-architecture.md`（行程架構、引擎協定、視窗、更新）與 `docs/specs/pipeline-engine.md`（協定欄位細節、設定檔結構）。本文件只補充 UI 端的設計，不改協定。
 
 ## 範圍
@@ -57,7 +57,8 @@
 - 每句一列：時間碼（`start_sample / 16000`，`m:ss`）、來源語言單字標籤（日／英／中，滑鼠移上去顯示「日語譯成繁體中文」）、原文（較大）、譯文。原文與譯文都加 `dir="auto"`（阿拉伯語由右到左）。譯文是空字串時以 CSS `attr(data-empty)` 顯示字典裡的「（沒有譯文）」／「翻譯中」（第一階段寫死在 CSS 的中文移到字典）。
 - 「顯示翻譯」關閉時只列原文（譯文列不顯示，`lib/subtitles.ts` 的 `lineDisplay`）；已翻譯的句子保留譯文，再打開時重新顯示。
 - 即時字幕（`is_final=false`）以淡色顯示並在左側加字幕黃細條；同一個 `utterance_id` 的完整翻譯到達時原地取代。最多保留 300 句。使用者停在底部時自動捲動，往上翻時不打擾。
-- 工具：顯示字幕視窗、滑鼠穿透、**顯示翻譯**三個開關，以及「清除紀錄」。開關下方說明全域快速鍵；快速鍵被其他程式占用時改為提示只能用開關。
+- 工具：顯示字幕視窗、滑鼠穿透、**顯示翻譯**三個開關、「清除紀錄」與「**匯出**」選單（見「匯出字幕紀錄」）。開關下方逐行說明三個全域快速鍵（滑鼠穿透、切換顯示翻譯、清除字幕）；被其他程式占用的快速鍵改為提示「已被其他程式占用，無法使用」，其餘照常（不擋其他功能）。
+- 「清除紀錄」同時清掉匯出用的紀錄：清掉的內容之後不會被匯出。
 - 空狀態：說明下一步（選模式與來源後按「開始」）。
 
 ### 模型頁
@@ -99,19 +100,20 @@
 
 | 區塊 | 欄位 | 寫入設定 |
 |---|---|---|
-| 翻譯服務 | 服務網址、API 金鑰的**環境變數名稱** | `translation.{base_url, api_key_env}` |
+| 翻譯服務 | 服務網址、API 金鑰的**環境變數名稱**；連不上時的引導（見「翻譯服務連不上時」） | `translation.{base_url, api_key_env}` |
 | 翻譯模型的授權地區 | 勾選框「我確認我不在歐盟、英國或南韓使用 kikitori，並同意遵守這些翻譯模型的授權條款。」（預設不勾） | `translation.allow_restricted` |
 | 介面語言（頁面最上方、在設定表單之外） | 「跟隨系統」與 13 個語系（以各自語言的名稱列出），選擇後立即套用並儲存 | `ui.locale`（`settings.set {"ui": {"locale": …}}`） |
 | 語言（獨立表單 `languages-form`，自己的「儲存語言」） | 影片翻譯：收聽語言（含「自動偵測」）＋字幕語言；即時口譯：我的語言＋對方的語言。下方是推薦組合預覽與「同時改用推薦的模型」（預設勾選）。見「語言選單」 | `source_language`、`target_language`、`partner_language`（＋勾選時推薦的 `asr`／`translation` 模型） |
-| 字幕 | 「顯示翻譯」開關（改變即套用，不經「儲存設定」，見「只顯示原文」）；譯文字級（14–96 px）、背景不透明度（0–100%）、字幕位置（貼齊上緣／下緣）、同時顯示的句數（1–3），附即時預覽 | `translation.enabled`；`subtitle.{font_size, background_opacity, position, max_lines}` |
-| 關於 | 程式版本、引擎版本與協定版本（假引擎會註明）、授權（`kikitori 以 MIT 授權發布`）、第三方元件聲明、第三方授權資料夾、「檢查更新」 | — |
+| 字幕 | 「顯示翻譯」開關（改變即套用，不經「儲存設定」，見「只顯示原文」）；譯文字級（14–96 px）、背景不透明度（0–100%）、字幕位置（貼齊上緣／下緣）、同時顯示的句數（1–3），附即時預覽；每句至少顯示（0–10 秒，可有小數，預設 1.5）、沒有新字幕時淡出（0–600 秒，0 = 不淡出，預設 8），見「閱讀節奏」 | `translation.enabled`；`subtitle.{font_size, background_opacity, position, max_lines, min_display_ms, idle_clear_secs}` |
+| 字幕紀錄與 OBS | 「每次結束時自動存檔（SRT 與 TXT）」（預設關）與存放位置、「開啟字幕紀錄資料夾」；「輸出字幕到文字檔（給 OBS）」：不輸出（預設）／原文／譯文／原文與譯文，下方顯示檔案路徑（寫入失敗時改為錯誤原因）與「開啟 OBS 文字檔資料夾」 | `ui.auto_save_transcripts`；`subtitle.obs_output` |
+| 關於 | 程式版本、引擎版本與協定版本（假引擎會註明）、授權（`kikitori 以 MIT 授權發布`）、第三方元件聲明、第三方授權資料夾、「檢查更新」、「複製診斷資訊」（見「診斷資訊」） | — |
 
 - 翻譯模型改在模型頁的「自訂組合」選擇（第一階段在設定頁），讓同一份表單涵蓋整個組合、一起經過 `models.validate`（授權、是否在伺服器上、記憶體）。
 - 授權地區說明：部分翻譯模型（例如騰訊 HY-MT）的授權不適用於歐盟、英國與南韓；kikitori 無法得知使用者所在地，所以預設不推薦。勾選後建議組合才會考慮這些模型；不勾選仍可在自訂組合手動選用，但檢查會顯示警告。改變這個勾選後，建議組合會在下次進入模型頁時重新計算。
 - **關於**：顯示「本程式內含的 Intel® OpenMP 等第三方元件依其各自授權條款提供；不得對其進行逆向工程。」（Intel EULA for Developer Tools 的再散布條件，見 `packaging-ci.md`）。正式版有兩個授權資料夾，各自一行顯示完整路徑（可選取）與一個按鈕：程式本身 `<資源目錄>/licenses`（kikitori 的 LICENSE、Tauri／Rust crate 與前端 npm 套件的授權全文、MPL-2.0 crate 的原始碼取得方式；`packaging-ci.md`「app 的第三方授權聲明」）→「開啟程式的第三方授權資料夾」；語音引擎 `<資源目錄>/kikitori-engine/THIRD_PARTY_LICENSES` →「開啟引擎的第三方授權資料夾」。只顯示實際存在的資料夾；兩者都不在（開發版）時改為說明正式版的位置。路徑由 Rust 的 `app_about` 指令算出（`app_licenses`、`engine_licenses`，不存在時為 `null`）；開啟由 `open_third_party_licenses {folder: "app" | "engine"}` 完成——前端只能傳這兩個名稱之一（serde enum，其他值在反序列化時就被拒絕），路徑一律在 Rust 端決定，所以不需要給前端 opener 的路徑權限。
 - 只存環境變數名稱，金鑰本身不經過 UI、不寫入任何檔案。
 - 儲存前先在前端驗證（網址必須 http/https、變數名稱 `^[A-Za-z_][A-Za-z0-9_]*$`、數值範圍），錯誤顯示在欄位下方。引擎回傳 `invalid_settings` 時依訊息中的欄位路徑（例如 `translation.base_url: …`）標到對應欄位。
-- 字幕外觀存在設定檔的 `subtitle` 物件（引擎原樣保存、不解讀）；儲存後同時透過 `overlay_set_style` 推給字幕視窗。
+- 字幕外觀存在設定檔的 `subtitle` 物件（引擎原樣保存、不解讀）；儲存後同時透過 `overlay_set_style` 推給字幕視窗。`subtitle.obs_output` 與外觀放在同一個物件，但**不是** `OverlayStyle` 的欄位（Rust 端 `deny_unknown_fields`）：前端讀設定時把它拆成 `Settings.obs_output`，儲存時合併回 `subtitle`，改變時另外送 `obs_set_output`。引擎就緒讀到設定時也送一次。
 - 頁首顯示設定檔路徑（`settings.get` 的 `path`）。
 - 設定檔 schema 2 的欄位都會讀取（`asr.fast_compute_type`／`final_compute_type`／`fast_cpu_threads`／`final_cpu_threads`／`cuda_library_dirs`、`translation.allow_restricted`），schema 3 另讀 `source_language`（語言碼或 `auto`）、`translation.enabled`；語言欄位只檢查格式（`^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})?$`），清單由引擎決定。格式不對的欄位改用預設值並提示，不會擋住頁面。
 
@@ -146,6 +148,71 @@
 ### 訊息
 
 內容區上方的訊息列（最多三則、可關閉）：操作失敗的原因與下一步、引擎 `log` 事件的 warning／error、`status: error` 的 `code` 對應說明（例如 `model_not_downloaded` →「模型還沒下載。請到『模型』頁下載後再開始。」，`translation_model_missing`、`translation_server_auth_failed` 也有說明）、引擎錯誤碼的說明（含 `license_not_accepted`、`gpu_runtime_unsupported`、`download_in_progress`、`pull_unsupported`、`translation_server_unreachable`、`translation_server_auth_failed`）、下載完成或失敗（開始前下載面板裡的下載除外）、GPU 加速元件安裝後的重啟、更新提示。
+
+### 匯出字幕紀錄
+
+規格見 `competitive-features.md` F1。格式在 `app/src/lib/export.ts`（純函式、可測），Rust 只驗證檔名並寫檔。
+
+- **內容**：主視窗另外保留整個 session 的字幕（`EXPORT_MAX_LINES` = 20 000 句，套用同一套字幕狀態規則），所以匯出不受畫面上 300 句的限制。只匯出完整字幕（`is_final`）：即時字幕還在變動。
+- **選單**（字幕紀錄頁工具列的「匯出」）：內容（原文與譯文／只有原文／只有譯文）＋ SRT、VTT、TXT、CSV 四個按鈕；沒有完整句子時按鈕停用並說明。存好後的訊息附「開啟資料夾」。
+- **格式**：時間碼＝`start_sample`／`end_sample` ÷ 16 000（從 session 開始算）；結束不晚於開始時給 1 秒。雙語時每個 cue 兩行（原文、譯文）；沒有譯文（還沒翻、或「顯示翻譯」關閉）時以原文代替，「只有譯文」也一樣。換行與控制字元收成一個空白（一個 cue 不會被拆開）。
+  - SRT：編號、`HH:MM:SS,mmm --> …`、cue 之間空一行、CRLF；文字裡的 `-->` 改成 `->`（SRT 沒有跳脫方式）。
+  - VTT：`WEBVTT` 標頭、`HH:MM:SS.mmm`、cue 編號；`&`、`<`、`>` 轉成實體（也就不會出現 `-->`）。
+  - TXT：`[HH:MM:SS] 原文`，下一行譯文，句與句之間空一行，CRLF。
+  - CSV：UTF-8 BOM（Excel 才不會亂碼）、標頭 `index,start,end,source_language,target_language,original,translation`（依內容省略欄位）、CRLF；RFC 4180 引號；以 `=`、`+`、`@`、Tab、CR 或「`-` 後面不是空白」開頭的欄位前面加 `'`（避免試算表當成公式執行；字幕來自任何人都能說的聲音），「- 對白」保持原樣。
+  - 由右到左的文字（第一個字母是希伯來／阿拉伯等文字）在 SRT、VTT、TXT 前後加 RLM（U+200F），由左到右排版的播放器才不會把句尾標點放錯邊；CSV 不加（資料原樣）。
+- **檔名**：`YYYY-MM-DD_HHMMSS_<模式>.<副檔名>`（session 開始的本地時間；沒有 session 時用現在時間）。同一個 session 再匯出同一種格式會覆寫。
+- **每次自動存檔**（`ui.auto_save_transcripts`，預設關）：session 由執行中變成非執行中（按「停止」、引擎回報 `idle`／`error`、引擎重啟）時，存 SRT 與 TXT（原文與譯文）各一份，每個 session 只存一次；結束的判斷集中在 `setSessionState`。
+- **Rust**（`output.rs`）：`transcript_save {fileName, contents}` 寫到 `<文件>/kikitori/transcripts/`（`PathResolver::document_dir()`，不新增 dialog／fs 外掛），回傳完整路徑。檔名規則：`<主檔名>.<srt|vtt|txt|csv>`，主檔名只能是 ASCII 英數、`_`、`-` 且以英數開頭，全長 ≤ 100，Windows 保留名稱（CON、NUL、COM1…）拒絕——分隔字元、`..`、磁碟代號、隱藏檔、結尾的點或空白都不可能出現；接上資料夾後再檢查結果正好是資料夾的直接子項目（`contained_path`）。內容 ≤ 32 MiB。先檢查檔名再建立資料夾；寫入是同資料夾的暫存檔＋`sync_all`＋`rename`（原子取代），失敗時刪暫存檔。檔案 I/O 在 `spawn_blocking`。`open_output_folder {folder: "transcripts" | "obs"}`（serde enum，路徑在 Rust 決定，資料夾不存在就先建立）以 opener 的 Rust API 開啟；`output_info` 回傳兩個位置給設定頁（沒有「文件」資料夾時為 `null`）。
+
+### 閱讀節奏
+
+規格見 `competitive-features.md` F5。規則在 `app/src/lib/rhythm.ts`（`stepRhythm`，時間由呼叫端傳入、可測），字幕視窗只負責計時與繪製。
+
+- 字幕視窗的字幕狀態多保留幾句（`max_lines + 8`），畫面上的句子由 `stepRhythm` 決定。
+- **每句至少顯示** `min_display_ms`：新的一句要擠掉最舊的一句時，最舊那句必須已顯示這麼久（從出現、或從變成完整翻譯起算），否則新句等到那時（`wakeAt`）。等待的句子超過一個畫面（`max_lines`）就不再等，直接顯示最新的一整個畫面——等待不能累積成延遲。0 = 不等。
+- 同一句的即時更新、即時→完整、引擎移除（非語音）都立即反映，不算「擠掉」。比已顯示過的句子更舊、還沒顯示的句子不再顯示。
+- **淡出**：畫面上的內容 `idle_clear_secs` 秒沒有任何變化就淡出（CSS 400 ms，`prefers-reduced-motion` 時不做動畫）。淡出的句子之後只有文字改變時（例如完整翻譯晚到）才重新出現；新的句子照常顯示。0 = 不淡出。
+- 新 session 與「清除字幕」快速鍵從空白開始（清除時保留 `lastFinalId`，舊句的即時字幕不會回來）。
+- 兩個欄位存在 `settings.subtitle`，透過 `overlay_set_style` 送到 Rust（`OverlayStyle.min_display_ms` 0–10 000、`idle_clear_secs` 0–600；缺欄位時用預設值 1500／8，舊的主視窗送來的外觀仍然有效）。
+
+### OBS 文字檔
+
+規格見 `competitive-features.md` F6。在 Rust（`obs.rs`）做，而不是在網頁：引擎的字幕事件本來就經過 Rust，而主視窗與字幕視窗在最小化／隱藏時計時器會被瀏覽器節流，直播時兩個視窗常常都是隱藏的。
+
+- 開啟（`obs_set_output {content: "off" | "original" | "translation" | "both"}`）後，把字幕視窗目前的句子寫進 `<文件>/kikitori/obs/subtitle.txt`（UTF-8、無 BOM）：每句一段，「原文與譯文」時譯文在原文下一行；沒有譯文或「顯示翻譯」關閉時以原文代替；句內換行收成空白。
+- 句子的規則與字幕視窗相同（`ObsLines` 照 `lib/subtitles.ts` 實作：同一句原地取代、完整翻譯不被晚到的即時字幕蓋掉、空白的完整字幕移除該句、只留最新 `max_lines` 句、較舊的 session 丟棄），`max_lines`、`idle_clear_secs` 與「顯示翻譯」跟著 `overlay_set_style`／`overlay_set_show_translation` 更新。閱讀節奏的「每句至少顯示」不套用（OBS 每秒讀一次檔案，寫最新內容即可）。
+- 寫入在專用執行緒：有變化才寫、合併連續的變化、**每秒最多 10 次**（`MIN_WRITE_INTERVAL` 100 ms），暫存檔＋rename 原子取代（OBS 不會讀到寫一半的檔案）。
+- **清空**：引擎回報 `idle`／`error`（session 結束或失敗）、引擎不在就緒狀態（重啟、停止）、「清除字幕」快速鍵、`idle_clear_secs` 沒有變化、切換成「不輸出」、程式結束。
+- 使用者開啟之前完全不碰磁碟（不建立資料夾或檔案）。找不到「文件」資料夾或寫入失敗時，`ObsStatus.error` 說明原因，設定頁顯示在路徑的位置；失敗只記一次 log，下一次變化再重試。
+- 不開任何網路埠（OBS 瀏覽器來源需要本機埠，列在「先不做」）。
+
+### 翻譯服務連不上時
+
+規格見 `competitive-features.md` F8。判斷在 `app/src/lib/translation-guide.ts`。
+
+- 依據：最近一次 `models.list.translation.server`（引擎就緒時主視窗在背景讀一次，失敗只記 log；模型頁與「重新偵測」也會更新）或 `hardware.detect` 的 `translation_server` 的 `reachable=false`，或開始前下載停在 `translation_server_unreachable`。「顯示翻譯」關閉時不顯示。
+- 設定頁「翻譯服務」區塊內：「連不上翻譯服務 {url}…」與三個按鈕——「**安裝 Ollama**」（以 opener 開 `https://ollama.com/download`；只在伺服器位址是這台電腦時出現，遠端服務裝在本機沒有用）、「**只顯示原文**」（與「顯示翻譯」開關相同的流程，設 `translation.enabled=false`）、「重新偵測」（重新送 `models.list`）。
+- 引導出現時另外在訊息列顯示一次（有「安裝 Ollama」「只顯示原文」），所以按「開始」之前就看得到；恢復連線或關閉翻譯時自動收起。
+
+### 全域快速鍵
+
+| 快速鍵 | 動作 | 處理 |
+|---|---|---|
+| Ctrl+Alt+K（macOS ⌘+Option+K） | 切換滑鼠穿透 | Rust 直接切換 |
+| Ctrl+Alt+J（macOS ⌘+Option+J） | 切換「顯示翻譯」 | Rust 送 `shortcut://action`（`"toggle_translation"`）給主視窗，主視窗用與開關相同的流程（引擎未就緒或切換中時忽略） |
+| Ctrl+Alt+U（macOS ⌘+Option+U） | 清除字幕 | Rust 清空 OBS 文字檔並廣播 `overlay://clear`，字幕視窗清空畫面；字幕紀錄不受影響 |
+
+- 都用 `tauri-plugin-global-shortcut` 註冊；任何一個註冊失敗（被其他程式占用）只記 log、在 `OverlaySnapshot.shortcuts` 標 `registered: false`，字幕紀錄頁的說明改為「已被其他程式占用，無法使用」，不影響其他快速鍵。
+- 選 J／U 而不是 T／C：GNOME 的 Ctrl+Alt+T 是開終端機、Ctrl+Alt+L 是鎖定畫面；波蘭文等鍵盤的 AltGr（= Ctrl+Alt）加 C／E／L／S／X 會打出字母。
+
+### 診斷資訊
+
+規格見 `competitive-features.md` F8。內容在 `app/src/lib/diagnostics.ts`（純函式、可測）。
+
+- 「關於」的「**複製診斷資訊**」：程式版本、介面語系、user agent、橋接狀態與引擎版本（協定、平台、是否假引擎）、session 狀態、硬體偵測摘要（OS、CPU、記憶體、每張顯示卡、cuBLAS、翻譯服務與錯誤；還沒偵測時註明——進入設定頁時若沒有偵測結果會在背景送一次 `hardware.detect`）、設定檔路徑與目前設定（JSON）、最近 20 則引擎訊息（`log` 事件的 info 以上、`status` 錯誤、引擎失敗）。報告用英文：給維護者看，不是介面文字。
+- **遮蔽**：設定中名稱像秘密的鍵（key、token、secret、password、credential、auth、cookie…）的值換成 `[redacted]`；`api_key_env` 只保留合法的環境變數**名稱**（不像名稱的值也遮蔽），金鑰本身 UI 從來不讀。所有文字再過一次：網址中的帳密與查詢字串、`Bearer`／`Basic` 權杖、`api_key=…` 之類的鍵值、`sk-…`、`hf_…`、`ghp_…` 等常見金鑰格式、家目錄中的使用者名稱（`C:\Users\<user>`、`/home/<user>`、`/Users/<user>`）。
+- 以 `navigator.clipboard.writeText` 複製（不新增外掛；只用這個視窗已有的資料，不等引擎回應，點擊的使用者啟用狀態仍有效）。剪貼簿被拒時顯示唯讀文字框（已全選），請使用者手動複製。
 
 ## 介面多語系
 
@@ -197,7 +264,7 @@
 - 即時字幕：原文與譯文都降低不透明度，譯文維持白色；完整翻譯到達時原地取代並轉成字幕黃。較舊的句子略淡，最新一句最醒目。
 - **只顯示原文**（快照的 `show_translation=false`）：每句只有原文一行，原文改用譯文的字級、粗細與字幕黃（即時字幕時為白色），不留空白的第二行（`lineDisplay` 決定、`.line.is-original-only`）。
 - 原文與譯文的 `<span>` 都有 `lang` 與 `dir="auto"`：阿拉伯語由右到左；無空白的語言（ja、zh、th）靠 `overflow-wrap` 換行，泰文用 `break-word`（由瀏覽器找字詞邊界）。
-- 句數：顯示最新 `max_lines` 句（1–3）；位置依設定貼齊視窗下緣或上緣。
+- 句數：顯示最新 `max_lines` 句（1–3），依閱讀節奏換句與淡出（見「閱讀節奏」）；位置依設定貼齊視窗下緣或上緣。「清除字幕」快速鍵（`overlay://clear`）清空畫面。
 - 移動與縮放：非穿透模式下，滑鼠移上去會出現淡框、上方把手（「拖曳移動」與「隱藏」）、右下角縮放把手；拖曳視窗任何地方可移動（`startDragging`），拖曳右下角可縮放（`startResizeDragging`）。空視窗顯示放置提示。
 - 滑鼠穿透：`set_ignore_cursor_events`。可從主視窗開關或全域快速鍵 **Ctrl+Alt+K**（macOS ⌘+Option+K）切換；穿透時隱藏所有框線與提示。程式啟動時一律為非穿透，避免使用者找不到視窗。
 - 記住位置與大小：`tauri-plugin-window-state`（位置、大小、最大化；不記可見性）。
@@ -221,10 +288,12 @@
 | `line_reader.rs` | 有上限的逐行讀取（1 MiB，與引擎相同）；超長行丟棄並讀到行尾，串流不會失去同步。 |
 | `connection.rs` | 傳送請求（NDJSON）、以 `id` 配對回應、每個請求一個期限（涵蓋寫入與等待）。逾時的請求從等待表移除，晚到的回應記錄後丟棄。格式錯誤的行記錄 error（附截短的內容）後略過，不影響其他訊息。輸出關閉時所有等待中的請求立即失敗。 |
 | `engine.rs` | 引擎行程：選擇指令（含正式版資源目錄的路徑）、spawn（不經 shell，Windows 加 `CREATE_NO_WINDOW`）、stderr 轉到 app 日誌、`engine.info` 握手並檢查 `protocol_version == 1`、意外結束時自動重啟（1 s、2 s、4 s 退避；60 秒內超過 3 次就停在「失敗」等使用者按重新啟動）、結束程式時先送 `engine.shutdown`，3 秒內（請求與等待共用同一個期限，`shutdown_within`）沒結束就強制結束；同步版 `shutdown_blocking` 給更新器的 `on_before_exit` 用（見「自動更新」）。 |
-| `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses` 與字幕視窗指令。 |
-| `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查）、穿透與可見狀態、介面語系（`locale`，`validate_locale` 只檢查格式：2–3 個字母，可接一個 2–8 字元的子標籤，最長 16 字元）、`show_translation`（「顯示翻譯」，初始 `true`）。`show_translation` 刻意不放進 `OverlayStyle`：它不是外觀、引擎存在 `translation.enabled` 而不是不透明的 `subtitle` 物件；放進 style 會讓 `settings.subtitle` 多一個與 `translation.enabled` 重複的欄位，也得放寬 `deny_unknown_fields`。改由獨立指令 `overlay_set_show_translation {enabled}` 設定並放進快照。 |
+| `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses`、`output_info`、`transcript_save`、`open_output_folder`、`obs_set_output` 與字幕視窗指令（`overlay_set_style`／`overlay_set_show_translation` 也更新 `ObsOutput`）。 |
+| `output.rs` | 使用者看得到的輸出檔：`<文件>/kikitori/{transcripts,obs}` 的位置、字幕紀錄檔名驗證與資料夾內的路徑檢查（`validate_transcript_name`、`contained_path`）、原子寫入（`write_atomic`）、`OutputFolder`（`transcripts`／`obs`）。見「匯出字幕紀錄」。 |
+| `obs.rs` | OBS 文字檔：與字幕視窗相同規則的 `ObsLines`、專用寫入執行緒（節流、合併、閒置清空、結束時清空）、`ObsStatus`。見「OBS 文字檔」。 |
+| `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查；含閱讀節奏的 `min_display_ms`、`idle_clear_secs`，缺少時用預設值）、三個全域快速鍵（`ShortcutAction`、各自是否註冊成功）、穿透與可見狀態、介面語系（`locale`，`validate_locale` 只檢查格式：2–3 個字母，可接一個 2–8 字元的子標籤，最長 16 字元）、`show_translation`（「顯示翻譯」，初始 `true`）。`show_translation` 刻意不放進 `OverlayStyle`：它不是外觀、引擎存在 `translation.enabled` 而不是不透明的 `subtitle` 物件；放進 style 會讓 `settings.subtitle` 多一個與 `translation.enabled` 重複的欄位，也得放寬 `deny_unknown_fields`。改由獨立指令 `overlay_set_show_translation {enabled}` 設定並放進快照。 |
 | `updater.rs` | 檢查與安裝更新的指令 `update_check`／`update_install`（tauri-plugin-updater 的 Rust API），安裝前關閉引擎（見「自動更新」）。 |
-| `lib.rs` | 外掛（log、window-state、updater、process、opener、global-shortcut）、狀態、事件轉發、全域快速鍵、生命週期（關閉主視窗即結束程式）。 |
+| `lib.rs` | 外掛（log、window-state、updater、process、opener、global-shortcut）、狀態（含 `ObsOutput`）、事件轉發（字幕事件同時交給 `ObsOutput`；`idle`／`error` 狀態與引擎不在就緒時清空 OBS 文字檔）、三個全域快速鍵（`run_shortcut`）、生命週期（關閉主視窗即結束程式；結束時清空 OBS 文字檔）。 |
 
 ### 引擎指令的選擇
 
@@ -240,7 +309,9 @@
 |---|---|
 | `engine://subtitle`、`engine://status`、`engine://download-progress`、`engine://log` | 已驗證的引擎事件（欄位同協定） |
 | `bridge://state` | `{phase: starting|ready|restarting|stopped|failed, detail, restarts, command, source, info}` |
-| `overlay://state` | `{style, click_through, visible, shortcut, shortcut_registered, locale, show_translation}`（`locale` 在主視窗送出前是 `null`；`show_translation` 在主視窗送出前是 `true`，舊版 Rust 沒有這個欄位時前端也當作 `true`） |
+| `shortcut://action` | 只送給主視窗：`"toggle_translation"`（全域快速鍵） |
+| `overlay://clear` | 「清除字幕」快速鍵；字幕視窗清空畫面（payload `null`） |
+| `overlay://state` | `{style, click_through, visible, shortcut, shortcut_registered, locale, show_translation, shortcuts}`（`shortcuts`：`[{action, keys, registered}]`，三個快速鍵；舊版 Rust 沒有時前端當作空清單）（`locale` 在主視窗送出前是 `null`；`show_translation` 在主視窗送出前是 `true`，舊版 Rust 沒有這個欄位時前端也當作 `true`） |
 
 前端（`src/lib/validate.ts`）再驗證一次所有事件與指令結果；不合格的 payload 記錄後丟棄。指令錯誤統一為 `{kind: engine|timeout|disconnected|invalid_input, …}`，由 `describeError` 轉成介面語言的說明。
 
@@ -252,10 +323,10 @@ Milestone 12–14 新增的指令：`languages_list`、`settings_preview_languag
 
 | 視窗 | 權限 |
 |---|---|
-| `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、Milestone 12–14 的五個指令、`update_check`／`update_install`（不給 `updater:default`：外掛自己的 JavaScript 指令會繞過關閉引擎的步驟）、`process:allow-restart`、`opener:allow-open-url`（scope 只有 `https://docs.nvidia.com/cuda/eula/index.html`）、全部引擎與字幕視窗指令（含 `overlay_set_locale`）、`app_about`、`open_third_party_licenses`（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
+| `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、Milestone 12–14 的五個指令、`update_check`／`update_install`（不給 `updater:default`：外掛自己的 JavaScript 指令會繞過關閉引擎的步驟）、`process:allow-restart`、`opener:allow-open-url`（scope 只有 `https://docs.nvidia.com/cuda/eula/index.html` 與 `https://ollama.com/download`）、全部引擎與字幕視窗指令（含 `overlay_set_locale`）、`app_about`、`open_third_party_licenses`、`output_info`、`transcript_save`、`open_output_folder`、`obs_set_output`（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
 | `overlay`（`capabilities/overlay.json`） | 事件 listen／unlisten、`start-dragging`、`start-resize-dragging`、`set-title`（依介面語系改視窗標題）、`overlay_get_state`、`overlay_set_visible` |
 
-opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端開這一個網址；沒有 `allow-default-urls`、沒有 `open-path`／`reveal-item-in-dir`。兩個授權資料夾由 Rust 指令以 opener 的 Rust API 開啟（前端只選 `app`／`engine`，路徑在 Rust 端決定）。`combination.test.ts` 檢查 capability 裡的 opener 權限正好是這一筆。
+opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端開這兩個網址（NVIDIA CUDA EULA、Ollama 官方下載頁）；沒有 `allow-default-urls`、沒有 `open-path`／`reveal-item-in-dir`。兩個授權資料夾與兩個輸出資料夾由 Rust 指令以 opener 的 Rust API 開啟（前端只選 `app`／`engine`、`transcripts`／`obs`，路徑在 Rust 端決定）。`combination.test.ts` 檢查 capability 裡的 opener 權限正好是這兩個網址。
 
 另設 CSP：`default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self'`；前端不使用 `innerHTML`，引擎傳來的文字一律以 `textContent` 顯示。
 
@@ -316,9 +387,9 @@ npm run tauri dev
 
 | 指令（在 `app/` 或 `app/src-tauri/`） | 內容 |
 |---|---|
-| `npm test` | vitest：介面多語系（見「介面多語系」的「檢查」：字典完整性、佔位符、複數類別、HTML 用到的鍵、原始碼不得有 CJK 文字、語系對應、退回、引擎訊息、每個引擎訊息碼的字典鍵與參數、參數在地化）、語言選單（`languages.test.ts`：正式引擎擷取的 `languages.list`／`settings.preview_languages`、選項文字與自動偵測、篩選、本地檢查、只送目前模式的欄位、預覽是否對應目前選擇、儲存的 patch 與「同時改用推薦的模型」、衝突的對方語言、預覽各狀態的文字）、開始前下載（`start-downloads.test.ts`：全部完成才自動開始、以 kind 區分同名模型、舊引擎沒有 kind、總量變大、失敗後只重試失敗的、等其他下載結束才報失敗、`pull_unsupported`／`translation_server_unreachable`／`translation_server_auth_failed` 停下並說明、`download_in_progress`、不重抓同一次開始已下載的模型、取消、面板文字）、「顯示翻譯」（`translation-toggle.test.ts`：執行中用 `session.set_translation`、否則 `settings.set`、引擎失敗不動字幕視窗、只有字幕視窗失敗時仍保留設定、只顯示原文的行）、`status.data.models` 與 `download_progress.kind` 的驗證、字幕視窗快照的 `show_translation`、`ui.locale` 的讀取與 patch、字幕視窗快照的 `locale`、更新指令的結果與進度事件驗證、字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化、自動推薦（`recommend.test.ts`：第一次執行只套用一次且先等偵測、訊息文字、不是新設定檔或使用者已存組合時不套用、引擎回 `applied: null` 視為略過、提示依 `differs` 與指紋顯示／隱藏、「不要再提醒」清單、缺少模型的提示與進度、下載中不能開始、`api.ts` 呼叫的每個指令都在 `build.rs` 與 `capabilities/main.json`） |
+| `npm test` | vitest：匯出（`export.test.ts`：時間碼與 16 kHz 換算、結束一定晚於開始、只匯出完整字幕、三種內容與以原文代替、SRT 編號／CRLF／`-->`、VTT 標頭與跳脫、TXT、CSV 的 BOM／標頭／引號／公式防護、由右到左文字的 RLM、檔名格式與 Rust 規則一致）、閱讀節奏（`rhythm.test.ts`：最少顯示時間、0 不等、不累積延遲、完整翻譯重新計時、原地更新與移除、淡出與喚醒時間、淡出後文字改變才回來、0 不淡出、從最後一次變化起算、不顯示更舊的句子）、診斷資訊（`diagnostics.test.ts`：網址帳密與查詢字串、權杖與金鑰格式、家目錄使用者名稱、設定中秘密鍵與 `api_key_env` 只留名稱、最近訊息上限、報告內容與不含使用者名稱）、翻譯服務引導（`translation-guide.test.ts`：本機／遠端、未偵測、關閉翻譯、開始被擋、capability 允許下載頁）、閱讀節奏與快速鍵清單與 OBS／輸出指令結果的驗證、設定頁的新欄位（秒→毫秒、範圍、`obs_output` 不進外觀）；介面多語系（見「介面多語系」的「檢查」：字典完整性、佔位符、複數類別、HTML 用到的鍵、原始碼不得有 CJK 文字、語系對應、退回、引擎訊息、每個引擎訊息碼的字典鍵與參數、參數在地化）、語言選單（`languages.test.ts`：正式引擎擷取的 `languages.list`／`settings.preview_languages`、選項文字與自動偵測、篩選、本地檢查、只送目前模式的欄位、預覽是否對應目前選擇、儲存的 patch 與「同時改用推薦的模型」、衝突的對方語言、預覽各狀態的文字）、開始前下載（`start-downloads.test.ts`：全部完成才自動開始、以 kind 區分同名模型、舊引擎沒有 kind、總量變大、失敗後只重試失敗的、等其他下載結束才報失敗、`pull_unsupported`／`translation_server_unreachable`／`translation_server_auth_failed` 停下並說明、`download_in_progress`、不重抓同一次開始已下載的模型、取消、面板文字）、「顯示翻譯」（`translation-toggle.test.ts`：執行中用 `session.set_translation`、否則 `settings.set`、引擎失敗不動字幕視窗、只有字幕視窗失敗時仍保留設定、只顯示原文的行）、`status.data.models` 與 `download_progress.kind` 的驗證、字幕視窗快照的 `show_translation`、`ui.locale` 的讀取與 patch、字幕視窗快照的 `locale`、更新指令的結果與進度事件驗證、字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化、自動推薦（`recommend.test.ts`：第一次執行只套用一次且先等偵測、訊息文字、不是新設定檔或使用者已存組合時不套用、引擎回 `applied: null` 視為略過、提示依 `differs` 與指紋顯示／隱藏、「不要再提醒」清單、缺少模型的提示與進度、下載中不能開始、`api.ts` 呼叫的每個指令都在 `build.rs` 與 `capabilities/main.json`） |
 | `npm run build` | `tsc` 型別檢查 + `vite build` |
-| `cargo test` | Milestone 12–14：翻譯模型名稱規則、`settings_preview_languages` 只送給定的欄位並拒絕未知欄位與格式錯誤的語言碼、`status.data` 轉發與大小上限、`download_progress.kind` 驗證、字幕視窗的 `show_translation`（初始 `true`、切換、不受外觀變更影響）；更新前關閉引擎（`fake_engine.py`：在 runtime worker 上同步呼叫，`engine.shutdown` 讓引擎自己結束；`--ignore-shutdown` 不回應時在期限後強制結束；沒有引擎時立即返回）、更新指令的逾時範圍與進度事件格式、協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；字幕視窗的介面語系（初始為 `None`、格式檢查、拒絕時保留舊值）、正式版資源目錄的引擎路徑與覆寫、`about_info`（兩個授權資料夾各自只在存在時回報；`licenses` 與 `tauri.sidecar.conf.json` 的資源名稱一致；`LicenseFolder` 只接受 `app`／`engine`）、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
+| `cargo test` | 競品補強：字幕紀錄檔名（接受產生的檔名；拒絕分隔字元、`..`、磁碟代號、隱藏檔、大寫或其他副檔名、結尾空白與點、非 ASCII、Windows 保留名稱、過長）、路徑一定是資料夾的直接子項目、原子寫入覆寫且不留暫存檔、過大的內容不建立任何東西、`output_info` 的位置、`OutputFolder`／`ObsContent` 只接受列舉值；OBS（與字幕視窗相同的句子規則、內容選擇與「顯示翻譯」、關閉時不碰磁碟、清除與關閉時清空、連續 200 次更新時每秒不超過 10 次寫入且最後內容正確、閒置清空、結束時清空、找不到「文件」資料夾時回報錯誤）；`OverlayStyle` 的閱讀節奏欄位（缺少時用預設值、範圍）與快速鍵清單。Milestone 12–14：翻譯模型名稱規則、`settings_preview_languages` 只送給定的欄位並拒絕未知欄位與格式錯誤的語言碼、`status.data` 轉發與大小上限、`download_progress.kind` 驗證、字幕視窗的 `show_translation`（初始 `true`、切換、不受外觀變更影響）；更新前關閉引擎（`fake_engine.py`：在 runtime worker 上同步呼叫，`engine.shutdown` 讓引擎自己結束；`--ignore-shutdown` 不回應時在期限後強制結束；沒有引擎時立即返回）、更新指令的逾時範圍與進度事件格式、協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；字幕視窗的介面語系（初始為 `None`、格式檢查、拒絕時保留舊值）、正式版資源目錄的引擎路徑與覆寫、`about_info`（兩個授權資料夾各自只在存在時回報；`licenses` 與 `tauri.sidecar.conf.json` 的資源名稱一致；`LicenseFolder` 只接受 `app`／`engine`）、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
 | `cargo clippy --all-targets -- -D warnings` | lint |
 
 ## 各平台需要實機確認的地方

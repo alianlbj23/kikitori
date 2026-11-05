@@ -548,6 +548,54 @@ input[type="range"] {
   color: var(--nezumi);
 }
 
+/* Export menu: a disclosure in the page tools, its panel floats below it. */
+.export-menu {
+  position: relative;
+}
+
+.export-menu summary {
+  list-style: none;
+  padding: 8px 18px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.export-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.export-menu summary:hover,
+.export-menu[open] summary {
+  border-color: var(--nezumi);
+}
+
+.export-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  width: min(320px, 80vw);
+  padding: 14px;
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  box-shadow: 0 6px 18px rgb(24 32 58 / 0.14);
+}
+
+.export-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.export-panel .field-help {
+  margin: 0;
+}
+
 .transcript {
   list-style: none;
   margin: 8px 0 0;
@@ -932,6 +980,25 @@ textarea {
   height: 16px;
   margin: 4px 0 0;
   accent-color: var(--ai-soft);
+}
+
+/* Translation server unreachable: what to do next (lib/translation-guide.ts). */
+.guide {
+  margin: 14px 0 4px;
+  padding: 12px 14px;
+  border-left: 4px solid var(--ai-soft);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  max-width: 70ch;
+}
+
+.guide p {
+  margin: 0 0 10px;
+}
+
+.diagnostics-text {
+  margin-top: 10px;
+  font-size: var(--t-sm);
 }
 
 .advanced {

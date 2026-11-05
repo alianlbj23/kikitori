@@ -11,9 +11,13 @@ import {
   parseDownloadProgress,
   parseHardware,
   parseModels,
+  parseObsStatus,
+  parseOutputInfo,
   parseOverlaySnapshot,
   parseOverlayStyle,
   parseRecommendationPreview,
+  parseSavedPath,
+  parseShortcutAction,
   parseStatus,
   parseSubtitle,
   parseUpdateDownloadEvent,
@@ -134,11 +138,48 @@ describe("command results", () => {
   });
 
   it("validates overlay style ranges", () => {
-    const ok = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 };
+    const ok = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2, min_display_ms: 0, idle_clear_secs: 600 };
     expect(parseOverlayStyle(ok)).toEqual(ok);
     expect(() => parseOverlayStyle({ ...ok, font_size: 200 })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, background_opacity: 2 })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, position: "left" })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, min_display_ms: 10_001 })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, idle_clear_secs: 601 })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, idle_clear_secs: 1.5 })).toThrow();
+  });
+
+  it("defaults the reading rhythm when an older Rust build has no such fields", () => {
+    const old = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 };
+    expect(parseOverlayStyle(old)).toEqual({ ...old, min_display_ms: 1500, idle_clear_secs: 8 });
+  });
+
+  it("reads the shortcut list, dropping unknown actions, and the OBS and output results", () => {
+    const snap = {
+      style: { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 },
+      click_through: false,
+      visible: true,
+      shortcut: "CommandOrControl+Alt+K",
+      shortcut_registered: true,
+      shortcuts: [
+        { action: "click_through", keys: "CommandOrControl+Alt+K", registered: true },
+        { action: "toggle_translation", keys: "CommandOrControl+Alt+J", registered: false },
+        { action: "future_action", keys: "X", registered: true },
+      ],
+    };
+    expect(parseOverlaySnapshot(snap).shortcuts.map((s) => s.action)).toEqual(["click_through", "toggle_translation"]);
+    expect(parseOverlaySnapshot({ ...snap, shortcuts: undefined }).shortcuts).toEqual([]);
+    expect(() => parseOverlaySnapshot({ ...snap, shortcuts: [{ action: "clear_subtitles", keys: 1, registered: true }] })).toThrow();
+    expect(parseShortcutAction("toggle_translation")).toBe("toggle_translation");
+    expect(() => parseShortcutAction("rm -rf")).toThrow();
+    expect(parseObsStatus({ content: "both", path: "C:/Docs/kikitori/obs/subtitle.txt", error: null })).toEqual({
+      content: "both",
+      path: "C:/Docs/kikitori/obs/subtitle.txt",
+      error: null,
+    });
+    expect(() => parseObsStatus({ content: "all", path: null, error: null })).toThrow();
+    expect(parseOutputInfo({ transcripts_dir: null, obs_file: null })).toEqual({ transcripts_dir: null, obs_file: null });
+    expect(parseSavedPath("C:/Docs/kikitori/transcripts/a.srt")).toBe("C:/Docs/kikitori/transcripts/a.srt");
+    expect(() => parseSavedPath("")).toThrow();
   });
 
   it("reads the overlay locale, tolerating older Rust builds and malformed tags", () => {

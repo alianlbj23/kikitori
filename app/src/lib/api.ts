@@ -12,6 +12,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { NVIDIA_EULA_URL } from "./combination";
 import { t, tp, type StringKey } from "./i18n";
+import { OLLAMA_DOWNLOAD_URL } from "./translation-guide";
 import type {
   AboutInfo,
   AppliedRecommendation,
@@ -27,9 +28,14 @@ import type {
   LogEvent,
   Mode,
   ModelsList,
+  ObsContent,
+  ObsStatus,
+  OutputFolder,
+  OutputInfo,
   OverlaySnapshot,
   OverlayStyle,
   RecommendationPreview,
+  ShortcutAction,
   StatusEvent,
   SubtitleEvent,
   UpdateDownloadEvent,
@@ -47,8 +53,12 @@ import {
   parseHardware,
   parseLog,
   parseModels,
+  parseObsStatus,
+  parseOutputInfo,
   parseOverlaySnapshot,
   parseRecommendationPreview,
+  parseSavedPath,
+  parseShortcutAction,
   parseStatus,
   parseSubtitle,
   parseUpdateDownloadEvent,
@@ -62,6 +72,10 @@ export const EVENTS = {
   log: "engine://log",
   bridge: "bridge://state",
   overlay: "overlay://state",
+  /** A global shortcut the main window handles (`toggle_translation`). */
+  shortcut: "shortcut://action",
+  /** The "clear subtitles" shortcut: the overlay empties its lines. */
+  overlayClear: "overlay://clear",
 } as const;
 
 export const api = {
@@ -175,9 +189,32 @@ export const api = {
     };
     await invoke("update_install", { onEvent: channel, timeoutMs });
   },
-  /** Opens the NVIDIA CUDA EULA; the opener permission allows no other URL. */
+  /** Opens the NVIDIA CUDA EULA (one of the two URLs the opener permission allows). */
   async openNvidiaEula(): Promise<void> {
     await openUrl(NVIDIA_EULA_URL);
+  },
+  /** Opens Ollama's official download page (the other allowed URL). */
+  async openOllamaDownload(): Promise<void> {
+    await openUrl(OLLAMA_DOWNLOAD_URL);
+  },
+  /** Where transcripts and the OBS text file go. */
+  async outputInfo(): Promise<OutputInfo> {
+    return parseOutputInfo(await invoke("output_info"));
+  },
+  /**
+   * Saves a transcript into `<Documents>/kikitori/transcripts/`; Rust validates
+   * the name and picks the folder. Resolves to the saved file's full path.
+   */
+  async transcriptSave(fileName: string, contents: string): Promise<string> {
+    return parseSavedPath(await invoke("transcript_save", { fileName, contents }));
+  },
+  /** Opens the transcripts or OBS folder; Rust computes the path from the name. */
+  async openOutputFolder(folder: OutputFolder): Promise<void> {
+    await invoke("open_output_folder", { folder });
+  },
+  /** Turns the OBS text file on or off and chooses what it holds. */
+  async obsSetOutput(content: ObsContent): Promise<ObsStatus> {
+    return parseObsStatus(await invoke("obs_set_output", { content }));
   },
   async overlayState(): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_get_state"));
@@ -225,6 +262,8 @@ export const events = {
   log: (h: (v: LogEvent) => void) => on(EVENTS.log, parseLog, h),
   bridge: (h: (v: BridgeStatus) => void) => on(EVENTS.bridge, parseBridgeStatus, h),
   overlay: (h: (v: OverlaySnapshot) => void) => on(EVENTS.overlay, parseOverlaySnapshot, h),
+  shortcut: (h: (v: ShortcutAction) => void) => on(EVENTS.shortcut, parseShortcutAction, h),
+  overlayClear: (h: () => void) => on(EVENTS.overlayClear, () => undefined, () => h()),
 };
 
 const ENGINE_CODES: Readonly<Record<string, StringKey>> = {

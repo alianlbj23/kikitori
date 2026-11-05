@@ -20,6 +20,7 @@ const snapshot = (show: boolean): OverlaySnapshot => ({
   visible: true,
   shortcut: "CommandOrControl+Alt+K",
   shortcut_registered: true,
+  shortcuts: [],
   locale: null,
   show_translation: show,
 });

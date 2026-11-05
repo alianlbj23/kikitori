@@ -120,6 +120,10 @@ describe("t and tp", () => {
       background_opacity_percent: "50",
       position: "bottom",
       max_lines: "2",
+      min_display_secs: "1.5",
+      idle_clear_secs: "8",
+      obs_output: "off",
+      auto_save_transcripts: false,
     }).base_url).toBe("The URL must start with http:// or https://.");
   });
 });

@@ -14,11 +14,34 @@ pub const OVERLAY_LABEL: &str = "overlay";
 pub const MAIN_LABEL: &str = "main";
 /// Global shortcut that toggles click-through; documented in docs/specs/ui.md.
 pub const CLICK_THROUGH_SHORTCUT: &str = "CommandOrControl+Alt+K";
+/// Global shortcut that toggles "顯示翻譯" (handled by the main window, which
+/// owns the engine call).
+///
+/// 選 J／U 而不是直覺的 T／C：GNOME 的 Ctrl+Alt+T 是開終端機、Ctrl+Alt+L 是鎖定畫面，
+/// 波蘭文等鍵盤的 AltGr（= Ctrl+Alt）+C／E／L／S／X 會打出字母；J、U 沒有這些衝突，
+/// 而且 J 就在既有的 K 旁邊。
+pub const TOGGLE_TRANSLATION_SHORTCUT: &str = "CommandOrControl+Alt+J";
+/// Global shortcut that clears the subtitles on screen (overlay and OBS text).
+pub const CLEAR_SUBTITLES_SHORTCUT: &str = "CommandOrControl+Alt+U";
 
 pub const FONT_SIZE_RANGE: (u32, u32) = (14, 96);
 /// Longest UI locale tag accepted for the overlay (e.g. `zh-TW`, `pt-BR`).
 pub const MAX_LOCALE_LEN: usize = 16;
 pub const MAX_LINES_RANGE: (u32, u32) = (1, 3);
+/// How long a line stays before a newer one may push it out (reading rhythm).
+pub const MIN_DISPLAY_MS_RANGE: (u32, u32) = (0, 10_000);
+/// Seconds without new subtitles before the overlay fades out; 0 = never.
+pub const IDLE_CLEAR_SECS_RANGE: (u32, u32) = (0, 600);
+pub const DEFAULT_MIN_DISPLAY_MS: u32 = 1500;
+pub const DEFAULT_IDLE_CLEAR_SECS: u32 = 8;
+
+fn default_min_display_ms() -> u32 {
+    DEFAULT_MIN_DISPLAY_MS
+}
+
+fn default_idle_clear_secs() -> u32 {
+    DEFAULT_IDLE_CLEAR_SECS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,6 +62,15 @@ pub struct OverlayStyle {
     pub position: OverlayPosition,
     /// How many utterances the overlay shows at once.
     pub max_lines: u32,
+    /// A line stays at least this long before a newer one pushes it out, so
+    /// fast speech does not scroll lines away before they can be read.
+    /// Defaulted so a main window that predates the field is still accepted.
+    #[serde(default = "default_min_display_ms")]
+    pub min_display_ms: u32,
+    /// Seconds after the last change before the overlay fades out and the OBS
+    /// text file is emptied; 0 keeps the last lines on screen.
+    #[serde(default = "default_idle_clear_secs")]
+    pub idle_clear_secs: u32,
 }
 
 impl Default for OverlayStyle {
@@ -48,6 +80,8 @@ impl Default for OverlayStyle {
             background_opacity: 0.45,
             position: OverlayPosition::Bottom,
             max_lines: 2,
+            min_display_ms: DEFAULT_MIN_DISPLAY_MS,
+            idle_clear_secs: DEFAULT_IDLE_CLEAR_SECS,
         }
     }
 }
@@ -74,8 +108,65 @@ impl OverlayStyle {
                 self.max_lines
             ));
         }
+        let (lo, hi) = MIN_DISPLAY_MS_RANGE;
+        if !(lo..=hi).contains(&self.min_display_ms) {
+            return Err(format!(
+                "min_display_ms must be in [{lo}, {hi}], got {}",
+                self.min_display_ms
+            ));
+        }
+        let (lo, hi) = IDLE_CLEAR_SECS_RANGE;
+        if !(lo..=hi).contains(&self.idle_clear_secs) {
+            return Err(format!(
+                "idle_clear_secs must be in [{lo}, {hi}], got {}",
+                self.idle_clear_secs
+            ));
+        }
         Ok(())
     }
+}
+
+/// What a global shortcut does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutAction {
+    ClickThrough,
+    ToggleTranslation,
+    ClearSubtitles,
+}
+
+impl ShortcutAction {
+    pub const ALL: [ShortcutAction; 3] = [
+        ShortcutAction::ClickThrough,
+        ShortcutAction::ToggleTranslation,
+        ShortcutAction::ClearSubtitles,
+    ];
+
+    pub fn keys(self) -> &'static str {
+        match self {
+            ShortcutAction::ClickThrough => CLICK_THROUGH_SHORTCUT,
+            ShortcutAction::ToggleTranslation => TOGGLE_TRANSLATION_SHORTCUT,
+            ShortcutAction::ClearSubtitles => CLEAR_SUBTITLES_SHORTCUT,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            ShortcutAction::ClickThrough => 0,
+            ShortcutAction::ToggleTranslation => 1,
+            ShortcutAction::ClearSubtitles => 2,
+        }
+    }
+}
+
+/// One global shortcut as the UI describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShortcutInfo {
+    pub action: ShortcutAction,
+    pub keys: &'static str,
+    /// False when another app owns the combination; the UI then says so
+    /// instead of advertising a key that does nothing.
+    pub registered: bool,
 }
 
 /// Snapshot sent to windows (`overlay_get_state` and `overlay://state`).
@@ -96,6 +187,9 @@ pub struct OverlaySnapshot {
     /// than in [`OverlayStyle`] because it is not appearance: the engine stores
     /// it under `translation`, not in the opaque `subtitle` object.
     pub show_translation: bool,
+    /// Every global shortcut (click-through included) and whether it could be
+    /// registered. `shortcut`/`shortcut_registered` stay for older front ends.
+    pub shortcuts: Vec<ShortcutInfo>,
 }
 
 #[derive(Debug)]
@@ -103,7 +197,8 @@ struct Inner {
     style: OverlayStyle,
     click_through: bool,
     visible: bool,
-    shortcut_registered: bool,
+    /// Indexed by [`ShortcutAction::index`].
+    shortcuts_registered: [bool; 3],
     locale: Option<String>,
     show_translation: bool,
 }
@@ -146,7 +241,7 @@ impl Default for OverlayState {
             // shortcut makes it click-through once it is in place.
             click_through: false,
             visible: false,
-            shortcut_registered: false,
+            shortcuts_registered: [false; 3],
             locale: None,
             // The engine's default (`translation.enabled: true`) until the main
             // window sends the saved value.
@@ -167,9 +262,17 @@ impl OverlayState {
             click_through: s.click_through,
             visible: s.visible,
             shortcut: CLICK_THROUGH_SHORTCUT,
-            shortcut_registered: s.shortcut_registered,
+            shortcut_registered: s.shortcuts_registered[ShortcutAction::ClickThrough.index()],
             locale: s.locale.clone(),
             show_translation: s.show_translation,
+            shortcuts: ShortcutAction::ALL
+                .iter()
+                .map(|&action| ShortcutInfo {
+                    action,
+                    keys: action.keys(),
+                    registered: s.shortcuts_registered[action.index()],
+                })
+                .collect(),
         })
     }
 
@@ -197,8 +300,8 @@ impl OverlayState {
         self.with(|s| s.visible = visible);
     }
 
-    pub fn set_shortcut_registered(&self, ok: bool) {
-        self.with(|s| s.shortcut_registered = ok);
+    pub fn set_shortcut_registered(&self, action: ShortcutAction, ok: bool) {
+        self.with(|s| s.shortcuts_registered[action.index()] = ok);
     }
 }
 
@@ -242,10 +345,64 @@ mod tests {
                 max_lines: 4,
                 ..Default::default()
             },
+            OverlayStyle {
+                min_display_ms: 10_001,
+                ..Default::default()
+            },
+            OverlayStyle {
+                idle_clear_secs: 601,
+                ..Default::default()
+            },
         ];
         for style in bad {
             assert!(style.validate().is_err(), "{style:?}");
         }
+    }
+
+    #[test]
+    fn reading_rhythm_fields_default_when_missing_and_accept_their_bounds() {
+        // A main window that predates the fields still sends a valid style.
+        let old: OverlayStyle = serde_json::from_str(
+            r#"{"font_size":40,"background_opacity":0.2,"position":"top","max_lines":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.min_display_ms, DEFAULT_MIN_DISPLAY_MS);
+        assert_eq!(old.idle_clear_secs, DEFAULT_IDLE_CLEAR_SECS);
+        for (ms, secs) in [(0, 0), (10_000, 600), (1500, 8)] {
+            let style = OverlayStyle {
+                min_display_ms: ms,
+                idle_clear_secs: secs,
+                ..Default::default()
+            };
+            assert!(style.validate().is_ok(), "{style:?}");
+        }
+        assert!(
+            serde_json::from_str::<OverlayStyle>(
+                r#"{"font_size":40,"background_opacity":0.2,"position":"top","max_lines":1,"min_display_ms":-1}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shortcuts_are_listed_with_their_registration() {
+        let state = OverlayState::default();
+        state.set_shortcut_registered(ShortcutAction::ClickThrough, true);
+        state.set_shortcut_registered(ShortcutAction::ClearSubtitles, true);
+        let snap = state.snapshot();
+        assert!(snap.shortcut_registered);
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(
+            json["shortcuts"],
+            serde_json::json!([
+                {"action": "click_through", "keys": CLICK_THROUGH_SHORTCUT, "registered": true},
+                {"action": "toggle_translation", "keys": TOGGLE_TRANSLATION_SHORTCUT, "registered": false},
+                {"action": "clear_subtitles", "keys": CLEAR_SUBTITLES_SHORTCUT, "registered": true},
+            ])
+        );
+        let keys: std::collections::HashSet<_> =
+            ShortcutAction::ALL.iter().map(|a| a.keys()).collect();
+        assert_eq!(keys.len(), 3, "each action needs its own key combination");
     }
 
     #[test]

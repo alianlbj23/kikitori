@@ -26,8 +26,11 @@ import type {
   LogEvent,
   ModelRole,
   ModelsList,
+  ObsStatus,
+  OutputInfo,
   OverlaySnapshot,
   OverlayStyle,
+  ShortcutInfo,
   Recommendation,
   RecommendationPreview,
   StatusEvent,
@@ -227,6 +230,19 @@ export function parseBridgeStatus(v: unknown): BridgeStatus {
 
 export const FONT_SIZE_RANGE = [14, 96] as const;
 export const MAX_LINES_RANGE = [1, 3] as const;
+/** Same bounds as Rust `MIN_DISPLAY_MS_RANGE` / `IDLE_CLEAR_SECS_RANGE`. */
+export const MIN_DISPLAY_MS_RANGE = [0, 10_000] as const;
+export const IDLE_CLEAR_SECS_RANGE = [0, 600] as const;
+export const DEFAULT_MIN_DISPLAY_MS = 1500;
+export const DEFAULT_IDLE_CLEAR_SECS = 8;
+
+/** An optional integer in `range`; `fallback` when absent (older Rust builds). */
+function rangedOr(o: Obj, key: string, path: string, range: readonly [number, number], fallback: number): number {
+  if (o[key] === undefined) return fallback;
+  const v = uint(o, key, path);
+  if (v < range[0] || v > range[1]) throw new ValidationError(`${path}.${key}`, "out of range");
+  return v;
+}
 
 export function parseOverlayStyle(v: unknown): OverlayStyle {
   const p = "style";
@@ -248,7 +264,61 @@ export function parseOverlayStyle(v: unknown): OverlayStyle {
     background_opacity: opacity,
     position: oneOf(o, "position", p, ["top", "bottom"] as const),
     max_lines: maxLines,
+    min_display_ms: rangedOr(o, "min_display_ms", p, MIN_DISPLAY_MS_RANGE, DEFAULT_MIN_DISPLAY_MS),
+    idle_clear_secs: rangedOr(o, "idle_clear_secs", p, IDLE_CLEAR_SECS_RANGE, DEFAULT_IDLE_CLEAR_SECS),
   };
+}
+
+const SHORTCUT_ACTIONS = ["click_through", "toggle_translation", "clear_subtitles"] as const;
+
+/** `OverlaySnapshot.shortcuts`; unknown actions (a newer Rust build) are dropped. */
+function parseShortcuts(v: unknown, path: string): ShortcutInfo[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new ValidationError(path, "expected an array");
+  const out: ShortcutInfo[] = [];
+  v.forEach((item, i) => {
+    const ip = `${path}[${i}]`;
+    const o = obj(item, ip);
+    if (!(SHORTCUT_ACTIONS as readonly unknown[]).includes(o.action)) return;
+    out.push({
+      action: oneOf(o, "action", ip, SHORTCUT_ACTIONS),
+      keys: str(o, "keys", ip, 100),
+      registered: bool(o, "registered", ip),
+    });
+  });
+  return out;
+}
+
+/** Payload of `shortcut://action` (the main window handles these). */
+export function parseShortcutAction(v: unknown): ShortcutInfo["action"] {
+  if (typeof v !== "string" || !(SHORTCUT_ACTIONS as readonly string[]).includes(v)) {
+    throw new ValidationError("shortcut", `expected one of ${SHORTCUT_ACTIONS.join(", ")}`);
+  }
+  return v as ShortcutInfo["action"];
+}
+
+export function parseObsStatus(v: unknown): ObsStatus {
+  const p = "obs_set_output";
+  const o = obj(v, p);
+  return {
+    content: oneOf(o, "content", p, ["off", "original", "translation", "both"] as const),
+    path: optStr(o, "path", p),
+    error: optStr(o, "error", p),
+  };
+}
+
+export function parseOutputInfo(v: unknown): OutputInfo {
+  const p = "output_info";
+  const o = obj(v, p);
+  return { transcripts_dir: optStr(o, "transcripts_dir", p), obs_file: optStr(o, "obs_file", p) };
+}
+
+/** `transcript_save`: the full path of the saved file. */
+export function parseSavedPath(v: unknown): string {
+  if (typeof v !== "string" || v.length === 0 || v.length > 4096) {
+    throw new ValidationError("transcript_save", "expected a path");
+  }
+  return v;
 }
 
 export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
@@ -264,6 +334,7 @@ export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
     locale: typeof o.locale === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(o.locale) ? o.locale : null,
     // Older Rust builds have no flag: translations were always shown then.
     show_translation: o.show_translation !== false,
+    shortcuts: parseShortcuts(o.shortcuts, `${p}.shortcuts`),
   };
 }
 

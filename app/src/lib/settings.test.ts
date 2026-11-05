@@ -41,6 +41,13 @@ describe("validateSettingsForm", () => {
     ["background_opacity_percent", "-1"],
     ["position", "left"],
     ["max_lines", "4"],
+    ["min_display_secs", "10.5"],
+    ["min_display_secs", "-1"],
+    ["min_display_secs", "1,5"],
+    ["min_display_secs", ""],
+    ["idle_clear_secs", "601"],
+    ["idle_clear_secs", "1.5"],
+    ["obs_output", "everything"],
   ] as const)("flags %s = %j", (field, value) => {
     const errors = validateSettingsForm({ ...validForm(), [field]: value });
     expect(errors[field]).toBeTruthy();
@@ -62,8 +69,41 @@ describe("settings patch", () => {
         api_key_env: "KIKITORI_TRANSLATE_API_KEY",
         allow_restricted: true,
       },
-      subtitle: { font_size: 32, background_opacity: 0.3, position: "top", max_lines: 2 },
+      subtitle: {
+        font_size: 32,
+        background_opacity: 0.3,
+        position: "top",
+        max_lines: 2,
+        min_display_ms: 1500,
+        idle_clear_secs: 8,
+        obs_output: "off",
+      },
+      ui: { auto_save_transcripts: false },
     });
+  });
+
+  it("stores reading rhythm, the OBS choice and auto-save (seconds become milliseconds)", () => {
+    const form = {
+      ...validForm(),
+      min_display_secs: "2.25",
+      idle_clear_secs: "0",
+      obs_output: "both",
+      auto_save_transcripts: true,
+    };
+    expect(validateSettingsForm(form)).toEqual({});
+    const patch = settingsPatchFromForm(form) as { subtitle: Record<string, unknown>; ui: Record<string, unknown> };
+    expect(patch.subtitle).toMatchObject({ min_display_ms: 2250, idle_clear_secs: 0, obs_output: "both" });
+    expect(patch.ui).toEqual({ auto_save_transcripts: true });
+    // Round trip through the settings the engine stores.
+    const back = parseSettingsResult({ settings: { subtitle: patch.subtitle, ui: patch.ui } }).settings;
+    expect(formFromSettings(back)).toMatchObject({
+      min_display_secs: "2.25",
+      idle_clear_secs: "0",
+      obs_output: "both",
+      auto_save_transcripts: true,
+    });
+    // obs_output stays out of the style Rust validates (deny_unknown_fields).
+    expect(back.subtitle).not.toHaveProperty("obs_output");
   });
 
   it("never sends translation models from the settings page", () => {
@@ -105,7 +145,27 @@ describe("parseSettingsResult", () => {
       background_opacity: DEFAULT_OVERLAY_STYLE.background_opacity,
       position: "top",
       max_lines: DEFAULT_OVERLAY_STYLE.max_lines,
+      min_display_ms: DEFAULT_OVERLAY_STYLE.min_display_ms,
+      idle_clear_secs: DEFAULT_OVERLAY_STYLE.idle_clear_secs,
     });
+  });
+
+  it("reads reading rhythm and the OBS choice, clamping and falling back", () => {
+    const { settings, warnings } = parseSettingsResult({
+      settings: {
+        subtitle: { min_display_ms: 99_999, idle_clear_secs: -3, obs_output: "translation" },
+        ui: { auto_save_transcripts: true },
+      },
+    });
+    expect(settings.subtitle.min_display_ms).toBe(10_000);
+    expect(settings.subtitle.idle_clear_secs).toBe(0);
+    expect(settings.obs_output).toBe("translation");
+    expect(settings.ui.auto_save_transcripts).toBe(true);
+    expect(warnings).toEqual([]);
+    const bad = parseSettingsResult({ settings: { subtitle: { obs_output: "all" }, ui: { auto_save_transcripts: "yes" } } });
+    expect(bad.settings.obs_output).toBe("off");
+    expect(bad.settings.ui.auto_save_transcripts).toBe(false);
+    expect(bad.warnings).toEqual(expect.arrayContaining(["subtitle.obs_output", "ui.auto_save_transcripts"]));
   });
 
   it("reads schema 2 fields", () => {
@@ -158,6 +218,7 @@ describe("parseSettingsResult", () => {
     expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({
       dismissed_recommendations: [],
       locale: "system",
+      auto_save_transcripts: false,
     });
     const ok = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["0123456789abcdef"], other: 1 } } });
     expect(ok.settings.ui.dismissed_recommendations).toEqual(["0123456789abcdef"]);

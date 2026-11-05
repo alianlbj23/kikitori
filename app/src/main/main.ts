@@ -8,7 +8,9 @@
  * the i18n dictionary, and every render function can run again after the
  * interface language changes (`onLocaleChanged`). The language section, the
  * downloads before starting and the "顯示翻譯" switch follow the same split
- * (`lib/languages.ts`, `lib/start-downloads.ts`, `lib/translation-toggle.ts`).
+ * (`lib/languages.ts`, `lib/start-downloads.ts`, `lib/translation-toggle.ts`),
+ * as do transcript export, the translation-server guide and the diagnostics
+ * report (`lib/export.ts`, `lib/translation-guide.ts`, `lib/diagnostics.ts`).
  */
 
 import { getVersion } from "@tauri-apps/api/app";
@@ -21,7 +23,18 @@ import {
   canSave,
   type CheckView,
 } from "../lib/combination";
+import { RecentLog, buildDiagnostics } from "../lib/diagnostics";
 import { byId, h, replace } from "../lib/dom";
+import {
+  EXPORT_CONTENTS,
+  EXPORT_FORMATS,
+  EXPORT_MAX_LINES,
+  exportTranscript,
+  hasExportableLines,
+  transcriptFileName,
+  type ExportContent,
+  type ExportFormat,
+} from "../lib/export";
 import {
   computeTypeLabel,
   describeStatus,
@@ -93,6 +106,7 @@ import {
   devicePatch,
   formFieldForEnginePath,
   formFromSettings,
+  obsOutputFromForm,
   settingsPatchFromForm,
   uiLocalePatch,
   validateCombinationForm,
@@ -104,6 +118,7 @@ import {
 } from "../lib/settings";
 import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
 import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
+import { translationGuide } from "../lib/translation-guide";
 import { setShowTranslation } from "../lib/translation-toggle";
 import type {
   AboutInfo,
@@ -119,9 +134,13 @@ import type {
   LicenseFolder,
   Mode,
   ModelsList,
+  ObsStatus,
+  OutputFolder,
+  OutputInfo,
   OverlaySnapshot,
   RecommendationPreview,
   Settings,
+  ShortcutAction,
 } from "../lib/types";
 import { asCommandError } from "../lib/validate";
 import { checkForUpdate, type UpdateUi } from "./updater";
@@ -182,6 +201,20 @@ interface State {
   langPreview: LanguagePreviewView;
   /** The "顯示翻譯" switch is being applied. */
   translationBusy: boolean;
+  /** Every line of the session for export (the visible log keeps only the last 300). */
+  exportLog: SubtitleState;
+  /** When the current (or last) session started, and in which mode: names exported files. */
+  sessionStartedAt: Date | null;
+  sessionMode: Mode;
+  /** Session whose transcript was auto-saved (once per session). */
+  autoSavedSession: string | null;
+  /** `output_info`: where transcripts and the OBS text go. */
+  output: OutputInfo | null;
+  /** Last `obs_set_output` answer. */
+  obs: ObsStatus | null;
+  /** The translation-server guide is shown (its notice appears once per appearance). */
+  guideShown: boolean;
+  appVersion: string | null;
 }
 
 /** State of the recommended-combination preview under the language menus. */
@@ -224,7 +257,20 @@ const state: State = {
   langFilters: { source: "", target: "", partner: "" },
   langPreview: { state: "unavailable" },
   translationBusy: false,
+  exportLog: emptySubtitles(),
+  sessionStartedAt: null,
+  sessionMode: "media",
+  autoSavedSession: null,
+  output: null,
+  obs: null,
+  guideShown: false,
+  appVersion: null,
 };
+
+/** Last engine messages for "複製診斷資訊". */
+const recentLog = new RecentLog();
+const GUIDE_NOTICE = "translation-guide";
+const EXPORT_NOTICE = "export";
 
 const firstRunGate = new FirstRunGate();
 
@@ -313,6 +359,22 @@ const el = {
   openEngineLicenses: byId<HTMLButtonElement>("open-engine-licenses"),
   checkUpdate: byId<HTMLButtonElement>("check-update"),
   updateStatus: byId("update-status"),
+  exportMenu: byId<HTMLDetailsElement>("export-menu"),
+  exportContent: byId<HTMLSelectElement>("export-content"),
+  exportFormats: byId("export-formats"),
+  exportHelp: byId("export-help"),
+  transcriptsPath: byId("transcripts-path"),
+  openTranscripts: byId<HTMLButtonElement>("open-transcripts"),
+  obsPath: byId("obs-path"),
+  openObs: byId<HTMLButtonElement>("open-obs"),
+  guide: byId("translation-guide"),
+  guideText: byId("translation-guide-text"),
+  guideInstall: byId<HTMLButtonElement>("guide-install"),
+  guideOriginal: byId<HTMLButtonElement>("guide-original"),
+  guideRecheck: byId<HTMLButtonElement>("guide-recheck"),
+  copyDiagnostics: byId<HTMLButtonElement>("copy-diagnostics"),
+  diagnosticsStatus: byId("diagnostics-status"),
+  diagnosticsText: byId<HTMLTextAreaElement>("diagnostics-text"),
 };
 
 // ---------------------------------------------------------------- notices
@@ -385,6 +447,16 @@ function sessionActive(): boolean {
 
 function engineReady(): boolean {
   return state.bridge?.phase === "ready";
+}
+
+/**
+ * Every change of the session state goes through here, so the end of a
+ * session (stop, engine error, engine restart) is noticed in one place.
+ */
+function setSessionState(next: EngineState): void {
+  const wasActive = sessionActive();
+  state.sessionState = next;
+  if (wasActive && !sessionActive()) void autoSaveTranscript();
 }
 
 function renderStatus(): void {
@@ -492,7 +564,7 @@ async function toggleSession(): Promise<void> {
   try {
     if (sessionActive()) {
       await api.sessionStop();
-      state.sessionState = "idle";
+      setSessionState("idle");
     } else {
       startFlow.reset();
       // Chosen speech models that are not downloaded yet (or still downloading):
@@ -520,7 +592,10 @@ async function startSession(): Promise<void> {
   const sessionId = await api.sessionStart(state.mode, deviceId);
   state.sessionId = sessionId;
   state.subtitles = emptySubtitles(sessionId);
-  state.sessionState = "loading";
+  state.exportLog = emptySubtitles(sessionId);
+  state.sessionStartedAt = new Date();
+  state.sessionMode = state.mode;
+  setSessionState("loading");
   renderTranscript();
   if (state.overlay && !state.overlay.visible) {
     await setOverlayVisible(true);
@@ -556,6 +631,7 @@ const startFlow = new StartDownloads({
   onChange: () => {
     renderStartDownloads();
     renderStatus();
+    renderTranslationGuide();
   },
 });
 
@@ -652,6 +728,115 @@ function renderTranscript(): void {
   }
   el.transcriptEmpty.hidden = state.subtitles.lines.length > 0;
   if (nearBottom && scroller) scroller.scrollTop = scroller.scrollHeight;
+  renderExport();
+}
+
+// ---------------------------------------------------------------- transcript export
+
+function exportFormatButtons(): HTMLButtonElement[] {
+  return Array.from(el.exportFormats.querySelectorAll<HTMLButtonElement>("button[data-format]"));
+}
+
+function renderExport(): void {
+  if (exportFormatButtons().length === 0) {
+    // Format names are file types, not interface text.
+    replace(
+      el.exportFormats,
+      ...EXPORT_FORMATS.map((format) => h("button", { type: "button", class: "ghost", "data-format": format }, format.toUpperCase())),
+    );
+    for (const button of exportFormatButtons()) {
+      button.addEventListener("click", () => void exportAs(button.dataset.format as ExportFormat));
+    }
+  }
+  const any = hasExportableLines(state.exportLog.lines);
+  for (const button of exportFormatButtons()) button.disabled = !any;
+  el.exportHelp.textContent = any ? t("export.help") : t("export.empty");
+}
+
+function exportContent(): ExportContent {
+  const v = el.exportContent.value;
+  return (EXPORT_CONTENTS as readonly string[]).includes(v) ? (v as ExportContent) : "both";
+}
+
+/** Writes one format through Rust; resolves to the saved path. */
+async function saveTranscript(format: ExportFormat, content: ExportContent): Promise<string> {
+  const name = transcriptFileName(state.sessionStartedAt ?? new Date(), state.sessionMode, format);
+  return api.transcriptSave(name, exportTranscript(state.exportLog.lines, format, content));
+}
+
+function notifySaved(text: string): void {
+  notify(text, "info", [{ label: t("export.openFolder"), run: () => void openOutputFolder("transcripts") }], {
+    key: EXPORT_NOTICE,
+  });
+}
+
+async function exportAs(format: ExportFormat): Promise<void> {
+  if (!hasExportableLines(state.exportLog.lines)) return;
+  for (const button of exportFormatButtons()) button.disabled = true;
+  try {
+    const path = await saveTranscript(format, exportContent());
+    el.exportMenu.open = false;
+    notifySaved(t("export.saved", { path }));
+  } catch (e) {
+    reportError("error.export", e);
+  } finally {
+    renderExport();
+  }
+}
+
+/** "每次結束時自動存檔": SRT and TXT (both languages) once per session. */
+async function autoSaveTranscript(): Promise<void> {
+  if (!state.settings?.ui.auto_save_transcripts || !hasExportableLines(state.exportLog.lines)) return;
+  const session = `${state.exportLog.sessionId ?? "-"}@${state.sessionStartedAt?.getTime() ?? 0}`;
+  if (state.autoSavedSession === session) return;
+  state.autoSavedSession = session;
+  try {
+    const srt = await saveTranscript("srt", "both");
+    await saveTranscript("txt", "both");
+    notifySaved(t("export.savedAuto", { path: srt }));
+  } catch (e) {
+    reportError("error.autoSave", e);
+  }
+}
+
+async function openOutputFolder(folder: OutputFolder): Promise<void> {
+  try {
+    await api.openOutputFolder(folder);
+  } catch (e) {
+    reportError("error.openFolder", e);
+  }
+}
+
+function renderOutputPaths(): void {
+  const o = state.output;
+  el.transcriptsPath.textContent = o?.transcripts_dir
+    ? t("output.transcriptsPath", { path: o.transcripts_dir })
+    : o
+      ? t("output.noDocuments")
+      : "";
+  el.openTranscripts.hidden = !o?.transcripts_dir;
+  const obsFile = state.obs?.path ?? o?.obs_file ?? null;
+  const obsError = state.obs && state.obs.content !== "off" ? state.obs.error : null;
+  el.obsPath.textContent = obsError
+    ? t("output.obsError", { error: obsError })
+    : obsFile
+      ? t("output.obsPath", { path: obsFile })
+      : o
+        ? t("output.noDocuments")
+        : "";
+  el.obsPath.classList.toggle("warning", obsError !== null);
+  el.openObs.hidden = !obsFile;
+}
+
+/** Sends the saved OBS choice to Rust (engine start, settings saved). */
+async function pushObsOutput(): Promise<void> {
+  if (!state.settings) return;
+  try {
+    state.obs = await api.obsSetOutput(state.settings.obs_output);
+  } catch (e) {
+    reportError("error.applyObs", e);
+  }
+  renderOutputPaths();
 }
 
 // ---------------------------------------------------------------- overlay controls
@@ -664,10 +849,29 @@ function renderOverlay(): void {
     el.shortcutNote.textContent = "";
     return;
   }
-  const keys = o.shortcut.replace("CommandOrControl", t("transcript.shortcutCtrl"));
-  el.shortcutNote.textContent = o.shortcut_registered
-    ? t("transcript.shortcutOn", { keys })
-    : t("transcript.shortcutTaken", { keys });
+  const label = (raw: string) => raw.replace("CommandOrControl", t("transcript.shortcutCtrl"));
+  const keys = label(o.shortcut);
+  const lines = [o.shortcut_registered ? t("transcript.shortcutOn", { keys }) : t("transcript.shortcutTaken", { keys })];
+  for (const s of o.shortcuts) {
+    if (s.action === "click_through") continue;
+    const action = s.action === "toggle_translation" ? t("shortcut.toggleTranslation") : t("shortcut.clearSubtitles");
+    lines.push(
+      !s.registered
+        ? t("transcript.shortcutActionTaken", { keys: label(s.keys), action })
+        : s.action === "toggle_translation"
+          ? t("transcript.shortcutTranslation", { keys: label(s.keys) })
+          : t("transcript.shortcutClear", { keys: label(s.keys) }),
+    );
+  }
+  replace(el.shortcutNote, ...lines.flatMap((line, i) => (i === 0 ? [line] : [h("br"), line])));
+}
+
+/** A global shortcut handled here (Rust forwards it; see lib.rs `run_shortcut`). */
+function onShortcut(action: ShortcutAction): void {
+  if (action !== "toggle_translation") return;
+  // Same rules as the switches: not while the engine is down or a switch is in flight.
+  if (!engineReady() || state.translationBusy || !state.settings) return;
+  void changeShowTranslation(!showsTranslation());
 }
 
 async function setOverlayVisible(visible: boolean): Promise<void> {
@@ -707,6 +911,7 @@ async function changeShowTranslation(enabled: boolean): Promise<void> {
     else reportError("error.setTranslation", result.overlayError);
     renderTranscript();
     renderModeNotes();
+    renderTranslationGuide();
     // The preview says whether a translation model is needed at all.
     scheduleLanguagePreview(0);
   } catch (e) {
@@ -1355,6 +1560,67 @@ function renderModels(): void {
   );
   replace(el.trNames, ...tr.models.map((x) => h("option", { value: x.name })));
   renderComboOptions();
+  renderTranslationGuide();
+}
+
+// ---------------------------------------------------------------- translation server guide
+
+/**
+ * "Install Ollama" / "Use original only" when the translation server cannot be
+ * reached (lib/translation-guide.ts): on the settings page, and once as a
+ * notice each time it appears, so it is seen before starting.
+ */
+function renderTranslationGuide(): void {
+  const server = state.models?.translation.server ?? state.hardware?.hardware.translation_server ?? null;
+  const guide = translationGuide(
+    {
+      translationEnabled: showsTranslation(),
+      server,
+      startBlockedUnreachable: startFlow.state.blocker === "server_unreachable",
+    },
+    state.settings?.translation.base_url ?? DEFAULT_SETTINGS.translation.base_url,
+  );
+  el.guide.hidden = guide === null;
+  if (!guide) {
+    state.guideShown = false;
+    noticeFor(GUIDE_NOTICE)?.remove();
+    return;
+  }
+  const text = t(guide.offerInstall ? "guide.local" : "guide.remote", { url: guide.url });
+  el.guideText.textContent = text;
+  el.guideInstall.hidden = !guide.offerInstall;
+  el.guideRecheck.disabled = !engineReady();
+  el.guideOriginal.disabled = !engineReady() || state.translationBusy;
+  if (state.guideShown) return;
+  state.guideShown = true;
+  const actions = [
+    ...(guide.offerInstall ? [{ label: t("guide.install"), run: () => void openOllamaDownload() }] : []),
+    { label: t("guide.originalOnly"), run: () => void changeShowTranslation(false) },
+  ];
+  notify(text, "info", actions, { key: GUIDE_NOTICE });
+}
+
+async function openOllamaDownload(): Promise<void> {
+  try {
+    await api.openOllamaDownload();
+  } catch (e) {
+    reportError("error.openOllama", e);
+  }
+}
+
+/** Probes the translation server again (models.list) after the user installed or started it. */
+async function recheckTranslationServer(): Promise<void> {
+  if (!engineReady()) return;
+  el.guideRecheck.disabled = true;
+  try {
+    state.models = await api.modelsList();
+    renderModels();
+    renderMissingNotice();
+  } catch (e) {
+    reportError("error.readModels", e);
+  } finally {
+    renderTranslationGuide();
+  }
 }
 
 async function loadModels(): Promise<void> {
@@ -1614,6 +1880,10 @@ const FORM_FIELDS: (keyof SettingsForm)[] = [
   "background_opacity_percent",
   "position",
   "max_lines",
+  "min_display_secs",
+  "idle_clear_secs",
+  "obs_output",
+  "auto_save_transcripts",
 ];
 
 function readForm(): SettingsForm {
@@ -1626,6 +1896,10 @@ function readForm(): SettingsForm {
     background_opacity_percent: field("background_opacity_percent").value,
     position: field("position").value,
     max_lines: field("max_lines").value,
+    min_display_secs: field("min_display_secs").value,
+    idle_clear_secs: field("idle_clear_secs").value,
+    obs_output: field("obs_output").value,
+    auto_save_transcripts: (field("auto_save_transcripts") as HTMLInputElement).checked,
   };
 }
 
@@ -1674,6 +1948,7 @@ async function submitSettings(): Promise<void> {
     const { settings } = await api.settingsSet(settingsPatchFromForm(form));
     state.settings = settings;
     await pushOverlayStyle();
+    if (state.obs?.content !== obsOutputFromForm(form)) await pushObsOutput();
     renderModeNotes();
     renderModels();
     el.settingsStatus.textContent = restrictedChanged ? t("settings.savedRegion") : t("settings.saved");
@@ -1961,6 +2236,40 @@ function renderAbout(): void {
   el.openEngineLicenses.hidden = !engine;
 }
 
+/**
+ * "複製診斷資訊": builds the redacted report (lib/diagnostics.ts) from what this
+ * window already knows — no engine call, so the click's user activation is
+ * still valid for the clipboard. If the clipboard is refused, the text is
+ * shown for copying by hand.
+ */
+async function copyDiagnostics(): Promise<void> {
+  const text = buildDiagnostics({
+    appVersion: state.appVersion,
+    uiLocale: getLocale(),
+    userAgent: navigator.userAgent,
+    bridgePhase: state.bridge?.phase ?? null,
+    bridgeDetail: state.bridge?.detail ?? null,
+    engine: state.bridge?.info ?? null,
+    sessionState: state.sessionState,
+    hardware: state.hardware?.hardware ?? null,
+    settings: state.settings,
+    settingsPath: state.settingsPath,
+    recentLog: recentLog.entries(),
+    now: new Date(),
+  });
+  try {
+    await navigator.clipboard.writeText(text);
+    el.diagnosticsText.hidden = true;
+    el.diagnosticsStatus.textContent = t("about.diagnosticsCopied");
+  } catch (e) {
+    console.error("clipboard write failed:", e);
+    el.diagnosticsText.value = text;
+    el.diagnosticsText.hidden = false;
+    el.diagnosticsText.select();
+    el.diagnosticsStatus.textContent = t("about.diagnosticsManual");
+  }
+}
+
 async function openLicenses(folder: LicenseFolder): Promise<void> {
   try {
     await api.openThirdPartyLicenses(folder);
@@ -2073,6 +2382,8 @@ function onLocaleChanged(): void {
   renderSettingsPath();
   renderAbout();
   renderMissingNotice();
+  renderOutputPaths();
+  renderTranslationGuide();
   void pushOverlayLocale();
 }
 
@@ -2086,6 +2397,34 @@ function showPage(page: Page): void {
     else item.removeAttribute("aria-current");
   }
   if (page === "models") void loadModels().then(checkRecommendation);
+  // The diagnostics report and the guide use the hardware summary; detect it once.
+  if (page === "settings" && !state.hardware && engineReady()) void detectHardwareQuietly();
+}
+
+async function detectHardwareQuietly(): Promise<void> {
+  try {
+    state.hardware = await api.hardwareDetect();
+    renderHardware();
+    renderTranslationGuide();
+  } catch (e) {
+    console.error("hardware.detect failed:", e);
+  }
+}
+
+/**
+ * `models.list` at engine start, so an unreachable translation server is noticed
+ * (and the guide shown) before the user presses Start. Failures are only logged:
+ * the models page reports them when opened.
+ */
+async function loadModelsQuietly(): Promise<void> {
+  if (state.models || state.page === "models") return;
+  try {
+    state.models = await api.modelsList();
+    renderModels();
+    renderMissingNotice();
+  } catch (e) {
+    console.error("models.list failed:", e);
+  }
 }
 
 // ---------------------------------------------------------------- engine data
@@ -2109,6 +2448,7 @@ async function loadEngineData(): Promise<void> {
     renderTranslationSwitches();
     await pushOverlayStyle();
     await pushOverlayShowTranslation();
+    await pushObsOutput();
   } catch (e) {
     reportError("error.readSettings", e);
   }
@@ -2125,6 +2465,7 @@ async function loadEngineData(): Promise<void> {
   // Runs on every engine (re)start, e.g. after the GPU runtime install restarts it.
   if (firstRunGate.claim({ isNew, userChoseModels: state.userChoseModels })) void firstRunFlow();
   else void checkRecommendation();
+  void loadModelsQuietly();
 }
 
 function onBridge(status: BridgeStatus): void {
@@ -2132,7 +2473,7 @@ function onBridge(status: BridgeStatus): void {
   state.bridge = status;
   if (status.phase !== "ready") {
     // A restarted engine has no session and no downloads in flight.
-    state.sessionState = "idle";
+    setSessionState("idle");
     for (const [id, d] of state.downloads) if (d.state === "downloading") state.downloads.delete(id);
   }
   renderStatus();
@@ -2145,6 +2486,7 @@ function onBridge(status: BridgeStatus): void {
   }
   if (status.phase === "ready" && !wasReady) void loadEngineData();
   if (status.phase === "failed") {
+    recentLog.push("bridge", `engine failed: ${status.detail ?? "unknown"}`);
     notify(t("engine.failedNotice", { reason: status.detail ?? t("common.unknownCause") }), "bad", [
       { label: t("engine.restart"), run: () => void restartEngine() },
     ]);
@@ -2265,8 +2607,16 @@ function wire(): void {
   });
   el.clear.addEventListener("click", () => {
     state.subtitles = emptySubtitles(state.subtitles.sessionId);
+    // Export follows the log: what was cleared is not exported later.
+    state.exportLog = emptySubtitles(state.exportLog.sessionId);
     renderTranscript();
   });
+  el.openTranscripts.addEventListener("click", () => void openOutputFolder("transcripts"));
+  el.openObs.addEventListener("click", () => void openOutputFolder("obs"));
+  el.guideInstall.addEventListener("click", () => void openOllamaDownload());
+  el.guideOriginal.addEventListener("click", () => void changeShowTranslation(false));
+  el.guideRecheck.addEventListener("click", () => void recheckTranslationServer());
+  el.copyDiagnostics.addEventListener("click", () => void copyDiagnostics());
   el.modelsRefresh.addEventListener("click", () => void loadModels().then(checkRecommendation));
   el.comboForm.addEventListener("input", () => {
     state.comboDirty = true;
@@ -2305,7 +2655,8 @@ async function subscribe(): Promise<void> {
     events.status((s) => {
       if (s.session_id !== null && state.sessionId !== null && s.session_id < state.sessionId) return;
       if (s.session_id !== null) state.sessionId = s.session_id;
-      state.sessionState = s.state;
+      setSessionState(s.state);
+      if (s.state === "error") recentLog.push("status", `${s.code ?? "error"}: ${s.detail ?? ""}`);
       if (s.state === "error" && s.code === "translation_model_missing" && s.missing_translation_models.length) {
         // Pull them on the user's Ollama, then start again (lib/start-downloads.ts).
         startFlow.begin(
@@ -2323,6 +2674,7 @@ async function subscribe(): Promise<void> {
     }),
     events.subtitle((ev) => {
       state.subtitles = applySubtitle(state.subtitles, ev, TRANSCRIPT_MAX_LINES);
+      state.exportLog = applySubtitle(state.exportLog, ev, EXPORT_MAX_LINES);
       renderTranscript();
     }),
     events.download((p) => {
@@ -2356,6 +2708,7 @@ async function subscribe(): Promise<void> {
       renderMissingNotice();
     }),
     events.log((l) => {
+      if (l.level !== "debug") recentLog.push(l.level, l.message);
       if (l.level === "warning" || l.level === "error") {
         console.warn(`engine ${l.level}: ${l.message}`);
         notify(t("engine.log", { message: l.message }), l.level === "error" ? "bad" : "info");
@@ -2365,6 +2718,7 @@ async function subscribe(): Promise<void> {
       state.overlay = o;
       renderOverlay();
     }),
+    events.shortcut(onShortcut),
   ]);
 }
 
@@ -2380,10 +2734,17 @@ async function init(): Promise<void> {
   renderModels();
   renderCheck();
   try {
-    el.aboutVersion.textContent = `kikitori ${await getVersion()}`;
+    state.appVersion = await getVersion();
+    el.aboutVersion.textContent = `kikitori ${state.appVersion}`;
   } catch (e) {
     console.error("getVersion failed:", e);
   }
+  try {
+    state.output = await api.outputInfo();
+  } catch (e) {
+    console.error("output_info failed:", e);
+  }
+  renderOutputPaths();
   try {
     state.about = await api.about();
   } catch (e) {

@@ -85,7 +85,41 @@ export interface OverlayStyle {
   background_opacity: number;
   position: OverlayPosition;
   max_lines: number;
+  /** A line stays at least this long before a newer one pushes it out (0 = never wait). */
+  min_display_ms: number;
+  /** Seconds after the last change before the overlay fades out; 0 = never. */
+  idle_clear_secs: number;
 }
+
+/** What a global shortcut does (Rust `ShortcutAction`). */
+export type ShortcutAction = "click_through" | "toggle_translation" | "clear_subtitles";
+
+export interface ShortcutInfo {
+  action: ShortcutAction;
+  keys: string;
+  /** False when another app owns the combination. */
+  registered: boolean;
+}
+
+/** Which text the OBS file holds (`settings.subtitle.obs_output`). */
+export type ObsContent = "off" | "original" | "translation" | "both";
+
+/** `obs_set_output` result. */
+export interface ObsStatus {
+  content: ObsContent;
+  /** Full path of the text file; null when the Documents folder is unknown. */
+  path: string | null;
+  error: string | null;
+}
+
+/** `output_info`: where transcripts and the OBS text go (null without a Documents folder). */
+export interface OutputInfo {
+  transcripts_dir: string | null;
+  obs_file: string | null;
+}
+
+/** Argument of `open_output_folder`. */
+export type OutputFolder = "transcripts" | "obs";
 
 export interface OverlaySnapshot {
   style: OverlayStyle;
@@ -97,6 +131,8 @@ export interface OverlaySnapshot {
   locale: string | null;
   /** Settings `translation.enabled`; false = show originals in the primary style. */
   show_translation: boolean;
+  /** Every global shortcut; older Rust builds list only `shortcut` (click-through). */
+  shortcuts: ShortcutInfo[];
 }
 
 export interface DeviceInfo {
@@ -308,6 +344,8 @@ export interface Settings {
     allow_restricted: boolean;
   };
   subtitle: OverlayStyle;
+  /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
+  obs_output: ObsContent;
   /** The UI's own state in the engine's opaque `ui` object (the engine never reads it). */
   ui: UiState;
 }
@@ -320,6 +358,8 @@ export interface UiState {
   dismissed_recommendations: string[];
   /** Interface language (`ui.locale`); "system" follows the OS. */
   locale: UiLocalePreference;
+  /** Save SRT and TXT of every session when it ends (`ui.auto_save_transcripts`). */
+  auto_save_transcripts: boolean;
 }
 
 /** `settings.preview_recommendation`: what applying would write, without saving. */

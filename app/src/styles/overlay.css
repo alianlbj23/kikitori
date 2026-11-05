@@ -113,6 +113,12 @@ body {
   gap: calc(var(--fs) * 0.35);
 }
 
+/* Idle fade-out (reading rhythm, lib/rhythm.ts); overlay.ts FADE_MS matches. */
+.lines.is-fading {
+  opacity: 0;
+  transition: opacity 400ms ease-out;
+}
+
 .line {
   display: flex;
   flex-direction: column;
@@ -230,7 +236,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .orig,
   .tr,
-  .handle {
+  .handle,
+  .lines.is-fading {
     transition: none;
   }
 }

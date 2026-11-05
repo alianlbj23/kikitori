@@ -76,6 +76,20 @@
               <label class="switch"><input type="checkbox" id="overlay-click-through" /><span data-i18n="transcript.clickThrough"></span></label>
               <label class="switch"><input type="checkbox" id="show-translation" checked /><span data-i18n="transcript.showTranslation"></span></label>
               <button type="button" class="ghost" id="clear-transcript" data-i18n="transcript.clear"></button>
+              <!-- Export (lib/export.ts builds the file, Rust transcript_save writes it). -->
+              <details class="export-menu" id="export-menu">
+                <summary data-i18n="export.button"></summary>
+                <div class="export-panel">
+                  <label for="export-content" data-i18n="export.content"></label>
+                  <select id="export-content">
+                    <option value="both" data-i18n="export.contentBoth"></option>
+                    <option value="original" data-i18n="export.contentOriginal"></option>
+                    <option value="translation" data-i18n="export.contentTranslation"></option>
+                  </select>
+                  <div class="export-formats" id="export-formats"></div>
+                  <p class="field-help" id="export-help" data-i18n="export.help"></p>
+                </div>
+              </details>
             </div>
           </header>
           <p class="shortcut-note" id="shortcut-note"></p>
@@ -303,6 +317,15 @@
                 <p class="field-error" data-error-for="api_key_env"></p>
               </div>
               <p class="field-help" data-i18n="settings.translationModelsHelp"></p>
+              <!-- Shown when the translation server cannot be reached (lib/translation-guide.ts). -->
+              <div class="guide" id="translation-guide" role="status" hidden>
+                <p id="translation-guide-text"></p>
+                <div class="form-actions">
+                  <button type="button" class="primary" id="guide-install" data-i18n="guide.install"></button>
+                  <button type="button" class="ghost" id="guide-original" data-i18n="guide.originalOnly"></button>
+                  <button type="button" class="ghost" id="guide-recheck" data-i18n="guide.recheck"></button>
+                </div>
+              </div>
             </fieldset>
 
             <fieldset class="block">
@@ -365,6 +388,52 @@
                   <p class="field-error" data-error-for="max_lines"></p>
                 </div>
               </div>
+              <!-- Reading rhythm of the overlay (lib/rhythm.ts). -->
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-min-display" data-i18n="settings.minDisplay"></label>
+                  <input id="f-min-display" name="min_display_secs" type="number" min="0" max="10" step="0.5" inputmode="decimal" />
+                  <p class="field-help" data-i18n="settings.minDisplayHelp"></p>
+                  <p class="field-error" data-error-for="min_display_secs"></p>
+                </div>
+                <div class="field">
+                  <label for="f-idle-clear" data-i18n="settings.idleClear"></label>
+                  <input id="f-idle-clear" name="idle_clear_secs" type="number" min="0" max="600" step="1" inputmode="numeric" />
+                  <p class="field-help" data-i18n="settings.idleClearHelp"></p>
+                  <p class="field-error" data-error-for="idle_clear_secs"></p>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset class="block">
+              <legend data-i18n="output.legend"></legend>
+              <div class="field">
+                <label class="consent" for="f-auto-save">
+                  <input id="f-auto-save" name="auto_save_transcripts" type="checkbox" />
+                  <span data-i18n="output.autoSave"></span>
+                </label>
+                <p class="field-help" data-i18n="output.autoSaveHelp"></p>
+                <p class="field-help" id="transcripts-path"></p>
+                <p class="field-error" data-error-for="auto_save_transcripts"></p>
+                <div class="form-actions">
+                  <button type="button" class="ghost" id="open-transcripts" data-i18n="output.openTranscripts"></button>
+                </div>
+              </div>
+              <div class="field">
+                <label for="f-obs-output" data-i18n="output.obs"></label>
+                <select id="f-obs-output" name="obs_output">
+                  <option value="off" data-i18n="output.obsOff"></option>
+                  <option value="original" data-i18n="output.obsOriginal"></option>
+                  <option value="translation" data-i18n="output.obsTranslation"></option>
+                  <option value="both" data-i18n="output.obsBoth"></option>
+                </select>
+                <p class="field-help" data-i18n="output.obsHelp"></p>
+                <p class="field-help" id="obs-path"></p>
+                <p class="field-error" data-error-for="obs_output"></p>
+                <div class="form-actions">
+                  <button type="button" class="ghost" id="open-obs" data-i18n="output.openObs"></button>
+                </div>
+              </div>
             </fieldset>
 
             <div class="form-actions">
@@ -386,6 +455,13 @@
               <button type="button" class="ghost" id="check-update" data-i18n="about.checkUpdate"></button>
               <span class="form-status" id="update-status" role="status"></span>
             </div>
+            <p class="rail-hint" data-i18n="about.diagnosticsHelp"></p>
+            <div class="form-actions">
+              <button type="button" class="ghost" id="copy-diagnostics" data-i18n="about.copyDiagnostics"></button>
+              <span class="form-status" id="diagnostics-status" role="status"></span>
+            </div>
+            <!-- Shown only when the clipboard cannot be written: the user copies by hand. -->
+            <textarea class="diagnostics-text" id="diagnostics-text" rows="12" readonly spellcheck="false" hidden></textarea>
           </section>
         </section>
       </main>

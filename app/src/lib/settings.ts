@@ -11,9 +11,10 @@
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
  * The language section has its own module (`languages.ts`).
- * Overlay appearance lives in the engine's opaque `subtitle` object, the UI's
- * own state (dismissed recommendation offers, interface language) in the opaque
- * `ui` object. Validation messages come from the i18n dictionary.
+ * Overlay appearance, reading rhythm and the OBS text choice live in the
+ * engine's opaque `subtitle` object, the UI's own state (dismissed
+ * recommendation offers, interface language, transcript auto-save) in the
+ * opaque `ui` object. Validation messages come from the i18n dictionary.
  */
 
 import { isUiLocale, t, type UiLocalePreference } from "./i18n";
@@ -24,18 +25,32 @@ import type {
   AsrDevice,
   ComputeType,
   Mode,
+  ObsContent,
   OverlayStyle,
   Settings,
   UiState,
 } from "./types";
-import { FONT_SIZE_RANGE, MAX_LINES_RANGE, ValidationError, parseRecommendation } from "./validate";
+import {
+  DEFAULT_IDLE_CLEAR_SECS,
+  DEFAULT_MIN_DISPLAY_MS,
+  FONT_SIZE_RANGE,
+  IDLE_CLEAR_SECS_RANGE,
+  MAX_LINES_RANGE,
+  MIN_DISPLAY_MS_RANGE,
+  ValidationError,
+  parseRecommendation,
+} from "./validate";
 
 export const DEFAULT_OVERLAY_STYLE: OverlayStyle = {
   font_size: 32,
   background_opacity: 0.45,
   position: "bottom",
   max_lines: 2,
+  min_display_ms: DEFAULT_MIN_DISPLAY_MS,
+  idle_clear_secs: DEFAULT_IDLE_CLEAR_SECS,
 };
+
+export const OBS_CONTENTS: readonly ObsContent[] = ["off", "original", "translation", "both"];
 
 /** CTranslate2 precisions the engine accepts (config `COMPUTE_TYPES`). */
 export const COMPUTE_TYPES: readonly ComputeType[] = [
@@ -80,7 +95,8 @@ export const DEFAULT_SETTINGS: Settings = {
     allow_restricted: false,
   },
   subtitle: DEFAULT_OVERLAY_STYLE,
-  ui: { dismissed_recommendations: [], locale: "system" },
+  obs_output: "off",
+  ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false },
 };
 
 /** Recommendation fingerprints are short hex strings (engine `recommendation_fingerprint`). */
@@ -176,6 +192,7 @@ export function uiStateFromSettings(ui: unknown, warn: Warn): UiState {
   return {
     dismissed_recommendations: dismissedFromUi(o.dismissed_recommendations, warn),
     locale: localeFromUi(o.locale, warn),
+    auto_save_transcripts: pickBool(o, "auto_save_transcripts", false, warn, "ui."),
   };
 }
 
@@ -216,6 +233,8 @@ export function overlayStyleFromSubtitle(subtitle: unknown): OverlayStyle {
         : DEFAULT_OVERLAY_STYLE.background_opacity,
     position: o.position === "top" || o.position === "bottom" ? o.position : "bottom",
     max_lines: clampInt(o.max_lines, MAX_LINES_RANGE, DEFAULT_OVERLAY_STYLE.max_lines),
+    min_display_ms: clampInt(o.min_display_ms, MIN_DISPLAY_MS_RANGE, DEFAULT_OVERLAY_STYLE.min_display_ms),
+    idle_clear_secs: clampInt(o.idle_clear_secs, IDLE_CLEAR_SECS_RANGE, DEFAULT_OVERLAY_STYLE.idle_clear_secs),
   };
 }
 
@@ -276,6 +295,7 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         allow_restricted: pickBool(tr, "allow_restricted", d.translation.allow_restricted, warn, "translation."),
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
+      obs_output: pickEnum(asObj(root.subtitle), "obs_output", OBS_CONTENTS, d.obs_output, warn, "subtitle."),
       ui: uiStateFromSettings(root.ui, warn),
     },
     path,
@@ -318,6 +338,11 @@ export interface SettingsForm {
   background_opacity_percent: string;
   position: string;
   max_lines: string;
+  /** Seconds, decimals allowed ("1.5"); stored as `subtitle.min_display_ms`. */
+  min_display_secs: string;
+  idle_clear_secs: string;
+  obs_output: string;
+  auto_save_transcripts: boolean;
 }
 
 export type FormErrors = Partial<Record<keyof SettingsForm, string>>;
@@ -329,6 +354,12 @@ const MODEL_NAME_MAX = 200;
 function parseIntField(raw: string): number | null {
   if (!/^\s*\d+\s*$/.test(raw)) return null;
   return Number.parseInt(raw, 10);
+}
+
+/** Non-negative seconds with an optional fraction ("1", "1.5", "0.25"). */
+function parseSecondsField(raw: string): number | null {
+  if (!/^\s*\d{1,6}(\.\d{1,3})?\s*$/.test(raw)) return null;
+  return Number.parseFloat(raw);
 }
 
 /** Checks the settings page form; returns per-field messages (empty when valid). */
@@ -365,6 +396,18 @@ export function validateSettingsForm(form: SettingsForm): FormErrors {
   if (lines === null || lines < MAX_LINES_RANGE[0] || lines > MAX_LINES_RANGE[1]) {
     errors.max_lines = t("validation.lines", { min: MAX_LINES_RANGE[0], max: MAX_LINES_RANGE[1] });
   }
+  const minSecs = parseSecondsField(form.min_display_secs);
+  const [msLo, msHi] = MIN_DISPLAY_MS_RANGE;
+  if (minSecs === null || minSecs * 1000 < msLo || minSecs * 1000 > msHi) {
+    errors.min_display_secs = t("validation.minDisplay", { min: msLo / 1000, max: msHi / 1000 });
+  }
+  const idle = parseIntField(form.idle_clear_secs);
+  if (idle === null || idle < IDLE_CLEAR_SECS_RANGE[0] || idle > IDLE_CLEAR_SECS_RANGE[1]) {
+    errors.idle_clear_secs = t("validation.idleClear", { min: IDLE_CLEAR_SECS_RANGE[0], max: IDLE_CLEAR_SECS_RANGE[1] });
+  }
+  if (!(OBS_CONTENTS as readonly string[]).includes(form.obs_output)) {
+    errors.obs_output = t("validation.obsOutput");
+  }
   return errors;
 }
 
@@ -374,10 +417,21 @@ export function overlayStyleFromForm(form: SettingsForm): OverlayStyle {
     background_opacity: Number.parseInt(form.background_opacity_percent, 10) / 100,
     position: form.position === "top" ? "top" : "bottom",
     max_lines: Number.parseInt(form.max_lines, 10),
+    min_display_ms: Math.round(Number.parseFloat(form.min_display_secs) * 1000),
+    idle_clear_secs: Number.parseInt(form.idle_clear_secs, 10),
   };
 }
 
-/** Partial settings for `settings.set`; call only after validation passed. */
+/** The form's OBS choice; call only after validation passed. */
+export function obsOutputFromForm(form: SettingsForm): ObsContent {
+  return (OBS_CONTENTS as readonly string[]).includes(form.obs_output) ? (form.obs_output as ObsContent) : "off";
+}
+
+/**
+ * Partial settings for `settings.set`; call only after validation passed.
+ * `obs_output` sits in `subtitle` beside the style (the engine deep-merges and
+ * never reads either), but is not part of the style Rust validates.
+ */
 export function settingsPatchFromForm(form: SettingsForm): Record<string, unknown> {
   return {
     translation: {
@@ -385,7 +439,8 @@ export function settingsPatchFromForm(form: SettingsForm): Record<string, unknow
       api_key_env: form.api_key_env.trim(),
       allow_restricted: form.allow_restricted,
     },
-    subtitle: overlayStyleFromForm(form),
+    subtitle: { ...overlayStyleFromForm(form), obs_output: obsOutputFromForm(form) },
+    ui: { auto_save_transcripts: form.auto_save_transcripts },
   };
 }
 
@@ -398,6 +453,10 @@ export function formFromSettings(s: Settings): SettingsForm {
     background_opacity_percent: String(Math.round(s.subtitle.background_opacity * 100)),
     position: s.subtitle.position,
     max_lines: String(s.subtitle.max_lines),
+    min_display_secs: String(s.subtitle.min_display_ms / 1000),
+    idle_clear_secs: String(s.subtitle.idle_clear_secs),
+    obs_output: s.obs_output,
+    auto_save_transcripts: s.ui.auto_save_transcripts,
   };
 }
 
@@ -538,6 +597,10 @@ export function formFieldForEnginePath(message: string): keyof SettingsForm | nu
     "subtitle.background_opacity": "background_opacity_percent",
     "subtitle.position": "position",
     "subtitle.max_lines": "max_lines",
+    "subtitle.min_display_ms": "min_display_secs",
+    "subtitle.idle_clear_secs": "idle_clear_secs",
+    "subtitle.obs_output": "obs_output",
+    "ui.auto_save_transcripts": "auto_save_transcripts",
   };
   return map[enginePath(message)] ?? null;
 }
