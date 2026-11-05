@@ -2,10 +2,14 @@
  * Display formatting for the UI (timecodes, sizes, language names, statuses).
  *
  * Role: keeps every user-facing wording decision for raw protocol values in one
- * place, in Traditional Chinese.
+ * place; the words themselves come from the i18n dictionary, language and
+ * region names from `Intl.DisplayNames` (`lib/i18n.ts`).
  */
 
+import { getLocale, joinList, languageName, regionName, t, tp, type StringKey } from "./i18n";
 import type { BridgeStatus, EngineState } from "./types";
+
+export { languageName } from "./i18n";
 
 export const SAMPLE_RATE = 16_000;
 
@@ -20,7 +24,7 @@ export function formatTimecode(samples: number, rate = SAMPLE_RATE): string {
 }
 
 export function formatBytes(bytes: number | null): string {
-  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return "未知";
+  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return t("common.unknown");
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;
   let unit = 0;
@@ -37,21 +41,21 @@ export function percent(done: number, total: number): number {
   return Math.min(100, Math.max(0, Math.floor((done / total) * 100)));
 }
 
-const LANGUAGE_SHORT: Record<string, string> = { ja: "日", en: "英", zh: "中", "zh-TW": "中" };
-const LANGUAGE_NAME: Record<string, string> = {
-  ja: "日語",
-  en: "英語",
-  zh: "中文",
-  "zh-TW": "繁體中文",
-};
-
-/** One-character tag used in the transcript gutter. */
+/**
+ * Short tag for the transcript gutter. Chinese and Japanese interfaces use the
+ * first character of the language's name (日／英／中), as the design specifies;
+ * other interfaces use the uppercase language subtag (JA, EN), since a first
+ * letter is ambiguous there.
+ */
 export function languageShort(code: string): string {
-  return LANGUAGE_SHORT[code] ?? (code.slice(0, 2) || "？");
-}
-
-export function languageName(code: string): string {
-  return LANGUAGE_NAME[code] ?? code;
+  const primary = code.split("-", 1)[0] ?? "";
+  if (!/^[A-Za-z]{2,3}$/.test(primary)) return "?";
+  const ui = getLocale();
+  if (ui === "zh-TW" || ui === "zh-CN" || ui === "ja") {
+    const name = languageName(primary);
+    if (name !== primary) return Array.from(name)[0] ?? primary;
+  }
+  return primary.toUpperCase();
 }
 
 /** Value for the HTML `lang` attribute, so CJK text gets the right glyph forms. */
@@ -60,16 +64,17 @@ export function htmlLang(code: string): string {
   return /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/.test(code) ? code : "";
 }
 
-const SPEED_TIER: Record<string, string> = {
-  fastest: "最快",
-  fast: "快",
-  medium: "中等",
-  slow: "慢",
-  slowest: "最慢",
+const SPEED_TIER: Readonly<Record<string, StringKey>> = {
+  fastest: "speed.fastest",
+  fast: "speed.fast",
+  medium: "speed.medium",
+  slow: "speed.slow",
+  slowest: "speed.slowest",
 };
 
 export function speedTierLabel(tier: string): string {
-  return SPEED_TIER[tier] ?? tier;
+  const key = SPEED_TIER[tier];
+  return key ? t(key) : tier;
 }
 
 const OS_NAME: Record<string, string> = { windows: "Windows", macos: "macOS", linux: "Linux" };
@@ -90,88 +95,87 @@ export interface StatusView {
  * the session state reported by the engine.
  */
 export function describeStatus(bridge: BridgeStatus | null, session: EngineState): StatusView {
-  if (!bridge || bridge.phase === "starting") return { label: "正在啟動引擎", tone: "busy" };
+  if (!bridge || bridge.phase === "starting") return { label: t("status.starting"), tone: "busy" };
   switch (bridge.phase) {
     case "restarting":
-      return { label: "引擎意外結束，正在重新啟動", tone: "busy" };
+      return { label: t("status.restarting"), tone: "busy" };
     case "failed":
-      return { label: "引擎無法啟動", tone: "bad" };
+      return { label: t("status.failed"), tone: "bad" };
     case "stopped":
-      return { label: "引擎已停止", tone: "bad" };
+      return { label: t("status.stopped"), tone: "bad" };
     case "ready":
       break;
   }
   switch (session) {
     case "loading":
-      return { label: "正在載入模型", tone: "busy" };
+      return { label: t("status.loading"), tone: "busy" };
     case "running":
-      return { label: "正在聆聽", tone: "live" };
+      return { label: t("status.running"), tone: "live" };
     case "error":
-      return { label: "發生錯誤，已停止", tone: "bad" };
+      return { label: t("status.error"), tone: "bad" };
     case "idle":
-      return { label: "待命中", tone: "quiet" };
+      return { label: t("status.idle"), tone: "quiet" };
   }
 }
 
-const STATUS_CODE: Record<string, string> = {
-  model_not_downloaded: "模型還沒下載。請到「模型」頁下載後再開始。",
-  unknown_model: "設定裡的模型不存在。請到「模型」頁重新選擇。",
-  device_not_found: "找不到選擇的音訊裝置。請重新選擇裝置。",
-  permission_denied: "沒有使用麥克風或錄音的權限。請在系統設定中允許 kikitori。",
-  device_lost: "音訊裝置中斷了。請確認裝置連線後重新開始。",
-  capture_unavailable: "這台電腦無法擷取這種聲音來源。",
-  capture_error: "擷取聲音時發生錯誤。",
-  pipeline_error: "語音處理發生錯誤。",
-  load_error: "載入模型失敗。",
+const STATUS_CODE: Readonly<Record<string, StringKey>> = {
+  model_not_downloaded: "status.code.model_not_downloaded",
+  unknown_model: "status.code.unknown_model",
+  device_not_found: "status.code.device_not_found",
+  permission_denied: "status.code.permission_denied",
+  device_lost: "status.code.device_lost",
+  capture_unavailable: "status.code.capture_unavailable",
+  capture_error: "status.code.capture_error",
+  pipeline_error: "status.code.pipeline_error",
+  load_error: "status.code.load_error",
 };
 
 /** Explanation for a `status: error` event, preferring our wording over raw detail. */
 export function describeStatusError(code: string | null, detail: string | null): string {
   const known = code ? STATUS_CODE[code] : undefined;
-  if (known) return known;
-  return detail ? `發生錯誤：${detail}` : "發生未知的錯誤。";
+  if (known) return t(known);
+  return detail ? t("status.errorDetail", { detail }) : t("status.errorUnknown");
 }
 
 /** Memory reported in MiB (nvidia-smi, model tables) as GB with one decimal. */
 export function formatMiB(mb: number | null): string {
-  if (mb === null || !Number.isFinite(mb) || mb < 0) return "未知";
+  if (mb === null || !Number.isFinite(mb) || mb < 0) return t("common.unknown");
   if (mb < 1024) return `${Math.round(mb)} MB`;
   return `${(mb / 1024).toFixed(1)} GB`;
 }
 
-const TIER: Record<string, string> = {
-  nvidia_8gb: "NVIDIA 顯示卡（8 GB 以上）",
-  nvidia_4gb: "NVIDIA 顯示卡（4–8 GB）",
-  nvidia_lt4gb: "NVIDIA 顯示卡（4 GB 以下）",
-  cpu: "CPU（記憶體 16 GB 以上）",
-  cpu_low: "CPU（輕量組合）",
-  apple_silicon: "Apple Silicon（CPU）",
+const TIER: Readonly<Record<string, StringKey>> = {
+  nvidia_8gb: "tier.nvidia_8gb",
+  nvidia_4gb: "tier.nvidia_4gb",
+  nvidia_lt4gb: "tier.nvidia_lt4gb",
+  cpu: "tier.cpu",
+  cpu_low: "tier.cpu_low",
+  apple_silicon: "tier.apple_silicon",
 };
 
 /** Hardware tier id from the recommendation (hardware.md), in plain words. */
 export function tierLabel(tier: string): string {
-  return TIER[tier] ?? tier;
+  const key = TIER[tier];
+  return key ? t(key) : tier;
 }
 
 export function deviceLabel(device: string): string {
   if (device === "cuda") return "NVIDIA GPU";
   if (device === "cpu") return "CPU";
-  if (device === "auto") return "自動";
+  if (device === "auto") return t("common.auto");
   return device;
 }
 
 /** Thread count of a recommendation or setting; 0 / null mean automatic. */
 export function threadsLabel(threads: number | null): string {
-  return threads ? `${threads} 個執行緒` : "執行緒自動";
+  return threads ? tp("threads.count", threads) : t("threads.auto");
 }
 
 export function computeTypeLabel(computeType: string | null): string {
-  return computeType ?? "精度自動";
+  return computeType ?? t("computeType.auto");
 }
-
-const REGION: Record<string, string> = { EU: "歐盟", UK: "英國", GB: "英國", KR: "南韓" };
 
 /** License-excluded region codes as names, e.g. ["EU", "KR"] → "歐盟、南韓". */
 export function regionNames(codes: readonly string[]): string {
-  return codes.map((c) => REGION[c] ?? c).join("、");
+  return joinList(codes.map(regionName));
 }

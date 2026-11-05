@@ -16,6 +16,8 @@ pub const MAIN_LABEL: &str = "main";
 pub const CLICK_THROUGH_SHORTCUT: &str = "CommandOrControl+Alt+K";
 
 pub const FONT_SIZE_RANGE: (u32, u32) = (14, 96);
+/// Longest UI locale tag accepted for the overlay (e.g. `zh-TW`, `pt-BR`).
+pub const MAX_LOCALE_LEN: usize = 16;
 pub const MAX_LINES_RANGE: (u32, u32) = (1, 3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +88,9 @@ pub struct OverlaySnapshot {
     /// False when the global shortcut could not be registered (taken by
     /// another app); the UI then only offers the in-app toggle.
     pub shortcut_registered: bool,
+    /// UI locale chosen in the main window (e.g. `zh-TW`, `en`); `None` until
+    /// the main window has sent one, and the overlay then follows the OS.
+    pub locale: Option<String>,
 }
 
 #[derive(Debug)]
@@ -94,6 +99,33 @@ struct Inner {
     click_through: bool,
     visible: bool,
     shortcut_registered: bool,
+    locale: Option<String>,
+}
+
+/// Checks a UI locale tag: a 2–3 letter language subtag, optionally followed
+/// by one 2–8 character alphanumeric subtag (`en`, `zh-TW`, `pt-BR`).
+///
+/// 字幕視窗只拿這個值來選字典與設定 `<html lang>`；這裡只擋掉格式不對的值
+/// （避免任意字串經由事件廣播出去），不列舉支援的語系，前端新增語系時不必改 Rust。
+pub fn validate_locale(locale: &str) -> Result<(), String> {
+    let bad = || format!("locale must look like `en` or `zh-TW`, got {locale:?}");
+    if locale.len() > MAX_LOCALE_LEN {
+        return Err(bad());
+    }
+    let mut parts = locale.split('-');
+    let language = parts.next().unwrap_or_default();
+    if !(2..=3).contains(&language.len()) || !language.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Err(bad());
+    }
+    if let Some(region) = parts.next()
+        && (!(2..=8).contains(&region.len()) || !region.bytes().all(|b| b.is_ascii_alphanumeric()))
+    {
+        return Err(bad());
+    }
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    Ok(())
 }
 
 /// Tauri-managed overlay state.
@@ -109,6 +141,7 @@ impl Default for OverlayState {
             click_through: false,
             visible: false,
             shortcut_registered: false,
+            locale: None,
         }))
     }
 }
@@ -126,7 +159,14 @@ impl OverlayState {
             visible: s.visible,
             shortcut: CLICK_THROUGH_SHORTCUT,
             shortcut_registered: s.shortcut_registered,
+            locale: s.locale.clone(),
         })
+    }
+
+    pub fn set_locale(&self, locale: String) -> Result<(), String> {
+        validate_locale(&locale)?;
+        self.with(|s| s.locale = Some(locale));
+        Ok(())
     }
 
     pub fn set_style(&self, style: OverlayStyle) -> Result<(), String> {
@@ -227,5 +267,38 @@ mod tests {
         };
         assert!(state.set_style(bad).is_err());
         assert_eq!(state.snapshot().style, OverlayStyle::default());
+    }
+
+    #[test]
+    fn locale_starts_unset_and_accepts_ui_locale_tags() {
+        let state = OverlayState::default();
+        assert_eq!(state.snapshot().locale, None);
+        for ok in ["en", "zh-TW", "pt-BR", "zh-CN", "id", "fil"] {
+            assert!(validate_locale(ok).is_ok(), "{ok}");
+        }
+        state.set_locale("ja".to_owned()).unwrap();
+        assert_eq!(state.snapshot().locale.as_deref(), Some("ja"));
+    }
+
+    #[test]
+    fn locale_rejects_malformed_tags_and_keeps_the_old_value() {
+        let state = OverlayState::default();
+        state.set_locale("en".to_owned()).unwrap();
+        for bad in [
+            "",
+            "e",
+            "english",
+            "en-",
+            "en-US-x",
+            "zh_TW",
+            "<b>",
+            "en-a",
+            "en-abcdefghi",
+            "ja-\u{65e5}\u{672c}",
+            "aaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(state.set_locale(bad.to_owned()).is_err(), "{bad:?}");
+        }
+        assert_eq!(state.snapshot().locale.as_deref(), Some("en"));
     }
 }

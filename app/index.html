@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-Hant-TW">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,6 +8,7 @@
     <script type="module" src="/src/main/main.ts"></script>
   </head>
   <body>
+    <!-- Visible text comes from src/locales via data-i18n* attributes (lib/i18n.ts applyStatic). -->
     <div class="app">
       <aside class="rail">
         <header class="brand">
@@ -16,37 +17,37 @@
         </header>
 
         <section class="rail-block" aria-labelledby="mode-heading">
-          <h2 id="mode-heading" class="rail-heading">模式</h2>
+          <h2 id="mode-heading" class="rail-heading" data-i18n="rail.mode"></h2>
           <div class="modes" role="radiogroup" aria-labelledby="mode-heading">
             <button type="button" class="mode" role="radio" data-mode="media" aria-checked="true">
-              <span class="mode-name">影片翻譯</span>
-              <span class="mode-note" data-mode-note="media">日語、英語譯成繁體中文</span>
+              <span class="mode-name" data-i18n="mode.media.name"></span>
+              <span class="mode-note" data-mode-note="media" data-i18n="mode.media.note"></span>
             </button>
             <button type="button" class="mode" role="radio" data-mode="interpret" aria-checked="false">
-              <span class="mode-name">即時口譯</span>
-              <span class="mode-note" data-mode-note="interpret">中文與日語互譯</span>
+              <span class="mode-name" data-i18n="mode.interpret.name"></span>
+              <span class="mode-note" data-mode-note="interpret"></span>
             </button>
           </div>
         </section>
 
         <section class="rail-block">
-          <label class="rail-heading" for="device">聲音來源</label>
+          <label class="rail-heading" for="device" data-i18n="rail.device"></label>
           <select id="device" class="rail-select"></select>
-          <p class="rail-hint" id="device-hint">影片翻譯會擷取電腦正在播放的聲音。</p>
+          <p class="rail-hint" id="device-hint"></p>
         </section>
 
-        <button type="button" id="start" class="start" data-state="idle">開始</button>
+        <button type="button" id="start" class="start" data-state="idle"></button>
 
-        <nav class="nav" aria-label="頁面">
-          <button type="button" class="nav-item" data-page="transcript" aria-current="page">字幕紀錄</button>
-          <button type="button" class="nav-item" data-page="models">模型</button>
-          <button type="button" class="nav-item" data-page="settings">設定</button>
+        <nav class="nav" data-i18n-aria-label="nav.label">
+          <button type="button" class="nav-item" data-page="transcript" aria-current="page" data-i18n="nav.transcript"></button>
+          <button type="button" class="nav-item" data-page="models" data-i18n="nav.models"></button>
+          <button type="button" class="nav-item" data-page="settings" data-i18n="nav.settings"></button>
         </nav>
 
         <footer class="engine" aria-live="polite">
-          <p class="engine-status"><span class="dot" id="status-dot" data-tone="busy"></span><span id="status-label">正在啟動引擎</span></p>
+          <p class="engine-status"><span class="dot" id="status-dot" data-tone="busy"></span><span id="status-label"></span></p>
           <p class="engine-detail" id="status-detail" hidden></p>
-          <button type="button" class="link-button" id="restart-engine" hidden>重新啟動引擎</button>
+          <button type="button" class="link-button" id="restart-engine" data-i18n="engine.restart" hidden></button>
         </footer>
       </aside>
 
@@ -56,102 +57,109 @@
         <section class="page" id="page-transcript" aria-labelledby="transcript-heading">
           <header class="page-head">
             <div>
-              <h1 id="transcript-heading">字幕紀錄</h1>
-              <p class="page-lede">即時字幕會先以淡色出現，整句翻譯完成後換成正式的譯文。</p>
+              <h1 id="transcript-heading" data-i18n="transcript.title"></h1>
+              <p class="page-lede" data-i18n="transcript.lede"></p>
             </div>
             <div class="page-tools">
-              <label class="switch"><input type="checkbox" id="overlay-visible" /><span>顯示字幕視窗</span></label>
-              <label class="switch"><input type="checkbox" id="overlay-click-through" /><span>滑鼠穿透</span></label>
-              <button type="button" class="ghost" id="clear-transcript">清除紀錄</button>
+              <label class="switch"><input type="checkbox" id="overlay-visible" /><span data-i18n="transcript.overlayVisible"></span></label>
+              <label class="switch"><input type="checkbox" id="overlay-click-through" /><span data-i18n="transcript.clickThrough"></span></label>
+              <button type="button" class="ghost" id="clear-transcript" data-i18n="transcript.clear"></button>
             </div>
           </header>
           <p class="shortcut-note" id="shortcut-note"></p>
           <ol class="transcript" id="transcript" aria-live="off"></ol>
           <div class="empty" id="transcript-empty">
-            <p class="empty-title">還沒有字幕</p>
-            <p>選好模式和聲音來源後按「開始」，聽到的每一句會依序列在這裡，原文在上、譯文在下。</p>
+            <p class="empty-title" data-i18n="transcript.emptyTitle"></p>
+            <p data-i18n="transcript.emptyBody"></p>
           </div>
         </section>
 
         <section class="page" id="page-models" aria-labelledby="models-heading" hidden>
           <header class="page-head">
             <div>
-              <h1 id="models-heading">模型</h1>
-              <p class="page-lede">語音辨識在這台電腦上執行；翻譯交給設定頁指定的翻譯服務。</p>
+              <h1 id="models-heading" data-i18n="models.title"></h1>
+              <p class="page-lede" data-i18n="models.lede"></p>
             </div>
             <div class="page-tools">
-              <button type="button" class="ghost" id="models-refresh">重新偵測</button>
+              <button type="button" class="ghost" id="models-refresh" data-i18n="models.refresh"></button>
             </div>
           </header>
 
           <section class="block" aria-labelledby="hw-heading">
-            <h2 id="hw-heading">這台電腦</h2>
+            <h2 id="hw-heading" data-i18n="hw.title"></h2>
             <dl class="facts" id="hardware"></dl>
             <ul class="notes" id="hardware-errors" hidden></ul>
           </section>
 
           <section class="block" aria-labelledby="rec-heading">
-            <h2 id="rec-heading">建議組合</h2>
+            <h2 id="rec-heading" data-i18n="rec.title"></h2>
             <div id="recommendation"></div>
           </section>
 
           <section class="block" aria-labelledby="gpu-heading">
-            <h2 id="gpu-heading">GPU 加速元件</h2>
-            <p class="block-lede">用 NVIDIA 顯示卡加速語音辨識，需要 NVIDIA 的 cuBLAS 函式庫。kikitori 不隨安裝檔附上它，由你同意授權後從 PyPI 下載。</p>
+            <h2 id="gpu-heading" data-i18n="gpu.title"></h2>
+            <p class="block-lede" data-i18n="gpu.lede"></p>
             <div id="gpu-runtime"></div>
           </section>
 
           <section class="block" aria-labelledby="asr-heading">
-            <h2 id="asr-heading">語音辨識模型</h2>
-            <p class="block-lede">即時字幕需要快，完整翻譯需要準；兩者可以用不同模型。</p>
+            <h2 id="asr-heading" data-i18n="asr.title"></h2>
+            <p class="block-lede" data-i18n="asr.lede"></p>
             <table class="models">
               <thead>
-                <tr><th scope="col">模型</th><th scope="col">大小</th><th scope="col">速度</th><th scope="col">記憶體</th><th scope="col">授權</th><th scope="col">狀態</th></tr>
+                <tr>
+                  <th scope="col" data-i18n="asr.colModel"></th>
+                  <th scope="col" data-i18n="asr.colSize"></th>
+                  <th scope="col" data-i18n="asr.colSpeed"></th>
+                  <th scope="col" data-i18n="asr.colMemory"></th>
+                  <th scope="col" data-i18n="asr.colLicense"></th>
+                  <th scope="col" data-i18n="asr.colStatus"></th>
+                </tr>
               </thead>
               <tbody id="asr-models"></tbody>
             </table>
           </section>
 
           <section class="block" aria-labelledby="tr-heading">
-            <h2 id="tr-heading">翻譯模型</h2>
+            <h2 id="tr-heading" data-i18n="tr.title"></h2>
             <p class="block-lede" id="tr-source"></p>
             <ul class="presets" id="tr-presets"></ul>
           </section>
 
           <section class="block" aria-labelledby="combo-heading">
-            <h2 id="combo-heading">自訂組合</h2>
-            <p class="block-lede">修改時會立刻檢查這台電腦跑不跑得動；有錯誤時不能儲存。新的組合從下一次「開始」生效。</p>
+            <h2 id="combo-heading" data-i18n="combo.title"></h2>
+            <p class="block-lede" data-i18n="combo.lede"></p>
             <form id="combo-form" novalidate>
               <div class="field-row">
                 <div class="field">
-                  <label for="c-fast-model">即時字幕的辨識模型</label>
+                  <label for="c-fast-model" data-i18n="combo.fastModel"></label>
                   <select id="c-fast-model" name="fast_model"></select>
                   <p class="field-error" data-error-for="fast_model"></p>
                 </div>
                 <div class="field">
-                  <label for="c-final-model">完整翻譯的辨識模型</label>
+                  <label for="c-final-model" data-i18n="combo.finalModel"></label>
                   <select id="c-final-model" name="final_model"></select>
                   <p class="field-error" data-error-for="final_model"></p>
                 </div>
               </div>
               <div class="field">
-                <label for="c-device">運算裝置</label>
+                <label for="c-device" data-i18n="combo.device"></label>
                 <select id="c-device" name="device">
-                  <option value="auto">自動（有可用的 NVIDIA GPU 就用，否則用 CPU）</option>
-                  <option value="cpu">CPU</option>
-                  <option value="cuda">NVIDIA GPU（CUDA）</option>
+                  <option value="auto" data-i18n="combo.deviceAuto"></option>
+                  <option value="cpu" data-i18n="combo.deviceCpu"></option>
+                  <option value="cuda" data-i18n="combo.deviceCuda"></option>
                 </select>
-                <p class="field-help">兩條路徑共用同一個裝置：GPU 在同一次執行中失敗過一次，就不會再嘗試。</p>
+                <p class="field-help" data-i18n="combo.deviceHelp"></p>
                 <p class="field-error" data-error-for="device"></p>
               </div>
               <div class="field-row">
                 <div class="field">
-                  <label for="c-tr-fast">即時字幕的翻譯模型</label>
+                  <label for="c-tr-fast" data-i18n="combo.translationFast"></label>
                   <input id="c-tr-fast" name="translation_fast" list="tr-names" autocomplete="off" spellcheck="false" />
                   <p class="field-error" data-error-for="translation_fast"></p>
                 </div>
                 <div class="field">
-                  <label for="c-tr-final">完整翻譯的翻譯模型</label>
+                  <label for="c-tr-final" data-i18n="combo.translationFinal"></label>
                   <input id="c-tr-final" name="translation_final" list="tr-names" autocomplete="off" spellcheck="false" />
                   <p class="field-error" data-error-for="translation_final"></p>
                 </div>
@@ -159,44 +167,44 @@
               <datalist id="tr-names"></datalist>
 
               <details class="advanced">
-                <summary>進階</summary>
-                <p class="field-help">精度與執行緒數通常交給建議組合決定。留空或選「自動」時，引擎依實際使用的裝置決定（CPU 用 int8、GPU 用 float16）。</p>
+                <summary data-i18n="combo.advanced"></summary>
+                <p class="field-help" data-i18n="combo.advancedHelp"></p>
                 <div class="field-row">
                   <div class="field">
-                    <label for="c-fast-ct">即時字幕的精度</label>
+                    <label for="c-fast-ct" data-i18n="combo.fastComputeType"></label>
                     <select id="c-fast-ct" name="fast_compute_type"></select>
                     <p class="field-error" data-error-for="fast_compute_type"></p>
                   </div>
                   <div class="field">
-                    <label for="c-final-ct">完整翻譯的精度</label>
+                    <label for="c-final-ct" data-i18n="combo.finalComputeType"></label>
                     <select id="c-final-ct" name="final_compute_type"></select>
                     <p class="field-error" data-error-for="final_compute_type"></p>
                   </div>
                 </div>
                 <div class="field-row">
                   <div class="field">
-                    <label for="c-fast-threads">即時字幕的 CPU 執行緒數</label>
-                    <input id="c-fast-threads" name="fast_cpu_threads" inputmode="numeric" placeholder="自動" autocomplete="off" />
+                    <label for="c-fast-threads" data-i18n="combo.fastThreads"></label>
+                    <input id="c-fast-threads" name="fast_cpu_threads" inputmode="numeric" data-i18n-placeholder="common.auto" autocomplete="off" />
                     <p class="field-error" data-error-for="fast_cpu_threads"></p>
                   </div>
                   <div class="field">
-                    <label for="c-final-threads">完整翻譯的 CPU 執行緒數</label>
-                    <input id="c-final-threads" name="final_cpu_threads" inputmode="numeric" placeholder="自動" autocomplete="off" />
+                    <label for="c-final-threads" data-i18n="combo.finalThreads"></label>
+                    <input id="c-final-threads" name="final_cpu_threads" inputmode="numeric" data-i18n-placeholder="common.auto" autocomplete="off" />
                     <p class="field-error" data-error-for="final_cpu_threads"></p>
                   </div>
                 </div>
                 <div class="field">
-                  <label for="c-cuda-dirs">自行安裝的 cuBLAS 12 資料夾</label>
-                  <textarea id="c-cuda-dirs" name="cuda_library_dirs" rows="3" spellcheck="false" placeholder="每行一個完整路徑，例如 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"></textarea>
-                  <p class="field-help">只有自己安裝了 CUDA Toolkit 時才需要填。上面下載的 GPU 加速元件會自動使用，不必列在這裡。</p>
+                  <label for="c-cuda-dirs" data-i18n="combo.cudaDirs"></label>
+                  <textarea id="c-cuda-dirs" name="cuda_library_dirs" rows="3" spellcheck="false" data-i18n-placeholder="combo.cudaDirsPlaceholder"></textarea>
+                  <p class="field-help" data-i18n="combo.cudaDirsHelp"></p>
                   <p class="field-error" data-error-for="cuda_library_dirs"></p>
                 </div>
               </details>
 
               <div class="check" id="combo-check" role="status" aria-live="polite"></div>
               <div class="form-actions">
-                <button type="submit" class="primary" id="combo-save">儲存組合</button>
-                <button type="button" class="ghost" id="combo-reset">還原成目前設定</button>
+                <button type="submit" class="primary" id="combo-save" data-i18n="combo.save"></button>
+                <button type="button" class="ghost" id="combo-reset" data-i18n="combo.reset"></button>
                 <span class="form-status" id="combo-status" role="status"></span>
               </div>
             </form>
@@ -206,97 +214,109 @@
         <section class="page" id="page-settings" aria-labelledby="settings-heading" hidden>
           <header class="page-head">
             <div>
-              <h1 id="settings-heading">設定</h1>
+              <h1 id="settings-heading" data-i18n="settings.title"></h1>
               <p class="page-lede" id="settings-path"></p>
             </div>
           </header>
 
+          <!-- Outside the settings form: the interface language is saved and applied as soon as it changes. -->
+          <fieldset class="block">
+            <legend data-i18n="settings.uiLocaleLegend"></legend>
+            <div class="field-row">
+              <div class="field">
+                <label for="f-ui-locale" data-i18n="settings.uiLocaleLabel"></label>
+                <select id="f-ui-locale"></select>
+                <p class="field-help" data-i18n="settings.uiLocaleHelp"></p>
+              </div>
+            </div>
+          </fieldset>
+
           <form id="settings-form" novalidate>
             <fieldset class="block">
-              <legend>翻譯服務</legend>
-              <p class="block-lede">支援 OpenAI 相容的 API。本機的 Ollama 預設網址是 http://localhost:11434/v1。</p>
+              <legend data-i18n="settings.translationLegend"></legend>
+              <p class="block-lede" data-i18n="settings.translationLede"></p>
               <div class="field">
-                <label for="f-base-url">服務網址</label>
+                <label for="f-base-url" data-i18n="settings.baseUrl"></label>
                 <input id="f-base-url" name="base_url" type="url" autocomplete="off" spellcheck="false" />
                 <p class="field-error" data-error-for="base_url"></p>
               </div>
               <div class="field">
-                <label for="f-api-key-env">API 金鑰的環境變數名稱</label>
+                <label for="f-api-key-env" data-i18n="settings.apiKeyEnv"></label>
                 <input id="f-api-key-env" name="api_key_env" autocomplete="off" spellcheck="false" />
-                <p class="field-help">只填變數名稱。金鑰本身請設在系統環境變數裡，kikitori 不會儲存金鑰。本機 Ollama 不需要金鑰。</p>
+                <p class="field-help" data-i18n="settings.apiKeyEnvHelp"></p>
                 <p class="field-error" data-error-for="api_key_env"></p>
               </div>
-              <p class="field-help">翻譯模型在「模型」頁的「自訂組合」選擇，選擇時會一併檢查授權與這台電腦的負擔。</p>
+              <p class="field-help" data-i18n="settings.translationModelsHelp"></p>
             </fieldset>
 
             <fieldset class="block">
-              <legend>翻譯模型的授權地區</legend>
-              <p class="block-lede">部分翻譯模型（例如騰訊 HY-MT）的授權不適用於歐盟、英國與南韓。kikitori 無法得知你身在何處，所以預設不推薦這些模型。</p>
+              <legend data-i18n="settings.regionLegend"></legend>
+              <p class="block-lede" data-i18n="settings.regionLede"></p>
               <div class="field">
                 <label class="consent" for="f-allow-restricted">
                   <input id="f-allow-restricted" name="allow_restricted" type="checkbox" />
-                  <span>我確認我不在歐盟、英國或南韓使用 kikitori，並同意遵守這些翻譯模型的授權條款。</span>
+                  <span data-i18n="settings.regionConsent"></span>
                 </label>
-                <p class="field-help">勾選後，建議組合才會考慮有地區限制的模型。不勾選時仍可在「自訂組合」手動選用，但會顯示警告。</p>
+                <p class="field-help" data-i18n="settings.regionHelp"></p>
                 <p class="field-error" data-error-for="allow_restricted"></p>
               </div>
             </fieldset>
 
             <fieldset class="block">
-              <legend>語言</legend>
+              <legend data-i18n="settings.languageLegend"></legend>
               <div class="field-row">
                 <div class="field">
-                  <label for="f-target">譯文語言</label>
-                  <select id="f-target" disabled><option value="zh-TW">繁體中文</option></select>
-                  <p class="field-help">影片翻譯一律譯成繁體中文。</p>
+                  <label for="f-target" data-i18n="settings.target"></label>
+                  <select id="f-target" disabled><option value="zh-TW" data-i18n-language="zh-TW"></option></select>
+                  <p class="field-help" data-i18n="settings.targetHelp"></p>
                 </div>
                 <div class="field">
-                  <label for="f-partner">口譯對方的語言</label>
+                  <label for="f-partner" data-i18n="settings.partner"></label>
                   <select id="f-partner" name="partner_language">
-                    <option value="ja">日語</option>
-                    <option value="en">英語</option>
+                    <option value="ja" data-i18n-language="ja"></option>
+                    <option value="en" data-i18n-language="en"></option>
                   </select>
-                  <p class="field-help">即時口譯時，你說中文會譯成這個語言，對方說的話會譯成中文。</p>
+                  <p class="field-help" data-i18n="settings.partnerHelp"></p>
                   <p class="field-error" data-error-for="partner_language"></p>
                 </div>
               </div>
             </fieldset>
 
             <fieldset class="block">
-              <legend>字幕外觀</legend>
+              <legend data-i18n="settings.styleLegend"></legend>
               <div class="preview" id="style-preview" aria-hidden="true">
                 <div class="preview-line">
-                  <span class="preview-orig" lang="ja">次の駅で降りましょう。</span>
-                  <span class="preview-tr">我們在下一站下車吧。</span>
+                  <span class="preview-orig" lang="ja" data-i18n="settings.previewOriginal"></span>
+                  <span class="preview-tr" data-i18n="settings.previewTranslation"></span>
                 </div>
               </div>
               <div class="field-row">
                 <div class="field">
-                  <label for="f-font-size">譯文字級 <output id="o-font-size"></output></label>
+                  <label for="f-font-size"><span data-i18n="settings.fontSize"></span> <output id="o-font-size"></output></label>
                   <input id="f-font-size" name="font_size" type="range" min="14" max="96" step="1" />
                   <p class="field-error" data-error-for="font_size"></p>
                 </div>
                 <div class="field">
-                  <label for="f-opacity">背景不透明度 <output id="o-opacity"></output></label>
+                  <label for="f-opacity"><span data-i18n="settings.opacity"></span> <output id="o-opacity"></output></label>
                   <input id="f-opacity" name="background_opacity_percent" type="range" min="0" max="100" step="5" />
                   <p class="field-error" data-error-for="background_opacity_percent"></p>
                 </div>
               </div>
               <div class="field-row">
                 <div class="field">
-                  <label for="f-position">字幕位置</label>
+                  <label for="f-position" data-i18n="settings.position"></label>
                   <select id="f-position" name="position">
-                    <option value="bottom">貼齊視窗下緣</option>
-                    <option value="top">貼齊視窗上緣</option>
+                    <option value="bottom" data-i18n="settings.positionBottom"></option>
+                    <option value="top" data-i18n="settings.positionTop"></option>
                   </select>
                   <p class="field-error" data-error-for="position"></p>
                 </div>
                 <div class="field">
-                  <label for="f-lines">同時顯示的句數</label>
+                  <label for="f-lines" data-i18n="settings.lines"></label>
                   <select id="f-lines" name="max_lines">
-                    <option value="1">1 句</option>
-                    <option value="2">2 句</option>
-                    <option value="3">3 句</option>
+                    <option value="1" data-i18n="settings.linesOption" data-i18n-count="1"></option>
+                    <option value="2" data-i18n="settings.linesOption" data-i18n-count="2"></option>
+                    <option value="3" data-i18n="settings.linesOption" data-i18n-count="3"></option>
                   </select>
                   <p class="field-error" data-error-for="max_lines"></p>
                 </div>
@@ -304,22 +324,22 @@
             </fieldset>
 
             <div class="form-actions">
-              <button type="submit" class="primary" id="settings-save">儲存設定</button>
+              <button type="submit" class="primary" id="settings-save" data-i18n="settings.save"></button>
               <span class="form-status" id="settings-status" role="status"></span>
             </div>
           </form>
 
           <section class="block" aria-labelledby="about-heading">
-            <h2 id="about-heading">關於</h2>
+            <h2 id="about-heading" data-i18n="about.title"></h2>
             <p id="about-version"></p>
             <p id="about-engine" class="rail-hint"></p>
             <p id="about-license"></p>
-            <p class="about-notice">本程式內含的 Intel® OpenMP 等第三方元件依其各自授權條款提供；不得對其進行逆向工程。</p>
+            <p class="about-notice" data-i18n="about.notice"></p>
             <p id="about-third-party" class="rail-hint"></p>
             <div class="form-actions">
-              <button type="button" class="ghost" id="open-app-licenses" hidden>開啟程式的第三方授權資料夾</button>
-              <button type="button" class="ghost" id="open-engine-licenses" hidden>開啟引擎的第三方授權資料夾</button>
-              <button type="button" class="ghost" id="check-update">檢查更新</button>
+              <button type="button" class="ghost" id="open-app-licenses" data-i18n="about.openAppLicenses" hidden></button>
+              <button type="button" class="ghost" id="open-engine-licenses" data-i18n="about.openEngineLicenses" hidden></button>
+              <button type="button" class="ghost" id="check-update" data-i18n="about.checkUpdate"></button>
               <span class="form-status" id="update-status" role="status"></span>
             </div>
           </section>

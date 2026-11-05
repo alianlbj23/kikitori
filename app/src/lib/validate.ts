@@ -36,6 +36,7 @@ import type {
   UpdateDownloadEvent,
   UpdateInfo,
 } from "./types";
+import { parseEngineMessages } from "./messages";
 
 export class ValidationError extends Error {
   constructor(path: string, problem: string) {
@@ -242,6 +243,8 @@ export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
     visible: bool(o, "visible", p),
     shortcut: str(o, "shortcut", p, 100),
     shortcut_registered: bool(o, "shortcut_registered", p),
+    // Older Rust builds have no locale; a malformed one is ignored (the overlay follows the OS).
+    locale: typeof o.locale === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(o.locale) ? o.locale : null,
   };
 }
 
@@ -297,8 +300,8 @@ export function parseRecommendation(v: unknown, p = "recommendation"): Recommend
     translation_final: optStr(o, "translation_final", p),
     translation_budget_gb: optNum(o, "translation_budget_gb", p),
     gpu_runtime_missing: bool(o, "gpu_runtime_missing", p),
-    reasons: strList(o.reasons),
-    warnings: strList(o.warnings),
+    reasons: parseEngineMessages(o.reasons),
+    warnings: parseEngineMessages(o.warnings),
   };
 }
 
@@ -470,10 +473,10 @@ export function parseModels(v: unknown): ModelsList {
 export function parseCombinationCheck(v: unknown): CombinationCheck {
   const p = "models.validate";
   const o = obj(v, p);
-  const errors = strList(o.errors);
+  const errors = parseEngineMessages(o.errors);
   // The engine sets ok=false exactly when there are errors; if the two ever
   // disagree, trust the errors so saving is never offered next to one.
-  return { ok: bool(o, "ok", p) && errors.length === 0, errors, warnings: strList(o.warnings) };
+  return { ok: bool(o, "ok", p) && errors.length === 0, errors, warnings: parseEngineMessages(o.warnings) };
 }
 
 export function parseAbout(v: unknown): AboutInfo {

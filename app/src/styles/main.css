@@ -349,7 +349,9 @@ legend {
   min-width: 0;
 }
 
-.block + .block {
+.block + .block,
+/* The interface-language block sits outside the settings form; keep the rule line before the form's first block. */
+.block + form > .block:first-child {
   border-top: 1px solid var(--rule);
   margin-top: 22px;
 }

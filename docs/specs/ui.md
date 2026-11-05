@@ -1,6 +1,6 @@
 # Spec: ui（Tauri 桌面程式）
 
-> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。之後加上自動推薦（第一次執行自動套用、更適合的組合提示、缺少模型的一鍵下載；見「自動推薦」）。
+> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。之後加上自動推薦（第一次執行自動套用、更適合的組合提示、缺少模型的一鍵下載；見「自動推薦」）。Milestone 15 第一階段（2026-11-05）：介面多語系的機制、全部介面文字抽到字典（zh-TW 基準、English），見「介面多語系」。
 > 上層約定：`docs/specs/app-architecture.md`（行程架構、引擎協定、視窗、更新）與 `docs/specs/pipeline-engine.md`（協定欄位細節、設定檔結構）。本文件只補充 UI 端的設計，不改協定。
 
 ## 範圍
@@ -100,7 +100,8 @@
 |---|---|---|
 | 翻譯服務 | 服務網址、API 金鑰的**環境變數名稱** | `translation.{base_url, api_key_env}` |
 | 翻譯模型的授權地區 | 勾選框「我確認我不在歐盟、英國或南韓使用 kikitori，並同意遵守這些翻譯模型的授權條款。」（預設不勾） | `translation.allow_restricted` |
-| 語言 | 譯文語言（固定繁體中文，唯讀）、口譯對方的語言（日語／英語） | `partner_language` |
+| 介面語言（頁面最上方、在設定表單之外） | 「跟隨系統」與 13 個語系（以各自語言的名稱列出），選擇後立即套用並儲存 | `ui.locale`（`settings.set {"ui": {"locale": …}}`） |
+| 語言 | 譯文語言（固定繁體中文，唯讀）、口譯對方的語言（日語／英語）；語言名稱由 `Intl.DisplayNames` 依介面語系產生 | `partner_language` |
 | 字幕外觀 | 譯文字級（14–96 px）、背景不透明度（0–100%）、字幕位置（貼齊上緣／下緣）、同時顯示的句數（1–3），附即時預覽 | `subtitle.{font_size, background_opacity, position, max_lines}` |
 | 關於 | 程式版本、引擎版本與協定版本（假引擎會註明）、授權（`kikitori 以 MIT 授權發布`）、第三方元件聲明、第三方授權資料夾、「檢查更新」 | — |
 
@@ -116,6 +117,46 @@
 ### 訊息
 
 內容區上方的訊息列（最多三則、可關閉）：操作失敗的原因與下一步、引擎 `log` 事件的 warning／error、`status: error` 的 `code` 對應說明（例如 `model_not_downloaded` →「模型還沒下載。請到『模型』頁下載後再開始。」）、引擎錯誤碼的說明（含 `license_not_accepted`、`gpu_runtime_unsupported`、`download_in_progress`）、下載完成或失敗、GPU 加速元件安裝後的重啟、更新提示。
+
+## 介面多語系
+
+規格見 `languages-i18n.md`「介面多語系」。不用 i18n 函式庫，全部在 `app/src/lib/i18n.ts` 與 `app/src/locales/`。
+
+### 字典
+
+- `app/src/locales/<code>.ts`，一個語系一個檔案；`zh-TW.ts` 是基準，`locales/types.ts` 由它導出 `MessageKey`、`Messages`。其他語系寫成 `export const xx: Messages = {…}`，**少一個鍵或多一個鍵都是型別錯誤**（`npm run build` 失敗）。`locales/index.ts` 列出 13 個語系（`UI_LOCALES`）、各自語言的名稱（`NATIVE_NAMES`，給選單用）與已有的字典（`DICTIONARIES`；目前 zh-TW、en，其他語系之後各加一個檔案並登記）。
+- 鍵是扁平的點號名稱（`status.idle`、`gpu.consentNotice`）。佔位符 `{name}`；每個語系的佔位符必須與基準相同。
+- 複數：值寫成物件，鍵是 `Intl.PluralRules` 的類別（`{one, other}`；中文只有 `other`），用 `tp(key, count, params)` 取用，`{count}` 自動帶入。每個語系要提供自己語言的全部類別（例如 ru 要 one/few/many/other），不能多給不會被選到的類別。
+- 不放在字典的：語言名稱（`languageName`，`Intl.DisplayNames` type `language`；zh-TW／zh-CN 對到 zh-Hant／zh-Hans 才會是「繁體中文／Traditional Chinese」）、地區名稱（`regionName`，type `region`；`UK` 視為 `GB`）、品牌「聞き取り」與 kikitori、模型與套件名稱、網址、`CPU`／`NVIDIA GPU` 等專有名詞。字幕紀錄的語言標籤：中文與日文介面取語言名稱的第一個字（日／英／中），其他介面用大寫的語言子標籤（JA／EN）。
+- 字幕外觀的預覽：原文固定是日文例句，譯文例句在字典裡（`settings.previewTranslation`），跟著介面語系。
+
+### 取用
+
+- `t(key, params)`（一般字串）、`tp(key, count, params)`（複數）。目前語系缺字（尚未有字典的語系、或空字串）時依序退回 English、zh-TW；退回時用**字典所屬語系**的複數規則。都找不到時顯示鍵本身並記錄 error。
+- 靜態 HTML 不寫任何介面文字，只有屬性：`data-i18n`（文字；複數鍵另加 `data-i18n-count`）、`data-i18n-title`、`data-i18n-placeholder`、`data-i18n-aria-label`、`data-i18n-language`（文字＝該語言代碼的名稱）。`applyStatic(root)` 依目前語系填入；未知的鍵記錄 error、保留原內容。
+- `setLocale(locale)` 設定 `<html lang>`（zh-TW → `zh-Hant-TW`、zh-CN → `zh-Hans-CN`，其餘照語系代碼，`tokens.css` 的 `:lang()` 依此選字型）並呼叫所有 `onLocaleChange` 監聽者。主視窗的監聽者 `onLocaleChanged` 重跑 `applyStatic` 與所有 render 函式（狀態、裝置、字幕紀錄的標籤、模型頁、組合檢查、設定頁、關於），所以每個 render 函式都要能從 state 重畫。**已顯示的訊息列不重寫**（它們是當下的事件）。
+
+### 語系的決定
+
+- `resolveLocale(navigator.languages)`：依偏好順序找第一個對得到的。中文：有 `Hant` 或地區 TW／HK／MO → zh-TW，其他（含單純 `zh`、`zh-Hans`、`zh-SG`）→ zh-CN；`pt*` → pt-BR；其他只比對主要語言子標籤；都對不到 → en。
+- 設定 `ui.locale`：`"system"`（預設、欄位不存在時）或 13 個語系代碼之一。讀到不認得但格式像語系的字串（較新版本存的）視為 `"system"` 且不提示；型別錯誤才列為壞欄位。儲存只送 `{"ui": {"locale": …}}`，引擎對 `ui` 深度合併，`dismissed_recommendations` 不受影響。
+- 啟動：引擎要幾秒才回應 `settings.get`，所以主視窗先用 `localStorage`（`kikitori.uiLocale`，只是快取）的選擇，沒有就跟隨系統，**在第一次 render 之前**套用；讀到設定檔後以設定檔為準。使用者在引擎未就緒時改了語言：先套用並快取，引擎就緒後再寫入設定檔（不被舊值蓋回）。
+
+### 字幕視窗
+
+- 主視窗每次切換語系都送 `overlay_set_locale {locale}`（具體的語系，不是 `"system"`）；Rust 存在 `OverlayState`，放進快照並廣播 `overlay://state`。字幕視窗的語系＝快照的 `locale`；`null`（主視窗還沒送）或不認得的值就跟隨系統。只在語系真的改變時重新填字、`document.title` 與 `setTitle`（視窗標題，需要 `core:window:allow-set-title`）。
+
+### 引擎傳來的文字
+
+- `lib/messages.ts`：推薦的 `reasons`／`warnings` 與 `models.validate` 的 `errors`／`warnings` 可能是字串（舊引擎，原樣顯示）或 `{code, params, message}`。`formatEngineMessage` 查字典的 `engine.<code>`（帶入 `params`），沒有這個鍵就顯示引擎附的英文 `message`。驗證：`code` 只能是 `[a-z0-9_.]{1,100}`、文字最長 2000 字元、`params` 只保留字串與有限數字，格式不對的項目丟掉不影響其他項目。
+- 第一階段只有機制；`engine.*` 的鍵在第二階段依 `hardware.md` 的 code 加入。`status`／指令錯誤的 `code`（`model_not_downloaded`、`license_not_accepted` 等）一直是 UI 自己對應，字典鍵是 `status.code.*`、`error.code.*`。
+
+### 檢查
+
+- 型別：每個語系的鍵與基準完全相同、複數鍵仍是複數。
+- `locales/locales.test.ts`：每個已登記的字典鍵與基準相同、沒有空字串、每個鍵（含每個複數形式）的佔位符與基準相同、複數類別正好是該語系 `Intl.PluralRules` 會選到的類別；`index.html`／`overlay.html` 用到的鍵都存在。
+- `lib/i18n-source.test.ts`：`app/src/**/*.ts`（排除 `src/locales/`、`*.test.ts`、`testdata/`）的字串、樣板與正規表示式字面值，以及兩個 HTML（排除註解）不得出現漢字、平假名、片假名、諺文，只允許品牌「聞き取り」。以 TypeScript 解析器區分程式與註解，所以註解仍可以寫繁體中文；`\u` 跳脫也會被抓到。
+- `lib/i18n.test.ts`：`resolveLocale` 的對應表、`t` 參數代入與退回、`tp` 的複數（含退回 English 時用 English 規則）、監聽者、`Intl.DisplayNames` 的語言／地區名稱、語言標籤、`applyStatic`（以假 DOM 測各屬性與未知鍵）。`lib/messages.test.ts`：字串原樣、已知 code 翻譯、未知 code 用 `message`、驗證規則。
 
 ## 字幕視窗 `overlay`
 
@@ -147,7 +188,7 @@
 | `connection.rs` | 傳送請求（NDJSON）、以 `id` 配對回應、每個請求一個期限（涵蓋寫入與等待）。逾時的請求從等待表移除，晚到的回應記錄後丟棄。格式錯誤的行記錄 error（附截短的內容）後略過，不影響其他訊息。輸出關閉時所有等待中的請求立即失敗。 |
 | `engine.rs` | 引擎行程：選擇指令（含正式版資源目錄的路徑）、spawn（不經 shell，Windows 加 `CREATE_NO_WINDOW`）、stderr 轉到 app 日誌、`engine.info` 握手並檢查 `protocol_version == 1`、意外結束時自動重啟（1 s、2 s、4 s 退避；60 秒內超過 3 次就停在「失敗」等使用者按重新啟動）、結束程式時先送 `engine.shutdown`，3 秒內（請求與等待共用同一個期限，`shutdown_within`）沒結束就強制結束；同步版 `shutdown_blocking` 給更新器的 `on_before_exit` 用（見「自動更新」）。 |
 | `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses` 與字幕視窗指令。 |
-| `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查）、穿透與可見狀態。 |
+| `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查）、穿透與可見狀態、介面語系（`locale`，`validate_locale` 只檢查格式：2–3 個字母，可接一個 2–8 字元的子標籤，最長 16 字元）。 |
 | `updater.rs` | 檢查與安裝更新的指令 `update_check`／`update_install`（tauri-plugin-updater 的 Rust API），安裝前關閉引擎（見「自動更新」）。 |
 | `lib.rs` | 外掛（log、window-state、updater、process、opener、global-shortcut）、狀態、事件轉發、全域快速鍵、生命週期（關閉主視窗即結束程式）。 |
 
@@ -165,9 +206,9 @@
 |---|---|
 | `engine://subtitle`、`engine://status`、`engine://download-progress`、`engine://log` | 已驗證的引擎事件（欄位同協定） |
 | `bridge://state` | `{phase: starting|ready|restarting|stopped|failed, detail, restarts, command, source, info}` |
-| `overlay://state` | `{style, click_through, visible, shortcut, shortcut_registered}` |
+| `overlay://state` | `{style, click_through, visible, shortcut, shortcut_registered, locale}`（`locale` 在主視窗送出前是 `null`） |
 
-前端（`src/lib/validate.ts`）再驗證一次所有事件與指令結果；不合格的 payload 記錄後丟棄。指令錯誤統一為 `{kind: engine|timeout|disconnected|invalid_input, …}`，由 `describeError` 轉成繁體中文說明。
+前端（`src/lib/validate.ts`）再驗證一次所有事件與指令結果；不合格的 payload 記錄後丟棄。指令錯誤統一為 `{kind: engine|timeout|disconnected|invalid_input, …}`，由 `describeError` 轉成介面語言的說明。
 
 ### 權限（最小權限）
 
@@ -175,8 +216,8 @@
 
 | 視窗 | 權限 |
 |---|---|
-| `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、`update_check`／`update_install`（不給 `updater:default`：外掛自己的 JavaScript 指令會繞過關閉引擎的步驟）、`process:allow-restart`、`opener:allow-open-url`（scope 只有 `https://docs.nvidia.com/cuda/eula/index.html`）、全部引擎與字幕視窗指令、`app_about`、`open_third_party_licenses`（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
-| `overlay`（`capabilities/overlay.json`） | 事件 listen／unlisten、`start-dragging`、`start-resize-dragging`、`overlay_get_state`、`overlay_set_visible` |
+| `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、`update_check`／`update_install`（不給 `updater:default`：外掛自己的 JavaScript 指令會繞過關閉引擎的步驟）、`process:allow-restart`、`opener:allow-open-url`（scope 只有 `https://docs.nvidia.com/cuda/eula/index.html`）、全部引擎與字幕視窗指令（含 `overlay_set_locale`）、`app_about`、`open_third_party_licenses`（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
+| `overlay`（`capabilities/overlay.json`） | 事件 listen／unlisten、`start-dragging`、`start-resize-dragging`、`set-title`（依介面語系改視窗標題）、`overlay_get_state`、`overlay_set_visible` |
 
 opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端開這一個網址；沒有 `allow-default-urls`、沒有 `open-path`／`reveal-item-in-dir`。兩個授權資料夾由 Rust 指令以 opener 的 Rust API 開啟（前端只選 `app`／`engine`，路徑在 Rust 端決定）。`combination.test.ts` 檢查 capability 裡的 opener 權限正好是這一筆。
 
@@ -235,9 +276,9 @@ npm run tauri dev
 
 | 指令（在 `app/` 或 `app/src-tauri/`） | 內容 |
 |---|---|
-| `npm test` | vitest：更新指令的結果與進度事件驗證、字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化、自動推薦（`recommend.test.ts`：第一次執行只套用一次且先等偵測、訊息文字、不是新設定檔或使用者已存組合時不套用、引擎回 `applied: null` 視為略過、提示依 `differs` 與指紋顯示／隱藏、「不要再提醒」清單、缺少模型的提示與進度、下載中不能開始、`api.ts` 呼叫的每個指令都在 `build.rs` 與 `capabilities/main.json`） |
+| `npm test` | vitest：介面多語系（見「介面多語系」的「檢查」：字典完整性、佔位符、複數類別、HTML 用到的鍵、原始碼不得有 CJK 文字、語系對應、退回、引擎訊息）、`ui.locale` 的讀取與 patch、字幕視窗快照的 `locale`、更新指令的結果與進度事件驗證、字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化、自動推薦（`recommend.test.ts`：第一次執行只套用一次且先等偵測、訊息文字、不是新設定檔或使用者已存組合時不套用、引擎回 `applied: null` 視為略過、提示依 `differs` 與指紋顯示／隱藏、「不要再提醒」清單、缺少模型的提示與進度、下載中不能開始、`api.ts` 呼叫的每個指令都在 `build.rs` 與 `capabilities/main.json`） |
 | `npm run build` | `tsc` 型別檢查 + `vite build` |
-| `cargo test` | 更新前關閉引擎（`fake_engine.py`：在 runtime worker 上同步呼叫，`engine.shutdown` 讓引擎自己結束；`--ignore-shutdown` 不回應時在期限後強制結束；沒有引擎時立即返回）、更新指令的逾時範圍與進度事件格式、協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；正式版資源目錄的引擎路徑與覆寫、`about_info`（兩個授權資料夾各自只在存在時回報；`licenses` 與 `tauri.sidecar.conf.json` 的資源名稱一致；`LicenseFolder` 只接受 `app`／`engine`）、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
+| `cargo test` | 更新前關閉引擎（`fake_engine.py`：在 runtime worker 上同步呼叫，`engine.shutdown` 讓引擎自己結束；`--ignore-shutdown` 不回應時在期限後強制結束；沒有引擎時立即返回）、更新指令的逾時範圍與進度事件格式、協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；字幕視窗的介面語系（初始為 `None`、格式檢查、拒絕時保留舊值）、正式版資源目錄的引擎路徑與覆寫、`about_info`（兩個授權資料夾各自只在存在時回報；`licenses` 與 `tauri.sidecar.conf.json` 的資源名稱一致；`LicenseFolder` 只接受 `app`／`engine`）、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
 | `cargo clippy --all-targets -- -D warnings` | lint |
 
 ## 各平台需要實機確認的地方

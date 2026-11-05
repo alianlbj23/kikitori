@@ -5,13 +5,14 @@
  * tauri.conf.json), then lets the user download, install and restart. Check and
  * install go through the app's `update_check`／`update_install` commands
  * (`src-tauri/src/updater.rs`), which shut the engine down before the Windows
- * installer replaces its files. All copy is Traditional Chinese; the caller
- * decides where messages appear.
+ * installer replaces its files. Copy comes from the i18n dictionary; the
+ * caller decides where messages appear.
  */
 
 import { relaunch } from "@tauri-apps/plugin-process";
 
 import { api } from "../lib/api";
+import { t } from "../lib/i18n";
 import type { UpdateInfo } from "../lib/types";
 
 const CHECK_TIMEOUT_MS = 15_000;
@@ -41,7 +42,7 @@ export async function checkForUpdate(ui: UpdateUi, reportFailures: boolean): Pro
     update = await api.updateCheck(CHECK_TIMEOUT_MS);
   } catch (e) {
     console.error("update check failed:", e);
-    if (reportFailures) ui.failed(`無法檢查更新：${describe(e)}`);
+    if (reportFailures) ui.failed(t("update.checkFailed", { reason: describe(e) }));
     return null;
   }
   if (!update) return null;
@@ -61,7 +62,7 @@ export async function checkForUpdate(ui: UpdateUi, reportFailures: boolean): Pro
       }, DOWNLOAD_TIMEOUT_MS);
     } catch (e) {
       console.error("update install failed:", e);
-      ui.failed(`更新失敗：${describe(e)}`);
+      ui.failed(t("update.failed", { reason: describe(e) }));
       return;
     }
     // On Windows the app has exited before this point (engine stopped first,
@@ -71,7 +72,7 @@ export async function checkForUpdate(ui: UpdateUi, reportFailures: boolean): Pro
         await relaunch();
       } catch (e) {
         console.error("relaunch failed:", e);
-        ui.failed(`無法自動重新啟動，請手動關閉後再開啟 kikitori。（${describe(e)}）`);
+        ui.failed(t("update.relaunchFailed", { reason: describe(e) }));
       }
     });
   });

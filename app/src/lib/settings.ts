@@ -11,8 +11,11 @@
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
  * Overlay appearance lives in the engine's opaque `subtitle` object, the UI's
- * own state (dismissed recommendation offers) in the opaque `ui` object.
+ * own state (dismissed recommendation offers, interface language) in the opaque
+ * `ui` object. Validation messages come from the i18n dictionary.
  */
+
+import { isUiLocale, t, type UiLocalePreference } from "./i18n";
 
 import type {
   AppliedRecommendation,
@@ -74,7 +77,7 @@ export const DEFAULT_SETTINGS: Settings = {
     allow_restricted: false,
   },
   subtitle: DEFAULT_OVERLAY_STYLE,
-  ui: { dismissed_recommendations: [] },
+  ui: { dismissed_recommendations: [], locale: "system" },
 };
 
 /** Recommendation fingerprints are short hex strings (engine `recommendation_fingerprint`). */
@@ -153,17 +156,38 @@ function clampInt(v: unknown, [lo, hi]: readonly [number, number], fallback: num
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
 
-/** The UI's state from the opaque `settings.ui`; malformed parts fall back to empty. */
+/** The UI's state from the opaque `settings.ui`; malformed parts fall back to defaults. */
 export function uiStateFromSettings(ui: unknown, warn: Warn): UiState {
-  const v = asObj(ui).dismissed_recommendations;
-  if (v === undefined) return { dismissed_recommendations: [] };
+  const o = asObj(ui);
+  return {
+    dismissed_recommendations: dismissedFromUi(o.dismissed_recommendations, warn),
+    locale: localeFromUi(o.locale, warn),
+  };
+}
+
+function dismissedFromUi(v: unknown, warn: Warn): string[] {
+  if (v === undefined) return [];
   // Reading is more lenient than writing (MAX_DISMISSED): a list written by a later
   // version that keeps more entries must not be reported as malformed.
   if (Array.isArray(v) && v.length <= 100 && v.every((f) => typeof f === "string" && FINGERPRINT_PATTERN.test(f))) {
-    return { dismissed_recommendations: v as string[] };
+    return v as string[];
   }
   warn("ui.dismissed_recommendations");
-  return { dismissed_recommendations: [] };
+  return [];
+}
+
+function localeFromUi(v: unknown, warn: Warn): UiLocalePreference {
+  if (v === undefined || v === "system") return "system";
+  if (isUiLocale(v)) return v;
+  // 較新版本可能存了這一版還不認得的語系：視為「跟隨系統」，不當成壞欄位提示使用者。
+  if (typeof v === "string" && v.length <= 35) return "system";
+  warn("ui.locale");
+  return "system";
+}
+
+/** Patch that stores the interface language; the engine deep-merges `ui`, so other keys stay. */
+export function uiLocalePatch(locale: UiLocalePreference): Record<string, unknown> {
+  return { ui: { locale } };
 }
 
 /** Overlay style from `settings.subtitle`, falling back field by field. */
@@ -284,6 +308,7 @@ export interface SettingsForm {
 export type FormErrors = Partial<Record<keyof SettingsForm, string>>;
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_NAME_MAX = 100;
 const MODEL_NAME_MAX = 200;
 
 function parseIntField(raw: string): number | null {
@@ -298,35 +323,35 @@ export function validateSettingsForm(form: SettingsForm): FormErrors {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      errors.base_url = "網址要以 http:// 或 https:// 開頭。";
+      errors.base_url = t("validation.urlScheme");
     }
   } catch {
     // URL() throws for anything unparsable; that is exactly the user error to report.
-    errors.base_url = url === "" ? "請填寫翻譯服務的網址。" : "這不是有效的網址。";
+    errors.base_url = url === "" ? t("validation.urlEmpty") : t("validation.urlInvalid");
   }
   const env = form.api_key_env.trim();
   if (!ENV_NAME.test(env)) {
-    errors.api_key_env = "只能用英文字母、數字和底線，且不能以數字開頭。";
-  } else if (env.length > 100) {
-    errors.api_key_env = "名稱太長（最多 100 個字元）。";
+    errors.api_key_env = t("validation.envPattern");
+  } else if (env.length > ENV_NAME_MAX) {
+    errors.api_key_env = t("validation.envTooLong", { max: ENV_NAME_MAX });
   }
   if (form.partner_language !== "ja" && form.partner_language !== "en") {
-    errors.partner_language = "請選擇日語或英語。";
+    errors.partner_language = t("validation.partner");
   }
   const size = parseIntField(form.font_size);
   if (size === null || size < FONT_SIZE_RANGE[0] || size > FONT_SIZE_RANGE[1]) {
-    errors.font_size = `字級要在 ${FONT_SIZE_RANGE[0]} 到 ${FONT_SIZE_RANGE[1]} 之間。`;
+    errors.font_size = t("validation.fontSize", { min: FONT_SIZE_RANGE[0], max: FONT_SIZE_RANGE[1] });
   }
   const opacity = parseIntField(form.background_opacity_percent);
   if (opacity === null || opacity > 100) {
-    errors.background_opacity_percent = "背景不透明度要在 0% 到 100% 之間。";
+    errors.background_opacity_percent = t("validation.opacity");
   }
   if (form.position !== "top" && form.position !== "bottom") {
-    errors.position = "請選擇上方或下方。";
+    errors.position = t("validation.position");
   }
   const lines = parseIntField(form.max_lines);
   if (lines === null || lines < MAX_LINES_RANGE[0] || lines > MAX_LINES_RANGE[1]) {
-    errors.max_lines = `句數要在 ${MAX_LINES_RANGE[0]} 到 ${MAX_LINES_RANGE[1]} 之間。`;
+    errors.max_lines = t("validation.lines", { min: MAX_LINES_RANGE[0], max: MAX_LINES_RANGE[1] });
   }
   return errors;
 }
@@ -421,34 +446,34 @@ function looksAbsolute(path: string): boolean {
 export function validateCombinationForm(form: CombinationForm): CombinationErrors {
   const errors: CombinationErrors = {};
   for (const key of ["fast_model", "final_model"] as const) {
-    if (!ASR_MODEL_ID.test(form[key])) errors[key] = "請選擇語音辨識模型。";
+    if (!ASR_MODEL_ID.test(form[key])) errors[key] = t("validation.asrModel");
   }
   if (!(ASR_DEVICES as readonly string[]).includes(form.device)) {
-    errors.device = "請選擇運算裝置。";
+    errors.device = t("validation.device");
   }
   for (const key of ["translation_fast", "translation_final"] as const) {
     const v = form[key].trim();
-    if (v === "") errors[key] = "請填寫翻譯模型的名稱。";
-    else if (v.length > MODEL_NAME_MAX) errors[key] = `模型名稱最多 ${MODEL_NAME_MAX} 個字元。`;
+    if (v === "") errors[key] = t("validation.translationEmpty");
+    else if (v.length > MODEL_NAME_MAX) errors[key] = t("validation.translationTooLong", { max: MODEL_NAME_MAX });
   }
   for (const key of ["fast_compute_type", "final_compute_type"] as const) {
     const v = form[key];
-    if (v !== "" && !(COMPUTE_TYPES as readonly string[]).includes(v)) errors[key] = "請選擇精度。";
+    if (v !== "" && !(COMPUTE_TYPES as readonly string[]).includes(v)) errors[key] = t("validation.computeType");
   }
   for (const key of ["fast_cpu_threads", "final_cpu_threads"] as const) {
     const raw = form[key].trim();
     if (raw === "") continue;
     const n = parseIntField(raw);
     if (n === null || n < CPU_THREADS_RANGE[0] || n > CPU_THREADS_RANGE[1]) {
-      errors[key] = `執行緒數要在 ${CPU_THREADS_RANGE[0]} 到 ${CPU_THREADS_RANGE[1]} 之間，留空代表自動。`;
+      errors[key] = t("validation.threads", { min: CPU_THREADS_RANGE[0], max: CPU_THREADS_RANGE[1] });
     }
   }
   const dirs = cudaDirs(form.cuda_library_dirs);
   if (dirs.length > MAX_CUDA_DIRS) {
-    errors.cuda_library_dirs = `最多 ${MAX_CUDA_DIRS} 個資料夾。`;
+    errors.cuda_library_dirs = t("validation.cudaDirsTooMany", { max: MAX_CUDA_DIRS });
   } else {
     const bad = dirs.find((d) => d.length > MAX_PATH_CHARS || !looksAbsolute(d));
-    if (bad !== undefined) errors.cuda_library_dirs = `「${bad.slice(0, 80)}」不是完整路徑（例如 C:\\CUDA\\bin）。`;
+    if (bad !== undefined) errors.cuda_library_dirs = t("validation.cudaDirNotAbsolute", { path: bad.slice(0, 80) });
   }
   return errors;
 }

@@ -7,6 +7,9 @@
  * validators in `validate.ts`.
  */
 
+import type { UiLocalePreference } from "./i18n";
+import type { EngineMessage } from "./messages";
+
 export type Mode = "media" | "interpret";
 export type PartnerLanguage = "ja" | "en";
 
@@ -81,6 +84,8 @@ export interface OverlaySnapshot {
   visible: boolean;
   shortcut: string;
   shortcut_registered: boolean;
+  /** UI locale the main window chose; null until it has sent one (follow the OS). */
+  locale: string | null;
 }
 
 export interface DeviceInfo {
@@ -163,8 +168,9 @@ export interface Recommendation {
   /** GB of (V)RAM left for the translation model; null when unknown. */
   translation_budget_gb: number | null;
   gpu_runtime_missing: boolean;
-  reasons: string[];
-  warnings: string[];
+  /** Plain strings from older engines, `{code, params, message}` from newer ones. */
+  reasons: EngineMessage[];
+  warnings: EngineMessage[];
 }
 
 export interface HardwareReport {
@@ -231,11 +237,11 @@ export interface ModelsList {
   };
 }
 
-/** `models.validate` result. Messages are already in Traditional Chinese. */
+/** `models.validate` result; messages are shown with `formatEngineMessage`. */
 export interface CombinationCheck {
   ok: boolean;
-  errors: string[];
-  warnings: string[];
+  errors: EngineMessage[];
+  warnings: EngineMessage[];
 }
 
 export type ComputeType =
@@ -287,6 +293,8 @@ export interface UiState {
    * (`settings.preview_recommendation`); a different recommendation prompts again.
    */
   dismissed_recommendations: string[];
+  /** Interface language (`ui.locale`); "system" follows the OS. */
+  locale: UiLocalePreference;
 }
 
 /** `settings.preview_recommendation`: what applying would write, without saving. */

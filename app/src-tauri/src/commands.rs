@@ -379,6 +379,19 @@ pub fn overlay_set_style(
     Ok(overlay.snapshot())
 }
 
+/// Tells the overlay which UI locale the main window uses, so its labels and
+/// title follow the language chosen on the settings page.
+#[tauri::command]
+pub fn overlay_set_locale(
+    app: AppHandle,
+    overlay: State<'_, OverlayState>,
+    locale: String,
+) -> CmdResult<OverlaySnapshot> {
+    overlay.set_locale(locale).map_err(invalid)?;
+    broadcast_overlay(&app, &overlay);
+    Ok(overlay.snapshot())
+}
+
 /// Applies click-through to the overlay window; shared with the global shortcut.
 pub fn apply_click_through(
     app: &AppHandle,

@@ -24,6 +24,7 @@ fn main() {
             "overlay_set_style",
             "overlay_set_click_through",
             "overlay_set_visible",
+            "overlay_set_locale",
             "update_check",
             "update_install",
         ]),

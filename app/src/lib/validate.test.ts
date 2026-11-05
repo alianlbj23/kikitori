@@ -11,6 +11,7 @@ import {
   parseDownloadProgress,
   parseHardware,
   parseModels,
+  parseOverlaySnapshot,
   parseOverlayStyle,
   parseRecommendationPreview,
   parseStatus,
@@ -116,6 +117,20 @@ describe("command results", () => {
     expect(() => parseOverlayStyle({ ...ok, position: "left" })).toThrow();
   });
 
+  it("reads the overlay locale, tolerating older Rust builds and malformed tags", () => {
+    const snap = {
+      style: { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 },
+      click_through: false,
+      visible: true,
+      shortcut: "CommandOrControl+Alt+K",
+      shortcut_registered: true,
+    };
+    expect(parseOverlaySnapshot({ ...snap, locale: "pt-BR" }).locale).toBe("pt-BR");
+    expect(parseOverlaySnapshot({ ...snap, locale: null }).locale).toBeNull();
+    expect(parseOverlaySnapshot(snap).locale).toBeNull();
+    expect(parseOverlaySnapshot({ ...snap, locale: "<script>" }).locale).toBeNull();
+  });
+
   it("recognises serialized command errors only", () => {
     expect(asCommandError({ kind: "timeout", method: "x", timeout_ms: 10 })).toEqual({
       kind: "timeout",
@@ -184,6 +199,16 @@ describe("hardware.detect (real engine, fake NVIDIA hardware)", () => {
     expect(r.gpu_runtime_missing).toBe(true);
     expect(r.reasons.length).toBeGreaterThan(0);
     expect(r.warnings[0]).toContain("cuBLAS");
+  });
+
+  it("accepts coded reasons and warnings from newer engines next to plain strings", () => {
+    const v = clone(detect);
+    const coded = { code: "gpu_runtime_missing", params: { name: "RTX" }, message: "Download the GPU runtime." };
+    (v.recommendation as Record<string, unknown>).reasons = ["plain", coded];
+    (v.recommendation as Record<string, unknown>).warnings = [coded, { code: 3 }];
+    const r = parseHardware(v).recommendation;
+    expect(r.reasons).toEqual(["plain", coded]);
+    expect(r.warnings).toEqual([coded]);
   });
 
   it("accepts a CUDA recommendation without translation (remote server)", () => {
@@ -294,6 +319,12 @@ describe("models.validate", () => {
       warnings: ["w"],
     });
     expect(parseCombinationCheck({ ok: false, errors: ["e"], warnings: [] }).ok).toBe(false);
+  });
+
+  it("keeps coded engine messages for translation in the UI", () => {
+    const coded = { code: "vram_tight", params: { gb: 4 }, message: "Video memory is tight." };
+    const check = parseCombinationCheck({ ok: true, errors: [], warnings: ["legacy", coded, 7] });
+    expect(check.warnings).toEqual(["legacy", coded]);
   });
 
   it("never reports ok next to an error", () => {

@@ -7,10 +7,11 @@
  * how it becomes settings (`settings.apply_recommendation`,
  * `settings.preview_recommendation`, whose `differs` already compares with the
  * saved settings); this module only decides *when* to apply or offer it, and
- * builds the Traditional Chinese messages from the engine's answers.
+ * builds the messages (in the interface language) from the engine's answers.
  */
 
 import { formatBytes, percent } from "./format";
+import { joinList, t } from "./i18n";
 import { MAX_DISMISSED } from "./settings";
 import type {
   AppliedRecommendation,
@@ -34,17 +35,17 @@ export function machineSummary(hw: HardwareInfo): string {
     (best, g) => (best === null || g.memory_total_mb > best.memory_total_mb ? g : best),
     null,
   );
-  if (gpu && !hw.apple_silicon) return `${gpu.name}，${Math.round(gpu.memory_total_mb / 1024)} GB`;
-  const ram = hw.memory.total_bytes === null ? null : `${Math.round(hw.memory.total_bytes / GIB)} GB 記憶體`;
+  if (gpu && !hw.apple_silicon) return t("machine.gpu", { name: gpu.name, gb: Math.round(gpu.memory_total_mb / 1024) });
+  const ram = hw.memory.total_bytes === null ? null : t("machine.ram", { gb: Math.round(hw.memory.total_bytes / GIB) });
   const name = hw.apple_silicon ? "Apple Silicon" : hw.cpu.model;
-  if (name && ram) return `${name}，${ram}`;
-  return name ?? (ram ? `這台電腦的處理器，${ram}` : "這台電腦的處理器");
+  if (name && ram) return t("machine.named", { name, ram });
+  return name ?? (ram ? t("machine.thisCpuRam", { ram }) : t("machine.thisCpu"));
 }
 
 function deviceShort(device: string): string {
   if (device === "cuda") return "GPU";
   if (device === "cpu") return "CPU";
-  return "自動";
+  return t("common.auto");
 }
 
 /** "即時 small、完整 large-v3-turbo（GPU），翻譯 qwen3.5:9b". */
@@ -52,30 +53,34 @@ export function combinationSummary(rec: Recommendation): string {
   const { fast_asr: fast, final_asr: final } = rec;
   const asr =
     fast.device === final.device
-      ? `即時 ${fast.model}、完整 ${final.model}（${deviceShort(fast.device)}）`
-      : `即時 ${fast.model}（${deviceShort(fast.device)}）、完整 ${final.model}（${deviceShort(final.device)}）`;
+      ? t("summary.asrSameDevice", { fast: fast.model, final: final.model, device: deviceShort(fast.device) })
+      : t("summary.asrSplit", {
+          fast: fast.model,
+          fastDevice: deviceShort(fast.device),
+          final: final.model,
+          finalDevice: deviceShort(final.device),
+        });
   const a = rec.translation_fast;
   const b = rec.translation_final;
   // The engine leaves translation untouched when it cannot recommend (remote server).
   const translation =
     a === null || b === null
-      ? "翻譯模型沿用目前設定（翻譯服務不在本機）"
+      ? t("summary.translationKept")
       : a === b
-        ? `翻譯 ${a}`
-        : `即時翻譯 ${a}、完整翻譯 ${b}`;
-  return `${asr}，${translation}`;
+        ? t("summary.translationSame", { model: a })
+        : t("summary.translationSplit", { fast: a, final: b });
+  return t("summary.full", { asr, translation });
 }
 
 /** Notice after the first-run auto-apply: what was chosen, and for which machine. */
 export function autoAppliedNotice(hw: HardwareInfo, rec: Recommendation): string {
-  const text = `已依這台電腦（${machineSummary(hw)}）套用建議組合：${combinationSummary(rec)}。`;
-  return rec.gpu_runtime_missing
-    ? `${text}顯示卡缺少 GPU 加速元件，目前先用 CPU；到「模型」頁下載後可以改用顯示卡。`
-    : text;
+  const params = { machine: machineSummary(hw), summary: combinationSummary(rec) };
+  return rec.gpu_runtime_missing ? t("firstRun.appliedGpuMissing", params) : t("firstRun.applied", params);
 }
 
+/** Ends `text` with a full stop (the locale's) unless it already ends a sentence. */
 function sentence(text: string): string {
-  return /[。！？.!?]$/.test(text) ? text : `${text}。`;
+  return /[。！？.!?]$/.test(text) ? text : `${text}${t("common.sentenceEnd")}`;
 }
 
 /** Notice when the first run could not detect or apply: the safe defaults stay. */
@@ -87,17 +92,14 @@ export function defaultsKeptNotice(
   if (stage === "apply") {
     // The request may have timed out after the engine wrote the file, so the
     // current combination is not stated; the models page shows what is saved.
-    return `無法套用建議組合：${sentence(reason)}請到「模型」頁確認目前的組合，需要時按「套用建議組合」。`;
+    return t("firstRun.applyFailed", { reason: sentence(reason) });
   }
-  return (
-    `無法偵測這台電腦的硬體：${sentence(reason)}先使用預設的組合（即時 ${asr.fast_model}、完整 ${asr.final_model}），` +
-    "可以到「模型」頁重新偵測後套用建議組合。"
-  );
+  return t("firstRun.detectFailed", { reason: sentence(reason), fast: asr.fast_model, final: asr.final_model });
 }
 
 /** Text of the "better combination" offer. */
 export function offerText(preview: RecommendationPreview): string {
-  return `有更適合這台電腦的組合：${combinationSummary(preview.recommendation)}。`;
+  return t("offer.text", { summary: combinationSummary(preview.recommendation) });
 }
 
 // ---------------------------------------------------------------- first run
@@ -230,19 +232,22 @@ export function missingModelsView(
     if (models?.find((x) => x.id === m.id)?.downloaded) continue;
     const d = downloads.get(m.id);
     if (d?.state === "downloading") downloading.push(`${m.id} ${percent(d.downloaded_bytes, d.total_bytes)}%`);
-    else if (d?.state === "error") failed.push(`${m.id} 下載失敗：${d.error ?? "未知原因"}`);
-    else pending.push(m);
+    else if (d?.state === "error") {
+      failed.push(t("missing.itemFailed", { model: m.id, error: d.error ?? t("common.unknownReason") }));
+    } else pending.push(m);
   }
-  if (downloading.length) return { state: "downloading", text: `正在下載 ${downloading.join("、")}，完成後就可以開始。` };
-  if (failed.length) return { state: "failed", text: `${failed.join("；")}。可以重新下載。` };
+  if (downloading.length) {
+    return { state: "downloading", text: t("missing.downloading", { models: joinList(downloading) }) };
+  }
+  if (failed.length) return { state: "failed", text: t("missing.failed", { items: failed.join(t("common.strongSeparator")) }) };
   if (pending.length) {
     const total = pending.reduce((sum, m) => sum + m.size_bytes, 0);
     return {
       state: "offer",
-      text: `還需要下載 ${pending.map((m) => m.id).join("、")}（共約 ${formatBytes(total)}）才能開始。`,
+      text: t("missing.offer", { models: joinList(pending.map((m) => m.id)), size: formatBytes(total) }),
     };
   }
-  return { state: "done", text: "模型已下載完成，可以按「開始」了。" };
+  return { state: "done", text: t("missing.done") };
 }
 
 /** Chosen models still downloading: starting now would fail with `model_not_downloaded`. */

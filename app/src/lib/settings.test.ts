@@ -14,6 +14,7 @@ import {
   parseAppliedRecommendation,
   parseSettingsResult,
   settingsPatchFromForm,
+  uiLocalePatch,
   validateCombinationForm,
   validateSettingsForm,
 } from "./settings";
@@ -156,13 +157,37 @@ describe("parseSettingsResult", () => {
   });
 
   it("reads dismissed recommendations from the opaque ui object", () => {
-    expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({ dismissed_recommendations: [] });
+    expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({
+      dismissed_recommendations: [],
+      locale: "system",
+    });
     const ok = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["0123456789abcdef"], other: 1 } } });
     expect(ok.settings.ui.dismissed_recommendations).toEqual(["0123456789abcdef"]);
     expect(ok.warnings).toEqual([]);
     const bad = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["x", 3] } } });
     expect(bad.settings.ui.dismissed_recommendations).toEqual([]);
     expect(bad.warnings).toContain("ui.dismissed_recommendations");
+  });
+
+  it("reads the interface language from ui.locale, keeping unknown future locales quiet", () => {
+    const read = (locale: unknown) => parseSettingsResult({ settings: { ui: { locale } } });
+    expect(read(undefined).settings.ui.locale).toBe("system");
+    expect(read("system").settings.ui.locale).toBe("system");
+    expect(read("pt-BR").settings.ui.locale).toBe("pt-BR");
+    expect(read("en").warnings).toEqual([]);
+    // A locale added by a later version: follow the system, without a "bad field" notice.
+    const future = read("sw");
+    expect(future.settings.ui.locale).toBe("system");
+    expect(future.warnings).toEqual([]);
+    const bad = read(42);
+    expect(bad.settings.ui.locale).toBe("system");
+    expect(bad.warnings).toContain("ui.locale");
+  });
+
+  it("stores the interface language under ui without touching other ui keys", () => {
+    // The engine deep-merges settings.set, so sending only ui.locale keeps dismissed_recommendations.
+    expect(uiLocalePatch("ja")).toEqual({ ui: { locale: "ja" } });
+    expect(uiLocalePatch("system")).toEqual({ ui: { locale: "system" } });
   });
 
   it("uses defaults for an empty subtitle object", () => {

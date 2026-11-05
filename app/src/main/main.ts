@@ -4,7 +4,9 @@
  * Role: wires the static markup in index.html to the engine (through `lib/api`)
  * and keeps it in sync with engine/bridge/overlay events. Pure decisions
  * (subtitle ordering, validation, wording, combination-check rules) live in
- * `lib/`; this file only holds UI state and renders it.
+ * `lib/`; this file only holds UI state and renders it. Every text comes from
+ * the i18n dictionary, and every render function can run again after the
+ * interface language changes (`onLocaleChanged`).
  */
 
 import { getVersion } from "@tauri-apps/api/app";
@@ -27,7 +29,6 @@ import {
   formatMiB,
   formatTimecode,
   htmlLang,
-  languageName,
   languageShort,
   osName,
   percent,
@@ -36,6 +37,25 @@ import {
   threadsLabel,
   tierLabel,
 } from "../lib/format";
+import {
+  NATIVE_NAMES,
+  UI_LOCALES,
+  applyStatic,
+  getLocale,
+  htmlLangForLocale,
+  isUiLocale,
+  joinList,
+  languageName,
+  localeForPreference,
+  onLocaleChange,
+  setLocale,
+  systemLanguages,
+  t,
+  tp,
+  type StringKey,
+  type UiLocalePreference,
+} from "../lib/i18n";
+import { formatEngineMessage, type EngineMessage } from "../lib/messages";
 import {
   FirstRunGate,
   blockingDownloads,
@@ -57,6 +77,7 @@ import {
   formFieldForEnginePath,
   formFromSettings,
   settingsPatchFromForm,
+  uiLocalePatch,
   validateCombinationForm,
   validateSettingsForm,
   type CombinationErrors,
@@ -124,6 +145,10 @@ interface State {
   closedOffers: Set<string>;
   /** Models the missing-models notice is about (null when it is not shown). */
   missing: MissingModel[] | null;
+  /** Interface language preference shown in the settings page menu. */
+  uiLocale: UiLocalePreference;
+  /** A language chosen while the engine was not ready; saved once it is. */
+  uiLocaleUnsaved: boolean;
 }
 
 const state: State = {
@@ -141,7 +166,7 @@ const state: State = {
   hardware: null,
   downloads: new Map(),
   page: "transcript",
-  check: { state: "unavailable", message: "引擎尚未就緒" },
+  check: { state: "unavailable", message: t("check.engineNotReady") },
   comboDirty: false,
   gpuLicenseAccepted: false,
   about: null,
@@ -150,6 +175,8 @@ const state: State = {
   preview: null,
   closedOffers: new Set(),
   missing: null,
+  uiLocale: "system",
+  uiLocaleUnsaved: false,
 };
 
 const firstRunGate = new FirstRunGate();
@@ -196,6 +223,7 @@ const el = {
   comboStatus: byId("combo-status"),
   settingsForm: byId<HTMLFormElement>("settings-form"),
   settingsPath: byId("settings-path"),
+  uiLocale: byId<HTMLSelectElement>("f-ui-locale"),
   settingsStatus: byId("settings-status"),
   preview: byId("style-preview"),
   oFontSize: byId<HTMLOutputElement>("o-font-size"),
@@ -244,7 +272,7 @@ function notify(
     b.addEventListener("click", action.run);
     buttons.appendChild(b);
   }
-  const close = h("button", { type: "button", class: "ghost", "aria-label": "關閉這則訊息" }, "關閉");
+  const close = h("button", { type: "button", class: "ghost", "aria-label": t("notice.closeLabel") }, t("notice.close"));
   close.addEventListener("click", () => {
     notice.remove();
     options.onClose?.();
@@ -261,9 +289,10 @@ function noticeFor(key: string): HTMLElement | null {
   return Array.from(el.notices.children).find((n): n is HTMLElement => n instanceof HTMLElement && n.dataset.key === key) ?? null;
 }
 
-function reportError(context: string, e: unknown): void {
+/** Shows "<context>: <reason>"; `context` is a dictionary key such as `error.start`. */
+function reportError(context: StringKey, e: unknown, params?: Record<string, string>): void {
   console.error(context, e);
-  notify(`${context}：${describeError(e)}`, "bad");
+  notify(t("common.withReason", { context: t(context, params), reason: describeError(e) }), "bad");
 }
 
 function engineCode(e: unknown): string | null {
@@ -294,7 +323,7 @@ function renderStatus(): void {
   const ready = engineReady();
   el.start.disabled = !ready || state.busy;
   el.start.dataset.state = state.busy ? "busy" : sessionActive() ? "running" : "idle";
-  el.start.textContent = sessionActive() ? "停止" : "開始";
+  el.start.textContent = sessionActive() ? t("start.stop") : t("start.start");
   for (const button of el.modes) {
     const mode = button.dataset.mode as Mode;
     button.setAttribute("aria-checked", String(mode === state.mode));
@@ -304,13 +333,18 @@ function renderStatus(): void {
 
   const info = state.bridge?.info;
   el.aboutEngine.textContent = info
-    ? `引擎 ${info.version}，協定第 ${info.protocol_version} 版${info.fake ? "，目前使用假引擎（開發模式）" : ""}。`
-    : "引擎尚未連線。";
+    ? t(info.fake ? "about.engineFake" : "about.engine", { version: info.version, protocol: info.protocol_version })
+    : t("about.engineOffline");
 }
 
 function renderModeNotes(): void {
   const partner = state.settings?.partner_language ?? "ja";
-  if (el.modeNotes.interpret) el.modeNotes.interpret.textContent = `中文與${languageName(partner)}互譯`;
+  if (el.modeNotes.interpret) {
+    el.modeNotes.interpret.textContent = t("mode.interpret.note", {
+      own: languageName("zh"),
+      partner: languageName(partner),
+    });
+  }
 }
 
 function renderDevices(): void {
@@ -319,7 +353,7 @@ function renderDevices(): void {
   const selected = state.mode === "media" ? state.settings?.media_device_id : state.settings?.interpret_device_id;
   const fallback = list.find((d) => d.is_default);
   const options = [
-    h("option", { value: "" }, fallback ? `預設：${fallback.name}` : "系統預設"),
+    h("option", { value: "" }, fallback ? t("device.defaultNamed", { name: fallback.name }) : t("device.systemDefault")),
     ...list.map((d) => h("option", { value: d.id }, d.name)),
   ];
   replace(el.device, ...options);
@@ -327,10 +361,10 @@ function renderDevices(): void {
   el.device.value = selected && known ? selected : "";
   el.deviceHint.textContent =
     selected && !known
-      ? "先前選擇的裝置目前找不到，會改用系統預設。"
+      ? t("device.hint.missing")
       : state.mode === "media"
-        ? "影片翻譯會擷取電腦正在播放的聲音。"
-        : "即時口譯會使用麥克風。";
+        ? t("device.hint.media")
+        : t("device.hint.interpret");
 }
 
 async function setMode(mode: Mode): Promise<void> {
@@ -343,7 +377,7 @@ async function setMode(mode: Mode): Promise<void> {
     const { settings } = await api.settingsSet(devicePatch(mode, deviceId ?? null));
     state.settings = settings;
   } catch (e) {
-    reportError("無法記住模式", e);
+    reportError("error.saveMode", e);
   }
 }
 
@@ -353,7 +387,7 @@ async function setDevice(deviceId: string | null): Promise<void> {
     state.settings = settings;
     renderDevices();
   } catch (e) {
-    reportError("無法記住聲音來源", e);
+    reportError("error.saveDevice", e);
   }
 }
 
@@ -369,7 +403,7 @@ async function toggleSession(): Promise<void> {
       const waiting = state.settings ? blockingDownloads(state.settings.asr, state.downloads) : [];
       if (waiting.length) {
         // Starting now would only fail with model_not_downloaded.
-        notify(`${waiting.join("、")} 還在下載，下載完成後再按「開始」。`);
+        notify(t("notice.waitDownloads", { models: joinList(waiting) }));
         return;
       }
       const deviceId = el.device.value === "" ? null : el.device.value;
@@ -383,7 +417,7 @@ async function toggleSession(): Promise<void> {
       }
     }
   } catch (e) {
-    reportError(sessionActive() ? "無法停止" : "無法開始", e);
+    reportError(sessionActive() ? "error.stop" : "error.start", e);
   } finally {
     state.busy = false;
     renderStatus();
@@ -399,7 +433,10 @@ function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
   const [time, lang, text] = li.children as unknown as [HTMLElement, HTMLElement, HTMLElement];
   time.textContent = formatTimecode(line.startSample);
   lang.textContent = languageShort(line.sourceLanguage);
-  lang.title = `${languageName(line.sourceLanguage)}譯成${languageName(line.targetLanguage)}`;
+  lang.title = t("transcript.langTitle", {
+    source: languageName(line.sourceLanguage),
+    target: languageName(line.targetLanguage),
+  });
   const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
   orig.textContent = line.original;
   orig.lang = htmlLang(line.sourceLanguage);
@@ -454,131 +491,148 @@ function renderOverlay(): void {
     el.shortcutNote.textContent = "";
     return;
   }
-  const keys = o.shortcut.replace("CommandOrControl", "Ctrl（macOS 為 ⌘）");
+  const keys = o.shortcut.replace("CommandOrControl", t("transcript.shortcutCtrl"));
   el.shortcutNote.textContent = o.shortcut_registered
-    ? `開啟滑鼠穿透後，點擊會穿過字幕視窗。按 ${keys} 可隨時切換。`
-    : `快速鍵 ${keys} 已被其他程式占用，請用這裡的開關切換滑鼠穿透。`;
+    ? t("transcript.shortcutOn", { keys })
+    : t("transcript.shortcutTaken", { keys });
 }
 
 async function setOverlayVisible(visible: boolean): Promise<void> {
   try {
     state.overlay = await api.overlaySetVisible(visible);
   } catch (e) {
-    reportError(visible ? "無法顯示字幕視窗" : "無法隱藏字幕視窗", e);
+    reportError(visible ? "error.showOverlay" : "error.hideOverlay", e);
   }
   renderOverlay();
 }
 
 // ---------------------------------------------------------------- models page: hardware
 
-const CUBLAS_SOURCE: Record<string, string> = {
-  runtime: "kikitori 下載的 GPU 加速元件",
-  configured: "自訂組合指定的資料夾",
-  system: "系統安裝的 CUDA",
+const CUBLAS_SOURCE: Readonly<Record<string, StringKey>> = {
+  runtime: "hw.cublasSource.runtime",
+  configured: "hw.cublasSource.configured",
+  system: "hw.cublasSource.system",
 };
+
+/** "text（note）" in the interface language's punctuation. */
+function withNote(text: string, note: string): string {
+  return t("common.parenthetical", { text, note });
+}
 
 function renderHardware(): void {
   const hw = state.hardware;
   if (!hw) {
-    replace(el.hardware, h("dt", {}, "狀態"), h("dd", {}, "偵測中"));
+    replace(el.hardware, h("dt", {}, t("hw.status")), h("dd", {}, t("hw.detecting")));
     el.hardwareErrors.hidden = true;
-    replace(el.recommendation, h("p", { class: "block-lede" }, "偵測完成後會在這裡列出建議。"));
+    replace(el.recommendation, h("p", { class: "block-lede" }, t("rec.pending")));
     return;
   }
   const x = hw.hardware;
   const cores =
     x.cpu.physical_cores && x.cpu.logical_cores
-      ? `${x.cpu.physical_cores} 核心、${x.cpu.logical_cores} 執行緒`
+      ? t("hw.cores", { physical: x.cpu.physical_cores, logical: x.cpu.logical_cores })
       : x.cpu_count
-        ? `${x.cpu_count} 個執行緒`
-        : "核心數未知";
+        ? tp("hw.threads", x.cpu_count)
+        : t("hw.coresUnknown");
   const gpus = x.apple_silicon
-    ? "Apple Silicon（與處理器共用記憶體）"
+    ? t("hw.appleSilicon")
     : x.gpus.length
-      ? x.gpus
-          .map((g) => {
+      ? joinList(
+          x.gpus.map((g) => {
             const extra = [
-              `顯示記憶體 ${formatMiB(g.memory_total_mb)}`,
-              g.driver_version ? `驅動 ${g.driver_version}` : null,
-              g.compute_capability ? `運算能力 ${g.compute_capability}` : null,
-            ].filter(Boolean);
-            return `${g.name}（${extra.join("，")}）`;
-          })
-          .join("、")
-      : "沒有偵測到 NVIDIA 顯示卡";
+              t("hw.gpuVram", { size: formatMiB(g.memory_total_mb) }),
+              g.driver_version ? t("hw.gpuDriver", { version: g.driver_version }) : null,
+              g.compute_capability ? t("hw.gpuCompute", { capability: g.compute_capability }) : null,
+            ].filter((s): s is string => s !== null);
+            return withNote(g.name, extra.join(t("common.clauseSeparator")));
+          }),
+        )
+      : t("hw.noNvidia");
+  const cublasSource = CUBLAS_SOURCE[x.cublas.source ?? ""];
   const cublas = !x.cublas.supported_platform
-    ? "這個平台不使用"
+    ? t("hw.cublasNotUsed")
     : x.cublas.available
-      ? `可以使用（${CUBLAS_SOURCE[x.cublas.source ?? ""] ?? x.cublas.source ?? "來源不明"}）`
-      : "未安裝";
+      ? t("hw.cublasAvailable", {
+          source: cublasSource ? t(cublasSource) : (x.cublas.source ?? t("hw.cublasSourceUnknown")),
+        })
+      : t("hw.cublasMissing");
   const ts = x.translation_server;
   const server = !ts
-    ? "未偵測"
+    ? t("hw.serverNotDetected")
     : ts.reachable
-      ? `${ts.base_url}（${ts.is_local ? "本機" : "遠端"}，${ts.models === null ? "模型清單未知" : `${ts.models.length} 個模型`}）`
-      : `${ts.base_url}（無法連線${ts.error ? `：${ts.error}` : ""}）`;
+      ? t("hw.serverReachable", {
+          url: ts.base_url,
+          where: ts.is_local ? t("hw.serverLocal") : t("hw.serverRemote"),
+          models: ts.models === null ? t("hw.serverModelsUnknown") : tp("hw.serverModelCount", ts.models.length),
+        })
+      : ts.error
+        ? t("hw.serverUnreachableError", { url: ts.base_url, error: ts.error })
+        : t("hw.serverUnreachable", { url: ts.base_url });
   const memory =
     x.memory.total_bytes === null
-      ? "未知"
+      ? t("common.unknown")
       : x.memory.available_bytes === null
         ? formatBytes(x.memory.total_bytes)
-        : `${formatBytes(x.memory.total_bytes)}（目前可用 ${formatBytes(x.memory.available_bytes)}）`;
+        : t("hw.memoryAvailable", {
+            total: formatBytes(x.memory.total_bytes),
+            available: formatBytes(x.memory.available_bytes),
+          });
   replace(
     el.hardware,
-    h("dt", {}, "作業系統"),
+    h("dt", {}, t("hw.os")),
     h("dd", {}, x.os_version.startsWith(osName(x.os)) ? x.os_version : `${osName(x.os)} ${x.os_version}`.trim()),
-    h("dt", {}, "處理器"),
-    h("dd", {}, `${x.cpu.model ?? x.machine ?? "未知"}，${cores}`),
-    h("dt", {}, "記憶體"),
+    h("dt", {}, t("hw.cpu")),
+    h("dd", {}, t("hw.cpuValue", { model: x.cpu.model ?? x.machine ?? t("common.unknown"), cores })),
+    h("dt", {}, t("hw.memory")),
     h("dd", {}, memory),
-    h("dt", {}, "顯示卡"),
+    h("dt", {}, t("hw.gpu")),
     h("dd", {}, gpus),
-    h("dt", {}, "cuBLAS（GPU 辨識）"),
+    h("dt", {}, t("hw.cublas")),
     h("dd", {}, cublas),
-    h("dt", {}, "翻譯服務"),
+    h("dt", {}, t("hw.server")),
     h("dd", {}, server),
   );
   el.hardwareErrors.hidden = x.errors.length === 0;
-  replace(el.hardwareErrors, ...x.errors.map((e) => h("li", { class: "warning" }, `偵測不完整：${e}`)));
+  replace(el.hardwareErrors, ...x.errors.map((e) => h("li", { class: "warning" }, t("hw.incomplete", { error: e }))));
   renderRecommendation();
 }
 
 function describeChoice(c: AsrChoice): string {
   const parts = [deviceLabel(c.device), computeTypeLabel(c.compute_type)];
   if (c.device !== "cuda") parts.push(threadsLabel(c.cpu_threads));
-  return `${c.model}（${parts.join("，")}）`;
+  return withNote(c.model, parts.join(t("common.clauseSeparator")));
 }
 
 function renderRecommendation(): void {
   const rec = state.hardware?.recommendation;
   if (!rec) return;
-  const notLocal = "無法推薦（翻譯服務不在本機），請在自訂組合選擇";
+  const notLocal = t("rec.notLocal");
   const dl = h(
     "dl",
     { class: "facts" },
-    h("dt", {}, "硬體等級"),
+    h("dt", {}, t("rec.tier")),
     h("dd", {}, tierLabel(rec.tier)),
-    h("dt", {}, "即時字幕的辨識"),
+    h("dt", {}, t("rec.fastAsr")),
     h("dd", {}, describeChoice(rec.fast_asr)),
-    h("dt", {}, "完整翻譯的辨識"),
+    h("dt", {}, t("rec.finalAsr")),
     h("dd", {}, describeChoice(rec.final_asr)),
-    h("dt", {}, "即時字幕的翻譯"),
+    h("dt", {}, t("rec.fastTranslation")),
     h("dd", {}, rec.translation_fast ?? notLocal),
-    h("dt", {}, "完整翻譯的翻譯"),
+    h("dt", {}, t("rec.finalTranslation")),
     h("dd", {}, rec.translation_final ?? notLocal),
-    rec.translation_budget_gb === null ? null : h("dt", {}, "可給翻譯模型的記憶體"),
-    rec.translation_budget_gb === null ? null : h("dd", {}, `約 ${rec.translation_budget_gb.toFixed(1)} GB`),
+    rec.translation_budget_gb === null ? null : h("dt", {}, t("rec.budget")),
+    rec.translation_budget_gb === null
+      ? null
+      : h("dd", {}, t("common.approxGb", { gb: rec.translation_budget_gb.toFixed(1) })),
   );
   const notes = h(
     "ul",
     { class: "notes" },
-    ...rec.reasons.map((r) => h("li", {}, r)),
-    ...rec.warnings.map((w) => h("li", { class: "warning" }, w)),
-    rec.gpu_runtime_missing
-      ? h("li", {}, "下載下方的「GPU 加速元件」後，建議組合會改用顯示卡。")
-      : null,
+    ...rec.reasons.map((r) => h("li", {}, formatEngineMessage(r))),
+    ...rec.warnings.map((w) => h("li", { class: "warning" }, formatEngineMessage(w))),
+    rec.gpu_runtime_missing ? h("li", {}, t("rec.gpuRuntimeMissing")) : null,
   );
-  const apply = h("button", { type: "button", class: "primary", id: "apply-recommendation" }, "套用建議組合");
+  const apply = h("button", { type: "button", class: "primary", id: "apply-recommendation" }, t("rec.apply"));
   apply.disabled = !engineReady();
   apply.addEventListener("click", () => void applyRecommendation(apply));
   replace(
@@ -589,7 +643,7 @@ function renderRecommendation(): void {
       "div",
       { class: "form-actions" },
       apply,
-      h("span", { class: "form-status" }, "會寫入辨識模型、運算裝置、精度、執行緒與翻譯模型。"),
+      h("span", { class: "form-status" }, t("rec.applyNote")),
     ),
   );
 }
@@ -601,12 +655,15 @@ async function applyRecommendation(button: HTMLButtonElement | null): Promise<vo
     showAppliedSettings(result, true);
     const r = result.recommendation;
     notify(
-      `已套用建議組合：即時字幕 ${r.fast_asr.model}、完整翻譯 ${r.final_asr.model}（${deviceLabel(r.fast_asr.device)}）。` +
-        (sessionActive() ? "下一次開始時生效。" : ""),
+      t(sessionActive() ? "rec.appliedWhileRunning" : "rec.applied", {
+        fast: r.fast_asr.model,
+        final: r.final_asr.model,
+        device: deviceLabel(r.fast_asr.device),
+      }),
     );
     await offerMissingModels();
   } catch (e) {
-    reportError("無法套用建議組合", e);
+    reportError("error.applyRecommendation", e);
   } finally {
     if (button) button.disabled = !engineReady();
   }
@@ -651,7 +708,7 @@ function forgetPreview(): void {
  */
 async function firstRunFlow(): Promise<void> {
   state.firstRunActive = true;
-  const reviewAction = { label: "到「模型」頁查看或修改", run: () => showPage("models") };
+  const reviewAction = { label: t("firstRun.review"), run: () => showPage("models") };
   try {
     const outcome = await runFirstRun(
       {
@@ -693,7 +750,7 @@ async function reloadSettings(): Promise<void> {
     fillCombo(settings);
     renderModels();
   } catch (e) {
-    reportError("無法讀取設定", e);
+    reportError("error.readSettings", e);
   }
 }
 
@@ -730,8 +787,8 @@ function renderOffer(): void {
     offerText(preview),
     "update",
     [
-      { label: "套用", run: () => void applyRecommendation(null) },
-      { label: "不要再提醒", run: () => void dismissOffer(preview.fingerprint) },
+      { label: t("offer.apply"), run: () => void applyRecommendation(null) },
+      { label: t("offer.dismiss"), run: () => void dismissOffer(preview.fingerprint) },
     ],
     { key: OFFER_NOTICE, onClose: () => state.closedOffers.add(preview.fingerprint) },
   );
@@ -747,7 +804,7 @@ async function dismissOffer(fingerprint: string): Promise<void> {
     const { settings } = await api.settingsSet({ ui: { dismissed_recommendations: dismissedWith(current, fingerprint) } });
     state.settings = settings;
   } catch (e) {
-    reportError("無法記住「不要再提醒」", e);
+    reportError("error.saveDismissal", e);
   }
 }
 
@@ -761,7 +818,7 @@ async function offerMissingModels(): Promise<boolean> {
   try {
     state.models = await api.modelsList();
   } catch (e) {
-    reportError("無法讀取模型清單", e);
+    reportError("error.readModels", e);
     return false;
   }
   renderModels();
@@ -786,8 +843,8 @@ function renderMissingNotice(): void {
     return;
   }
   const actions: NoticeAction[] = [];
-  if (view.state === "offer") actions.push({ label: "下載缺少的模型", run: downloadMissingModels });
-  if (view.state === "failed") actions.push({ label: "重新下載", run: downloadMissingModels });
+  if (view.state === "offer") actions.push({ label: t("missing.download"), run: downloadMissingModels });
+  if (view.state === "failed") actions.push({ label: t("common.redownload"), run: downloadMissingModels });
   const notice = notify(view.text, view.state === "failed" ? "bad" : "update", actions, {
     key: MISSING_NOTICE,
     onClose: () => {
@@ -812,17 +869,13 @@ function downloadMissingModels(): void {
 function renderGpuRuntime(): void {
   const rt = state.models?.gpu_runtime;
   if (!rt) {
-    replace(el.gpuRuntime, h("p", { class: "gpu-state rail-hint" }, "讀取中"));
+    replace(el.gpuRuntime, h("p", { class: "gpu-state rail-hint" }, t("common.loading")));
     return;
   }
   if (!rt.supported) {
     replace(
       el.gpuRuntime,
-      h(
-        "p",
-        { class: "gpu-state" },
-        "這台電腦的平台用不到這個元件：GPU 加速只支援 Windows 與 Linux 的 x86-64 搭配 NVIDIA 顯示卡，其他平台一律用 CPU 辨識。",
-      ),
+      h("p", { class: "gpu-state" }, t("gpu.unsupported")),
     );
     return;
   }
@@ -835,13 +888,17 @@ function renderGpuRuntime(): void {
       h(
         "div",
         { class: "progress" },
-        h("progress", { max: 100, value: pct, "aria-label": "GPU 加速元件下載進度" }),
+        h("progress", { max: 100, value: pct, "aria-label": t("gpu.progressLabel") }),
         h(
           "span",
           {},
           finishing
-            ? "下載完成，正在驗證與解壓（約數秒）"
-            : `${pct}%，${formatBytes(progress.downloaded_bytes)}／${formatBytes(progress.total_bytes)}`,
+            ? t("gpu.finishing")
+            : t("gpu.progress", {
+                percent: pct,
+                done: formatBytes(progress.downloaded_bytes),
+                total: formatBytes(progress.total_bytes),
+              }),
         ),
       ),
     );
@@ -851,28 +908,26 @@ function renderGpuRuntime(): void {
     const what = [rt.package ?? "cuBLAS", rt.version].filter(Boolean).join(" ");
     replace(
       el.gpuRuntime,
-      h("p", { class: "gpu-state" }, `已安裝 ${what}${rt.path ? `，位置 ${rt.path}` : ""}。`),
-      rt.cublas_available
-        ? null
-        : h("p", { class: "gpu-state warning" }, "已安裝但目前偵測不到可用的 cuBLAS。請重新啟動引擎後再按「重新偵測」。"),
+      h("p", { class: "gpu-state" }, rt.path ? t("gpu.installedAt", { what, path: rt.path }) : t("gpu.installed", { what })),
+      rt.cublas_available ? null : h("p", { class: "gpu-state warning" }, t("gpu.noCublas")),
     );
     return;
   }
 
   const hw = state.hardware;
-  const size = rt.download_bytes ? `約 ${formatBytes(rt.download_bytes)}` : "數百 MB";
+  const size = rt.download_bytes ? t("gpu.sizeApprox", { size: formatBytes(rt.download_bytes) }) : t("gpu.sizeUnknown");
   const pkg = [rt.package ?? "nvidia-cublas-cu12", rt.version].filter(Boolean).join(" ");
   const situation = hw?.recommendation.gpu_runtime_missing
-    ? "這台電腦的 NVIDIA 顯示卡可以加速辨識，但缺少這個元件，目前改用 CPU。"
+    ? t("gpu.situationMissing")
     : hw && hw.hardware.gpus.length === 0
-      ? "沒有偵測到 NVIDIA 顯示卡；沒有顯示卡時不需要下載。"
+      ? t("gpu.situationNoGpu")
       : null;
   const licenseName = rt.license ?? "NVIDIA CUDA EULA";
-  const read = h("button", { type: "button", class: "ghost" }, "閱讀授權條款");
+  const read = h("button", { type: "button", class: "ghost" }, t("gpu.readLicense"));
   read.addEventListener("click", () => void openEula());
   const consent = h("input", { type: "checkbox", id: "gpu-eula-consent" });
   consent.checked = state.gpuLicenseAccepted;
-  const download = h("button", { type: "button", class: "primary" }, "下載 GPU 加速元件");
+  const download = h("button", { type: "button", class: "primary" }, t("gpu.download"));
   download.disabled = !state.gpuLicenseAccepted || !engineReady();
   consent.addEventListener("change", () => {
     state.gpuLicenseAccepted = consent.checked;
@@ -882,21 +937,12 @@ function renderGpuRuntime(): void {
   replace(
     el.gpuRuntime,
     situation ? h("p", { class: "gpu-state" }, situation) : null,
-    h(
-      "p",
-      { class: "gpu-state" },
-      `這會從 PyPI 下載 NVIDIA cuBLAS（${pkg}，${size}），使用即表示同意 NVIDIA CUDA EULA（${licenseName}）。`,
-    ),
+    h("p", { class: "gpu-state" }, t("gpu.consentNotice", { package: pkg, size, license: licenseName })),
     rt.license_url ? h("p", { class: "gpu-state eula-url url" }, rt.license_url) : null,
     progress?.state === "error"
-      ? h("p", { class: "field-error" }, `上次下載失敗：${progress.error ?? "未知原因"}`)
+      ? h("p", { class: "field-error" }, t("gpu.lastFailed", { error: progress.error ?? t("common.unknownReason") }))
       : null,
-    h(
-      "label",
-      { class: "consent", for: "gpu-eula-consent" },
-      consent,
-      h("span", {}, "我同意 NVIDIA CUDA EULA"),
-    ),
+    h("label", { class: "consent", for: "gpu-eula-consent" }, consent, h("span", {}, t("gpu.agree"))),
     h("div", { class: "gpu-actions" }, download, canOpenLicenseUrl(rt.license_url) ? read : null),
   );
 }
@@ -905,7 +951,7 @@ async function openEula(): Promise<void> {
   try {
     await api.openNvidiaEula();
   } catch (e) {
-    reportError("無法開啟授權條款，請複製網址到瀏覽器開啟", e);
+    reportError("error.openEula", e);
   }
 }
 
@@ -927,7 +973,7 @@ async function downloadGpuRuntime(): Promise<void> {
       return;
     }
     state.downloads.delete(id);
-    reportError("無法下載 GPU 加速元件", e);
+    reportError("error.downloadGpuRuntime", e);
     if (code === "gpu_runtime_unsupported") void loadModels();
     renderGpuRuntime();
   }
@@ -939,15 +985,11 @@ function onGpuRuntimeInstalled(): void {
     (d) => d.state === "downloading" && d.model !== GPU_RUNTIME_ID,
   ).length;
   if (afterGpuRuntimeInstalled(sessionActive(), others) === "restart") {
-    notify("GPU 加速元件已安裝。正在重新啟動引擎以啟用 GPU。");
+    notify(t("gpu.installedRestarting"));
     void restartEngine();
     return;
   }
-  notify(
-    "GPU 加速元件已安裝。目前有工作在進行，所以沒有自動重新啟動引擎；完成後請重新啟動引擎，才會使用 GPU。",
-    "update",
-    [{ label: "重新啟動引擎", run: () => void restartEngine() }],
-  );
+  notify(t("gpu.installedBusy"), "update", [{ label: t("engine.restart"), run: () => void restartEngine() }]);
   void loadModels();
 }
 
@@ -960,29 +1002,38 @@ function downloadCell(model: { id: string; downloaded: boolean }): HTMLElement {
     return h(
       "div",
       { class: "progress" },
-      h("progress", { max: 100, value: pct, "aria-label": `${model.id} 下載進度` }),
-      h("span", {}, `${pct}%，${formatBytes(progress.downloaded_bytes)}`),
+      h("progress", { max: 100, value: pct, "aria-label": t("asr.progressLabel", { model: model.id }) }),
+      h("span", {}, t("asr.progress", { percent: pct, done: formatBytes(progress.downloaded_bytes) })),
     );
   }
-  if (model.downloaded) return h("span", { class: "ok" }, "已下載");
+  if (model.downloaded) return h("span", { class: "ok" }, t("asr.downloaded"));
   const wrap = h("div", {});
   if (progress?.state === "error") {
-    wrap.append(h("p", { class: "field-error" }, `下載失敗：${progress.error ?? "未知原因"}`));
+    wrap.append(
+      h("p", { class: "field-error" }, t("asr.downloadFailed", { error: progress.error ?? t("common.unknownReason") })),
+    );
   }
-  const button = h("button", { type: "button", class: "ghost" }, progress?.state === "error" ? "重新下載" : "下載");
+  const button = h(
+    "button",
+    { type: "button", class: "ghost" },
+    progress?.state === "error" ? t("common.redownload") : t("asr.download"),
+  );
   button.addEventListener("click", () => void downloadModel(model.id));
   wrap.append(button);
   return wrap;
 }
 
 function roleNames(roles: readonly string[]): string {
-  return roles.map((r) => (r === "fast" ? "即時" : "完整")).join("、");
+  return joinList(roles.map((r) => (r === "fast" ? t("role.fast") : t("role.final"))));
 }
 
 function memoryCell(cpu: number | null, gpu: number | null): string {
-  const parts = [cpu === null ? null : `CPU ${formatMiB(cpu)}`, gpu === null ? null : `GPU ${formatMiB(gpu)}`];
-  const known = parts.filter(Boolean);
-  return known.length ? known.join("／") : "未知";
+  const parts = [
+    cpu === null ? null : t("asr.memoryCpu", { size: formatMiB(cpu) }),
+    gpu === null ? null : t("asr.memoryGpu", { size: formatMiB(gpu) }),
+  ];
+  const known = parts.filter((p): p is string => p !== null);
+  return known.length ? known.join(t("common.altSeparator")) : t("common.unknown");
 }
 
 function renderModels(): void {
@@ -990,15 +1041,15 @@ function renderModels(): void {
   const s = state.settings;
   renderGpuRuntime();
   if (!m) {
-    replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, "讀取中")));
+    replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, t("common.loading"))));
     return;
   }
   replace(
     el.asrModels,
     ...m.asr.map((model) => {
       const uses: string[] = [];
-      if (s?.asr.fast_model === model.id) uses.push("即時");
-      if (s?.asr.final_model === model.id) uses.push("完整");
+      if (s?.asr.fast_model === model.id) uses.push(t("role.fast"));
+      if (s?.asr.final_model === model.id) uses.push(t("role.final"));
       return h(
         "tr",
         {},
@@ -1006,19 +1057,12 @@ function renderModels(): void {
           "td",
           {},
           h("span", { class: "model-id" }, model.id),
-          uses.length ? h("span", { class: "tag" }, `使用中：${uses.join("、")}`) : null,
+          uses.length ? h("span", { class: "tag" }, t("asr.inUse", { roles: joinList(uses) })) : null,
           model.recommended_for.length
-            ? h("span", { class: "tag tag-quiet" }, `建議：${roleNames(model.recommended_for)}`)
+            ? h("span", { class: "tag tag-quiet" }, t("common.recommendedFor", { roles: roleNames(model.recommended_for) }))
             : null,
           model.no_speech_reliable === false
-            ? h(
-                "span",
-                {
-                  class: "tag tag-quiet",
-                  title: "這個模型無法可靠判斷「不是人聲」，用在完整翻譯時改用即時字幕模型的判斷過濾雜音。",
-                },
-                "不判斷非人聲",
-              )
+            ? h("span", { class: "tag tag-quiet", title: t("asr.noSpeechHelp") }, t("asr.noSpeech"))
             : null,
         ),
         h("td", {}, formatBytes(model.size_bytes)),
@@ -1030,36 +1074,47 @@ function renderModels(): void {
     }),
   );
 
-  const t = m.translation;
-  const installed = t.models.filter((x) => x.installed === true).length;
-  el.trSource.textContent = !t.server.reachable
-    ? `無法連到翻譯服務 ${t.server.base_url}${t.server.error ? `（${t.server.error}）` : ""}。如果使用本機 Ollama，請先啟動它。`
-    : `翻譯服務 ${t.server.base_url}${t.server.is_local ? "（本機）" : ""}上已安裝 ${installed} 個模型。`;
+  // `tr`, not `t`: `t` is the translation function.
+  const tr = m.translation;
+  const installed = tr.models.filter((x) => x.installed === true).length;
+  el.trSource.textContent = !tr.server.reachable
+    ? tr.server.error
+      ? t("tr.unreachableError", { url: tr.server.base_url, error: tr.server.error })
+      : t("tr.unreachable", { url: tr.server.base_url })
+    : tp(tr.server.is_local ? "tr.installedCountLocal" : "tr.installedCount", installed, { url: tr.server.base_url });
   replace(
     el.trPresets,
-    ...t.models.map((p) =>
+    ...tr.models.map((p) =>
       h(
         "li",
         {},
         h("span", { class: "preset-name" }, p.label),
         p.label !== p.name ? h("span", { class: "preset-meta" }, p.name) : null,
-        p.recommended_for.length ? h("span", { class: "tag tag-quiet" }, `建議：${roleNames(p.recommended_for)}`) : null,
-        p.commercial_use === false ? h("span", { class: "tag tag-warn" }, "不可商用") : null,
+        p.recommended_for.length
+          ? h("span", { class: "tag tag-quiet" }, t("common.recommendedFor", { roles: roleNames(p.recommended_for) }))
+          : null,
+        p.commercial_use === false ? h("span", { class: "tag tag-warn" }, t("tr.nonCommercial")) : null,
         p.excluded_regions.length
-          ? h("span", { class: "tag tag-warn" }, `授權不適用於${regionNames(p.excluded_regions)}`)
+          ? h("span", { class: "tag tag-warn" }, t("tr.regionExcluded", { regions: regionNames(p.excluded_regions) }))
           : null,
         h(
           "span",
           { class: "preset-meta" },
-          p.known ? `授權 ${p.license ?? "未知"}` : "不在 kikitori 的清單中，授權請自行確認",
+          p.known ? t("tr.license", { license: p.license ?? t("common.unknown") }) : t("tr.unlisted"),
         ),
-        p.approx_vram_gb === null ? null : h("span", { class: "preset-meta" }, `約 ${p.approx_vram_gb.toFixed(1)} GB`),
-        h("span", { class: "preset-meta" }, p.installed === null ? "安裝狀態未知" : p.installed ? "已安裝" : "未安裝"),
+        p.approx_vram_gb === null
+          ? null
+          : h("span", { class: "preset-meta" }, t("common.approxGb", { gb: p.approx_vram_gb.toFixed(1) })),
+        h(
+          "span",
+          { class: "preset-meta" },
+          p.installed === null ? t("tr.stateUnknown") : p.installed ? t("tr.stateInstalled") : t("tr.stateMissing"),
+        ),
         p.license_url ? h("span", { class: "preset-meta url" }, p.license_url) : null,
       ),
     ),
   );
-  replace(el.trNames, ...t.models.map((x) => h("option", { value: x.name })));
+  replace(el.trNames, ...tr.models.map((x) => h("option", { value: x.name })));
   renderComboOptions();
 }
 
@@ -1070,9 +1125,9 @@ async function loadModels(): Promise<void> {
   // by id, so neither waits on the other's position in the reply stream.
   const [hardware, models] = await Promise.allSettled([api.hardwareDetect(), api.modelsList()]);
   if (hardware.status === "fulfilled") state.hardware = hardware.value;
-  else reportError("無法偵測硬體", hardware.reason);
+  else reportError("error.detectHardware", hardware.reason);
   if (models.status === "fulfilled") state.models = models.value;
-  else reportError("無法讀取模型清單", models.reason);
+  else reportError("error.readModels", models.reason);
   el.modelsRefresh.disabled = false;
   renderHardware();
   renderModels();
@@ -1093,7 +1148,7 @@ async function downloadModel(id: string): Promise<void> {
     state.downloads.delete(id);
     renderModels();
     renderMissingNotice();
-    reportError(`無法下載 ${id}`, e);
+    reportError("error.downloadModel", e, { model: id });
   }
 }
 
@@ -1134,7 +1189,7 @@ function readCombo(): CombinationForm {
 function setOptions(select: HTMLSelectElement, options: { value: string; label: string }[], value: string): void {
   // An empty value only happens before settings are loaded; nothing to preserve then.
   const keep = value === "" || options.some((o) => o.value === value);
-  const all = keep ? options : [{ value, label: `${value}（不在清單中）` }, ...options];
+  const all = keep ? options : [{ value, label: t("combo.notInList", { value }) }, ...options];
   replace(select, ...all.map((o) => h("option", { value: o.value }, o.label)));
   select.value = value;
 }
@@ -1143,12 +1198,12 @@ function renderComboOptions(): void {
   const current = readCombo();
   const asr = (state.models?.asr ?? []).map((x) => ({
     value: x.id,
-    label: `${x.id}${x.downloaded ? "" : "（未下載）"}`,
+    label: x.downloaded ? x.id : t("combo.notDownloaded", { id: x.id }),
   }));
   for (const key of ["fast_model", "final_model"] as const) {
     setOptions(namedField(el.comboForm, key) as HTMLSelectElement, asr, current[key]);
   }
-  const precisions = [{ value: "", label: "自動" }, ...COMPUTE_TYPES.map((c) => ({ value: c, label: c }))];
+  const precisions = [{ value: "", label: t("common.auto") }, ...COMPUTE_TYPES.map((c) => ({ value: c, label: c }))];
   for (const key of ["fast_compute_type", "final_compute_type"] as const) {
     setOptions(namedField(el.comboForm, key) as HTMLSelectElement, precisions, current[key]);
   }
@@ -1162,7 +1217,7 @@ function fillCombo(settings: Settings, force = false): void {
   for (const key of ["fast_model", "final_model", "fast_compute_type", "final_compute_type"] as const) {
     const select = namedField(el.comboForm, key) as HTMLSelectElement;
     if (!Array.from(select.options).some((o) => o.value === form[key])) {
-      select.append(h("option", { value: form[key] }, form[key] || "自動"));
+      select.append(h("option", { value: form[key] }, form[key] || t("common.auto")));
     }
   }
   for (const name of COMBO_FIELDS) namedField(el.comboForm, name).value = form[name];
@@ -1199,14 +1254,14 @@ function showComboErrors(errors: CombinationErrors): void {
 
 function renderCheck(): void {
   const v = state.check;
-  const list = (items: string[], cls: string | null) =>
-    h("ul", {}, ...items.map((m) => h("li", cls ? { class: cls } : {}, m)));
+  const list = (items: readonly EngineMessage[], cls: string | null) =>
+    h("ul", {}, ...items.map((m) => h("li", cls ? { class: cls } : {}, formatEngineMessage(m))));
   switch (v.state) {
     case "local_errors":
-      replace(el.comboCheck, h("p", { class: "is-error" }, "請先修正標示的欄位。"));
+      replace(el.comboCheck, h("p", { class: "is-error" }, t("check.fixFirst")));
       break;
     case "checking":
-      replace(el.comboCheck, h("p", {}, "正在檢查這個組合"));
+      replace(el.comboCheck, h("p", {}, t("check.checking")));
       break;
     case "checked": {
       const { ok, errors, warnings } = v.check;
@@ -1215,11 +1270,7 @@ function renderCheck(): void {
         h(
           "p",
           ok ? {} : { class: "is-error" },
-          ok
-            ? warnings.length
-              ? "這台電腦可以使用這個組合，但請留意："
-              : "這台電腦可以使用這個組合。"
-            : "這個組合目前無法使用：",
+          ok ? (warnings.length ? t("check.okWithWarnings") : t("check.ok")) : t("check.notOk"),
         ),
         errors.length ? list(errors, "is-error") : null,
         warnings.length ? list(warnings, null) : null,
@@ -1227,13 +1278,10 @@ function renderCheck(): void {
       break;
     }
     case "rejected":
-      replace(el.comboCheck, h("p", { class: "is-error" }, `引擎不接受這個設定：${v.message}`));
+      replace(el.comboCheck, h("p", { class: "is-error" }, t("check.rejected", { message: v.message })));
       break;
     case "unavailable":
-      replace(
-        el.comboCheck,
-        h("p", {}, `暫時無法檢查組合（${v.message}）。仍可儲存，引擎會在儲存時檢查設定格式。`),
-      );
+      replace(el.comboCheck, h("p", {}, t("check.unavailable", { reason: v.message })));
       break;
   }
   el.comboSave.disabled = !canSave(v) || !engineReady();
@@ -1253,7 +1301,7 @@ function scheduleCheck(delay = CHECK_DEBOUNCE_MS): void {
     state.check = { state: "local_errors" };
   } else if (!engineReady()) {
     checks.invalidate();
-    state.check = { state: "unavailable", message: "引擎尚未就緒" };
+    state.check = { state: "unavailable", message: t("check.engineNotReady") };
   } else {
     state.check = { state: "checking" };
     checkTimer = window.setTimeout(() => void runCheck(form), delay);
@@ -1270,7 +1318,7 @@ async function runCheck(form: CombinationForm): Promise<void> {
     const ce = asCommandError(e);
     if (ce?.kind === "engine" && ce.code === "invalid_settings") {
       const field = combinationFieldForEnginePath(ce.message);
-      if (checks.isCurrent(token) && field) showComboErrors({ [field]: `引擎拒絕這個值：${ce.message}` });
+      if (checks.isCurrent(token) && field) showComboErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
       next = { state: "rejected", message: ce.message };
     } else {
       console.error("models.validate failed", e);
@@ -1289,7 +1337,7 @@ async function submitCombo(): Promise<void> {
   showComboErrors(errors);
   if (Object.keys(errors).length > 0 || !canSave(state.check)) return;
   el.comboSave.disabled = true;
-  el.comboStatus.textContent = "儲存中";
+  el.comboStatus.textContent = t("common.saving");
   try {
     const { settings } = await api.settingsSet(combinationPatch(form));
     state.settings = settings;
@@ -1299,7 +1347,7 @@ async function submitCombo(): Promise<void> {
     forgetPreview();
     fillCombo(settings, true);
     renderModels();
-    el.comboStatus.textContent = sessionActive() ? "已儲存，下一次開始時生效。" : "已儲存組合。";
+    el.comboStatus.textContent = sessionActive() ? t("combo.savedNextStart") : t("combo.saved");
     // The new combination may need other models (and an old prompt may be stale).
     void offerMissingModels();
   } catch (e) {
@@ -1307,8 +1355,8 @@ async function submitCombo(): Promise<void> {
     const field =
       ce?.kind === "engine" && ce.code === "invalid_settings" ? combinationFieldForEnginePath(ce.message) : null;
     if (field && ce?.kind === "engine") {
-      showComboErrors({ [field]: `引擎拒絕這個值：${ce.message}` });
-      el.comboStatus.textContent = "請修正標示的欄位。";
+      showComboErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      el.comboStatus.textContent = t("form.fixFields");
     } else {
       el.comboStatus.textContent = describeError(e);
     }
@@ -1372,7 +1420,7 @@ function renderPreview(): void {
 }
 
 function renderSettingsPath(): void {
-  el.settingsPath.textContent = state.settingsPath ? `設定檔：${state.settingsPath}` : "";
+  el.settingsPath.textContent = state.settingsPath ? t("settings.path", { path: state.settingsPath }) : "";
 }
 
 async function submitSettings(): Promise<void> {
@@ -1380,10 +1428,10 @@ async function submitSettings(): Promise<void> {
   const errors = validateSettingsForm(form);
   showFormErrors(errors);
   if (Object.keys(errors).length > 0) {
-    el.settingsStatus.textContent = "請修正標示的欄位。";
+    el.settingsStatus.textContent = t("form.fixFields");
     return;
   }
-  el.settingsStatus.textContent = "儲存中";
+  el.settingsStatus.textContent = t("common.saving");
   const restrictedChanged = state.settings?.translation.allow_restricted !== form.allow_restricted;
   try {
     const { settings } = await api.settingsSet(settingsPatchFromForm(form));
@@ -1391,15 +1439,13 @@ async function submitSettings(): Promise<void> {
     await pushOverlayStyle();
     renderModeNotes();
     renderModels();
-    el.settingsStatus.textContent = restrictedChanged
-      ? "已儲存設定。建議組合會依新的授權地區重新計算（到「模型」頁查看）。"
-      : "已儲存設定。";
+    el.settingsStatus.textContent = restrictedChanged ? t("settings.savedRegion") : t("settings.saved");
   } catch (e) {
     const ce = asCommandError(e);
     const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? formFieldForEnginePath(ce.message) : null;
     if (field && ce?.kind === "engine") {
-      showFormErrors({ [field]: `引擎拒絕這個值：${ce.message}` });
-      el.settingsStatus.textContent = "請修正標示的欄位。";
+      showFormErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      el.settingsStatus.textContent = t("form.fixFields");
     } else {
       el.settingsStatus.textContent = describeError(e);
     }
@@ -1413,7 +1459,7 @@ async function pushOverlayStyle(): Promise<void> {
     state.overlay = await api.overlaySetStyle(state.settings.subtitle);
     renderOverlay();
   } catch (e) {
-    reportError("無法套用字幕外觀", e);
+    reportError("error.applyStyle", e);
   }
 }
 
@@ -1421,25 +1467,23 @@ async function pushOverlayStyle(): Promise<void> {
 
 function renderAbout(): void {
   const a = state.about;
-  el.aboutLicense.textContent = a ? `kikitori 以 ${a.license} 授權發布。` : "";
+  el.aboutLicense.textContent = a ? t("about.license", { license: a.license }) : "";
   const app = a?.app_licenses ?? null;
   const engine = a?.engine_licenses ?? null;
   if (app || engine) {
     // Each folder is listed on its own line so its path stays selectable.
     replace(
       el.aboutThirdParty,
-      "第三方元件的授權全文：",
+      t("about.thirdPartyHead"),
       app && h("br"),
-      app && "程式本身（Tauri／Rust 套件、前端套件，以及 kikitori 的 LICENSE）：",
+      app && t("about.thirdPartyApp"),
       app && h("span", { class: "url" }, app),
       engine && h("br"),
-      engine && "語音引擎（Python 套件）：",
+      engine && t("about.thirdPartyEngine"),
       engine && h("span", { class: "url" }, engine),
     );
   } else {
-    el.aboutThirdParty.textContent =
-      "開發版沒有內附授權資料夾。正式版的授權全文在安裝目錄的 licenses（程式本身）與 " +
-      "kikitori-engine/THIRD_PARTY_LICENSES（語音引擎）資料夾。";
+    el.aboutThirdParty.textContent = t("about.thirdPartyDev");
   }
   el.openAppLicenses.hidden = !app;
   el.openEngineLicenses.hidden = !engine;
@@ -1449,8 +1493,112 @@ async function openLicenses(folder: LicenseFolder): Promise<void> {
   try {
     await api.openThirdPartyLicenses(folder);
   } catch (e) {
-    reportError("無法開啟授權資料夾，請依上面的路徑自行開啟", e);
+    reportError("error.openLicenses", e);
   }
+}
+
+// ---------------------------------------------------------------- interface language
+
+/** Per-viewer cache of `ui.locale`, so the first paint already uses the chosen language. */
+const UI_LOCALE_CACHE_KEY = "kikitori.uiLocale";
+
+function readCachedUiLocale(): UiLocalePreference {
+  try {
+    const v = window.localStorage.getItem(UI_LOCALE_CACHE_KEY);
+    if (v === "system" || isUiLocale(v)) return v;
+  } catch (e) {
+    // localStorage 可能被停用；只是少了快取，設定檔讀到後仍會套用正確的語系。
+    console.warn("cannot read the cached interface language:", e);
+  }
+  return "system";
+}
+
+function cacheUiLocale(pref: UiLocalePreference): void {
+  try {
+    window.localStorage.setItem(UI_LOCALE_CACHE_KEY, pref);
+  } catch (e) {
+    console.warn("cannot cache the interface language:", e);
+  }
+}
+
+/** Switches to `pref` (re-rendering everything through `onLocaleChanged`). */
+function applyUiLocale(pref: UiLocalePreference): void {
+  state.uiLocale = pref;
+  cacheUiLocale(pref);
+  setLocale(localeForPreference(pref, systemLanguages()));
+}
+
+/**
+ * The saved `ui.locale` arrived (engine start): it wins over the cache, unless
+ * the user picked a language while the engine was not ready — then that choice
+ * is saved now instead.
+ */
+async function syncUiLocale(saved: UiLocalePreference): Promise<void> {
+  if (state.uiLocaleUnsaved) {
+    await saveUiLocale(state.uiLocale);
+    return;
+  }
+  if (saved !== state.uiLocale) applyUiLocale(saved);
+}
+
+async function saveUiLocale(pref: UiLocalePreference): Promise<void> {
+  if (!engineReady()) {
+    state.uiLocaleUnsaved = true;
+    return;
+  }
+  try {
+    const { settings } = await api.settingsSet(uiLocalePatch(pref));
+    state.settings = settings;
+    state.uiLocaleUnsaved = false;
+  } catch (e) {
+    state.uiLocaleUnsaved = true;
+    reportError("error.saveUiLocale", e);
+  }
+}
+
+/** The user picked a language in the settings page: apply at once, then save. */
+async function chooseUiLocale(pref: UiLocalePreference): Promise<void> {
+  applyUiLocale(pref);
+  await saveUiLocale(pref);
+}
+
+function renderUiLocaleOptions(): void {
+  replace(
+    el.uiLocale,
+    h("option", { value: "system" }, t("settings.uiLocaleSystem")),
+    ...UI_LOCALES.map((l) => h("option", { value: l, lang: htmlLangForLocale(l) }, NATIVE_NAMES[l])),
+  );
+  el.uiLocale.value = state.uiLocale;
+}
+
+/** The overlay window follows the main window's language (through Rust, see overlay.rs). */
+async function pushOverlayLocale(): Promise<void> {
+  try {
+    state.overlay = await api.overlaySetLocale(getLocale());
+  } catch (e) {
+    reportError("error.setOverlayLocale", e);
+  }
+}
+
+/** Redraws every text from state in the new language; notices already shown keep theirs. */
+function onLocaleChanged(): void {
+  applyStatic(document);
+  renderUiLocaleOptions();
+  if (state.check.state === "unavailable" && !engineReady()) {
+    state.check = { state: "unavailable", message: t("check.engineNotReady") };
+  }
+  renderStatus();
+  renderModeNotes();
+  renderDevices();
+  renderTranscript();
+  renderOverlay();
+  renderHardware();
+  renderModels();
+  renderCheck();
+  renderSettingsPath();
+  renderAbout();
+  renderMissingNotice();
+  void pushOverlayLocale();
 }
 
 // ---------------------------------------------------------------- navigation
@@ -1473,9 +1621,10 @@ async function loadEngineData(): Promise<void> {
     const { settings, path, warnings, isNew: fresh } = await api.settingsGet();
     isNew = fresh;
     if (warnings.length) {
-      notify(`設定檔中有 ${warnings.length} 個欄位無法讀取，暫時使用預設值：${warnings.join("、")}`, "bad");
+      notify(tp("notice.settingsFieldsUnreadable", warnings.length, { fields: joinList(warnings) }), "bad");
     }
     state.settings = settings;
+    await syncUiLocale(settings.ui.locale);
     state.settingsPath = path;
     state.mode = settings.mode;
     fillForm(settings);
@@ -1483,12 +1632,12 @@ async function loadEngineData(): Promise<void> {
     renderSettingsPath();
     await pushOverlayStyle();
   } catch (e) {
-    reportError("無法讀取設定", e);
+    reportError("error.readSettings", e);
   }
   try {
     state.devices = await api.devicesList();
   } catch (e) {
-    reportError("無法列出音訊裝置", e);
+    reportError("error.listDevices", e);
   }
   renderModeNotes();
   renderDevices();
@@ -1511,8 +1660,8 @@ function onBridge(status: BridgeStatus): void {
   renderCheck();
   if (status.phase === "ready" && !wasReady) void loadEngineData();
   if (status.phase === "failed") {
-    notify(`引擎無法啟動：${status.detail ?? "原因不明"}`, "bad", [
-      { label: "重新啟動引擎", run: () => void restartEngine() },
+    notify(t("engine.failedNotice", { reason: status.detail ?? t("common.unknownCause") }), "bad", [
+      { label: t("engine.restart"), run: () => void restartEngine() },
     ]);
   }
 }
@@ -1522,7 +1671,7 @@ async function restartEngine(): Promise<void> {
   try {
     onBridge(await api.restartEngine());
   } catch (e) {
-    reportError("無法重新啟動引擎", e);
+    reportError("error.restartEngine", e);
   } finally {
     el.restart.disabled = false;
   }
@@ -1534,12 +1683,12 @@ function updateUi(): UpdateUi {
   let notice: HTMLElement | null = null;
   return {
     offer(version, _notes, install) {
-      notice = notify(`kikitori ${version} 已經推出，可以下載並安裝。`, "update", [
+      notice = notify(t("update.available", { version }), "update", [
         {
-          label: "下載並安裝",
+          label: t("update.install"),
           run: () => {
             notice?.remove();
-            notice = notify("正在下載更新。", "update");
+            notice = notify(t("update.downloading"), "update");
             void install();
           },
         },
@@ -1547,12 +1696,12 @@ function updateUi(): UpdateUi {
     },
     progress(pct) {
       const p = notice?.querySelector("p");
-      if (p) p.textContent = pct === null ? "正在下載更新。" : `正在下載更新：${pct}%`;
+      if (p) p.textContent = pct === null ? t("update.downloading") : t("update.progress", { percent: pct });
     },
     installed(version, restart) {
       notice?.remove();
-      notice = notify(`kikitori ${version} 已安裝，重新啟動後生效。`, "update", [
-        { label: "立即重新啟動", run: () => void restart() },
+      notice = notify(t("update.installed", { version }), "update", [
+        { label: t("update.restartNow"), run: () => void restart() },
       ]);
     },
     failed(message) {
@@ -1565,11 +1714,13 @@ function updateUi(): UpdateUi {
 
 async function manualUpdateCheck(): Promise<void> {
   el.checkUpdate.disabled = true;
-  el.updateStatus.textContent = "檢查中";
+  const checking = t("update.checking");
+  el.updateStatus.textContent = checking;
   try {
     const version = await checkForUpdate(updateUi(), true);
-    if (version) el.updateStatus.textContent = `有新版本 ${version}。`;
-    else if (el.updateStatus.textContent === "檢查中") el.updateStatus.textContent = "目前已是最新版本。";
+    if (version) el.updateStatus.textContent = t("update.found", { version });
+    // A failure already replaced the text (UpdateUi.failed); keep that message.
+    else if (el.updateStatus.textContent === checking) el.updateStatus.textContent = t("update.latest");
   } finally {
     el.checkUpdate.disabled = false;
   }
@@ -1592,7 +1743,7 @@ function wire(): void {
     try {
       state.overlay = await api.overlaySetClickThrough(el.overlayClick.checked);
     } catch (e) {
-      reportError("無法切換滑鼠穿透", e);
+      reportError("error.toggleClickThrough", e);
     }
     renderOverlay();
   });
@@ -1626,6 +1777,10 @@ function wire(): void {
   el.openAppLicenses.addEventListener("click", () => void openLicenses("app"));
   el.openEngineLicenses.addEventListener("click", () => void openLicenses("engine"));
   el.checkUpdate.addEventListener("click", () => void manualUpdateCheck());
+  el.uiLocale.addEventListener("change", () => {
+    const v = el.uiLocale.value;
+    if (v === "system" || isUiLocale(v)) void chooseUiLocale(v);
+  });
 }
 
 async function subscribe(): Promise<void> {
@@ -1660,12 +1815,12 @@ async function subscribe(): Promise<void> {
           // "still needed" while the list is being reloaded.
           const listed = state.models?.asr.find((m) => m.id === p.model);
           if (listed) listed.downloaded = true;
-          notify(`${p.model} 下載完成。`);
+          notify(t("download.done", { model: p.model }));
           void loadModels();
         }
       } else if (p.state === "error") {
-        const what = p.model === GPU_RUNTIME_ID ? "GPU 加速元件" : p.model;
-        notify(`${what}下載失敗：${p.error ?? "未知原因"}`, "bad");
+        const what = p.model === GPU_RUNTIME_ID ? t("gpu.name") : p.model;
+        notify(t("download.failed", { what, error: p.error ?? t("common.unknownReason") }), "bad");
       }
       if (state.page === "models") renderModels();
       renderMissingNotice();
@@ -1673,7 +1828,7 @@ async function subscribe(): Promise<void> {
     events.log((l) => {
       if (l.level === "warning" || l.level === "error") {
         console.warn(`engine ${l.level}: ${l.message}`);
-        notify(`引擎提醒：${l.message}`, l.level === "error" ? "bad" : "info");
+        notify(t("engine.log", { message: l.message }), l.level === "error" ? "bad" : "info");
       }
     }),
     events.overlay((o) => {
@@ -1684,6 +1839,10 @@ async function subscribe(): Promise<void> {
 }
 
 async function init(): Promise<void> {
+  // Before anything is rendered: the last choice (cached) or the OS language,
+  // so the window never shows the wrong language while the engine starts.
+  onLocaleChange(onLocaleChanged);
+  applyUiLocale(readCachedUiLocale());
   wire();
   renderStatus();
   renderTranscript();
@@ -1707,12 +1866,12 @@ async function init(): Promise<void> {
     state.overlay = await api.overlayState();
     renderOverlay();
   } catch (e) {
-    reportError("無法讀取字幕視窗狀態", e);
+    reportError("error.readOverlayState", e);
   }
   try {
     onBridge(await api.bridgeStatus());
   } catch (e) {
-    reportError("無法讀取引擎狀態", e);
+    reportError("error.readBridge", e);
   }
   if (import.meta.env.PROD) {
     // Silent on failure: being offline at startup is normal.
@@ -1722,5 +1881,5 @@ async function init(): Promise<void> {
 
 init().catch((e: unknown) => {
   console.error("main window failed to initialise", e);
-  notify(`畫面初始化失敗：${describeError(e)}`, "bad");
+  notify(t("notice.initFailed", { reason: describeError(e) }), "bad");
 });

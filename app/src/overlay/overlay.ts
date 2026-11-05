@@ -4,7 +4,9 @@
  * Role: renders the newest utterances on a transparent, always-on-top window.
  * It only listens — subtitles and status from the engine, style and
  * click-through from the main window via Rust — and can move, resize and hide
- * itself. It cannot control the engine (see capabilities/overlay.json).
+ * itself. It cannot control the engine (see capabilities/overlay.json). Its
+ * interface language is the one the main window pushes through Rust
+ * (`OverlaySnapshot.locale`), or the OS language until then.
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -12,6 +14,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, events } from "../lib/api";
 import { byId, h, replace } from "../lib/dom";
 import { htmlLang } from "../lib/format";
+import {
+  applyStatic,
+  isUiLocale,
+  onLocaleChange,
+  resolveLocale,
+  setLocale,
+  systemLanguages,
+  t,
+  type UiLocale,
+} from "../lib/i18n";
 import { DEFAULT_OVERLAY_STYLE } from "../lib/settings";
 import { applySubtitle, emptySubtitles, trimSubtitles, type SubtitleState } from "../lib/subtitles";
 import type { OverlaySnapshot, OverlayStyle } from "../lib/types";
@@ -36,7 +48,28 @@ function applyStyle(next: OverlayStyle): void {
   render();
 }
 
+/** Re-labels the overlay and its window title in the current locale. */
+function relabel(): void {
+  applyStatic(document);
+  const title = t("overlay.title");
+  document.title = title;
+  // 字幕視窗沒有標題列，但標題會出現在工作切換、螢幕閱讀器等地方。
+  appWindow.setTitle(title).catch((err: unknown) => console.error("setTitle failed:", err));
+}
+
+let appliedLocale: UiLocale | null = null;
+
+function applyLocale(locale: string | null): void {
+  // Before the main window has sent a locale (or for one this build does not know), follow the OS.
+  const next = isUiLocale(locale) ? locale : resolveLocale(systemLanguages());
+  // Every style or click-through change re-sends the snapshot; relabel only on a real change.
+  if (next === appliedLocale) return;
+  appliedLocale = next;
+  setLocale(next);
+}
+
 function applySnapshot(s: OverlaySnapshot): void {
+  applyLocale(s.locale);
   clickThrough = s.click_through;
   frame.classList.toggle("is-interactive", !clickThrough);
   applyStyle(s.style);
@@ -82,6 +115,8 @@ function wire(): void {
 }
 
 async function init(): Promise<void> {
+  onLocaleChange(relabel);
+  applyLocale(null);
   wire();
   render();
   await Promise.all([

@@ -176,6 +176,7 @@ pub fn run() {
             commands::overlay_set_style,
             commands::overlay_set_click_through,
             commands::overlay_set_visible,
+            commands::overlay_set_locale,
             updater::update_check,
             updater::update_install,
         ])
