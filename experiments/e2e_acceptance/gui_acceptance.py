@@ -16,13 +16,23 @@
 不按任何按鈕，app 自己偵測硬體並套用建議組合（這台電腦：GPU 組合）、顯示說明 → 關閉 →
 同一個設定資料夾再啟動一次 → 不再自動套用、設定檔不變。
 
+其他情境：
+- `installed`：CI 建置的 NSIS 安裝檔（`KIKITORI_E2E_INSTALLER`）靜默安裝到暫存目錄 → 已安裝的
+  程式：引擎從安裝目錄啟動、第一次啟動自動套用 GPU 組合、影片翻譯雙語字幕；接著在同一份安裝上跑
+  下面兩個情境 → 靜默解除安裝並確認清乾淨（安裝目錄、HKCU Uninstall、捷徑、行程）。
+- `missing-models`：app 與引擎的 `LOCALAPPDATA` 指到暫存目錄（只複製 `small`，不動使用者的
+  模型快取）→ 建議組合缺 base →「下載缺少的模型」→ 同一則訊息顯示進度 → 完成 → 開始。
+- `better-combo`：存成 CPU 組合 →「有更適合這台電腦的組合」→「套用」→ 再存 CPU →
+  「不要再提醒」（指紋寫入 `settings.ui.dismissed_recommendations`）→ 再啟動不再提示。
+
 設定檔放在本次結果資料夾（`KIKITORI_CONFIG_DIR`），不碰使用者的設定。截圖：含動畫台詞的放
 `screenshots/private/`（git 忽略），其餘放 `screenshots/`。
 
 執行（互動選單）：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py
-非互動：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py --batch run|first-run
+非互動：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py
+        --batch run|first-run|installed|missing-models|better-combo
 工具路徑以環境變數指定：KIKITORI_E2E_APP（kikitori-app.exe）、KIKITORI_E2E_TAURI_DRIVER、
-KIKITORI_E2E_EDGEDRIVER。
+KIKITORI_E2E_EDGEDRIVER、KIKITORI_E2E_INSTALLER（`installed` 用）。
 """
 
 from __future__ import annotations
@@ -32,8 +42,11 @@ import ctypes
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -46,6 +59,9 @@ from acceptance import EN_LINES, EN_VOICE, KANA, load_track, simplified_chars, t
 from e2e_common import HERE, RESULTS, ROOT, TARGET_OUTPUT, Player
 
 logger = logging.getLogger("e2e.gui")
+
+# 安裝與解除安裝的檢查（HKCU Uninstall、行程、捷徑）沿用更新驗收的寫法
+sys.path.insert(0, str(ROOT / "experiments" / "update_acceptance"))
 
 SCREENSHOTS = HERE / "screenshots"
 PRIVATE_SCREENSHOTS = SCREENSHOTS / "private"
@@ -868,16 +884,29 @@ return Array.from(document.querySelectorAll('#notices .notice')).map(n => ({
 
 
 class AppSession:
-    """一次 app 啟動：tauri-driver + WebDriver session，切到主視窗；離開時關閉並等行程結束。"""
+    """一次 app 啟動：tauri-driver + WebDriver session，切到主視窗；離開時關閉並等行程結束。
 
-    def __init__(self, run: Run, config_dir: Path, label: str) -> None:
-        self.app = tool_path("KIKITORI_E2E_APP", DEFAULT_APP)
+    `app` 省略時用 `KIKITORI_E2E_APP`；`extra_env` 會傳給 app 與它啟動的引擎
+    （例如把 `LOCALAPPDATA` 指到暫存目錄，讓引擎看到空的模型快取）。
+    """
+
+    def __init__(
+        self,
+        run: Run,
+        config_dir: Path,
+        label: str,
+        *,
+        app: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
+        self.app = app or tool_path("KIKITORI_E2E_APP", DEFAULT_APP)
         self.tauri_driver = tool_path("KIKITORI_E2E_TAURI_DRIVER")
         self.edgedriver = tool_path("KIKITORI_E2E_EDGEDRIVER")
         self.env = {
             k: v for k, v in os.environ.items() if not k.startswith("KIKITORI_ENGINE")
         }
         self.env["KIKITORI_CONFIG_DIR"] = str(config_dir)
+        self.env.update(extra_env or {})
         self.log_path = run.dir / f"tauri-driver-{label}.log"
         self.wd = WebDriver(f"http://127.0.0.1:{DRIVER_PORT}")
         self.driver: subprocess.Popen[bytes] | None = None
@@ -926,6 +955,73 @@ class AppSession:
 
     def notices(self) -> list[dict[str, Any]]:
         return self.wd.script(NOTICES_JS)
+
+    def notice(self, key: str) -> dict[str, Any] | None:
+        """目前顯示的 `data-key` 訊息（沒有時 None）。"""
+        return next((n for n in self.notices() if n["key"] == key), None)
+
+    def click_notice_action(self, key: str, label: str) -> None:
+        """按下 `data-key` 訊息上文字為 `label` 的按鈕。"""
+        clicked = self.wd.script(
+            "const n = document.querySelector(`#notices .notice[data-key='${arguments[0]}']`);"
+            "const b = n && Array.from(n.querySelectorAll('.notice-actions button'))"
+            ".find(x => x.textContent === arguments[1]);"
+            "if (!b) return false; b.click(); return true;",
+            key,
+            label,
+        )
+        if not clicked:
+            raise WebDriverError(f"no button {label!r} on notice {key!r}")
+
+    def window(self, title: str) -> str:
+        """標題為 `title` 的 webview 的 handle（會切換過去）。"""
+        for handle in self.wd.handles():
+            self.wd.switch(handle)
+            if self.wd.title() == title:
+                return handle
+        raise WebDriverError(f"no webview titled {title!r}")
+
+    def wait_ready(self, timeout: float = 120) -> None:
+        self.wd.wait(
+            "engine ready",
+            lambda: self.wd.text("#status-label") == "待命中",
+            timeout=timeout,
+        )
+
+    def show_page(self, page: str) -> None:
+        self.wd.click(f'.nav-item[data-page="{page}"]')
+        self.wd.wait(
+            f"page {page}",
+            lambda: self.wd.script(
+                f"return !document.getElementById('page-{page}').hidden;"
+            ),
+            timeout=10,
+        )
+
+    def choose_virtual_loopback(self) -> str:
+        """影片翻譯模式、聲音來源選虛擬喇叭的 loopback（測試聲音只播到那裡）。"""
+        wd = self.wd
+        self.show_page("transcript")
+        wd.click('.mode[data-mode="media"]')
+        target = wd.wait(
+            "virtual loopback option",
+            lambda: next(
+                (
+                    o
+                    for o in wd.find_all("#device option")
+                    if TARGET_OUTPUT in wd.s("GET", f"/element/{o}/text")
+                ),
+                None,
+            ),
+            timeout=30,
+        )
+        wd.click(target, is_id=True)
+        return str(
+            wd.script(
+                "const s=document.getElementById('device');"
+                "return s.options[s.selectedIndex].text;"
+            )
+        )
 
 
 def run_first_run() -> int:
@@ -1059,36 +1155,681 @@ def run_first_run() -> int:
     return 0 if passed else 1
 
 
+OFFER_KEY = "recommendation-offer"
+MISSING_KEY = "missing-models"
+FIRST_RUN_KEY = "first-run"
+OFFER_TEXT = "有更適合這台電腦的組合"
+
+
+def leftover_processes(app_name: str = "kikitori-app.exe") -> dict[str, list[int]]:
+    return {
+        name: app_pids(name)
+        for name in (
+            app_name,
+            "kikitori-engine.exe",
+            "msedgedriver.exe",
+            "tauri-driver.exe",
+        )
+    }
+
+
+def finish(run: Run) -> int:
+    passed = all(step["passed"] for step in run.steps.values())
+    (run.dir / "gui-results.json").write_text(
+        json.dumps(run.steps, ensure_ascii=False, indent=2), "utf-8"
+    )
+    print(
+        f"\nOVERALL: {'PASS' if passed else 'FAIL'}  (details: {run.dir / 'gui-results.json'})"
+    )
+    return 0 if passed else 1
+
+
+def read_settings(config_dir: Path) -> dict[str, Any]:
+    return json.loads((config_dir / "settings.json").read_text("utf-8"))
+
+
+def save_combo(app: AppSession, combo: dict[str, str]) -> str:
+    """在模型頁的「自訂組合」填入 `combo`（表單欄位名稱 → 值）並儲存，回傳狀態文字。
+
+    儲存要等 `models.validate` 的即時檢查完成（檢查中按下不會儲存），所以沒有出現
+    「已儲存」時每秒再按一次。
+    """
+    wd = app.wd
+    app.show_page("models")
+    wd.wait(
+        "combo options",
+        lambda: wd.script(
+            "return document.getElementById('c-fast-model').options.length > 1;"
+        ),
+        timeout=60,
+    )
+    wd.script(
+        "const f = document.getElementById('combo-form');"
+        "for (const [k, v] of Object.entries(arguments[0])) {"
+        "  const e = f.elements[k]; e.value = v;"
+        "  e.dispatchEvent(new Event('input', {bubbles: true}));"
+        "  e.dispatchEvent(new Event('change', {bubbles: true}));"
+        "}",
+        combo,
+    )
+
+    def saved() -> str | None:
+        status = wd.text("#combo-status")
+        if status.startswith("已儲存"):
+            return status
+        if status not in ("", "儲存中"):
+            raise RuntimeError(f"combo save failed: {status!r}")
+        if status == "":
+            wd.click("#combo-save")
+        return None
+
+    return str(wd.wait("combo saved", saved, timeout=60, interval=1.0))
+
+
+def install_ci_build(installer: Path, install_dir: Path) -> dict[str, Any]:
+    """靜默安裝 NSIS 安裝檔（per-user）到 `install_dir`，回傳 HKCU 的 Uninstall 項目。"""
+    from update_acceptance import uninstall_entries
+
+    # /D= 必須是最後一個參數、不能加引號（路徑不含空白）
+    if " " in str(install_dir):
+        raise ValueError(f"install dir must not contain spaces: {install_dir}")
+    subprocess.run([str(installer), "/S", f"/D={install_dir}"], check=True, timeout=300)
+    return {"entries": uninstall_entries()}
+
+
+def uninstall_ci_build(install_dir: Path, before: dict[str, Any]) -> dict[str, Any]:
+    """靜默解除安裝並收集清理證據（登錄、捷徑、行程、安裝目錄）。"""
+    from update_acceptance import IDENTIFIER, baseline, kill_pid, processes_under
+
+    evidence: dict[str, Any] = {}
+    for p in processes_under(install_dir) if install_dir.exists() else []:
+        kill_pid(p["ProcessId"], force=True)
+        evidence.setdefault("killed_before_uninstall", []).append(p["ExecutablePath"])
+    uninstaller = install_dir / "uninstall.exe"
+    if uninstaller.is_file():
+        # `_?=` 讓解除安裝程式就地執行並等它結束（否則它複製到暫存目錄後立即返回）；
+        # 代價是它刪不掉自己，所以之後只剩 uninstall.exe 時才刪除整個目錄。
+        proc = subprocess.run(
+            [str(uninstaller), "/S", f"_?={install_dir}"], timeout=300, check=False
+        )
+        evidence["uninstaller_exit"] = proc.returncode
+    remaining = (
+        sorted(str(p.relative_to(install_dir)) for p in install_dir.rglob("*"))
+        if install_dir.exists()
+        else []
+    )
+    evidence["left_by_uninstaller"] = remaining
+    if remaining in ([], ["uninstall.exe"]):
+        shutil.rmtree(install_dir, ignore_errors=True)
+    # 解除安裝程式在 /S 時不刪 app 資料；測試前不存在、而且只有 window-state 外掛的檔案時才移除。
+    roaming = Path(os.environ["APPDATA"]) / IDENTIFIER
+    if not before["roaming_app_dir"] and roaming.is_dir():
+        contents = sorted(p.name for p in roaming.iterdir())
+        evidence["roaming_app_dir_contents"] = contents
+        if contents in ([], [".window-state.json"]):
+            shutil.rmtree(roaming)
+    after = baseline()
+    evidence.update(
+        install_dir_exists=install_dir.exists(),
+        uninstall_entries=after["uninstall_entries"],
+        shortcuts=after["shortcuts"],
+        shortcuts_before=before["shortcuts"],
+        roaming_app_dir=[before["roaming_app_dir"], after["roaming_app_dir"]],
+        roaming_settings_dir=[
+            before["roaming_settings_dir"],
+            after["roaming_settings_dir"],
+        ],
+        leftover_processes=leftover_processes(),
+    )
+    evidence["ok"] = (
+        evidence.get("uninstaller_exit") == 0
+        and remaining in ([], ["uninstall.exe"])
+        and not evidence["install_dir_exists"]
+        and not after["uninstall_entries"]
+        and after["shortcuts"] == before["shortcuts"]
+        and after["roaming_app_dir"] == before["roaming_app_dir"]
+        and after["roaming_settings_dir"] == before["roaming_settings_dir"]
+        and not any(evidence["leftover_processes"].values())
+    )
+    return evidence
+
+
+def scenario_installed_media(run: Run, app_exe: Path, install_dir: Path) -> None:
+    """已安裝的程式：引擎從安裝目錄啟動、第一次啟動自動套用 GPU 組合、影片翻譯雙語字幕。"""
+    from update_acceptance import processes_under
+
+    config_dir = run.dir / "config-installed"
+    config_dir.mkdir()
+    player = Player()
+    try:
+        with AppSession(run, config_dir, "installed", app=app_exe) as app:
+            wd = app.wd
+            main = wd.s("GET", "/window")
+            app.wait_ready()
+            procs = processes_under(install_dir)
+            apps = [p for p in procs if p["Name"].lower() == app_exe.name.lower()]
+            engines = [p for p in procs if p["Name"].lower() == "kikitori-engine.exe"]
+            expected_engine = install_dir / "kikitori-engine" / "kikitori-engine.exe"
+            run.check(
+                "installed: engine starts from the install dir (child of the app)",
+                len(apps) == 1
+                and len(engines) == 1
+                and os.path.normcase(engines[0]["ExecutablePath"])
+                == os.path.normcase(str(expected_engine))
+                and engines[0]["ParentProcessId"] == apps[0]["ProcessId"],
+                {
+                    "app": [(p["ProcessId"], p["ExecutablePath"]) for p in apps],
+                    "engine": [
+                        (p["ProcessId"], p["ParentProcessId"], p["ExecutablePath"])
+                        for p in engines
+                    ],
+                },
+            )
+            notice = wd.wait(
+                "first-run notice",
+                lambda: app.notice(FIRST_RUN_KEY),
+                timeout=120,
+            )
+            settings = read_settings(config_dir)
+            asr = settings["asr"]
+            run.check(
+                "installed: first-run auto-apply notice with the GPU combination",
+                FIRST_RUN_NOTICE in notice["text"]
+                and "GPU" in notice["text"]
+                and asr["device"] == "cuda"
+                and asr["final_model"] in notice["text"],
+                {"notice": notice, "asr": asr, "translation": settings["translation"]},
+            )
+            time.sleep(4)  # 缺模型與「更適合的組合」的背景檢查
+            wd.screenshot(SCREENSHOTS / "13-installed-first-run.png")
+            other = [n for n in app.notices() if n["key"] != FIRST_RUN_KEY]
+            run.check(
+                "installed: no other prompts after first run",
+                not any(
+                    OFFER_TEXT in n["text"] or "還需要下載" in n["text"] for n in other
+                ),
+                other,
+            )
+
+            chosen = app.choose_virtual_loopback()
+            wd.click("#start")
+            t0 = time.monotonic()
+            wd.wait(
+                "listening",
+                lambda: wd.text("#status-label") == "正在聆聽",
+                timeout=180,
+            )
+            run.check(
+                "installed: media mode + virtual loopback → 正在聆聽",
+                TARGET_OUTPUT in chosen,
+                {"device": chosen, "load_secs": round(time.monotonic() - t0, 1)},
+            )
+            overlay = app.window("kikitori 字幕")
+            wd.switch(main)
+            pid = apps[0]["ProcessId"]
+            overlay_hwnd = find_windows(pid).get("kikitori 字幕")
+            main_rect = window_rect(find_windows(pid)["kikitori"])
+            overlay_home = window_rect(overlay_hwnd) if overlay_hwnd else None
+            if overlay_hwnd:
+                move_window(overlay_hwnd, main_rect[0] + 140, main_rect[1] + 400)
+            playing = play_async(player, "anime", load_track("anime").audio)
+            watched = watch_subtitles(wd, main, overlay, playing, settle=6.0)
+            rows = watched["rows"]
+            finals = [r for r in rows if not r["partial"]]
+            partial_first = [
+                i for i, seen in watched["seen_partial_before_final"].items() if seen
+            ]
+            bad_tc = {
+                i: simplified_chars(r["tr"])
+                for i, r in enumerate(rows)
+                if simplified_chars(r["tr"])
+            }
+            jp = sum(1 for r in finals if KANA.search(r["orig"]))
+            run.check(
+                "installed: transcript partial → final bilingual (Traditional Chinese)",
+                len(finals) >= 6
+                and len(partial_first) >= 4
+                and not any(r["partial"] for r in rows)
+                and all(r["tr"] for r in finals)
+                and not bad_tc
+                and jp >= len(finals) - 1,
+                {
+                    "rows": len(rows),
+                    "finals": len(finals),
+                    "rows_seen_partial_first": len(partial_first),
+                    "japanese_originals": jp,
+                    "simplified": bad_tc,
+                    "langs": [r["lang"] for r in rows],
+                },
+            )
+            wd.screenshot(PRIVATE_SCREENSHOTS / "installed-transcript.png")
+            wd.switch(overlay)
+            ov = wd.script(OVERLAY_JS)
+            wd.switch(main)
+            ov_bad = [
+                simplified_chars(line["tr"])
+                for line in ov["lines"]
+                if simplified_chars(line["tr"])
+            ]
+            if overlay_hwnd:
+                hide_automation_consoles(window_rect(overlay_hwnd))
+                time.sleep(0.5)
+                capture_screen_rect(
+                    window_rect(overlay_hwnd),
+                    PRIVATE_SCREENSHOTS / "installed-overlay-screen.png",
+                )
+            run.check(
+                "installed: overlay shows bilingual subtitles (Traditional Chinese)",
+                watched["overlay_max_lines"] >= 1
+                and watched["overlay_partial_seen"]
+                and len(ov["lines"]) >= 1
+                and all(line["tr"] for line in ov["lines"])
+                and not ov_bad,
+                {
+                    "max_lines_seen": watched["overlay_max_lines"],
+                    "partial_seen": watched["overlay_partial_seen"],
+                    "now": len(ov["lines"]),
+                    "simplified": ov_bad,
+                },
+            )
+            if overlay_hwnd and overlay_home:
+                move_window(overlay_hwnd, overlay_home[0], overlay_home[1])
+            wd.click("#start")
+            wd.wait("idle", lambda: wd.text("#status-label") == "待命中", timeout=30)
+            run.check(
+                "installed: stop → 待命中",
+                wd.text("#start") == "開始",
+                wd.text("#status-label"),
+            )
+    finally:
+        player.close()
+
+
+def scenario_missing_models(run: Run, app_exe: Path | None = None) -> None:
+    """建議組合選到沒下載的 ASR 模型 →「下載缺少的模型」→ 進度 → 完成後可以開始。
+
+    不動使用者的模型快取：app 與引擎的 `LOCALAPPDATA` 指到暫存目錄（模型快取與 GPU
+    加速元件都在 `%LOCALAPPDATA%\\kikitori`），只把 `small` 複製過去。沒有 cuBLAS 時
+    這台電腦的建議組合是 CPU 的 base／small，所以只缺 base（約 140 MB）。
+    """
+    from kikitori.asr import default_cache_dir
+
+    real_cache = default_cache_dir()
+    real_before = sorted(p.name for p in real_cache.iterdir())
+    local = run.dir / "localappdata"
+    cache = local / "kikitori" / "models"
+    shutil.copytree(real_cache / "small", cache / "small")
+    config_dir = run.dir / "config-missing"
+    config_dir.mkdir()
+    player = Player()
+    try:
+        with AppSession(
+            run,
+            config_dir,
+            "missing",
+            app=app_exe,
+            extra_env={"LOCALAPPDATA": str(local)},
+        ) as app:
+            wd = app.wd
+            app.wait_ready()
+            first = wd.wait(
+                "first-run notice", lambda: app.notice(FIRST_RUN_KEY), timeout=120
+            )
+            asr = read_settings(config_dir)["asr"]
+            chosen = list(dict.fromkeys([asr["fast_model"], asr["final_model"]]))
+            expected_missing = [m for m in chosen if not (cache / m).exists()]
+            offer = wd.wait(
+                "missing-models prompt",
+                lambda: (
+                    (n := app.notice(MISSING_KEY)) and "還需要下載" in n["text"] and n
+                ),
+                timeout=60,
+            )
+            listed = offer["text"].split("還需要下載 ", 1)[1].split("（", 1)[0]
+            run.check(
+                "missing models: prompt lists exactly the chosen models that are not downloaded",
+                bool(expected_missing)
+                and listed.split("、") == expected_missing
+                and "下載缺少的模型" in offer["actions"],
+                {
+                    "first_run_notice": first["text"],
+                    "asr": asr,
+                    "expected_missing": expected_missing,
+                    "notice": offer,
+                },
+            )
+            wd.screenshot(SCREENSHOTS / "14-missing-models-offer.png")
+            app.click_notice_action(MISSING_KEY, "下載缺少的模型")
+            texts: list[str] = []
+            positions: set[int] = set()
+            gaps: list[float] = []
+            shot = False
+            t0 = time.monotonic()
+
+            def progress() -> dict[str, Any] | None:
+                nonlocal shot
+                state = wd.script(
+                    "const ns = Array.from(document.querySelectorAll('#notices .notice'));"
+                    "const i = ns.findIndex(n => n.dataset.key === arguments[0]);"
+                    "return i < 0 ? null : {index: i, count: ns.length,"
+                    " text: ns[i].querySelector('p').textContent,"
+                    " state: ns[i].dataset.state,"
+                    " actions: Array.from(ns[i].querySelectorAll('.notice-actions button')).map(b => b.textContent)};",
+                    MISSING_KEY,
+                )
+                if state is None:
+                    gaps.append(round(time.monotonic() - t0, 1))
+                    return None
+                positions.add(state["index"])
+                if not texts or texts[-1] != state["text"]:
+                    texts.append(state["text"])
+                if (
+                    not shot
+                    and state["state"] == "downloading"
+                    and "%" in state["text"]
+                ):
+                    wd.screenshot(SCREENSHOTS / "15-missing-models-progress.png")
+                    shot = True
+                if state["state"] == "failed":
+                    raise RuntimeError(f"download failed: {state['text']}")
+                return state if state["state"] == "done" else None
+
+            done = wd.wait("download done", progress, timeout=900, interval=0.3)
+            secs = round(time.monotonic() - t0, 1)
+            percents = [
+                int(m.group(1))
+                for t in texts
+                if t.startswith("正在下載 ") and (m := re.search(r"(\d+)%", t))
+            ]
+            run.check(
+                "missing models: click downloads with progress in the same message, then done",
+                len(percents) >= 2
+                and percents == sorted(percents)
+                and done["text"] == "模型已下載完成，可以按「開始」了。"
+                and not gaps
+                and all((cache / m).is_dir() for m in expected_missing),
+                {
+                    "secs": secs,
+                    "texts": texts[:3] + ["…"] + texts[-3:]
+                    if len(texts) > 6
+                    else texts,
+                    "progress_updates": len(percents),
+                    "notice_positions": sorted(positions),
+                    "polls_without_the_notice": gaps,
+                    "done": done,
+                },
+            )
+            wd.screenshot(SCREENSHOTS / "16-missing-models-done.png")
+
+            device = app.choose_virtual_loopback()
+            wd.click("#start")
+            t0 = time.monotonic()
+            wd.wait(
+                "listening",
+                lambda: wd.text("#status-label") == "正在聆聽",
+                timeout=180,
+            )
+            load = round(time.monotonic() - t0, 1)
+            en = tts_clip("tts_en", EN_LINES, EN_VOICE, "en")
+            player.play("tts_en", en.audio)
+            rows = wd.wait(
+                "a final subtitle",
+                lambda: (
+                    (r := wd.script(ROWS_JS))
+                    and any(not x["partial"] and x["tr"] for x in r)
+                    and r
+                ),
+                timeout=60,
+            )
+            time.sleep(4)
+            rows = wd.script(ROWS_JS)
+            wd.click("#start")
+            wd.wait("idle", lambda: wd.text("#status-label") == "待命中", timeout=30)
+            run.check(
+                "missing models: 開始 works after the download (CPU base/small)",
+                any(not r["partial"] and r["tr"] for r in rows),
+                {
+                    "device": device,
+                    "load_secs": load,
+                    "rows": [(r["lang"], r["orig"], r["tr"]) for r in rows],
+                },
+            )
+    finally:
+        player.close()
+    real_after = sorted(p.name for p in real_cache.iterdir())
+    run.check(
+        "missing models: the user's model cache was not touched",
+        real_before == real_after,
+        {"real_cache": str(real_cache), "models": real_after},
+    )
+
+
+CPU_COMBO = {
+    "device": "cpu",
+    "fast_model": "base",
+    "final_model": "small",
+    "fast_compute_type": "",
+    "final_compute_type": "",
+}
+
+
+def scenario_better_combo(run: Run, app_exe: Path | None = None) -> None:
+    """設定存成 CPU 組合、這台電腦建議 GPU →「有更適合這台電腦的組合」：套用、不要再提醒。"""
+    config_dir = run.dir / "config-offer"
+    config_dir.mkdir()
+    # 第一次啟動自動套用 GPU 組合，再到模型頁存成 CPU 組合（使用者自己選的）
+    with AppSession(run, config_dir, "offer-1", app=app_exe) as app:
+        wd = app.wd
+        app.wait_ready()
+        wd.wait("first-run notice", lambda: app.notice(FIRST_RUN_KEY), timeout=120)
+        status = save_combo(app, CPU_COMBO)
+        hidden_after_save = app.notice(OFFER_KEY) is None
+        app.show_page("transcript")
+        app.show_page("models")  # 進入模型頁會再比較一次
+        offer = wd.wait(
+            "offer on models page", lambda: app.notice(OFFER_KEY), timeout=60
+        )
+        run.check(
+            "offer: shown on the models page after saving a CPU combination",
+            OFFER_TEXT in offer["text"]
+            and offer["actions"] == ["套用", "不要再提醒", "關閉"]
+            and read_settings(config_dir)["asr"]["device"] == "cpu"
+            and hidden_after_save,
+            {
+                "save_status": status,
+                "hidden_right_after_save": hidden_after_save,
+                "notice": offer,
+            },
+        )
+
+    # 再啟動：啟動時就提示；「套用」寫入 GPU 組合並收起
+    with AppSession(run, config_dir, "offer-2", app=app_exe) as app:
+        wd = app.wd
+        app.wait_ready()
+        offer = wd.wait("offer at startup", lambda: app.notice(OFFER_KEY), timeout=60)
+        wd.screenshot(SCREENSHOTS / "17-better-combination-offer.png")
+        app.click_notice_action(OFFER_KEY, "套用")
+        wd.wait(
+            "applied",
+            lambda: read_settings(config_dir)["asr"]["device"] == "cuda",
+            timeout=60,
+        )
+        time.sleep(3)
+        after_apply = app.notices()
+        asr = read_settings(config_dir)["asr"]
+        run.check(
+            "offer: shown at startup; 套用 applies the GPU combination and hides it",
+            OFFER_TEXT in offer["text"]
+            and asr["device"] == "cuda"
+            and not any(n["key"] == OFFER_KEY for n in after_apply),
+            {"offer": offer["text"], "asr": asr, "notices_after": after_apply},
+        )
+        wd.screenshot(SCREENSHOTS / "18-better-combination-applied.png")
+
+        # 再存成 CPU 組合 → 模型頁再出現提示 →「不要再提醒」
+        save_combo(app, CPU_COMBO)
+        app.show_page("transcript")
+        app.show_page("models")
+        fingerprint = wd.wait(
+            "offer again",
+            lambda: wd.script(
+                "const n = document.querySelector("
+                "`#notices .notice[data-key='recommendation-offer']`);"
+                "return n ? n.dataset.fingerprint : null;"
+            ),
+            timeout=60,
+        )
+        app.click_notice_action(OFFER_KEY, "不要再提醒")
+        dismissed = wd.wait(
+            "dismissed fingerprint saved",
+            lambda: (
+                read_settings(config_dir).get("ui", {}).get("dismissed_recommendations")
+            ),
+            timeout=30,
+        )
+        run.check(
+            "offer: 不要再提醒 hides it and stores the fingerprint in settings.ui",
+            dismissed == [fingerprint] and app.notice(OFFER_KEY) is None,
+            {
+                "fingerprint": fingerprint,
+                "ui": read_settings(config_dir)["ui"],
+                "asr_device": read_settings(config_dir)["asr"]["device"],
+            },
+        )
+    before = (config_dir / "settings.json").read_bytes()
+
+    # 再啟動：同一個推薦不再提示（啟動、進入模型頁、重新偵測都不會）
+    with AppSession(run, config_dir, "offer-3", app=app_exe) as app:
+        wd = app.wd
+        app.wait_ready()
+        seen: list[dict[str, Any]] = []
+
+        def collect(seconds: float) -> None:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                for n in app.notices():
+                    if n not in seen:
+                        seen.append(n)
+                time.sleep(0.5)
+
+        collect(10)
+        app.show_page("models")
+        collect(6)
+        wd.click("#models-refresh")
+        collect(10)
+        wd.screenshot(SCREENSHOTS / "19-better-combination-dismissed.png")
+        after = (config_dir / "settings.json").read_bytes()
+        run.check(
+            "offer: not shown again after relaunch for the same recommendation",
+            not any(OFFER_TEXT in n["text"] for n in seen) and before == after,
+            {"notices": seen, "settings_unchanged": before == after},
+        )
+
+
+def run_installed() -> int:
+    """CI 建置的安裝檔：靜默安裝 → 已安裝程式的驗收（含缺少模型與更適合組合）→ 靜默解除安裝。"""
+    from update_acceptance import baseline
+
+    run = Run("installed")
+    installer = tool_path("KIKITORI_E2E_INSTALLER")
+    print(f"results: {run.dir}\ninstaller: {installer}")
+    before = baseline()
+    if before["uninstall_entries"]:
+        run.check(
+            "no kikitori installed for this user before the test",
+            False,
+            before["uninstall_entries"],
+        )
+        return finish(run)
+    install_dir = (
+        Path(tempfile.mkdtemp(prefix="kikitori-ci-install-")).resolve() / "kikitori"
+    )
+    app_exe = install_dir / "kikitori-app.exe"
+    try:
+        entries = install_ci_build(installer, install_dir)["entries"]
+        run.check(
+            "silent install (per-user) registers 0.1.0 in HKCU",
+            len(entries) == 1
+            and entries[0].get("DisplayVersion") == "0.1.0"
+            and app_exe.is_file()
+            and (install_dir / "kikitori-engine" / "kikitori-engine.exe").is_file(),
+            {"install_dir": str(install_dir), "entries": entries},
+        )
+        for name, scenario in (
+            (
+                "installed media",
+                lambda: scenario_installed_media(run, app_exe, install_dir),
+            ),
+            ("missing models", lambda: scenario_missing_models(run, app_exe)),
+            ("better combination", lambda: scenario_better_combo(run, app_exe)),
+        ):
+            try:
+                scenario()
+            except Exception:
+                logger.exception("%s aborted", name)
+                run.steps[f"{name}: aborted"] = {
+                    "passed": False,
+                    "detail": "exception (see log)",
+                }
+    finally:
+        evidence = uninstall_ci_build(install_dir, before)
+        run.check("silent uninstall cleans up", evidence.pop("ok"), evidence)
+        shutil.rmtree(install_dir.parent, ignore_errors=True)
+    return finish(run)
+
+
+def run_single(name: str, scenario: Any) -> int:
+    """在 `KIKITORI_E2E_APP` 的建置上執行一個情境。"""
+    run = Run(name)
+    print(f"results: {run.dir}")
+    try:
+        scenario(run)
+    except Exception:
+        logger.exception("%s aborted", name)
+        run.steps["aborted"] = {"passed": False, "detail": "exception (see log)"}
+    left = leftover_processes()
+    run.check("no leftover processes", not any(left.values()), left)
+    return finish(run)
+
+
 MENU = """
 kikitori 桌面程式驗收（WebDriver）
   1) 執行完整流程（會播放測試聲音到虛擬喇叭）
   2) 第一次啟動：空的設定資料夾自動套用建議組合，再啟動一次確認不重複套用（不播放聲音）
-  3) 離開
+  3) CI 的安裝檔：靜默安裝 → 第一次啟動＋影片翻譯、缺少模型、更適合的組合 → 解除安裝
+  4) 缺少模型：建議組合選到沒下載的模型 → 一鍵下載 → 開始（下載約 140 MB）
+  5) 更適合的組合：存成 CPU 組合 → 提示 → 套用／不要再提醒 → 再啟動不再提示
+  6) 離開
 """
+
+BATCH = {
+    "run": lambda: run_gui(),
+    "first-run": lambda: run_first_run(),
+    "installed": lambda: run_installed(),
+    "missing-models": lambda: run_single("missing-models", scenario_missing_models),
+    "better-combo": lambda: run_single("better-combo", scenario_better_combo),
+}
 
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    if argv == ["--batch", "run"]:
-        return run_gui()
-    if argv == ["--batch", "first-run"]:
-        return run_first_run()
+    if len(argv) == 2 and argv[0] == "--batch" and argv[1] in BATCH:
+        return BATCH[argv[1]]()
     if argv:
-        print("usage: gui_acceptance.py [--batch run|first-run]", file=sys.stderr)
+        print(f"usage: gui_acceptance.py [--batch {'|'.join(BATCH)}]", file=sys.stderr)
         return 2
+    choices = dict(zip("12345", BATCH.values(), strict=True))
     while True:
         print(MENU)
         try:
             choice = input("請輸入編號：").strip()
         except EOFError:
             return 0
-        if choice == "1":
-            return run_gui()
-        if choice == "2":
-            return run_first_run()
-        if choice == "3":
+        if choice in choices:
+            return choices[choice]()
+        if choice == "6":
             return 0
         print(f"無效的選項：{choice!r}")
 

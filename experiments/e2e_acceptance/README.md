@@ -9,7 +9,7 @@
 | 檔案 | 內容 |
 |---|---|
 | `acceptance.py` | A：以 stdio 協定驅動**真的**引擎（開發版 `uv run kikitori engine` 或打包好的 `kikitori-engine.exe`），真擷取、真 Whisper（GPU）、真 Ollama |
-| `gui_acceptance.py` | B／C：以 W3C WebDriver（tauri-driver + msedgedriver，只用標準庫的 HTTP）操作正式版建置的桌面程式 |
+| `gui_acceptance.py` | B／B2／B3／C：以 W3C WebDriver（tauri-driver + msedgedriver，只用標準庫的 HTTP）操作正式版建置或 CI 安裝檔安裝的桌面程式 |
 | `e2e_common.py` | 共用：NDJSON 客戶端、WAV、Windows TTS、播放到指定裝置 |
 | `screenshots/` | 可以提交的截圖（只有本專案自己寫的句子）；`screenshots/private/` 含動畫台詞，git 忽略 |
 | `data/`、`results/` | TTS 音檔、建置副本、每次執行的結果（含台詞），git 忽略 |
@@ -21,9 +21,9 @@ uv run python -X utf8 experiments/e2e_acceptance/acceptance.py        互動選�
 uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py    互動選單
 ```
 
-非互動（自動化用）：`acceptance.py --batch dev|release|devices|tts`、`gui_acceptance.py --batch run`。
+非互動（自動化用）：`acceptance.py --batch dev|release|devices|tts`、`gui_acceptance.py --batch run|first-run|installed|missing-models|better-combo`。
 GUI 驗收以環境變數指定工具：`KIKITORI_E2E_APP`（`kikitori-app.exe`，resources 旁要有 `kikitori-engine/` 與 `licenses/`）、
-`KIKITORI_E2E_TAURI_DRIVER`、`KIKITORI_E2E_EDGEDRIVER`；`KIKITORI_E2E_RELEASE_ENGINE` 可把 `--batch release` 指到別的引擎建置。
+`KIKITORI_E2E_TAURI_DRIVER`、`KIKITORI_E2E_EDGEDRIVER`、`KIKITORI_E2E_INSTALLER`（`installed` 用的 NSIS 安裝檔）；`KIKITORI_E2E_RELEASE_ENGINE` 可把 `--batch release` 指到別的引擎建置。
 
 安全規則：
 - 測試聲音只播到名稱含 **Steam Streaming Speakers** 的 WASAPI 輸出（虛擬喇叭，使用者聽不到）；它若是系統預設輸出就拒絕播放。引擎擷取同一裝置的 loopback。
@@ -145,6 +145,60 @@ npm run tauri build -- --no-bundle --config <conf.json>
 | 清理 | 沒有殘留行程 |
 
 截圖（都看過）：`10-first-run-notice.png`（字幕紀錄頁上方的訊息，文字完整、沒有溢出）、`11-first-run-models.png`（模型頁：RTX 5070、cuBLAS 可以使用、建議組合 small／large-v3-turbo／qwen3.5:9b，上方仍是同一則訊息）、`12-relaunch.png`（第二次啟動：沒有訊息）。
+
+### B3. CI 建置的安裝檔、缺少模型一鍵下載、更適合的組合（WebDriver）— PASS
+
+`gui_acceptance.py --batch installed`（選單 3）。安裝檔是 release 演練 run 42007759032（`6fb4647`）的
+`bundle-windows` artifact：`kikitori_0.1.0_x64-setup.exe`（42,350,240 bytes，SHA-256
+`ab8c97581343848d1907cdcb893785d595582faf8af3b8f1ed3cf8c2d5cc7d83`）。測試前 HKCU Uninstall 沒有 kikitori
+（有的話腳本拒絕執行）。三個情境都在同一份安裝上跑，每次啟動都用空的暫存 `KIKITORI_CONFIG_DIR`，
+`results/20261105-182741-installed`。缺少模型與更適合的組合也可以單獨對 `KIKITORI_E2E_APP` 的建置跑
+（`--batch missing-models`、`--batch better-combo`，選單 4、5）。
+
+**1. 安裝與第一次啟動、影片翻譯**
+
+| 步驟 | 結果 |
+|---|---|
+| 靜默安裝 `/S /D=%TEMP%\kikitori-ci-install-…\kikitori` | HKCU Uninstall `kikitori`、`DisplayVersion 0.1.0` |
+| 啟動已安裝的程式 | 行程樹：`<安裝目錄>\kikitori-app.exe` → 子行程 `<安裝目錄>\kikitori-engine\kikitori-engine.exe` |
+| 第一次啟動（不按按鈕） | 「已依這台電腦（NVIDIA GeForce RTX 5070，12 GB）套用建議組合：即時 small、完整 large-v3-turbo（GPU），翻譯 qwen3.5:9b。」；設定檔 `asr.device=cuda`、float16；沒有其他提示 |
+| 影片翻譯＋「喇叭 (Steam Streaming Speakers) [Loopback]」 | 開始後 9.0 s「正在聆聽」（含 Ollama 載入） |
+| 播放 anime.wav | 字幕紀錄 9 列，9 列都先以即時字幕出現再換成完整翻譯；原文 9 列都是日文（「うん。」標「英」，已知限制）；譯文 0 個簡體字 |
+| 字幕視窗 | 最多同時 2 句、看得到即時字幕；最後兩句雙語、譯文正體 |
+| 停止 | 「待命中」，按鈕回到「開始」 |
+| 靜默解除安裝 `uninstall.exe /S _?=<安裝目錄>` | 結束碼 0；只留下 `uninstall.exe`（`_?=` 的已知行為，腳本隨後刪除）；安裝目錄已刪、HKCU 沒有 kikitori、捷徑與測試前相同（都沒有）、`%APPDATA%\io.github.alianlbj23.kikitori` 與 `%APPDATA%\kikitori` 維持不存在、沒有殘留的 app／引擎／driver 行程 |
+
+**2a. 缺少模型 → 一鍵下載**
+
+不動使用者的模型快取：app 與引擎的 `LOCALAPPDATA` 指到結果資料夾裡的空目錄（`asr/cache.py` 的
+快取與 GPU 加速元件都在 `%LOCALAPPDATA%\kikitori`），只把 `small` 複製過去。沒有 cuBLAS，所以這台
+電腦的建議組合變成 CPU 的 base／small，缺 base。
+
+| 步驟 | 結果 |
+|---|---|
+| 第一次啟動 | 「已依這台電腦（NVIDIA GeForce RTX 5070，12 GB）套用建議組合：即時 base、完整 small（CPU），翻譯 qwen3.5:9b。顯示卡缺少 GPU 加速元件，目前先用 CPU；到『模型』頁下載後可以改用顯示卡。」 |
+| 缺少模型的提示 | 「還需要下載 base（共約 148 MB）才能開始。」＋「下載缺少的模型」「關閉」；只列 base（small 已在快取） |
+| 按「下載缺少的模型」 | 同一則訊息（`data-key=missing-models`，輪詢期間一直在、一直在最上面）原地更新「正在下載 base 0%…99%，完成後就可以開始。」（41 次更新、遞增），15.4 s 後「模型已下載完成，可以按『開始』了。」；另有一則「base 下載完成。」 |
+| 開始 | CPU base／small 1.9 s 後「正在聆聽」；本專案的英文 TTS 4 句 → 正體中文（例如「Let's start the meeting.」→「我們開始會議吧。」） |
+| 使用者的模型快取 | 測試前後相同（base、kotoba-whisper-v2.0、large-v3、large-v3-turbo、medium、small、tiny） |
+
+**2b. 有更適合這台電腦的組合**
+
+| 步驟 | 結果 |
+|---|---|
+| 第一次啟動自動套用 GPU 組合後，模型頁存成 CPU base／small | 「已儲存組合。」、儲存當下提示收起；離開再進模型頁 → 「有更適合這台電腦的組合：即時 small、完整 large-v3-turbo（GPU），翻譯 qwen3.5:9b。」＋「套用」「不要再提醒」「關閉」 |
+| 再啟動 | 啟動時就出現同一則提示 → 「套用」→ 設定檔 `asr.device=cuda`、small／large-v3-turbo float16，提示消失，改顯示「已套用建議組合：即時字幕 small、完整翻譯 large-v3-turbo（NVIDIA GPU）。」 |
+| 再存成 CPU 組合 → 進模型頁 → 「不要再提醒」 | 提示消失；設定檔 `"ui": {"dismissed_recommendations": ["d4339e94105d34f3"]}`，與提示的 `data-fingerprint` 相同；`asr.device` 仍是 cpu |
+| 再啟動（等 10 s、進模型頁、按「重新偵測」） | 沒有任何提示；設定檔逐位元組不變（指紋在重新啟動與重新偵測後不變） |
+
+截圖（都看過）：`13-installed-first-run.png`（已安裝程式的第一次啟動訊息）、`14-missing-models-offer.png`
+（缺 base 的提示在第一次啟動訊息上方）、`15-missing-models-progress.png`（同一則訊息變成「正在下載 base 0%」，
+只剩「關閉」）、`16-missing-models-done.png`（「模型已下載完成…」，下面是「base 下載完成。」）、
+`17-better-combination-offer.png`（三個按鈕的提示，文字沒有溢出）、`18-better-combination-applied.png`
+（提示收起、只剩已套用的訊息）、`19-better-combination-dismissed.png`（再啟動、重新偵測後的模型頁：沒有提示）。
+`private/installed-transcript.png`、`private/installed-overlay-screen.png`：已安裝程式的日文字幕紀錄與實際螢幕上的字幕視窗（含台詞，git 忽略）。
+
+觀察（未改）：下載完成時會有兩則訊息（缺少模型那則的「模型已下載完成…」與一般的「base 下載完成。」），內容重複但不衝突，規格兩者都有寫。
 
 ### C. 「關於」的授權資料夾 — PASS
 
