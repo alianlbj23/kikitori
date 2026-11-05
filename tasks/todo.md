@@ -172,4 +172,5 @@
 - [ ] 里程碑 7：Tauri 介面
   - 第一階段結果：Tauri v2 + Vite + TypeScript；主視窗（模式、裝置、字幕紀錄、模型頁、設定頁）與透明置頂字幕視窗（即時→完整原地取代、滑鼠穿透、Ctrl+Alt+K）；Rust 引擎橋接（逐行驗證、id 配對與逾時、自動重啟）；vitest 60、cargo test 44、clippy、debug build 通過；更新器公鑰已寫入。待做：sidecar 打包整合、Linux／macOS 實機確認。
 - [ ] 里程碑 8：CI/CD
+  - 前半結果：PyInstaller one-folder 引擎（Windows 170 MB、啟動 0.30 s；one-file 1.28 s 且會殘留暫存檔，故不採用），以 Tauri resources 散布；`--self-check` 與假模式協定 smoke test；THIRD_PARTY_LICENSES；`scripts/sync_version.py`；`test.yml`（三平台 Python 測試＋引擎打包 smoke test）。待做：Tauri CI job、`release.yml`。
 - [ ] 里程碑 9：自動更新

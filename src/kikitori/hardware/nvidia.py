@@ -265,7 +265,9 @@ def system_library_dirs(
         path_var = env.get("LD_LIBRARY_PATH", "")
     else:
         return []
-    for entry in path_var.split(os.pathsep if windows else ":"):
+    # 依目標平台的分隔字元切，不用 os.pathsep：在其他平台模擬 Windows（測試、CI）時
+    # os.pathsep 是 ":"，會把 "C:\..." 從磁碟代號處切斷。
+    for entry in path_var.split(";" if windows else ":"):
         entry = entry.strip().strip('"')
         if entry and _absolute(entry, windows=windows):
             dirs.append(Path(entry))

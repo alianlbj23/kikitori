@@ -1,0 +1,105 @@
+# 測試：任何分支的 push 與 pull request 都跑。
+# 設計說明見 docs/specs/packaging-ci.md。第三方 action 一律釘在完整 commit SHA（註解是對應的版本）。
+name: test
+
+on:
+  push:
+  pull_request:
+
+# 只需要讀原始碼；沒有任何步驟要寫回 repo、建立 release 或讀 secrets。
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Windows runner 的管線預設編碼不是 UTF-8；測試與腳本會印出中文。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  # 與本機開發相同的 uv 版本（uv.lock 由它產生）。
+  UV_VERSION: "0.13.4"
+
+jobs:
+  python:
+    name: python (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest 是 Apple Silicon（arm64）。
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+
+      - name: Unit tests
+        run: uv run python -m unittest discover -s tests
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Version numbers in sync
+        run: uv run python scripts/sync_version.py check
+
+  engine-bundle:
+    # 每個平台建置 PyInstaller 引擎（one-folder），再對建好的執行檔跑冒煙測試：
+    # --self-check（原生函式庫與資料檔）+ 假模式的 stdio 協定。
+    name: engine bundle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+
+      - name: Build and smoke-test kikitori-engine
+        env:
+          KIKITORI_BUILD_NONINTERACTIVE: "1"
+        # --no-sidecar：這裡只驗證引擎；放進 app/src-tauri/binaries/ 由 Tauri 的 job 負責。
+        run: uv run python packaging/engine/build.py --no-sidecar --smoke
+
+  # ------------------------------------------------------------------------------------
+  # TODO（app/ 穩定後由協調者加入）：Tauri 前端與 Rust 的檢查。
+  # 架構規格要求：前端型別檢查與建置、cargo test、cargo clippy。預計的形狀：
+  #
+  # app:
+  #   name: app (${{ matrix.os }})
+  #   strategy: { fail-fast: false, matrix: { os: [windows-latest, ubuntu-latest, macos-latest] } }
+  #   runs-on: ${{ matrix.os }}
+  #   steps:
+  #     - actions/checkout（同上，釘 SHA）
+  #     - actions/setup-node（釘 SHA；node 版本與 app/ 一致）→ npm ci、npm run typecheck、
+  #       npm test、npm run build（working-directory: app）
+  #     - Rust toolchain（釘 SHA 的 action 或 runner 內建 rustup）＋ Linux 需 apt 安裝
+  #       WebKitGTK 等 Tauri 依賴
+  #     - cargo test --locked、cargo clippy --locked -- -D warnings（working-directory: app/src-tauri）
+  #     - 若 tauri.conf.json 的 bundle.resources 指向 binaries/kikitori-engine/，cargo build
+  #       會檢查該路徑存在：先跑 engine 建置（build.py，不加 --no-sidecar），或建立空的
+  #       佔位目錄。
+  # ------------------------------------------------------------------------------------

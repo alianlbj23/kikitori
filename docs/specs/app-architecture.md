@@ -29,7 +29,7 @@
 ```
 
 - **為什麼用 sidecar**：語音處理生態在 Python；Tauri 只負責 UI、視窗、更新。以 stdin/stdout 交換 NDJSON，不開網路埠。
-- **打包**：引擎用 PyInstaller（one-folder）打包成各平台的 `kikitori-engine` 執行檔，作為 Tauri `externalBin` sidecar。開發時 Tauri 改用 `uv run kikitori engine` 啟動。
+- **打包**：引擎用 PyInstaller（one-folder）打包成各平台的 `kikitori-engine/` 資料夾，整個資料夾作為 Tauri `bundle.resources` 散布，Rust 從資源目錄直接啟動其中的執行檔。不用 `externalBin`（它只能帶單一執行檔），也不用 one-file（實測啟動 1.28 s 對 0.30 s，且被強制結束時會在暫存目錄留下約 170 MB）。細節見 `packaging-ci.md`。開發時 Tauri 改用 `uv run kikitori engine` 啟動。
 - **時間**：引擎內所有音訊位置用樣本計數（16 kHz），不用牆鐘時間。
 
 ## Python 套件結構（`src/kikitori/`）

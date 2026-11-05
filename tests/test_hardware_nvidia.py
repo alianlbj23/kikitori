@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from kikitori.hardware.nvidia import (
     GPU_QUERY_FIELDS,
@@ -224,10 +225,24 @@ class CublasSearchTest(unittest.TestCase):
         self.assertEqual(info.source, "runtime")
 
     def test_system_path(self) -> None:
-        sysdir = self.make_dir("cuda", WINDOWS_CUBLAS_FILES)
-        info = find_cublas(
-            "windows", "AMD64", env={"PATH": os.fspath(sysdir)}, glob_dirs=lambda _: []
-        )
+        # 暫存目錄是本機真實路徑，所以用本機平台的規則；在 Linux／macOS 上
+        # "/tmp/..." 依 Windows 規則不是絕對路徑，會被正確地排除。
+        if os.name == "nt":
+            sysdir = self.make_dir("cuda", WINDOWS_CUBLAS_FILES)
+            info = find_cublas(
+                "windows",
+                "AMD64",
+                env={"PATH": os.fspath(sysdir)},
+                glob_dirs=lambda _: [],
+            )
+        else:
+            sysdir = self.make_dir("cuda", LINUX_CUBLAS_FILES)
+            info = find_cublas(
+                "linux",
+                "x86_64",
+                env={"LD_LIBRARY_PATH": os.fspath(sysdir)},
+                glob_dirs=lambda _: [],
+            )
         self.assertEqual(info.source, "system")
 
     def test_files_split_across_dirs(self) -> None:
@@ -279,6 +294,16 @@ class SystemLibraryDirsTest(unittest.TestCase):
         self.assertIn(os.fspath(Path("C:\\Tools")), names)
         self.assertIn(os.fspath(Path("C:\\Quoted")), names)
         self.assertFalse(any("relative" in n for n in names))
+
+    def test_windows_path_split_does_not_depend_on_host_pathsep(self) -> None:
+        # CI 在 Linux／macOS 上也會跑 Windows 分支；那裡的 os.pathsep 是 ":"，
+        # 會把 "C:\Tools" 從磁碟代號處切斷。
+        env = {"PATH": "C:\\Tools;D:\\More"}
+        with mock.patch.object(os, "pathsep", ":"):
+            dirs = system_library_dirs("windows", env, glob_dirs=lambda _: [])
+        names = [os.fspath(d) for d in dirs]
+        self.assertIn(os.fspath(Path("C:\\Tools")), names)
+        self.assertIn(os.fspath(Path("D:\\More")), names)
 
     def test_linux(self) -> None:
         dirs = system_library_dirs(
