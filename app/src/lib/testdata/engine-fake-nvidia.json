@@ -34,7 +34,11 @@
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": false,
-        "keep_warm_secs": 240
+        "keep_warm_secs": 240,
+        "glossary": {
+          "builtin": true,
+          "entries": []
+        }
       },
       "pipeline": {
         "partial_interval_ms": 700,
@@ -160,6 +164,7 @@
         "id": "base",
         "size_bytes": 4194304,
         "downloaded": true,
+        "disk_bytes": 4194304,
         "license": "MIT",
         "speed_tier": "fast",
         "no_speech_reliable": true,
@@ -174,6 +179,7 @@
         "id": "small",
         "size_bytes": 4194304,
         "downloaded": true,
+        "disk_bytes": 4194304,
         "license": "MIT",
         "speed_tier": "fast",
         "no_speech_reliable": true,
@@ -188,6 +194,7 @@
         "id": "large-v3-turbo",
         "size_bytes": 4194304,
         "downloaded": true,
+        "disk_bytes": 4194304,
         "license": "MIT",
         "speed_tier": "fast",
         "no_speech_reliable": false,
@@ -206,7 +213,8 @@
         "size_bytes": 4194304,
         "license": "MIT",
         "speed_tier": "fast",
-        "downloaded": false
+        "downloaded": false,
+        "disk_bytes": null
       },
       {
         "no_speech_reliable": null,
@@ -218,7 +226,8 @@
         "size_bytes": 4194304,
         "license": "MIT",
         "speed_tier": "fast",
-        "downloaded": false
+        "downloaded": false,
+        "disk_bytes": null
       }
     ],
     "gpu_runtime": {
@@ -490,7 +499,11 @@
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": false,
-        "keep_warm_secs": 240
+        "keep_warm_secs": 240,
+        "glossary": {
+          "builtin": true,
+          "entries": []
+        }
       },
       "pipeline": {
         "partial_interval_ms": 700,
@@ -1018,7 +1031,11 @@
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": false,
-        "keep_warm_secs": 240
+        "keep_warm_secs": 240,
+        "glossary": {
+          "builtin": true,
+          "entries": []
+        }
       },
       "pipeline": {
         "partial_interval_ms": 700,
@@ -1194,7 +1211,11 @@
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": false,
-        "keep_warm_secs": 240
+        "keep_warm_secs": 240,
+        "glossary": {
+          "builtin": true,
+          "entries": []
+        }
       },
       "pipeline": {
         "partial_interval_ms": 700,
@@ -1393,7 +1414,11 @@
         "final_model": "qwen3.5:9b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": false,
-        "keep_warm_secs": 240
+        "keep_warm_secs": 240,
+        "glossary": {
+          "builtin": true,
+          "entries": []
+        }
       },
       "pipeline": {
         "partial_interval_ms": 700,

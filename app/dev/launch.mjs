@@ -59,6 +59,16 @@ const choices = [
     env: { KIKITORI_ENGINE_CMD: fakeCmd(["--translation-server", "offline"]) },
   },
   {
+    label: "開發模式：假引擎，輸入一直沒有聲音（看狀態列音量表與「沒有收到聲音」提示）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_CMD: fakeCmd(["--metrics", "silent"]) },
+  },
+  {
+    label: "開發模式：假引擎，辨識跟不上（待處理句數超過 3，看「建議改用較小的模型」提示）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_CMD: fakeCmd(["--metrics", "backlog"]) },
+  },
+  {
     label: "開發模式：正式引擎（實際擷取聲音、載入模型）",
     args: ["dev"],
     env: {},

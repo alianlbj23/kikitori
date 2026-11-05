@@ -92,6 +92,8 @@ describe("original-only lines", () => {
       start_sample: 0,
       end_sample: 16000,
       session_id: 1,
+      stable_chars: null,
+      latency_ms: 700,
     },
     3,
   );
@@ -100,13 +102,19 @@ describe("original-only lines", () => {
   it("shows both lines when translations are on", () => {
     expect(lineDisplay(line, true)).toEqual({
       original: "次の駅で降りましょう。",
+      originalParts: { stable: "次の駅で降りましょう。", unstable: "" },
       translation: "我們在下一站下車吧。",
       originalOnly: false,
     });
   });
 
   it("promotes the original and leaves no empty translation line when off", () => {
-    expect(lineDisplay(line, false)).toEqual({ original: "次の駅で降りましょう。", translation: "", originalOnly: true });
+    expect(lineDisplay(line, false)).toEqual({
+      original: "次の駅で降りましょう。",
+      originalParts: { stable: "次の駅で降りましょう。", unstable: "" },
+      translation: "",
+      originalOnly: true,
+    });
     // The translation stays in the state, so switching back shows it again.
     expect(line.translation).toBe("我們在下一站下車吧。");
   });

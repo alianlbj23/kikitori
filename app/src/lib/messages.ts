@@ -67,7 +67,8 @@ const LANGUAGE_PARAMS = new Set(["language", "source_language", "target_language
  * codes become language names (`auto` → "detect automatically"), the ASR path
  * and translation field ids become the labels the models page uses, region
  * codes become names, and `*_gb` amounts get one decimal like the English
- * template (`{ram_gb:.1f}`). Model and GPU names stay as they are.
+ * template (`{ram_gb:.1f}`), and a "live / final" precision pair is labelled.
+ * Model and GPU names stay as they are.
  */
 export function localizeParam(name: string, value: string | number): string | number {
   if (typeof value === "number") {
@@ -78,6 +79,11 @@ export function localizeParam(name: string, value: string | number): string | nu
   if (name === "path" && value === "final_asr") return t("engineParam.final_asr");
   if (name === "field" && value === "translation_fast") return t("engineParam.translation_fast");
   if (name === "field" && value === "translation_final") return t("engineParam.translation_final");
+  // `asr_gpu` reports "live / final" when the two paths use different precisions.
+  if (name === "compute_type" && value.includes(" / ")) {
+    const [fast, final] = value.split(" / ", 2).map((v) => v.trim());
+    return t("engineParam.compute_type_pair", { fast: fast ?? "", final: final ?? "" });
+  }
   if (name === "regions") {
     return joinList(
       value

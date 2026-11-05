@@ -214,6 +214,22 @@ describe("parseSettingsResult", () => {
     expect(parseSettingsResult({ settings: {}, is_new: "yes" }).isNew).toBe(false);
   });
 
+  it("reads the glossary the engine reports, and defaults it for older engines", () => {
+    const fromEngine = parseSettingsResult(engine["settings.get"]);
+    expect(fromEngine.settings.translation.glossary).toEqual({ builtin: true, entries: [] });
+    expect(fromEngine.warnings).toEqual([]);
+    const old = parseSettingsResult({ settings: { translation: {} } });
+    expect(old.settings.translation.glossary).toEqual({ builtin: true, entries: [] });
+    expect(old.warnings).toEqual([]);
+    const custom = parseSettingsResult({
+      settings: { translation: { glossary: { builtin: false, entries: [{ source: "a", target: "b", target_language: "en" }] } } },
+    });
+    expect(custom.settings.translation.glossary).toEqual({
+      builtin: false,
+      entries: [{ source: "a", target: "b", target_language: "en" }],
+    });
+  });
+
   it("reads dismissed recommendations from the opaque ui object", () => {
     expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({
       dismissed_recommendations: [],

@@ -10,13 +10,15 @@
  * combination on the models page (ASR and translation models, device,
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
- * The language section has its own module (`languages.ts`).
+ * The language section has its own module (`languages.ts`), and so has the
+ * glossary editor (`glossary.ts`, `translation.glossary`).
  * Overlay appearance, reading rhythm and the OBS text choice live in the
  * engine's opaque `subtitle` object, the UI's own state (dismissed
  * recommendation offers, interface language, transcript auto-save) in the
  * opaque `ui` object. Validation messages come from the i18n dictionary.
  */
 
+import { DEFAULT_GLOSSARY, glossaryFromSettings } from "./glossary";
 import { isUiLocale, t, type UiLocalePreference } from "./i18n";
 import { isLanguageCode } from "./languages";
 
@@ -93,6 +95,7 @@ export const DEFAULT_SETTINGS: Settings = {
     final_model: "qwen3.5:4b",
     api_key_env: "KIKITORI_TRANSLATE_API_KEY",
     allow_restricted: false,
+    glossary: DEFAULT_GLOSSARY,
   },
   subtitle: DEFAULT_OVERLAY_STYLE,
   obs_output: "off",
@@ -293,6 +296,7 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         final_model: pickStr(tr, "final_model", d.translation.final_model, warn, "translation."),
         api_key_env: pickStr(tr, "api_key_env", d.translation.api_key_env, warn, "translation."),
         allow_restricted: pickBool(tr, "allow_restricted", d.translation.allow_restricted, warn, "translation."),
+        glossary: glossaryFromSettings(tr.glossary, warn),
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
       obs_output: pickEnum(asObj(root.subtitle), "obs_output", OBS_CONTENTS, d.obs_output, warn, "subtitle."),

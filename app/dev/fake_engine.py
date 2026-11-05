@@ -27,6 +27,19 @@ does), and `session.set_translation` switches a running session.
 `translation_server_auth_failed`). The rules are the real engine's; this is only
 a shape-correct stand-in.
 
+The competitive features (docs/specs/competitive-features.md) are imitated too:
+partial subtitles carry `stable_chars` (the previous partial's length, as
+LocalAgreement-2 would confirm it) and finals `latency_ms`; a `metrics` event
+(`level_dbfs`, `backlog`, `latency_ms_median`) follows every second while a
+session runs, with `--metrics {normal,silent,backlog}` choosing whether the
+input sounds normal, stays below -60 dBFS (the "no audio" hint) or lets the
+backlog grow past 3 (the "can't keep up" warning); `models.list` reports
+`disk_bytes` and `models.delete` frees a downloaded ASR model unless the
+running session or a download uses it (`unknown_model`, `model_in_use`,
+`model_not_downloaded`, checked in the engine's order); `settings.set`
+validates `translation.glossary` with the engine's limits and error paths
+(`translation.glossary.entries[3].source: ...`).
+
 Point the app at it with
     KIKITORI_ENGINE_CMD='["uv","run","--no-project","python","app/dev/fake_engine.py"]'
 or use `npm run menu` in app/.
@@ -46,9 +59,11 @@ import os
 import platform
 import queue
 import re
+import statistics
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 
@@ -163,6 +178,14 @@ TRANSLATION_SIZES_GB: dict[str, float] = {
 BROKEN_PULL = "fake-broken-pull:1b"
 PULL_BYTES = 4 * 1024 * 1024
 TRANSLATION_SERVER_PROFILES = ("ollama", "openai", "offline", "auth")
+# `--metrics`: what the fake input level and backlog look like.
+METRICS_PROFILES = ("normal", "silent", "backlog")
+METRICS_INTERVAL_SECS = 1.0
+# Engine limits of `translation.glossary` (src/kikitori/translate/glossary.py).
+GLOSSARY_MAX_ENTRIES = 500
+GLOSSARY_MAX_SOURCE_CHARS = 100
+GLOSSARY_MAX_TARGET_CHARS = 200
+GLOSSARY_ENTRY_KEYS = ("source", "target", "target_language")
 TRANSLATION_MODEL_NAME = re.compile(r"(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 
 
@@ -307,6 +330,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": False,
         "keep_warm_secs": 240,
+        "glossary": {"builtin": True, "entries": []},
     },
     "pipeline": {
         "partial_interval_ms": 700,
@@ -392,6 +416,84 @@ def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _invalid(message: str) -> ProtocolError:
+    return ProtocolError("invalid_settings", message)
+
+
+def _glossary_key(text: str) -> str:
+    """The engine's matching key: NFKC + casefold + strip (`glossary.match_key`)."""
+    return unicodedata.normalize("NFKC", text).casefold().strip()
+
+
+def _check_glossary_text(path: str, name: str, value: object, limit: int) -> None:
+    """The engine's `_check_text`, with the same error path and wording."""
+    where = f"{path}.{name}"
+    if not isinstance(value, str):
+        raise _invalid(f"{where}: {name} must be a string, got {type(value).__name__}")
+    if not value.strip():
+        raise _invalid(f"{where}: {name} must not be empty")
+    if value != value.strip():
+        raise _invalid(f"{where}: {name} must not start or end with whitespace")
+    if len(value) > limit:
+        raise _invalid(f"{where}: {name} must be at most {limit} characters")
+    if not value.isprintable():
+        raise _invalid(
+            f"{where}: {name} must not contain control characters or line breaks"
+        )
+
+
+def validate_glossary(glossary: object) -> None:
+    """`translation.glossary` like the engine's `_parse_glossary` (limits, duplicates, paths)."""
+    path = "translation.glossary"
+    if not isinstance(glossary, dict):
+        raise _invalid(f"{path}: expected an object")
+    unknown = set(glossary) - {"builtin", "entries"}
+    if unknown:
+        raise _invalid(f"{path}.{min(unknown)}: unknown field")
+    if not isinstance(glossary.get("builtin", True), bool):
+        raise _invalid(f"{path}.builtin: expected a boolean")
+    entries = glossary.get("entries", [])
+    if not isinstance(entries, list) or len(entries) > GLOSSARY_MAX_ENTRIES:
+        raise _invalid(
+            f"{path}.entries: expected a list of at most {GLOSSARY_MAX_ENTRIES} entries"
+        )
+    seen: set[tuple[str, str | None]] = set()
+    for i, item in enumerate(entries):
+        entry_path = f"{path}.entries[{i}]"
+        if not isinstance(item, dict):
+            raise _invalid(
+                f"{entry_path}: expected an object, got {type(item).__name__}"
+            )
+        extra = set(item) - set(GLOSSARY_ENTRY_KEYS)
+        if extra:
+            raise _invalid(f"{entry_path}.{min(extra)}: unknown field")
+        for name in ("source", "target"):
+            if name not in item:
+                raise _invalid(f"{entry_path}.{name}: missing")
+        language = item.get("target_language")
+        if language is not None and language not in LANGUAGE_WHISPER:
+            raise _invalid(
+                f"{entry_path}.target_language: unsupported language code {language!r}"
+            )
+        _check_glossary_text(
+            entry_path, "source", item["source"], GLOSSARY_MAX_SOURCE_CHARS
+        )
+        _check_glossary_text(
+            entry_path, "target", item["target"], GLOSSARY_MAX_TARGET_CHARS
+        )
+        key = (_glossary_key(item["source"]), language)
+        if not key[0]:
+            raise _invalid(
+                f"{entry_path}.source: source must contain at least one visible character"
+            )
+        if key in seen:
+            raise _invalid(
+                f"{entry_path}.source: duplicate of an earlier entry "
+                f"({item['source']!r} for target_language {language!r})"
+            )
+        seen.add(key)
+
+
 def validate_settings(settings: dict[str, Any]) -> None:
     """A small subset of the real engine's checks, enough to exercise UI errors."""
     unknown = set(settings) - set(DEFAULT_SETTINGS)
@@ -442,6 +544,7 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise ProtocolError(
             "invalid_settings", "translation.allow_restricted: expected a boolean"
         )
+    validate_glossary(settings["translation"].get("glossary"))
     asr = settings["asr"]
     unknown_asr = set(asr) - set(DEFAULT_SETTINGS["asr"])
     if unknown_asr:
@@ -487,12 +590,23 @@ class Session(threading.Thread):
         mode: str,
         writer: Writer,
         settings: dict[str, Any] | None = None,
+        metrics_profile: str = "normal",
     ) -> None:
         super().__init__(name=f"session-{session_id}", daemon=True)
         self.session_id = session_id
         self.mode = mode
         self.writer = writer
+        self.metrics_profile = metrics_profile
         settings = settings or DEFAULT_SETTINGS
+        # The models this session loads: `models.delete` refuses them while it runs.
+        self.asr_models = frozenset(
+            (settings["asr"]["fast_model"], settings["asr"]["final_model"])
+        )
+        # Written by the session thread, read by the metrics thread (plain
+        # assignments of immutable values, so no lock is needed).
+        self.speaking = False
+        self.latencies: tuple[int, ...] = ()
+        self.running_since = 0.0
         self.target = settings["target_language"]
         self.partner = settings["partner_language"]
         # Read by the session thread for each sentence; `session.set_translation`
@@ -542,6 +656,20 @@ class Session(threading.Thread):
             self.status("idle")
             return
         self.status("running")
+        self.running_since = time.monotonic()
+        metrics = threading.Thread(
+            target=self._report_metrics, name=f"metrics-{self.session_id}", daemon=True
+        )
+        metrics.start()
+        try:
+            self._subtitles()
+        finally:
+            # Like the engine: no metrics after the session's terminal status.
+            self.stop_event.set()
+            metrics.join(timeout=2)
+        self.status("idle")
+
+    def _subtitles(self) -> None:
         lines = MEDIA_LINES if self.mode == "media" else INTERPRET_LINES
         position = SAMPLE_RATE  # first utterance starts after 1 s
         utterance_id = 0
@@ -555,7 +683,6 @@ class Session(threading.Thread):
             position = start + SAMPLE_RATE * 3
             if self.stop_event.wait(1.2):
                 break
-        self.status("idle")
 
     def _target_language(self, source: str) -> str:
         if self.mode == "interpret" and source == LANGUAGE_WHISPER[self.target]:
@@ -581,27 +708,78 @@ class Session(threading.Thread):
         translation: str,
         start: int,
     ) -> bool:
-        """Partial results grow through the sentence, then the final replaces them."""
+        """Partial results grow through the sentence, then the final replaces them.
+
+        Each partial's `stable_chars` is the previous partial's length: the
+        prefix two consecutive hypotheses agree on (LocalAgreement-2).
+        """
         steps = 4
-        for i in range(1, steps + 1):
-            if self.stop_event.wait(0.55):
-                return False
-            cut_o = max(1, len(original) * i // (steps + 1))
-            cut_t = len(translation) * i // (steps + 1)
-            cut_t = max(1, cut_t) if translation else 0
-            self._emit(
-                utterance_id,
-                source,
-                original[:cut_o],
-                translation[:cut_t],
-                False,
-                start,
-                i,
-            )
+        stable = 0
+        self.speaking = True
+        try:
+            for i in range(1, steps + 1):
+                if self.stop_event.wait(0.55):
+                    return False
+                cut_o = max(1, len(original) * i // (steps + 1))
+                cut_t = len(translation) * i // (steps + 1)
+                cut_t = max(1, cut_t) if translation else 0
+                self._emit(
+                    utterance_id,
+                    source,
+                    original[:cut_o],
+                    translation[:cut_t],
+                    False,
+                    start,
+                    i,
+                    stable_chars=stable,
+                )
+                stable = cut_o
+        finally:
+            self.speaking = False
         if self.stop_event.wait(0.6):
             return False
-        self._emit(utterance_id, source, original, translation, True, start, steps + 1)
+        latency = 600 + (utterance_id * 137) % 900
+        self.latencies = (*self.latencies, latency)[-10:]
+        self._emit(
+            utterance_id,
+            source,
+            original,
+            translation,
+            True,
+            start,
+            steps + 1,
+            latency_ms=latency,
+        )
         return True
+
+    def _report_metrics(self) -> None:
+        """One `metrics` event per second while running (see `--metrics`)."""
+        tick = 0
+        while not self.stop_event.wait(METRICS_INTERVAL_SECS):
+            tick += 1
+            if self.metrics_profile == "silent":
+                level = -90.0
+            elif self.speaking:
+                level = -20.0 - (tick % 5) * 1.5
+            else:
+                level = -47.0 + (tick % 3)
+            if self.metrics_profile == "backlog":
+                # Grows by one every 3 s up to 6: past the warning threshold (3).
+                backlog = min(6, int(time.monotonic() - self.running_since) // 3)
+            else:
+                backlog = 1 if self.speaking and tick % 4 == 0 else 0
+            latencies = self.latencies
+            self.writer.event(
+                "metrics",
+                {
+                    "session_id": self.session_id,
+                    "level_dbfs": level,
+                    "backlog": backlog,
+                    "latency_ms_median": int(statistics.median(latencies))
+                    if latencies
+                    else None,
+                },
+            )
 
     def _emit(
         self,
@@ -612,21 +790,26 @@ class Session(threading.Thread):
         is_final: bool,
         start: int,
         step: int,
+        stable_chars: int = 0,
+        latency_ms: int | None = None,
     ) -> None:
-        self.writer.event(
-            "subtitle",
-            {
-                "utterance_id": utterance_id,
-                "original": original,
-                "translation": translation,
-                "source_language": source,
-                "target_language": self._target_language(source),
-                "is_final": is_final,
-                "start_sample": start,
-                "end_sample": start + int(SAMPLE_RATE * 0.5 * step),
-                "session_id": self.session_id,
-            },
-        )
+        data: dict[str, Any] = {
+            "utterance_id": utterance_id,
+            "original": original,
+            "translation": translation,
+            "source_language": source,
+            "target_language": self._target_language(source),
+            "is_final": is_final,
+            "start_sample": start,
+            "end_sample": start + int(SAMPLE_RATE * 0.5 * step),
+            "session_id": self.session_id,
+        }
+        # Like the engine: partials carry only stable_chars, finals only latency_ms.
+        if is_final:
+            data["latency_ms"] = latency_ms
+        else:
+            data["stable_chars"] = stable_chars
+        self.writer.event("subtitle", data)
 
 
 class FakeEngine:
@@ -635,9 +818,11 @@ class FakeEngine:
         writer: Writer,
         ignore_shutdown: bool = False,
         translation_server: str = "ollama",
+        metrics_profile: str = "normal",
     ) -> None:
         self.writer = writer
         self.translation_server = translation_server
+        self.metrics_profile = metrics_profile
         self.translation_installed = {
             m["name"] for m in TRANSLATION_MODELS if m["installed"]
         }
@@ -658,6 +843,8 @@ class FakeEngine:
         self.methods: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "engine.info": self.engine_info,
             "models.download": self.models_download,
+            # Synchronous like the engine's: no session or download can start in between.
+            "models.delete": self.models_delete,
             "devices.list": lambda _p: {"devices": DEVICES},
             "settings.get": lambda _p: self.settings_result(),
             "settings.set": self.settings_set,
@@ -928,6 +1115,7 @@ class FakeEngine:
                     **m,
                     **ASR_RESOURCES[m["id"]],
                     "downloaded": m["id"] in self.downloaded,
+                    "disk_bytes": self._disk_bytes(m["id"]),
                     "recommended_for": roles.get(m["id"], []),
                 }
                 for m in ASR_MODELS
@@ -1283,6 +1471,49 @@ class FakeEngine:
             self.translation_installed.add(model)
         event(PULL_BYTES, PULL_BYTES, "done")
 
+    def _disk_bytes(self, model: str) -> int | None:
+        """What a downloaded model takes on disk (a little over the download size)."""
+        if model not in self.downloaded:
+            return None
+        size = next(int(m["size_bytes"]) for m in ASR_MODELS if m["id"] == model)
+        return size + size // 100
+
+    def models_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Deletes a downloaded ASR model; the engine's checks in the engine's order."""
+        if set(params) - {"model"}:
+            raise ProtocolError(
+                "invalid_params", f"unknown parameter {min(set(params) - {'model'})!r}"
+            )
+        model = params.get("model")
+        if not isinstance(model, str) or not model:
+            raise ProtocolError("invalid_params", "model must be a non-empty string")
+        if model not in {m["id"] for m in ASR_MODELS}:
+            raise ProtocolError("unknown_model", f"unknown ASR model {model!r}")
+        with self.lock:
+            session = self.session
+            users = []
+            if (
+                session is not None
+                and session.is_alive()
+                and model in session.asr_models
+            ):
+                users.append(f"session {session.session_id}")
+            if model in self.downloading:
+                users.append("a download")
+            if users:
+                raise ProtocolError(
+                    "model_in_use",
+                    f"ASR model {model} is in use by {', '.join(users)}; stop it first",
+                )
+            freed = self._disk_bytes(model)
+            if freed is None:
+                raise ProtocolError(
+                    "model_not_downloaded", f"ASR model {model} is not downloaded"
+                )
+            self.downloaded.discard(model)
+        log(f"deleted {model} ({freed} bytes)")
+        return {"model": model, "freed_bytes": freed}
+
     def models_download(self, params: dict[str, Any]) -> dict[str, Any]:
         model = params.get("model")
         sizes = {m["id"]: int(m["size_bytes"]) for m in ASR_MODELS}
@@ -1378,7 +1609,13 @@ class FakeEngine:
             if self.session is not None and self.session.is_alive():
                 raise ProtocolError("session_active", "a session is already running")
             settings = copy.deepcopy(self.settings)
-            session = Session(self.next_session_id, mode, self.writer, settings)
+            session = Session(
+                self.next_session_id,
+                mode,
+                self.writer,
+                settings,
+                metrics_profile=self.metrics_profile,
+            )
             session.start_error = self._start_error({**settings, "mode": mode})
             self.next_session_id += 1
             self.session = session
@@ -1513,6 +1750,13 @@ def main() -> int:
         help="fake translation server: ollama (pulls work), openai (pull_unsupported), "
         "offline (translation_server_unreachable), auth (translation_server_auth_failed)",
     )
+    parser.add_argument(
+        "--metrics",
+        choices=METRICS_PROFILES,
+        default="normal",
+        help="fake input: normal, silent (below -60 dBFS: the no-audio hint) or "
+        "backlog (grows past 3 sentences: the can't-keep-up warning)",
+    )
     args = parser.parse_args()
     if args.garbage_every < 0 or args.crash_after < 0:
         parser.error("arguments must be non-negative")
@@ -1522,6 +1766,7 @@ def main() -> int:
         writer,
         ignore_shutdown=args.ignore_shutdown,
         translation_server=args.translation_server,
+        metrics_profile=args.metrics,
     )
     if args.crash_after > 0:
 

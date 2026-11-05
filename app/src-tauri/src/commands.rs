@@ -28,7 +28,8 @@ const QUICK: Duration = Duration::from_secs(10);
 /// `settings.preview_languages`, `models.pull_translation`) run `nvidia-smi` and
 /// probe the translation server (2 s timeout per address), and the engine runs
 /// them one at a time in arrival order, so a request may first wait for the
-/// ones queued before it.
+/// ones queued before it. `models.delete` uses the same deadline: removing a
+/// multi-GB model folder can take seconds on a slow disk.
 const BACKGROUND: Duration = Duration::from_secs(45);
 /// The engine answers `session.start` after validating, before loading models.
 const SESSION_START: Duration = Duration::from_secs(30);
@@ -218,6 +219,20 @@ pub fn models_download_params(model: &str, accept_license: bool) -> Result<Value
     Ok(json!({ "model": model }))
 }
 
+/// `models.delete` parameters (competitive-features.md F7). Only downloaded
+/// speech recognition models can be deleted; the GPU runtime is refused here so
+/// a misbehaving webview cannot even ask, and the engine re-checks the rest
+/// (registry id, not in use, path inside the model cache).
+pub fn models_delete_params(model: &str) -> Result<Value, RequestError> {
+    validate_model_id(model)?;
+    if model == GPU_RUNTIME_ID {
+        return Err(invalid(
+            "models.delete only applies to speech recognition models",
+        ));
+    }
+    Ok(json!({ "model": model }))
+}
+
 /// `models.validate` parameters: the candidate partial settings, or none to
 /// check the saved settings.
 pub fn models_validate_params(settings: Option<&Value>) -> Result<Value, RequestError> {
@@ -255,6 +270,13 @@ pub async fn models_download(
 ) -> CmdResult<Value> {
     let params = models_download_params(&model, accept_license.unwrap_or(false))?;
     bridge.request("models.download", params, QUICK).await
+}
+
+/// Deletes a downloaded ASR model; answers `{model, freed_bytes}`.
+#[tauri::command]
+pub async fn models_delete(bridge: State<'_, EngineBridge>, model: String) -> CmdResult<Value> {
+    let params = models_delete_params(&model)?;
+    bridge.request("models.delete", params, BACKGROUND).await
 }
 
 #[tauri::command]
@@ -727,6 +749,18 @@ mod tests {
             json!({"model": "gpu-runtime"})
         );
         assert!(models_download_params("../x", false).is_err());
+    }
+
+    #[test]
+    fn delete_params_only_take_asr_model_ids() {
+        assert_eq!(
+            models_delete_params("large-v3").unwrap(),
+            json!({"model": "large-v3"})
+        );
+        for bad in ["", "../x", "a/b", GPU_RUNTIME_ID] {
+            assert!(models_delete_params(bad).is_err(), "{bad:?}");
+        }
+        assert!(models_delete_params(&"m".repeat(MAX_MODEL_ID_CHARS + 1)).is_err());
     }
 
     #[test]

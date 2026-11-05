@@ -246,6 +246,38 @@ select {
   gap: 8px;
 }
 
+/* Input level and median latency of the running session (lib/metrics.ts). */
+.metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: var(--t-xs);
+  color: var(--on-ai-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.meter {
+  flex: 1;
+  max-width: 96px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.14);
+  overflow: hidden;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--kihada);
+  transition: width 300ms linear;
+}
+
+.meter[data-quiet="true"] .meter-fill {
+  background: var(--on-ai-dim);
+}
+
 .engine-detail {
   margin-top: 4px !important;
   color: var(--on-ai-dim);
@@ -385,10 +417,32 @@ legend {
   border-color: var(--nezumi);
 }
 
+/* Irreversible actions (deleting a model) after a confirmation. */
+.danger {
+  padding: 8px 18px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: var(--beni);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .primary:disabled,
-.ghost:disabled {
+.ghost:disabled,
+.danger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Text only for screen readers (e.g. the header of the glossary's button column). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .switch {
@@ -647,8 +701,12 @@ input[type="range"] {
   overflow-wrap: anywhere;
 }
 
-/* The utterance still being heard: lighter text, yellow edge. */
-.utt.is-partial .utt-orig,
+/*
+ * The utterance still being heard: yellow edge, lighter translation. Of the
+ * original only the tail that may still change is faded; the settled prefix
+ * (`stable_chars`, lib/stable.ts) is already final-looking.
+ */
+.utt.is-partial .utt-unstable,
 .utt.is-partial .utt-tr {
   opacity: 0.5;
 }
@@ -1123,4 +1181,74 @@ textarea {
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* ---------- Models: disk use and deletion (F7) ---------- */
+
+.model-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.model-disk {
+  color: var(--nezumi);
+  font-size: var(--t-sm);
+}
+
+.delete-confirm {
+  flex-basis: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  background: var(--beni-soft);
+}
+
+.delete-confirm p {
+  margin: 0 0 8px;
+}
+
+/* ---------- Settings: glossary (F3) ---------- */
+
+.glossary-wrap {
+  max-height: 420px;
+  overflow: auto;
+  margin: 12px 0 6px;
+}
+
+.glossary {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.glossary th {
+  position: sticky;
+  top: 0;
+  background: var(--paper);
+  text-align: left;
+  font-weight: 400;
+  font-size: var(--t-sm);
+  color: var(--nezumi);
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.glossary td {
+  padding: 6px 8px 6px 0;
+  vertical-align: top;
+}
+
+.glossary td:nth-child(1),
+.glossary td:nth-child(2) {
+  width: 36%;
+}
+
+.glossary td.has-error input,
+.glossary td.has-error select {
+  border-color: var(--beni);
+}
+
+.glossary-actions {
+  width: 1%;
+  white-space: nowrap;
 }

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_RECENT_LOG, RecentLog, buildDiagnostics, redactSettings, redactText, type DiagnosticsInput } from "./diagnostics";
+import {
+  MAX_RECENT_LOG,
+  RecentLog,
+  buildDiagnostics,
+  redactSettings,
+  redactText,
+  settingsForReport,
+  type DiagnosticsInput,
+} from "./diagnostics";
 import { DEFAULT_SETTINGS } from "./settings";
 import type { HardwareInfo, Settings } from "./types";
 
@@ -140,5 +148,24 @@ describe("buildDiagnostics", () => {
     expect(text).toContain("not detected yet");
     expect(text).toContain("not loaded");
     expect(text).toContain("none");
+  });
+});
+
+describe("glossary in the report", () => {
+  it("lists only how many entries there are, never the terms", () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      translation: {
+        ...DEFAULT_SETTINGS.translation,
+        glossary: { builtin: false, entries: [{ source: "secret-term", target: "x", target_language: null }] },
+      },
+    };
+    expect((settingsForReport(settings) as typeof settings).translation.glossary).toEqual({
+      builtin: false,
+      entries: "1 entries (not included)",
+    });
+    const text = buildDiagnostics(input({ settings }));
+    expect(text).not.toContain("secret-term");
+    expect(text).toContain("1 entries (not included)");
   });
 });

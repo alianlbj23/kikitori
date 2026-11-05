@@ -34,6 +34,8 @@ const EVENT_SUBTITLE: &str = "engine://subtitle";
 const EVENT_STATUS: &str = "engine://status";
 const EVENT_DOWNLOAD: &str = "engine://download-progress";
 const EVENT_LOG: &str = "engine://log";
+/// Input level, backlog and latency once a second (main window status bar).
+const EVENT_METRICS: &str = "engine://metrics";
 const EVENT_BRIDGE: &str = "bridge://state";
 /// Sent to the main window by the "toggle translation" shortcut: switching
 /// needs an engine call and the settings, which live there.
@@ -78,6 +80,12 @@ impl EventSink for TauriSink {
             }
             EngineEvent::DownloadProgress(p) => self.emit(EVENT_DOWNLOAD, p),
             EngineEvent::Log(p) => self.emit(EVENT_LOG, p),
+            // Only the main window shows it; the overlay never listens.
+            EngineEvent::Metrics(p) => {
+                if let Err(e) = self.app.emit_to(MAIN_LABEL, EVENT_METRICS, p) {
+                    log::error!("cannot emit {EVENT_METRICS}: {e}");
+                }
+            }
             // Filtered out by the connection already; nothing to forward.
             EngineEvent::Unknown { name } => log::debug!("unknown event {name} reached the sink"),
         }
@@ -218,6 +226,7 @@ pub fn run() {
             commands::models_download,
             commands::models_validate,
             commands::models_pull_translation,
+            commands::models_delete,
             commands::languages_list,
             commands::devices_list,
             commands::settings_get,

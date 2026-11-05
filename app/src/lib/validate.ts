@@ -24,6 +24,8 @@ import type {
   HardwareInfo,
   HardwareReport,
   LogEvent,
+  MetricsEvent,
+  ModelDeleteResult,
   ModelRole,
   ModelsList,
   ObsStatus,
@@ -143,6 +145,10 @@ export function parseSubtitle(v: unknown): SubtitleEvent {
     start_sample: uint(o, "start_sample", p),
     end_sample: uint(o, "end_sample", p),
     session_id: optUint(o, "session_id", p),
+    // Partial-only and final-only hints; dropped where they do not belong so
+    // the renderers never have to second-guess them.
+    stable_chars: o.is_final === false ? optUint(o, "stable_chars", p) : null,
+    latency_ms: o.is_final === true ? optUint(o, "latency_ms", p) : null,
   };
   if (ev.end_sample < ev.start_sample) {
     throw new ValidationError(`${p}.end_sample`, "before start_sample");
@@ -188,6 +194,22 @@ export function parseDownloadProgress(v: unknown): DownloadProgressEvent {
         ? "downloading"
         : oneOf(o, "state", p, ["downloading", "done", "error"] as const),
     error: optStr(o, "error", p),
+  };
+}
+
+/** `metrics` (F4). Rust has checked the ranges; the level is clamped again for the meter. */
+export function parseMetrics(v: unknown): MetricsEvent {
+  const p = "metrics";
+  const o = obj(v, p);
+  const level = o.level_dbfs;
+  if (typeof level !== "number" || !Number.isFinite(level)) {
+    throw new ValidationError(`${p}.level_dbfs`, "expected a number");
+  }
+  return {
+    session_id: optUint(o, "session_id", p),
+    level_dbfs: Math.min(0, Math.max(-120, level)),
+    backlog: uint(o, "backlog", p),
+    latency_ms_median: optUint(o, "latency_ms_median", p),
   };
 }
 
@@ -499,7 +521,16 @@ function parseAsrModel(v: unknown, path: string): AsrModel {
     vram_mb: optUint(o, "vram_mb", path),
     vram_int8_mb: optUint(o, "vram_int8_mb", path),
     recommended_for: roles(o.recommended_for),
+    // Older engines do not report it.
+    disk_bytes: optUint(o, "disk_bytes", path),
   };
+}
+
+/** `models.delete`: `{model, freed_bytes}`. */
+export function parseModelDeleteResult(v: unknown): ModelDeleteResult {
+  const p = "models.delete";
+  const o = obj(v, p);
+  return { model: str(o, "model", p, 100), freed_bytes: uint(o, "freed_bytes", p) };
 }
 
 function parseGpuRuntime(v: unknown, p: string): GpuRuntime {

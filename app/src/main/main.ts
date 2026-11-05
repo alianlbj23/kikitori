@@ -10,7 +10,10 @@
  * downloads before starting and the "顯示翻譯" switch follow the same split
  * (`lib/languages.ts`, `lib/start-downloads.ts`, `lib/translation-toggle.ts`),
  * as do transcript export, the translation-server guide and the diagnostics
- * report (`lib/export.ts`, `lib/translation-guide.ts`, `lib/diagnostics.ts`).
+ * report (`lib/export.ts`, `lib/translation-guide.ts`, `lib/diagnostics.ts`),
+ * the glossary editor, the status-bar metrics, model deletion and the
+ * end-of-session auto-save wait (`lib/glossary.ts`, `lib/metrics.ts`,
+ * `lib/model-delete.ts`, `lib/session-end.ts`).
  */
 
 import { getVersion } from "@tauri-apps/api/app";
@@ -86,7 +89,32 @@ import {
   type LanguageField,
   type LanguageForm,
 } from "../lib/languages";
+import {
+  GLOSSARY_MAX_CSV_BYTES,
+  glossaryErrorForEnginePath,
+  glossaryFileName,
+  glossaryPatch,
+  glossaryToCsv,
+  hasGlossaryErrors,
+  mergeGlossary,
+  parseGlossaryCsv,
+  validateGlossary,
+  type GlossaryErrorTarget,
+  type GlossaryField,
+  type GlossaryRowErrors,
+} from "../lib/glossary";
 import { formatEngineMessage, type EngineMessage } from "../lib/messages";
+import {
+  applyMetrics,
+  dismissMetricsWarning,
+  emptyMetrics,
+  metricsSessionState,
+  metricsView,
+  noAudioDueAt,
+  type MetricsState,
+  type MetricsWarning,
+} from "../lib/metrics";
+import { deleteBlockedText, deleteConfirmText, deleteOffer } from "../lib/model-delete";
 import {
   FirstRunGate,
   dismissedWith,
@@ -116,6 +144,7 @@ import {
   type FormErrors,
   type SettingsForm,
 } from "../lib/settings";
+import { SessionEndSave } from "../lib/session-end";
 import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
 import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
 import { translationGuide } from "../lib/translation-guide";
@@ -124,14 +153,17 @@ import type {
   AboutInfo,
   AppliedRecommendation,
   AsrChoice,
+  AsrModel,
   BridgeStatus,
   DeviceInfo,
   DownloadProgressEvent,
   EngineState,
+  GlossaryEntry,
   HardwareReport,
   LanguageInfo,
   LanguagePreview,
   LicenseFolder,
+  MetricsEvent,
   Mode,
   ModelsList,
   ObsStatus,
@@ -215,6 +247,33 @@ interface State {
   /** The translation-server guide is shown (its notice appears once per appearance). */
   guideShown: boolean;
   appVersion: string | null;
+  /** Level meter, latency and warnings of the running session (lib/metrics.ts). */
+  metrics: MetricsState;
+  /** The glossary editor (settings page). */
+  glossary: GlossaryEditor;
+  /** ASR models with a `models.delete` in flight. */
+  deleting: Set<string>;
+  /** The model whose delete confirmation is open (one at a time). */
+  confirmDelete: string | null;
+}
+
+/** One table row; `id` keeps the row's elements when others are added or removed. */
+interface GlossaryRow {
+  id: number;
+  entry: GlossaryEntry;
+}
+
+interface GlossaryEditor {
+  builtin: boolean;
+  rows: GlossaryRow[];
+  /** The table differs from the saved settings; reloads keep the edits. */
+  dirty: boolean;
+  /** The engine's rejection of the last save, until the user edits that place. */
+  engineError: { target: GlossaryErrorTarget; message: string } | null;
+  /** A `settings.set` is in flight (Save stays disabled). */
+  saving: boolean;
+  /** Counts edits, so a save does not overwrite rows changed while it was in flight. */
+  revision: number;
 }
 
 /** State of the recommended-combination preview under the language menus. */
@@ -265,6 +324,10 @@ const state: State = {
   obs: null,
   guideShown: false,
   appVersion: null,
+  metrics: emptyMetrics(),
+  glossary: { builtin: true, rows: [], dirty: false, engineError: null, saving: false, revision: 0 },
+  deleting: new Set(),
+  confirmDelete: null,
 };
 
 /** Last engine messages for "複製診斷資訊". */
@@ -375,6 +438,22 @@ const el = {
   copyDiagnostics: byId<HTMLButtonElement>("copy-diagnostics"),
   diagnosticsStatus: byId("diagnostics-status"),
   diagnosticsText: byId<HTMLTextAreaElement>("diagnostics-text"),
+  metrics: byId("metrics"),
+  levelMeter: byId("level-meter"),
+  levelFill: byId("level-fill"),
+  latency: byId("latency"),
+  glossaryForm: byId<HTMLFormElement>("glossary-form"),
+  glossaryBuiltin: byId<HTMLInputElement>("f-glossary-builtin"),
+  glossaryRows: byId("glossary-rows"),
+  glossaryEmpty: byId("glossary-empty"),
+  glossaryListError: byId("glossary-list-error"),
+  glossaryAdd: byId<HTMLButtonElement>("glossary-add"),
+  glossaryImport: byId<HTMLButtonElement>("glossary-import"),
+  glossaryFile: byId<HTMLInputElement>("glossary-file"),
+  glossaryExport: byId<HTMLButtonElement>("glossary-export"),
+  glossarySave: byId<HTMLButtonElement>("glossary-save"),
+  glossaryReset: byId<HTMLButtonElement>("glossary-reset"),
+  glossaryStatus: byId("glossary-status"),
 };
 
 // ---------------------------------------------------------------- notices
@@ -449,14 +528,25 @@ function engineReady(): boolean {
   return state.bridge?.phase === "ready";
 }
 
+/** Auto-save waits for the engine's "idle" (or 2 s) so a final sent after Stop is included. */
+const sessionEnd = new SessionEndSave(() => void autoSaveTranscript(), {
+  set: (run, ms) => window.setTimeout(run, ms),
+  clear: (handle) => window.clearTimeout(handle),
+});
+
 /**
  * Every change of the session state goes through here, so the end of a
  * session (stop, engine error, engine restart) is noticed in one place.
+ * `fromEngine`: the engine itself reported the state (or is gone), so no
+ * subtitle of the ended session can still arrive.
  */
-function setSessionState(next: EngineState): void {
+function setSessionState(next: EngineState, fromEngine: boolean): void {
   const wasActive = sessionActive();
   state.sessionState = next;
-  if (wasActive && !sessionActive()) void autoSaveTranscript();
+  if (wasActive && !sessionActive()) sessionEnd.ended(fromEngine);
+  else if (fromEngine && !sessionActive()) sessionEnd.engineIdle();
+  state.metrics = metricsSessionState(state.metrics, next, state.sessionId);
+  renderMetrics();
 }
 
 function renderStatus(): void {
@@ -486,6 +576,64 @@ function renderStatus(): void {
   el.aboutEngine.textContent = info
     ? t(info.fake ? "about.engineFake" : "about.engine", { version: info.version, protocol: info.protocol_version })
     : t("about.engineOffline");
+}
+
+// ---------------------------------------------------------------- status bar metrics
+
+const METRICS_NOTICES: Readonly<Record<MetricsWarning, string>> = { backlog: "metrics-backlog", no_audio: "metrics-no-audio" };
+/**
+ * Warnings whose notice was shown for the current occurrence. A notice pushed
+ * out by newer ones (the list keeps three) is not re-added every second.
+ */
+const shownMetricsWarnings = new Set<MetricsWarning>();
+let noAudioTimer: number | undefined;
+
+function onMetrics(ev: MetricsEvent): void {
+  state.metrics = applyMetrics(state.metrics, ev, Date.now());
+  renderMetrics();
+}
+
+/**
+ * Meter, median latency and the two warnings (lib/metrics.ts). The no-audio
+ * hint is re-checked by a timer too: metrics may stop arriving.
+ */
+function renderMetrics(): void {
+  const now = Date.now();
+  const view = metricsView(state.metrics, now);
+  el.metrics.hidden = !view.visible;
+  const level = view.level ?? 0;
+  el.levelFill.style.width = `${Math.round(level * 100)}%`;
+  el.levelMeter.dataset.quiet = String(view.level === null || level === 0);
+  el.levelMeter.setAttribute("aria-valuenow", String(Math.round(view.levelDbfs ?? -120)));
+  el.levelMeter.setAttribute("aria-valuetext", view.levelDbfs === null ? t("metrics.levelUnknown") : t("metrics.levelValue", { db: Math.round(view.levelDbfs) }));
+  el.levelMeter.title = t("metrics.levelLabel");
+  el.latency.textContent =
+    view.latencyMs === null ? t("metrics.latencyUnknown") : t("metrics.latency", { seconds: (view.latencyMs / 1000).toFixed(1) });
+  el.latency.title = t("metrics.latencyHelp");
+
+  for (const warning of ["backlog", "no_audio"] as const) {
+    const key = METRICS_NOTICES[warning];
+    const show = view.warnings.includes(warning);
+    if (!show) {
+      noticeFor(key)?.remove();
+      shownMetricsWarnings.delete(warning);
+      continue;
+    }
+    if (shownMetricsWarnings.has(warning)) continue;
+    shownMetricsWarnings.add(warning);
+    const actions: NoticeAction[] =
+      warning === "backlog" ? [{ label: t("metrics.openModels"), run: () => showPage("models") }] : [];
+    notify(warning === "backlog" ? t("metrics.backlog") : t("metrics.noAudio"), "info", actions, {
+      key,
+      onClose: () => {
+        state.metrics = dismissMetricsWarning(state.metrics, warning);
+      },
+    });
+  }
+
+  window.clearTimeout(noAudioTimer);
+  const due = noAudioDueAt(state.metrics, now);
+  if (due !== null) noAudioTimer = window.setTimeout(renderMetrics, due - now + 50);
 }
 
 function renderModeNotes(): void {
@@ -564,7 +712,7 @@ async function toggleSession(): Promise<void> {
   try {
     if (sessionActive()) {
       await api.sessionStop();
-      setSessionState("idle");
+      setSessionState("idle", false);
     } else {
       startFlow.reset();
       // Chosen speech models that are not downloaded yet (or still downloading):
@@ -589,13 +737,15 @@ async function toggleSession(): Promise<void> {
 /** `session.start` with the current mode and device; resets the transcript. */
 async function startSession(): Promise<void> {
   const deviceId = el.device.value === "" ? null : el.device.value;
+  // A previous session still waiting for its last final is saved before its log is reset.
+  sessionEnd.flush();
   const sessionId = await api.sessionStart(state.mode, deviceId);
   state.sessionId = sessionId;
   state.subtitles = emptySubtitles(sessionId);
   state.exportLog = emptySubtitles(sessionId);
   state.sessionStartedAt = new Date();
   state.sessionMode = state.mode;
-  setSessionState("loading");
+  setSessionState("loading", false);
   renderTranscript();
   if (state.overlay && !state.overlay.visible) {
     await setOverlayVisible(true);
@@ -684,7 +834,10 @@ function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
     target: languageName(line.targetLanguage),
   });
   const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
-  orig.textContent = shown.original;
+  // Settled prefix at normal emphasis, the tail that may still change faded (F2).
+  const [stable, unstable] = orig.children as unknown as [HTMLElement, HTMLElement];
+  stable.textContent = shown.originalParts.stable;
+  unstable.textContent = shown.originalParts.unstable;
   orig.lang = htmlLang(line.sourceLanguage);
   tr.textContent = shown.translation;
   tr.lang = htmlLang(line.targetLanguage);
@@ -699,7 +852,13 @@ function newLineElement(): HTMLLIElement {
     h("span", { class: "utt-time" }),
     h("span", { class: "utt-lang" }),
     // dir="auto": Arabic runs right to left, line by line.
-    h("div", { class: "utt-text" }, h("p", { class: "utt-orig", dir: "auto" }), h("p", { class: "utt-tr", dir: "auto" })),
+    // The two spans carry no dir of their own: the paragraph's direction orders them.
+    h(
+      "div",
+      { class: "utt-text" },
+      h("p", { class: "utt-orig", dir: "auto" }, h("span", { class: "utt-stable" }), h("span", { class: "utt-unstable" })),
+      h("p", { class: "utt-tr", dir: "auto" }),
+    ),
   );
 }
 
@@ -758,10 +917,21 @@ function exportContent(): ExportContent {
   return (EXPORT_CONTENTS as readonly string[]).includes(v) ? (v as ExportContent) : "both";
 }
 
+/** What one export writes: taken at once, so a new session starting mid-save cannot mix in. */
+interface TranscriptSnapshot {
+  lines: readonly SubtitleLine[];
+  startedAt: Date;
+  mode: Mode;
+}
+
+function transcriptSnapshot(): TranscriptSnapshot {
+  return { lines: state.exportLog.lines, startedAt: state.sessionStartedAt ?? new Date(), mode: state.sessionMode };
+}
+
 /** Writes one format through Rust; resolves to the saved path. */
-async function saveTranscript(format: ExportFormat, content: ExportContent): Promise<string> {
-  const name = transcriptFileName(state.sessionStartedAt ?? new Date(), state.sessionMode, format);
-  return api.transcriptSave(name, exportTranscript(state.exportLog.lines, format, content));
+async function saveTranscript(snap: TranscriptSnapshot, format: ExportFormat, content: ExportContent): Promise<string> {
+  const name = transcriptFileName(snap.startedAt, snap.mode, format);
+  return api.transcriptSave(name, exportTranscript(snap.lines, format, content));
 }
 
 function notifySaved(text: string): void {
@@ -774,7 +944,7 @@ async function exportAs(format: ExportFormat): Promise<void> {
   if (!hasExportableLines(state.exportLog.lines)) return;
   for (const button of exportFormatButtons()) button.disabled = true;
   try {
-    const path = await saveTranscript(format, exportContent());
+    const path = await saveTranscript(transcriptSnapshot(), format, exportContent());
     el.exportMenu.open = false;
     notifySaved(t("export.saved", { path }));
   } catch (e) {
@@ -790,9 +960,10 @@ async function autoSaveTranscript(): Promise<void> {
   const session = `${state.exportLog.sessionId ?? "-"}@${state.sessionStartedAt?.getTime() ?? 0}`;
   if (state.autoSavedSession === session) return;
   state.autoSavedSession = session;
+  const snap = transcriptSnapshot();
   try {
-    const srt = await saveTranscript("srt", "both");
-    await saveTranscript("txt", "both");
+    const srt = await saveTranscript(snap, "srt", "both");
+    await saveTranscript(snap, "txt", "both");
     notifySaved(t("export.savedAuto", { path: srt }));
   } catch (e) {
     reportError("error.autoSave", e);
@@ -1439,7 +1610,80 @@ function onGpuRuntimeInstalled(): void {
 
 // ---------------------------------------------------------------- models page: lists
 
-function downloadCell(model: { id: string; downloaded: boolean }): HTMLElement {
+/** "Downloaded", the space it takes, and Delete with an in-page confirmation (F7). */
+function downloadedCell(model: AsrModel): HTMLElement {
+  const offer = deleteOffer(model, {
+    fastModel: state.settings?.asr.fast_model ?? null,
+    finalModel: state.settings?.asr.final_model ?? null,
+    sessionActive: sessionActive(),
+    downloading: state.downloads.get(model.id)?.state === "downloading",
+    deleting: state.deleting.has(model.id),
+    engineReady: engineReady(),
+  });
+  const wrap = h(
+    "div",
+    { class: "model-state" },
+    h("span", { class: "ok" }, t("asr.downloaded")),
+    model.disk_bytes === null ? null : h("span", { class: "model-disk" }, t("asr.diskUse", { size: formatBytes(model.disk_bytes) })),
+  );
+  if (!offer) return wrap;
+  // A confirmation interrupted by a block (session start, engine restart) is dropped,
+  // so it never reappears without a click.
+  if (state.confirmDelete === model.id && offer.blocked !== null) state.confirmDelete = null;
+  if (state.confirmDelete === model.id) {
+    const yes = h("button", { type: "button", class: "danger" }, t("asr.deleteYes"));
+    yes.addEventListener("click", () => void deleteModel(model));
+    const no = h("button", { type: "button", class: "ghost" }, t("asr.deleteNo"));
+    no.addEventListener("click", () => {
+      state.confirmDelete = null;
+      renderModels();
+    });
+    wrap.append(
+      h("div", { class: "delete-confirm", role: "group" }, h("p", {}, deleteConfirmText(model, offer)), h("div", { class: "gpu-actions" }, yes, no)),
+    );
+    return wrap;
+  }
+  const del = h(
+    "button",
+    { type: "button", class: "ghost", title: offer.blocked ? deleteBlockedText(offer.blocked) : null },
+    offer.blocked === "deleting" ? t("asr.deleting") : t("asr.delete"),
+  );
+  del.disabled = offer.blocked !== null;
+  del.addEventListener("click", () => {
+    state.confirmDelete = model.id;
+    renderModels();
+    // Keyboard users land on the safe choice (only when it opens, not on every redraw).
+    el.asrModels.querySelector<HTMLButtonElement>(".delete-confirm .ghost")?.focus();
+  });
+  wrap.append(del);
+  return wrap;
+}
+
+/** `models.delete` after the user confirmed; the list is reloaded either way. */
+async function deleteModel(model: AsrModel): Promise<void> {
+  state.confirmDelete = null;
+  state.deleting.add(model.id);
+  renderModels();
+  try {
+    const result = await api.modelsDelete(model.id);
+    notify(t("asr.deleted", { model: result.model, size: formatBytes(result.freed_bytes) }));
+  } catch (e) {
+    // model_not_downloaded / model_in_use / unknown_model have their own sentences;
+    // the reload below shows the list as the engine sees it now.
+    reportError("error.deleteModel", e, { model: model.id });
+  } finally {
+    state.deleting.delete(model.id);
+  }
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("error.readModels", e);
+  }
+  renderModels();
+  renderMissingNotice();
+}
+
+function downloadCell(model: AsrModel): HTMLElement {
   const progress = state.downloads.get(model.id);
   if (progress && progress.state === "downloading") {
     const pct = percent(progress.downloaded_bytes, progress.total_bytes);
@@ -1450,7 +1694,7 @@ function downloadCell(model: { id: string; downloaded: boolean }): HTMLElement {
       h("span", {}, t("asr.progress", { percent: pct, done: formatBytes(progress.downloaded_bytes) })),
     );
   }
-  if (model.downloaded) return h("span", { class: "ok" }, t("asr.downloaded"));
+  if (model.downloaded) return downloadedCell(model);
   const wrap = h("div", {});
   if (progress?.state === "error") {
     wrap.append(
@@ -1975,6 +2219,253 @@ async function pushOverlayStyle(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- settings page: glossary
+
+let nextGlossaryRowId = 1;
+/** Rows added in this window and not edited yet: their "required" errors wait for a save attempt. */
+const freshGlossaryRows = new Set<number>();
+const GLOSSARY_FIELDS: readonly GlossaryField[] = ["source", "target", "target_language"];
+
+function glossaryEntries(): GlossaryEntry[] {
+  return state.glossary.rows.map((r) => r.entry);
+}
+
+function toGlossaryRows(entries: readonly GlossaryEntry[]): GlossaryRow[] {
+  return entries.map((entry) => ({ id: nextGlossaryRowId++, entry: { ...entry } }));
+}
+
+/** Puts the saved glossary into the editor unless the user has unsaved edits (or `force`). */
+function fillGlossary(settings: Settings, force = false): void {
+  if (state.glossary.dirty && !force) return;
+  const g = settings.translation.glossary;
+  state.glossary = {
+    builtin: g.builtin,
+    rows: toGlossaryRows(g.entries),
+    dirty: false,
+    engineError: null,
+    saving: false,
+    revision: state.glossary.revision,
+  };
+  freshGlossaryRows.clear();
+  el.glossaryStatus.textContent = "";
+  renderGlossary();
+}
+
+/** Local problems plus the engine's last rejection, placed on its row (or the list). */
+function glossaryErrors(): { rows: Map<number, GlossaryRowErrors>; list: string | null } {
+  const local = validateGlossary(glossaryEntries(), state.languages?.map((l) => l.code) ?? null);
+  const rows = new Map(local.rows);
+  let list = local.list;
+  const rejected = state.glossary.engineError;
+  if (rejected) {
+    const message = t("form.engineRejected", { message: rejected.message });
+    if (rejected.target.kind === "entry" && rejected.target.index < state.glossary.rows.length) {
+      const field = rejected.target.field ?? "source";
+      const current = rows.get(rejected.target.index) ?? {};
+      if (!current[field]) rows.set(rejected.target.index, { ...current, [field]: message });
+    } else {
+      list = list ?? message;
+    }
+  }
+  return { rows, list };
+}
+
+function glossaryLanguageSelect(value: string | null, label: string): HTMLSelectElement {
+  const options = [h("option", { value: "" }, t("glossary.allLanguages"))];
+  const list = state.languages ?? [];
+  for (const o of languageOptions(list)) options.push(h("option", { value: o.value, dir: "auto" }, o.label));
+  // A code the list does not have (older settings) stays visible instead of silently changing.
+  if (value !== null && !list.some((l) => l.code === value)) options.push(h("option", { value }, value));
+  const select = h("select", { "data-field": "target_language", "aria-label": label }, ...options);
+  select.value = value ?? "";
+  return select;
+}
+
+function glossaryRowElement(row: GlossaryRow, index: number): HTMLTableRowElement {
+  const n = index + 1;
+  const input = (field: "source" | "target", label: string) => {
+    const i = h("input", { "data-field": field, "aria-label": label, autocomplete: "off", spellcheck: "false", dir: "auto" });
+    i.value = row.entry[field];
+    return i;
+  };
+  const cell = (control: HTMLElement, field: GlossaryField) =>
+    h("td", { "data-cell": field }, control, h("p", { class: "field-error", "data-error-for": field }));
+  const remove = h(
+    "button",
+    { type: "button", class: "ghost", "aria-label": t("glossary.removeLabel", { row: n }) },
+    t("glossary.remove"),
+  );
+  remove.addEventListener("click", () => removeGlossaryRow(row.id));
+  return h(
+    "tr",
+    { "data-row": row.id },
+    cell(input("source", t("glossary.sourceLabel", { row: n })), "source"),
+    cell(input("target", t("glossary.targetLabel", { row: n })), "target"),
+    cell(glossaryLanguageSelect(row.entry.target_language, t("glossary.languageLabel", { row: n })), "target_language"),
+    h("td", { class: "glossary-actions" }, remove),
+  );
+}
+
+/** Rebuilds the table (rows added, removed, imported, reloaded or relabelled). */
+function renderGlossary(): void {
+  el.glossaryBuiltin.checked = state.glossary.builtin;
+  replace(el.glossaryRows, ...state.glossary.rows.map((row, i) => glossaryRowElement(row, i)));
+  el.glossaryEmpty.hidden = state.glossary.rows.length > 0;
+  renderGlossaryErrors();
+}
+
+/** Updates only error texts and buttons, so typing never loses focus. */
+function renderGlossaryErrors(): void {
+  const errors = glossaryErrors();
+  state.glossary.rows.forEach((row, i) => {
+    const tr = el.glossaryRows.querySelector<HTMLElement>(`tr[data-row="${row.id}"]`);
+    if (!tr) return;
+    const rowErrors = freshGlossaryRows.has(row.id) ? {} : (errors.rows.get(i) ?? {});
+    for (const field of GLOSSARY_FIELDS) {
+      const message = rowErrors[field] ?? "";
+      const slot = tr.querySelector<HTMLElement>(`[data-error-for="${field}"]`);
+      if (slot) slot.textContent = message;
+      tr.querySelector(`[data-field="${field}"]`)?.setAttribute("aria-invalid", String(message !== ""));
+      tr.querySelector(`[data-cell="${field}"]`)?.classList.toggle("has-error", message !== "");
+    }
+  });
+  el.glossaryListError.textContent = errors.list ?? "";
+  el.glossarySave.disabled = !engineReady() || !state.settings || !state.glossary.dirty || state.glossary.saving;
+  el.glossaryReset.disabled = !state.glossary.dirty;
+  el.glossaryExport.disabled = state.glossary.rows.length === 0;
+}
+
+function markGlossaryEdited(): void {
+  state.glossary.dirty = true;
+  state.glossary.revision++;
+  el.glossaryStatus.textContent = "";
+}
+
+function addGlossaryRow(): void {
+  const [row] = toGlossaryRows([{ source: "", target: "", target_language: null }]);
+  if (!row) return;
+  state.glossary.rows.push(row);
+  freshGlossaryRows.add(row.id);
+  // Row positions changed: an engine error by index no longer points at the right row.
+  state.glossary.engineError = null;
+  markGlossaryEdited();
+  renderGlossary();
+  el.glossaryRows.querySelector<HTMLInputElement>(`tr[data-row="${row.id}"] [data-field="source"]`)?.focus();
+}
+
+function removeGlossaryRow(id: number): void {
+  const index = state.glossary.rows.findIndex((r) => r.id === id);
+  if (index < 0) return;
+  state.glossary.rows.splice(index, 1);
+  freshGlossaryRows.delete(id);
+  state.glossary.engineError = null;
+  markGlossaryEdited();
+  renderGlossary();
+  // Keep the keyboard in the table: the next row's (or the previous row's) remove button.
+  const next = state.glossary.rows[Math.min(index, state.glossary.rows.length - 1)];
+  const focus = next
+    ? el.glossaryRows.querySelector<HTMLButtonElement>(`tr[data-row="${next.id}"] .glossary-actions button`)
+    : el.glossaryAdd;
+  focus?.focus();
+}
+
+function onGlossaryInput(e: Event): void {
+  const control = e.target;
+  if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement)) return;
+  const id = Number(control.closest<HTMLElement>("tr[data-row]")?.dataset.row);
+  const index = state.glossary.rows.findIndex((r) => r.id === id);
+  const row = state.glossary.rows[index];
+  const field = control.dataset.field;
+  if (!row || (field !== "source" && field !== "target" && field !== "target_language")) return;
+  row.entry =
+    field === "target_language"
+      ? { ...row.entry, target_language: control.value === "" ? null : control.value }
+      : { ...row.entry, [field]: control.value };
+  freshGlossaryRows.delete(row.id);
+  const rejected = state.glossary.engineError?.target;
+  if (rejected && (rejected.kind !== "entry" || rejected.index === index)) state.glossary.engineError = null;
+  markGlossaryEdited();
+  renderGlossaryErrors();
+}
+
+async function submitGlossary(): Promise<void> {
+  freshGlossaryRows.clear();
+  const entries = glossaryEntries();
+  const local = validateGlossary(entries, state.languages?.map((l) => l.code) ?? null);
+  renderGlossaryErrors();
+  if (hasGlossaryErrors(local)) {
+    el.glossaryStatus.textContent = t("form.fixFields");
+    el.glossaryRows.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    return;
+  }
+  const revision = state.glossary.revision;
+  state.glossary.saving = true;
+  renderGlossaryErrors();
+  el.glossaryStatus.textContent = t("common.saving");
+  try {
+    const { settings } = await api.settingsSet(glossaryPatch({ builtin: state.glossary.builtin, entries }));
+    state.settings = settings;
+    state.glossary.saving = false;
+    // Rows edited (or imported) while saving stay as they are, still unsaved.
+    if (state.glossary.revision === revision) fillGlossary(settings, true);
+    el.glossaryStatus.textContent = sessionActive() ? t("glossary.savedNextStart") : t("glossary.saved");
+  } catch (e) {
+    state.glossary.saving = false;
+    const ce = asCommandError(e);
+    const target = ce?.kind === "engine" && ce.code === "invalid_settings" ? glossaryErrorForEnginePath(ce.message) : null;
+    if (target && ce?.kind === "engine") {
+      state.glossary.engineError = { target, message: ce.message };
+      el.glossaryStatus.textContent = t("form.fixFields");
+    } else {
+      el.glossaryStatus.textContent = describeError(e);
+    }
+    renderGlossaryErrors();
+  }
+}
+
+/** Writes the table as it is now (saved or not) to `<Documents>/kikitori/transcripts/`. */
+async function exportGlossary(): Promise<void> {
+  el.glossaryExport.disabled = true;
+  try {
+    const path = await api.transcriptSave(glossaryFileName(new Date()), glossaryToCsv(glossaryEntries()));
+    notify(t("glossary.exported", { path }), "info", [{ label: t("export.openFolder"), run: () => void openOutputFolder("transcripts") }], {
+      key: EXPORT_NOTICE,
+    });
+  } catch (e) {
+    reportError("error.exportGlossary", e);
+  } finally {
+    renderGlossaryErrors();
+  }
+}
+
+/** Adds the rows of a CSV file to the table (saved with "儲存術語表" like typed rows). */
+async function importGlossary(file: File): Promise<void> {
+  if (file.size > GLOSSARY_MAX_CSV_BYTES) {
+    el.glossaryStatus.textContent = t("glossary.importTooLarge", { size: formatBytes(GLOSSARY_MAX_CSV_BYTES) });
+    return;
+  }
+  let text: string;
+  try {
+    text = await file.text();
+  } catch (e) {
+    reportError("error.importGlossary", e);
+    return;
+  }
+  const parsed = parseGlossaryCsv(text);
+  const merged = mergeGlossary(glossaryEntries(), parsed.entries);
+  state.glossary.rows.push(...toGlossaryRows(merged.entries.slice(state.glossary.rows.length)));
+  state.glossary.engineError = null;
+  if (merged.added > 0) markGlossaryEdited();
+  renderGlossary();
+  const parts = [t("glossary.imported", { added: merged.added, skipped: merged.skipped })];
+  if (parsed.badLines.length) {
+    const shown = parsed.badLines.slice(0, 10).map(String);
+    if (parsed.badLines.length > shown.length) shown.push("…");
+    parts.push(t("glossary.importBadLines", { lines: joinList(shown) }));
+  }
+  el.glossaryStatus.textContent = parts.join(" ");
+}
+
 // ---------------------------------------------------------------- settings page: languages
 
 const LANGUAGE_FIELDS: readonly LanguageField[] = ["source", "target", "partner"];
@@ -2156,6 +2647,8 @@ async function loadLanguages(): Promise<void> {
     reportError("error.readLanguages", e);
   }
   renderLanguages();
+  // The glossary's language menus list the engine's languages.
+  renderGlossary();
   scheduleLanguagePreview(0);
 }
 
@@ -2384,6 +2877,8 @@ function onLocaleChanged(): void {
   renderMissingNotice();
   renderOutputPaths();
   renderTranslationGuide();
+  renderGlossary();
+  renderMetrics();
   void pushOverlayLocale();
 }
 
@@ -2444,6 +2939,7 @@ async function loadEngineData(): Promise<void> {
     fillForm(settings);
     fillCombo(settings);
     fillLanguageForm(settings);
+    fillGlossary(settings);
     renderSettingsPath();
     renderTranslationSwitches();
     await pushOverlayStyle();
@@ -2473,12 +2969,13 @@ function onBridge(status: BridgeStatus): void {
   state.bridge = status;
   if (status.phase !== "ready") {
     // A restarted engine has no session and no downloads in flight.
-    setSessionState("idle");
+    setSessionState("idle", true);
     for (const [id, d] of state.downloads) if (d.state === "downloading") state.downloads.delete(id);
   }
   renderStatus();
   renderCheck();
   renderTranslationSwitches();
+  renderGlossaryErrors();
   if (status.phase !== "ready") {
     // A restarted engine has no downloads for the start in flight any more.
     startFlow.cancel();
@@ -2617,6 +3114,29 @@ function wire(): void {
   el.guideOriginal.addEventListener("click", () => void changeShowTranslation(false));
   el.guideRecheck.addEventListener("click", () => void recheckTranslationServer());
   el.copyDiagnostics.addEventListener("click", () => void copyDiagnostics());
+  el.glossaryRows.addEventListener("input", onGlossaryInput);
+  el.glossaryBuiltin.addEventListener("change", () => {
+    state.glossary.builtin = el.glossaryBuiltin.checked;
+    if (state.glossary.engineError?.target.kind === "builtin") state.glossary.engineError = null;
+    markGlossaryEdited();
+    renderGlossaryErrors();
+  });
+  el.glossaryAdd.addEventListener("click", addGlossaryRow);
+  el.glossaryImport.addEventListener("click", () => el.glossaryFile.click());
+  el.glossaryFile.addEventListener("change", () => {
+    const file = el.glossaryFile.files?.[0];
+    // Cleared so picking the same file again (after fixing it) imports it again.
+    el.glossaryFile.value = "";
+    if (file) void importGlossary(file);
+  });
+  el.glossaryExport.addEventListener("click", () => void exportGlossary());
+  el.glossaryReset.addEventListener("click", () => {
+    if (state.settings) fillGlossary(state.settings, true);
+  });
+  el.glossaryForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void submitGlossary();
+  });
   el.modelsRefresh.addEventListener("click", () => void loadModels().then(checkRecommendation));
   el.comboForm.addEventListener("input", () => {
     state.comboDirty = true;
@@ -2655,7 +3175,7 @@ async function subscribe(): Promise<void> {
     events.status((s) => {
       if (s.session_id !== null && state.sessionId !== null && s.session_id < state.sessionId) return;
       if (s.session_id !== null) state.sessionId = s.session_id;
-      setSessionState(s.state);
+      setSessionState(s.state, true);
       if (s.state === "error") recentLog.push("status", `${s.code ?? "error"}: ${s.detail ?? ""}`);
       if (s.state === "error" && s.code === "translation_model_missing" && s.missing_translation_models.length) {
         // Pull them on the user's Ollama, then start again (lib/start-downloads.ts).
@@ -2714,6 +3234,7 @@ async function subscribe(): Promise<void> {
         notify(t("engine.log", { message: l.message }), l.level === "error" ? "bad" : "info");
       }
     }),
+    events.metrics(onMetrics),
     events.overlay((o) => {
       state.overlay = o;
       renderOverlay();

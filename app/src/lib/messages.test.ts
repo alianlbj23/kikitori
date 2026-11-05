@@ -85,6 +85,8 @@ describe("engine message parameters", () => {
     expect(localizeParam("ram_gb", 7)).toBe("7.0");
     expect(localizeParam("vram_mb", 8188)).toBe(8188);
     expect(localizeParam("model", "qwen3.5:9b")).toBe("qwen3.5:9b");
+    expect(localizeParam("compute_type", "float16")).toBe("float16");
+    expect(localizeParam("compute_type", "float16 / int8_float16")).toBe("live float16, final int8_float16");
   });
 
   it("fills the real dictionary with localized parameters", () => {

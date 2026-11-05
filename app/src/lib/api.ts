@@ -26,7 +26,9 @@ import type {
   LanguagePreview,
   LicenseFolder,
   LogEvent,
+  MetricsEvent,
   Mode,
+  ModelDeleteResult,
   ModelsList,
   ObsContent,
   ObsStatus,
@@ -52,6 +54,8 @@ import {
   parseDownloadProgress,
   parseHardware,
   parseLog,
+  parseMetrics,
+  parseModelDeleteResult,
   parseModels,
   parseObsStatus,
   parseOutputInfo,
@@ -70,6 +74,8 @@ export const EVENTS = {
   status: "engine://status",
   download: "engine://download-progress",
   log: "engine://log",
+  /** Input level, backlog and latency, about once a second (main window only). */
+  metrics: "engine://metrics",
   bridge: "bridge://state",
   overlay: "overlay://state",
   /** A global shortcut the main window handles (`toggle_translation`). */
@@ -97,6 +103,13 @@ export const api = {
    */
   async modelsDownload(model: string, acceptLicense = false): Promise<void> {
     await invoke("models_download", acceptLicense ? { model, acceptLicense } : { model });
+  },
+  /**
+   * Deletes a downloaded speech recognition model (F7). Rejects with
+   * `unknown_model`, `model_not_downloaded` or `model_in_use`.
+   */
+  async modelsDelete(model: string): Promise<ModelDeleteResult> {
+    return parseModelDeleteResult(await invoke("models_delete", { model }));
   },
   /** Checks partial settings against this machine without saving them. */
   async modelsValidate(settings: Record<string, unknown> | null): Promise<CombinationCheck> {
@@ -260,6 +273,7 @@ export const events = {
   status: (h: (v: StatusEvent) => void) => on(EVENTS.status, parseStatus, h),
   download: (h: (v: DownloadProgressEvent) => void) => on(EVENTS.download, parseDownloadProgress, h),
   log: (h: (v: LogEvent) => void) => on(EVENTS.log, parseLog, h),
+  metrics: (h: (v: MetricsEvent) => void) => on(EVENTS.metrics, parseMetrics, h),
   bridge: (h: (v: BridgeStatus) => void) => on(EVENTS.bridge, parseBridgeStatus, h),
   overlay: (h: (v: OverlaySnapshot) => void) => on(EVENTS.overlay, parseOverlaySnapshot, h),
   shortcut: (h: (v: ShortcutAction) => void) => on(EVENTS.shortcut, parseShortcutAction, h),
@@ -274,6 +288,8 @@ const ENGINE_CODES: Readonly<Record<string, StringKey>> = {
   capture_unavailable: "error.code.capture_unavailable",
   capture_error: "error.code.capture_error",
   unknown_model: "error.code.unknown_model",
+  model_not_downloaded: "error.code.model_not_downloaded",
+  model_in_use: "error.code.model_in_use",
   download_in_progress: "error.code.download_in_progress",
   license_not_accepted: "error.code.license_not_accepted",
   gpu_runtime_unsupported: "error.code.gpu_runtime_unsupported",

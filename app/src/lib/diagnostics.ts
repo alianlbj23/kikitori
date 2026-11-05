@@ -11,7 +11,8 @@
  *   is never read by the UI);
  * - credentials and query strings in URLs, bearer tokens, `key=value` secrets
  *   and well-known API key shapes in any text;
- * - the user name in home-folder paths (`C:\Users\<name>`, `/home/<name>`).
+ * - the user name in home-folder paths (`C:\Users\<name>`, `/home/<name>`);
+ * - the glossary's terms (only their number is listed).
  *
  * The report is in English on purpose: it is read by maintainers, not shown
  * as interface text, and stays the same whatever the interface language.
@@ -62,6 +63,21 @@ export function redactSettings(value: unknown, key = ""): unknown {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactSettings(v, k)]));
   }
   return value;
+}
+
+/**
+ * The settings as the report shows them. Glossary terms are the user's own
+ * content (and up to 500 rows), so only their number is reported.
+ */
+export function settingsForReport(s: Settings): unknown {
+  const glossary = s.translation.glossary;
+  return {
+    ...s,
+    translation: {
+      ...s.translation,
+      glossary: { builtin: glossary.builtin, entries: `${glossary.entries.length} entries (not included)` },
+    },
+  };
 }
 
 /** The last engine messages (log events, status errors), newest last. */
@@ -152,7 +168,7 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
     [
       "[settings]",
       `path: ${i.settingsPath ?? "unknown"}`,
-      i.settings ? JSON.stringify(redactSettings(i.settings), null, 2) : "not loaded",
+      i.settings ? JSON.stringify(redactSettings(settingsForReport(i.settings)), null, 2) : "not loaded",
     ],
     [`[recent engine messages] (last ${MAX_RECENT_LOG})`, ...(i.recentLog.length ? i.recentLog : ["none"])],
   ];

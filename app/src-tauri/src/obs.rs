@@ -461,6 +461,8 @@ mod tests {
             start_sample: 0,
             end_sample: 16_000,
             session_id: Some(1),
+            stable_chars: None,
+            latency_ms: None,
         }
     }
 

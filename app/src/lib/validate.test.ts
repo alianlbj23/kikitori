@@ -10,6 +10,8 @@ import {
   parseDevices,
   parseDownloadProgress,
   parseHardware,
+  parseMetrics,
+  parseModelDeleteResult,
   parseModels,
   parseObsStatus,
   parseOutputInfo,
@@ -326,11 +328,12 @@ describe("models.list (real engine, fake NVIDIA hardware)", () => {
       vram_mb: 600,
       vram_int8_mb: 450,
       recommended_for: ["fast"],
+      disk_bytes: 4194304,
     });
     const turbo = m.asr.find((a) => a.id === "large-v3-turbo");
     expect(turbo?.no_speech_reliable).toBe(false);
     const missing = m.asr.find((a) => a.id === "fake-missing");
-    expect(missing).toMatchObject({ no_speech_reliable: null, vram_mb: null, downloaded: false });
+    expect(missing).toMatchObject({ no_speech_reliable: null, vram_mb: null, downloaded: false, disk_bytes: null });
   });
 
   it("parses the GPU runtime with its license", () => {
@@ -462,5 +465,65 @@ describe("update_check / update_install", () => {
     expect(() => parseUpdateDownloadEvent({ event: "Paused" })).toThrow(ValidationError);
     expect(() => parseUpdateDownloadEvent({ event: "Progress", data: { chunkLength: -1 } })).toThrow(ValidationError);
     expect(() => parseUpdateDownloadEvent({ event: "Progress" })).toThrow(ValidationError);
+  });
+});
+
+describe("competitive features: subtitle hints, metrics, model deletion", () => {
+  it("keeps stable_chars on partials and latency_ms on finals only", () => {
+    const partial = { ...subtitle, is_final: false, stable_chars: 2, latency_ms: 900 };
+    expect(parseSubtitle(partial)).toMatchObject({ stable_chars: 2, latency_ms: null });
+    const final = { ...subtitle, stable_chars: 2, latency_ms: 900 };
+    expect(parseSubtitle(final)).toMatchObject({ stable_chars: null, latency_ms: 900 });
+    // Older engines send neither.
+    expect(parseSubtitle({ ...subtitle, is_final: false })).toMatchObject({ stable_chars: null, latency_ms: null });
+    expect(parseSubtitle({ ...subtitle, latency_ms: null }).latency_ms).toBeNull();
+    expect(() => parseSubtitle({ ...partial, stable_chars: -1 })).toThrow(ValidationError);
+    expect(() => parseSubtitle({ ...partial, stable_chars: "2" })).toThrow(ValidationError);
+    expect(() => parseSubtitle({ ...final, latency_ms: 1.5 })).toThrow(ValidationError);
+  });
+
+  it("parses metrics and clamps the level", () => {
+    expect(parseMetrics({ session_id: 3, level_dbfs: -20.5, backlog: 1, latency_ms_median: 800 })).toEqual({
+      session_id: 3,
+      level_dbfs: -20.5,
+      backlog: 1,
+      latency_ms_median: 800,
+    });
+    expect(parseMetrics({ level_dbfs: -200, backlog: 0 })).toEqual({
+      session_id: null,
+      level_dbfs: -120,
+      backlog: 0,
+      latency_ms_median: null,
+    });
+    expect(parseMetrics({ level_dbfs: 4, backlog: 0 }).level_dbfs).toBe(0);
+    for (const bad of [
+      { backlog: 0 },
+      { level_dbfs: "-3", backlog: 0 },
+      { level_dbfs: -3, backlog: -1 },
+      { level_dbfs: -3, backlog: 0, latency_ms_median: "9" },
+      null,
+    ]) {
+      expect(() => parseMetrics(bad), JSON.stringify(bad)).toThrow(ValidationError);
+    }
+  });
+
+  it("reads disk_bytes when present and null otherwise", () => {
+    const list = clone(engine["models.list"]) as { asr: Record<string, unknown>[] };
+    list.asr[0]!.disk_bytes = 150_000_000;
+    delete list.asr[1]!.disk_bytes;
+    const m = parseModels(list);
+    expect(m.asr[0]!.disk_bytes).toBe(150_000_000);
+    expect(m.asr[1]!.disk_bytes).toBeNull();
+    list.asr[0]!.disk_bytes = -1;
+    expect(() => parseModels(list)).toThrow(ValidationError);
+  });
+
+  it("parses the models.delete result", () => {
+    expect(parseModelDeleteResult({ model: "small", freed_bytes: 484_000_000 })).toEqual({
+      model: "small",
+      freed_bytes: 484_000_000,
+    });
+    expect(() => parseModelDeleteResult({ model: "small" })).toThrow(ValidationError);
+    expect(() => parseModelDeleteResult({ model: 1, freed_bytes: 0 })).toThrow(ValidationError);
   });
 });

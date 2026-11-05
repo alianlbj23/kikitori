@@ -22,6 +22,24 @@ export interface SubtitleEvent {
   start_sample: number;
   end_sample: number;
   session_id: number | null;
+  /**
+   * Partials only: code points at the start of `original` that will not change
+   * any more (competitive-features.md F2). null for finals and older engines.
+   */
+  stable_chars: number | null;
+  /** Finals only: end of speech → final sent, in ms (F4); null when unknown. */
+  latency_ms: number | null;
+}
+
+/** `metrics` event (F4): about once a second while a session runs. */
+export interface MetricsEvent {
+  session_id: number | null;
+  /** Input level (RMS), -120 (silence) to 0 dBFS. */
+  level_dbfs: number;
+  /** Complete sentences waiting for the final pass. */
+  backlog: number;
+  /** Median of recent final latencies in ms; null before the first final. */
+  latency_ms_median: number | null;
 }
 
 export type EngineState = "idle" | "loading" | "running" | "error";
@@ -248,6 +266,14 @@ export interface AsrModel {
   vram_int8_mb: number | null;
   /** Paths the hardware recommendation picks this model for. */
   recommended_for: ModelRole[];
+  /** Space the downloaded model takes on disk (F7); null when not downloaded or unknown. */
+  disk_bytes: number | null;
+}
+
+/** `models.delete` result. */
+export interface ModelDeleteResult {
+  model: string;
+  freed_bytes: number;
 }
 
 /** Optional NVIDIA cuBLAS runtime the engine can download (hardware.md). */
@@ -342,12 +368,28 @@ export interface Settings {
     api_key_env: string;
     /** User confirmed they are outside the EU, UK and South Korea. */
     allow_restricted: boolean;
+    /** `translation.glossary` (docs/specs/vtuber-profile.md); edited on the settings page. */
+    glossary: GlossarySettings;
   };
   subtitle: OverlayStyle;
   /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
   obs_output: ObsContent;
   /** The UI's own state in the engine's opaque `ui` object (the engine never reads it). */
   ui: UiState;
+}
+
+/** One user glossary entry (`translation.glossary.entries[]`). */
+export interface GlossaryEntry {
+  source: string;
+  target: string;
+  /** Subtitle language the entry applies to; null = every language. */
+  target_language: string | null;
+}
+
+export interface GlossarySettings {
+  /** The engine's built-in livestream glossary is used. */
+  builtin: boolean;
+  entries: GlossaryEntry[];
 }
 
 export interface UiState {

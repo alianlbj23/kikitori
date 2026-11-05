@@ -15,6 +15,7 @@
  * - events from an older session are dropped, a newer session starts afresh.
  */
 
+import { splitStable, type TextParts } from "./stable";
 import type { SubtitleEvent } from "./types";
 
 export interface SubtitleLine {
@@ -26,6 +27,8 @@ export interface SubtitleLine {
   readonly isFinal: boolean;
   readonly startSample: number;
   readonly endSample: number;
+  /** Partials: code points of `original` that have settled (null = none known). */
+  readonly stableChars: number | null;
 }
 
 export interface SubtitleState {
@@ -49,6 +52,7 @@ function toLine(ev: SubtitleEvent): SubtitleLine {
     isFinal: ev.is_final,
     startSample: ev.start_sample,
     endSample: ev.end_sample,
+    stableChars: ev.stable_chars,
   };
 }
 
@@ -119,6 +123,8 @@ export function applySubtitle(
 /** What one line shows, given the "顯示翻譯" switch. */
 export interface LineDisplay {
   original: string;
+  /** `original` split into its settled prefix and the tail that may change (F2). */
+  originalParts: TextParts;
   /** Empty when translations are hidden; the translation line is then left out. */
   translation: string;
   /**
@@ -134,9 +140,10 @@ export interface LineDisplay {
  * back on shows them again; the engine sends an empty translation while off.
  */
 export function lineDisplay(line: SubtitleLine, showTranslation: boolean): LineDisplay {
+  const originalParts = splitStable(line.original, line.stableChars, line.isFinal);
   return showTranslation
-    ? { original: line.original, translation: line.translation, originalOnly: false }
-    : { original: line.original, translation: "", originalOnly: true };
+    ? { original: line.original, originalParts, translation: line.translation, originalOnly: false }
+    : { original: line.original, originalParts, translation: "", originalOnly: true };
 }
 
 /** Trims to a new limit (e.g. after the user changes "lines on screen"). */

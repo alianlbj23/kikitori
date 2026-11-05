@@ -9,6 +9,7 @@ fn main() {
             "models_download",
             "models_validate",
             "models_pull_translation",
+            "models_delete",
             "languages_list",
             "devices_list",
             "settings_get",

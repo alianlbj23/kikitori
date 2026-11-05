@@ -197,9 +197,16 @@ body {
   opacity: 0.78;
 }
 
-.line.is-partial .orig,
+/*
+ * A line still being heard: its translation is lighter; of the original only
+ * the tail that may still change is (the settled prefix, lib/stable.ts, is not).
+ */
 .line.is-partial .tr {
   opacity: 0.72;
+}
+
+.line.is-partial .unstable {
+  opacity: 0.6;
 }
 
 .line.is-partial .tr {

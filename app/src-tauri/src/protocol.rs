@@ -57,6 +57,7 @@ pub enum EngineEvent {
     Status(StatusPayload),
     DownloadProgress(DownloadProgressPayload),
     Log(LogPayload),
+    Metrics(MetricsPayload),
     Unknown { name: String },
 }
 
@@ -75,7 +76,36 @@ pub struct SubtitlePayload {
     /// architecture spec is still accepted.
     #[serde(default)]
     pub session_id: Option<u64>,
+    /// Partials only (competitive-features.md F2): how many characters (code
+    /// points) at the start of `original` will not change any more. Absent from
+    /// finals and from older engines, and then left out when forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_chars: Option<u64>,
+    /// Finals only (F4): end of speech → final subtitle sent, in milliseconds;
+    /// `null` when the engine could not measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
+
+/// `metrics` event (F4), about once a second while a session runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsPayload {
+    #[serde(default)]
+    pub session_id: Option<u64>,
+    /// Input level (RMS) in dBFS, −120 (silence) to 0.
+    pub level_dbfs: f64,
+    /// Complete sentences waiting for the final pass.
+    pub backlog: u64,
+    /// Median of recent `latency_ms`; `null` before the first final.
+    #[serde(default)]
+    pub latency_ms_median: Option<u64>,
+}
+
+/// Bounds of `metrics.level_dbfs` (the engine floors silence at −120 dBFS).
+const LEVEL_DBFS_RANGE: std::ops::RangeInclusive<f64> = -120.0..=0.0;
+/// Anything above this is a broken clock or counter, not a measurement.
+const MAX_LATENCY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_BACKLOG: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -264,9 +294,14 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
     let ctx = |e: serde_json::Error| shape(format!("event {name:?}: {e}"));
     let event = match name.as_str() {
         "subtitle" => {
-            let p: SubtitlePayload = serde_json::from_value(data).map_err(ctx)?;
-            validate_subtitle(&p)?;
+            let mut p: SubtitlePayload = serde_json::from_value(data).map_err(ctx)?;
+            validate_subtitle(&mut p)?;
             EngineEvent::Subtitle(p)
+        }
+        "metrics" => {
+            let p: MetricsPayload = serde_json::from_value(data).map_err(ctx)?;
+            validate_metrics(&p)?;
+            EngineEvent::Metrics(p)
         }
         "status" => {
             let p: StatusPayload = serde_json::from_value(data).map_err(ctx)?;
@@ -315,13 +350,40 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
     Ok(event)
 }
 
-fn validate_subtitle(p: &SubtitlePayload) -> Result<(), ParseError> {
+/// Checks a subtitle. Out-of-range F2/F4 hints are repaired instead of
+/// rejected (dropping the whole line over a display hint would lose the text);
+/// a hint of the wrong type is a broken engine and rejected like any field.
+fn validate_subtitle(p: &mut SubtitlePayload) -> Result<(), ParseError> {
     check_len("subtitle.original", &p.original, MAX_TEXT_CHARS)?;
     check_len("subtitle.translation", &p.translation, MAX_TEXT_CHARS)?;
     check_language("subtitle.source_language", &p.source_language)?;
     check_language("subtitle.target_language", &p.target_language)?;
     if p.end_sample < p.start_sample {
         return Err(shape("subtitle.end_sample is before start_sample"));
+    }
+    if let Some(n) = p.stable_chars {
+        // A prefix longer than the text means "all of it" (the UI clamps too).
+        p.stable_chars = Some(n.min(p.original.chars().count() as u64));
+    }
+    if p.latency_ms.is_some_and(|ms| ms > MAX_LATENCY_MS) {
+        p.latency_ms = None;
+    }
+    Ok(())
+}
+
+/// A malformed `metrics` event is dropped: the next one follows within a second.
+fn validate_metrics(p: &MetricsPayload) -> Result<(), ParseError> {
+    if !LEVEL_DBFS_RANGE.contains(&p.level_dbfs) {
+        return Err(shape(format!(
+            "metrics.level_dbfs {} is outside -120..0",
+            p.level_dbfs
+        )));
+    }
+    if p.backlog > MAX_BACKLOG {
+        return Err(shape(format!("metrics.backlog {} is too large", p.backlog)));
+    }
+    if p.latency_ms_median.is_some_and(|ms| ms > MAX_LATENCY_MS) {
+        return Err(shape("metrics.latency_ms_median is too large"));
     }
     Ok(())
 }
@@ -512,6 +574,91 @@ mod tests {
             assert!(
                 matches!(parse(&v.to_string()), Err(ParseError::Shape(_))),
                 "{field} = {value}"
+            );
+        }
+    }
+
+    fn parse_subtitle(v: &Value) -> SubtitlePayload {
+        match parse(&v.to_string()) {
+            Ok(Some(Incoming::Event(EngineEvent::Subtitle(s)))) => s,
+            other => panic!("expected subtitle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtitle_stable_chars_and_latency() {
+        let mut v = subtitle_json();
+        v["data"]["stable_chars"] = json!(2);
+        let s = parse_subtitle(&v);
+        assert_eq!(s.stable_chars, Some(2));
+        assert_eq!(serde_json::to_value(&s).unwrap()["stable_chars"], json!(2));
+        // Longer than the text (5 characters, 15 UTF-8 bytes): clamped, not rejected.
+        v["data"]["stable_chars"] = json!(99);
+        assert_eq!(parse_subtitle(&v).stable_chars, Some(5));
+
+        let mut f = subtitle_json();
+        f["data"]["is_final"] = json!(true);
+        f["data"]["latency_ms"] = json!(850);
+        let s = parse_subtitle(&f);
+        assert_eq!(s.latency_ms, Some(850));
+        assert!(s.stable_chars.is_none());
+        let forwarded = serde_json::to_value(&s).unwrap();
+        assert_eq!(forwarded["latency_ms"], json!(850));
+        // Absent fields stay absent when forwarded, so older payloads keep their shape.
+        assert!(forwarded.get("stable_chars").is_none());
+        for no_latency in [json!(null), json!(MAX_LATENCY_MS + 1)] {
+            f["data"]["latency_ms"] = no_latency;
+            assert!(parse_subtitle(&f).latency_ms.is_none());
+        }
+        for bad in [json!(-1), json!("3"), json!(1.5)] {
+            let mut b = subtitle_json();
+            b["data"]["stable_chars"] = bad.clone();
+            assert!(
+                matches!(parse(&b.to_string()), Err(ParseError::Shape(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn subtitle_with_unknown_fields_is_accepted() {
+        let mut v = subtitle_json();
+        v["data"]["future_field"] = json!({"x": 1});
+        assert_eq!(parse_subtitle(&v).utterance_id, 3);
+    }
+
+    #[test]
+    fn metrics_event() {
+        let line = r#"{"event":"metrics","data":{"session_id":4,"level_dbfs":-23.5,"backlog":2,"latency_ms_median":900,"later":true}}"#;
+        let Some(Incoming::Event(EngineEvent::Metrics(m))) = parse(line).unwrap() else {
+            panic!("expected metrics");
+        };
+        assert_eq!(m.session_id, Some(4));
+        assert_eq!(m.level_dbfs, -23.5);
+        assert_eq!(m.backlog, 2);
+        assert_eq!(m.latency_ms_median, Some(900));
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"session_id": 4, "level_dbfs": -23.5, "backlog": 2, "latency_ms_median": 900})
+        );
+        let quiet = r#"{"event":"metrics","data":{"level_dbfs":-120,"backlog":0,"latency_ms_median":null}}"#;
+        let Some(Incoming::Event(EngineEvent::Metrics(m))) = parse(quiet).unwrap() else {
+            panic!("expected metrics");
+        };
+        assert!(m.session_id.is_none() && m.latency_ms_median.is_none());
+        for bad in [
+            json!({"level_dbfs": 3.0, "backlog": 0}),
+            json!({"level_dbfs": -121.0, "backlog": 0}),
+            json!({"level_dbfs": "-3", "backlog": 0}),
+            json!({"level_dbfs": -3.0, "backlog": -1}),
+            json!({"level_dbfs": -3.0, "backlog": MAX_BACKLOG + 1}),
+            json!({"level_dbfs": -3.0, "backlog": 0, "latency_ms_median": MAX_LATENCY_MS + 1}),
+            json!({"backlog": 0}),
+        ] {
+            let line = json!({"event": "metrics", "data": bad});
+            assert!(
+                matches!(parse(&line.to_string()), Err(ParseError::Shape(_))),
+                "{line}"
             );
         }
     }

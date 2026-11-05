@@ -10,7 +10,9 @@
  * off (`OverlaySnapshot.show_translation`) each line is the original alone, in
  * the primary subtitle style. Which lines are on screen follows the reading
  * rhythm (`lib/rhythm.ts`): a minimum time per line and an idle fade-out. The
- * "clear subtitles" shortcut (`overlay://clear`) empties the screen.
+ * "clear subtitles" shortcut (`overlay://clear`) empties the screen. A line
+ * still being heard fades only the part of the original that may change
+ * (`lib/stable.ts`).
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -145,7 +147,14 @@ function render(): void {
       return h(
         "div",
         { class: classes.filter(Boolean).join(" ") },
-        h("span", { class: "orig", lang: htmlLang(line.sourceLanguage), dir: "auto" }, display.original),
+        // Settled prefix and the tail that may still change (F2); the inner spans take
+        // their direction from the outer one.
+        h(
+          "span",
+          { class: "orig", lang: htmlLang(line.sourceLanguage), dir: "auto" },
+          h("span", { class: "stable" }, display.originalParts.stable),
+          display.originalParts.unstable ? h("span", { class: "unstable" }, display.originalParts.unstable) : null,
+        ),
         display.originalOnly
           ? null
           : h("span", { class: "tr", lang: htmlLang(line.targetLanguage), dir: "auto" }, display.translation),

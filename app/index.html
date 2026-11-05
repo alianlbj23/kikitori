@@ -47,6 +47,11 @@
         <footer class="engine" aria-live="polite">
           <p class="engine-status"><span class="dot" id="status-dot" data-tone="busy"></span><span id="status-label"></span></p>
           <p class="engine-detail" id="status-detail" hidden></p>
+          <!-- Input level and median latency while a session runs (lib/metrics.ts). -->
+          <div class="metrics" id="metrics" hidden>
+            <div class="meter" id="level-meter" role="meter" aria-valuemin="-120" aria-valuemax="0" data-i18n-aria-label="metrics.levelLabel"><span class="meter-fill" id="level-fill"></span></div>
+            <span class="metrics-latency" id="latency"></span>
+          </div>
           <button type="button" class="link-button" id="restart-engine" data-i18n="engine.restart" hidden></button>
         </footer>
       </aside>
@@ -440,6 +445,48 @@
               <button type="submit" class="primary" id="settings-save" data-i18n="settings.save"></button>
               <span class="form-status" id="settings-status" role="status"></span>
             </div>
+          </form>
+
+          <!-- Its own form: the glossary is saved on its own (lib/glossary.ts). -->
+          <form id="glossary-form" novalidate>
+            <fieldset class="block">
+              <legend data-i18n="glossary.legend"></legend>
+              <p class="block-lede" data-i18n="glossary.lede"></p>
+              <div class="field">
+                <label class="switch" for="f-glossary-builtin">
+                  <input id="f-glossary-builtin" type="checkbox" checked />
+                  <span data-i18n="glossary.builtin"></span>
+                </label>
+                <p class="field-help" data-i18n="glossary.builtinHelp"></p>
+              </div>
+              <div class="glossary-wrap">
+                <table class="glossary">
+                  <thead>
+                    <tr>
+                      <th scope="col" data-i18n="glossary.colSource"></th>
+                      <th scope="col" data-i18n="glossary.colTarget"></th>
+                      <th scope="col" data-i18n="glossary.colLanguage"></th>
+                      <th scope="col"><span class="visually-hidden" data-i18n="glossary.colActions"></span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="glossary-rows"></tbody>
+                </table>
+              </div>
+              <p class="field-help" id="glossary-empty" data-i18n="glossary.empty"></p>
+              <p class="field-error" id="glossary-list-error" role="alert"></p>
+              <div class="form-actions">
+                <button type="button" class="ghost" id="glossary-add" data-i18n="glossary.add"></button>
+                <button type="button" class="ghost" id="glossary-import" data-i18n="glossary.import"></button>
+                <button type="button" class="ghost" id="glossary-export" data-i18n="glossary.export"></button>
+                <input type="file" id="glossary-file" accept=".csv,text/csv,text/plain" hidden />
+              </div>
+              <p class="field-help" data-i18n="glossary.csvHelp"></p>
+              <div class="form-actions">
+                <button type="submit" class="primary" id="glossary-save" data-i18n="glossary.save"></button>
+                <button type="button" class="ghost" id="glossary-reset" data-i18n="glossary.reset"></button>
+                <span class="form-status" id="glossary-status" role="status"></span>
+              </div>
+            </fieldset>
           </form>
 
           <section class="block" aria-labelledby="about-heading">

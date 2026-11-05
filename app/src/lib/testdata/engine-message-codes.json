@@ -34,6 +34,28 @@
       },
       "english": "{final_model} cannot tell speech from silence (no_speech); {fast_model}'s no_speech and the voice detector filter non-speech instead"
     },
+    "asr_bgm_robust_final": {
+      "params": [
+        "final_model"
+      ],
+      "types": {
+        "final_model": "str"
+      },
+      "english": "{final_model} for final subtitles holds up best against background music and game sound in livestreams (kikitori's Japanese livestream evaluation)"
+    },
+    "asr_live_model_for_language": {
+      "params": [
+        "language",
+        "fast_model",
+        "model"
+      ],
+      "types": {
+        "language": "str",
+        "fast_model": "str",
+        "model": "str"
+      },
+      "english": "{fast_model} is much less accurate for {language}, so live subtitles also use {model} (loaded once and shared by both)"
+    },
     "asr_large_v3_remote_translation": {
       "params": [
         "final_model"

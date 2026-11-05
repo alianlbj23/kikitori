@@ -26,6 +26,7 @@ function line(id: number, original: string, translation: string, startS: number,
     isFinal,
     startSample: Math.round(startS * 16_000),
     endSample: Math.round(endS * 16_000),
+    stableChars: null,
   };
 }
 

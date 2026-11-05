@@ -18,6 +18,7 @@
     "allow-models-download",
     "allow-models-validate",
     "allow-models-pull-translation",
+    "allow-models-delete",
     "allow-languages-list",
     "allow-devices-list",
     "allow-settings-get",
