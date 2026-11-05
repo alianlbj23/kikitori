@@ -184,7 +184,9 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 - `models.list` → `models_overview(info, recommend(info))`，另保留第一版的 `translation.base_url／installed／error／presets`。
 - `models.download {"model": "gpu-runtime", "accept_license": true}`（`GPU_RUNTIME_ID`）→ `install_gpu_runtime(progress=..., cancel=...)`，進度用同一個 `download_progress` 事件（`model = "gpu-runtime"`）。沒有 `accept_license: true` 時回 `license_not_accepted`（訊息含 EULA 網址）；`engine.shutdown` 時取消。
 - `models.validate` → `validate_combination(combination_from_settings(設定), info, downloaded_asr=已下載的 ASR, allow_restricted=設定)`。
-- `settings.apply_recommendation` → `recommend(info)` 轉成設定（`engine/hardware_service.py` 的 `recommendation_patch()`）後存檔。
+- `settings.apply_recommendation` → `recommend(info)` 轉成設定（`engine/hardware_service.py` 的 `recommendation_patch()`）後存檔；`only_if_new` 時只在還沒有設定檔時寫入（第一次執行的自動套用）。
+- `settings.preview_recommendation` → 同一個 `recommendation_patch()`，不存檔，另回 `differs`（與目前設定比較）與 `fingerprint`（`recommendation_fingerprint()`：patch 的 SHA-256 前 16 字元）。
+- **自動推薦（UI）**：預設設定是安全的 CPU 組合（base／small），所以不能只靠「套用建議組合」按鈕：第一次執行（`settings.get` 的 `is_new`）UI 等 `hardware.detect` 完成後自動 `settings.apply_recommendation {"only_if_new": true}` 並說明選了什麼；之後（啟動、GPU 執行環境安裝後引擎重啟、進入模型頁）以 `settings.preview_recommendation` 檢查，`differs` 時提示「有更適合這台電腦的組合」（可「不要再提醒」，以指紋記在設定的 `ui`）。推薦的 ASR 模型沒下載時提示一鍵下載，不自動下載。細節見 `ui.md`「自動推薦」。
 - 建立 pipeline 時（`pipeline/factory.py`）：每條路徑 `load_transcriber(..., device=s.asr.device, compute_type=s.asr.<role>_compute_type, cpu_threads=…, cuda_library_dirs=s.asr.cuda_library_dirs + [installed_runtime_dir()])`；`cpu_threads` 為 null 時用 `auto_cpu_threads()`（device=cuda 時 0）。
 - 地區限制：設定 `translation.allow_restricted` 預設 **false**（引擎不知道使用者所在地，預設不推薦 HY-MT；使用者在設定頁確認不在歐盟／英國／南韓後才打開）。
 

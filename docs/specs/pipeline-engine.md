@@ -170,7 +170,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
     "keep_warm_secs": 240
   },
   "pipeline": {"partial_interval_ms": 700, "no_speech_threshold": 0.6, "context_lines": 3, "asr_prompt_context": true},
-  "subtitle": {}
+  "subtitle": {},
+  "ui": {}
 }
 ```
 
@@ -195,6 +196,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `pipeline.context_lines` | 整數，[0, 10] |
 | `pipeline.asr_prompt_context` | 布林 |
 | `subtitle` | 任意 JSON 物件，引擎不解讀、原樣保存給 UI（字型、位置、顏色…）；巢狀 ≤ 5 層、序列化後 ≤ 16 KiB、不得有 NaN／Infinity |
+| `ui` | UI 自己的狀態，限制與 `subtitle` 相同、引擎不解讀。目前只有 `dismissed_recommendations`（「不要再提醒」過的推薦指紋，最多 10 個，見 `settings.preview_recommendation`）。schema 2 之後新增、有預設值 `{}`，**不升 schema**（與 `keep_warm_secs` 相同） |
 
 - ASR 預設為「沒有 GPU 也跑得動」的組合（`asr.md` 的 CPU ≥ 16 GB 等級：即時 `base`、完整 `small`），hardware 偵測之後推薦覆寫。
 - 數字欄位不接受布林；整數欄位不接受小數。未知欄位一律報錯（打錯字要讓使用者知道）。缺少的欄位用預設值（舊檔案加新欄位時不必遷移；例如 `translation.keep_warm_secs` 是 schema 2 之後新增、沒有升版的欄位。代價是舊版程式讀到新版寫的檔案會報「unknown setting」，`SettingsStore` 會保留原檔並用預設值）。
@@ -207,6 +209,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 - **遷移**：`schema_version` 必須是正整數；小於目前版本時依序套用 `MIGRATIONS[n]`（n → n+1）；大於目前版本 → `SettingsError`（新版程式寫的檔案，不覆寫）。遷移只在記憶體中進行，檔案在下一次 `settings.set`／`settings.apply_recommendation` 時才以新版格式寫回。
   - **1 → 2**（Milestone 6）：`asr.compute_type` 拆成 `asr.fast_compute_type` 與 `asr.final_compute_type`（v1 的值複製到兩邊）。新增的 `asr.fast_cpu_threads`、`asr.final_cpu_threads`（null）與 `translation.allow_restricted`（false）用預設值。v1 的欄位名稱在 v2 是未知欄位（`settings.set {"asr": {"compute_type": …}}` 回 `invalid_settings`）。
 - 寫：先寫同目錄的暫存檔（UTF-8、縮排 2、`ensure_ascii=False`）、`flush` + `fsync`，再 `os.replace` 成正式檔名，中途失敗刪掉暫存檔並往上拋 `OSError`。
+- `SettingsStore.is_new`：`load()` 時檔案不存在、且之後沒有成功的 `update()` → True（第一次執行）；檔案存在但無效 → False（那是使用者存過的設定，不自動覆寫）；`load()` 之前 → False。`update_if_new(patch)`：只在 `is_new` 時寫入，否則不動並回傳 None——檢查與寫入在同一把鎖內。
 - `SettingsStore`（執行緒安全）：`load()` 讀檔；檔案無效時保留預設值並回傳警告，**不覆寫**原檔；之後第一次 `update()` 存檔前把無效檔案改名為 `settings.json.invalid`（保留給使用者檢查）。`update(partial)`：深度合併（物件遞迴合併、其他值整個取代）→ 驗證 → 存檔 → 更新記憶體；驗證失敗時檔案與記憶體都不變。
 
 ## engine（stdio NDJSON）
@@ -251,9 +254,10 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `models.download` | `{"model": <ASR id>}` 或 `{"model": "gpu-runtime", "accept_license": true}` | `{"model", "started": true}`；在背景下載，進度以 `download_progress` 事件回報 |
 | `models.validate`（背景） | `{"settings"?: 部分設定物件}` | `{"ok": bool, "errors": [字串], "warnings": [字串]}` |
 | `devices.list` | — | `{"devices": [DeviceInfo]}` |
-| `settings.get` | — | `{"settings": {...}, "path": 設定檔路徑}` |
+| `settings.get` | — | `{"settings": {...}, "path": 設定檔路徑, "is_new": bool}` |
 | `settings.set` | 部分設定物件（深度合併） | 同 `settings.get` |
-| `settings.apply_recommendation`（背景） | — | `{"settings", "path", "applied": 寫入的部分設定, "recommendation": ModelCombination}` |
+| `settings.apply_recommendation`（背景） | `{"only_if_new"?: bool}` | `{"settings", "path", "is_new", "applied": 寫入的部分設定 \| null, "recommendation": ModelCombination}` |
+| `settings.preview_recommendation`（背景） | — | `{"patch": 套用會寫入的部分設定, "recommendation": ModelCombination, "differs": bool, "fingerprint": 16 個十六進位字元}`（不存檔） |
 | `session.start` | `{"mode": "media"\|"interpret", "device_id"?: str \| null}` | `{"session_id": int}` |
 | `session.stop` | — | `{}`（沒有 session 也回 `{}`） |
 | `engine.shutdown` | — | `{}`，之後結束 |
@@ -276,6 +280,9 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   - 裝好 GPU 執行環境後，下一個 session 自動用到它（factory 每次建立元件都檢查）。但若這個引擎行程先前已經嘗試過 CUDA 而失敗（例如 `device=auto` 在沒有 cuBLAS 時跑過 session），asr 在同一行程內不再嘗試 CUDA——UI 應在安裝完成後重啟引擎（沒有 session 在跑時）。
 - `models.validate`：設定頁「檢查組合」。`settings` 是要檢查的部分設定，與目前設定深度合併後（**不存檔**）轉成組合交給 `hardware.validate_combination()`（`downloaded_asr` 為已下載的 ASR 模型、`allow_restricted` 取自合併後的設定）；省略時檢查目前設定。合併後的設定不合法 → `invalid_settings`（與 `settings.set` 相同）；`settings` 不是物件 → `invalid_params`。`errors` 非空時 `ok=false`（例如選 cuda 但缺 cuBLAS、未知的 ASR 模型）；是否阻擋儲存由 UI 決定。訊息為繁體中文。
 - `settings.apply_recommendation`：把目前硬體的推薦組合寫進設定（深度合併並存檔，等同 `settings.set`），回應帶實際寫入的 `applied` 與 `recommendation`。對應規則：`asr.fast_model／final_model` ← 推薦模型；`asr.device` ← 推薦的裝置（`cuda`／`cpu`，不用 `auto`：推薦 CPU（例如缺 cuBLAS）時若存 auto，asr 會先試 CUDA 而失敗，之後整個行程都不再試）；`asr.*_compute_type` ← 推薦精度；`asr.*_cpu_threads` ← 推薦值，0 存成 null；`translation.fast_model／final_model` ← 推薦模型（推薦為 null，即翻譯伺服器不在本機時，不改）；`cuda_library_dirs`、`allow_restricted` 與其他欄位不動。設定檔無法寫入 → `settings_io_error`。UI 也可以只顯示 `hardware.detect` 的推薦、讓使用者修改後用 `settings.set` 存，但「套用推薦」一律用這個方法，讓轉換規則只存在引擎裡。
+  - `only_if_new: true`（第一次執行的自動套用）：只在 `is_new` 時寫入（`SettingsStore.update_if_new()`，檢查與寫入同一把鎖）；設定已存過（使用者在偵測期間存了組合、切換了模式…）時不寫入，回應的 `applied` 為 `null`，`settings` 是目前設定。不是布林 → `invalid_params`。
+- `settings.get`／`settings.set`／`settings.apply_recommendation` 的 `is_new`：`SettingsStore.is_new`（見「讀寫」）。UI 以它判斷第一次執行、自動套用推薦。
+- `settings.preview_recommendation`：`settings.apply_recommendation`「會」寫入什麼，不存檔。`patch` 與 `applied` 出自同一個 `recommendation_patch()`；`differs` = 合併 `patch` 後的設定 ≠ 目前設定（只有推薦涵蓋的欄位會影響）；`fingerprint` = `patch` 的正規化 JSON（鍵排序）的 SHA-256 前 16 個十六進位字元，推薦改變時跟著改變，UI 以它記住「不要再提醒」。與其他背景方法不同，設定在**執行時**才讀取（預覽可能排在其他背景請求之後，`differs` 要對照 UI 收到回應時的設定）。重用 10 秒的偵測快取。
 
 ### 事件
 
@@ -317,6 +324,27 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 6. **新錯誤碼**：`license_not_accepted`（訊息含 `https://docs.nvidia.com/cuda/eula/index.html`）、`gpu_runtime_unsupported`。`unknown_model` 的訊息改為列出 ASR 模型與 `gpu-runtime`。
 7. **建議 UI 流程**：設定頁開啟 → `hardware.detect`（顯示推薦與 `warnings`；`gpu_runtime_missing=true` 時顯示「下載 GPU 執行環境」按鈕與授權說明）→ 使用者同意 → `models.download {"model":"gpu-runtime","accept_license":true}` → `done` 後（沒有 session 在跑時）重啟引擎 → `hardware.detect` → 「套用推薦」呼叫 `settings.apply_recommendation`；手動修改時先 `models.validate {"settings": 表單}` 顯示錯誤／警告，再 `settings.set`。在設定頁提供「我不在歐盟／英國／南韓」開關對應 `translation.allow_restricted`。
 8. **設定 schema 2**：`asr.compute_type` 移除，改為 `asr.fast_compute_type`／`asr.final_compute_type`；新增 `asr.fast_cpu_threads`／`asr.final_cpu_threads`（null＝自動）與 `translation.allow_restricted`（預設 false）。舊設定檔自動遷移；`settings.set` 送 `asr.compute_type` 會回 `invalid_settings`。`settings.get` 的 `schema_version` 為 2。
+
+### 協定變更（自動推薦，2026-11-05）
+
+全部是新增，`protocol_version` 維持 1、schema 維持 2：
+
+1. `settings.get`／`settings.set`／`settings.apply_recommendation` 的結果新增 `"is_new": bool`。
+2. `settings.apply_recommendation` 新增參數 `{"only_if_new": true}`；此時 `applied` 可能是 `null`。
+3. 新方法 `settings.preview_recommendation`（背景）→ `{"patch", "recommendation", "differs", "fingerprint"}`。
+4. 設定新增頂層 `ui` 物件（UI 原樣保存）。
+
+```json
+{"id": 1, "method": "settings.get"}
+{"id": 1, "result": {"settings": {"schema_version": 2, "...": "...", "subtitle": {}, "ui": {}}, "path": "C:/Users/me/AppData/Roaming/kikitori/settings.json", "is_new": true}}
+{"id": 2, "method": "settings.apply_recommendation", "params": {"only_if_new": true}}
+{"id": 2, "result": {"settings": {"...": "..."}, "path": "...", "is_new": false, "applied": {"asr": {"fast_model": "small", "final_model": "large-v3-turbo", "device": "cuda", "fast_compute_type": "float16", "final_compute_type": "float16", "fast_cpu_threads": null, "final_cpu_threads": null}, "translation": {"fast_model": "qwen3.5:9b", "final_model": "qwen3.5:9b"}}, "recommendation": {"tier": "nvidia_8gb", "...": "..."}}}
+{"id": 3, "method": "settings.preview_recommendation"}
+{"id": 3, "result": {"patch": {"asr": {"...": "..."}, "translation": {"...": "..."}}, "recommendation": {"tier": "nvidia_8gb", "...": "..."}, "differs": false, "fingerprint": "3f9c0d1e2a4b5c6d"}}
+{"id": 4, "method": "settings.set", "params": {"ui": {"dismissed_recommendations": ["3f9c0d1e2a4b5c6d"]}}}
+```
+
+UI 流程見 `ui.md`「自動推薦」。
 
 ## 入口
 
@@ -399,6 +427,7 @@ experiments/pipeline_smoke/
 - config：預設值、每種驗證錯誤（型別、範圍、未知欄位、布林當數字、max ≤ pause）、round-trip、深度合併、原子寫入（替換失敗時原檔不變、沒有殘留暫存檔）、新版 schema 拒絕、三平台路徑（注入 system／env／home）、`KIKITORI_CONFIG_DIR`、無效檔案改名。
 - pipeline（逐步模式、假 VoiceModel／Transcriber／Translator）：即時→完整順序與取代、最新槽丟舊工作、句子結束後丟即時工作、完整結果不丟且依序（含佇列背壓）、兩種模式的語言路由、中文不翻譯、不支援組合、非語音過濾與「清除」完整結果、前文與 ASR prompt、尾巴裁切、翻譯錯誤為 warning、ASR 錯誤為 error 狀態、完整模型 no_speech 不可靠時改用即時模型的值、即時辨識慢時自動拉長間隔（假時鐘）；執行緒模式：`ArraySource` 跑完送 `idle`、`stop()` 乾淨結束（以事件等待，不用 sleep 判斷）、worker 例外變 `error`。
 - engine：子行程（假模式、`KIKITORI_CONFIG_DIR` 指到暫存目錄）交換 NDJSON：`engine.info`、`unknown_method`、壞 JSON／非物件／錯型別 id／超長行、`settings.get`／`set`（成功、驗證錯誤）、`devices.list`、`hardware.detect`、`models.list`、`models.download` 進度事件、session 產生字幕事件與 `idle`、`session.stop`、`session_active`、`engine.shutdown` 與 stdin EOF 結束碼 0、stdout 每一行都是合法 JSON；另以同行程測 `MessageWriter`、請求解析。
+- 自動推薦：config 測 `is_new`（新檔、存檔後、無效檔、存檔失敗不變）、`update_if_new`、`ui` 的驗證／合併／缺少時不遷移；`test_engine_hardware.py` 測 `recommendation_preview()`（patch 與 apply 相同、套用後 `differs=false`、推薦以外欄位不影響、手動改模型後 `differs=true`、指紋穩定且隨推薦改變）；子行程測 `is_new`（重啟後仍 false）、preview 不寫檔且與 apply 的 `applied` 相同、手動修改後與 GPU 執行環境安裝後 `differs=true`、`only_if_new`（已存過不覆寫、第一次會寫、非布林 `invalid_params`）。
 - engine（Milestone 6）：子行程測 `hardware.detect`（假 GPU、缺 cuBLAS 的推薦）、`models.list`（新舊欄位）、背景請求的回應順序、`gpu-runtime` 授權閘門（缺少／false／非布林、ASR 帶 `accept_license`）、安裝進度與安裝後推薦改為 GPU、雜湊不符的 `error` 事件、不支援的平台、`engine.shutdown` 取消下載與 `download_in_progress`、`models.validate`（目前設定、候選設定不存檔、參數錯誤）、`settings.apply_recommendation`（安裝前 CPU、安裝後 CUDA、存檔）、v1 設定檔遷移；同行程測背景工作執行緒（FIFO、錯誤碼、結束時丟棄）、偵測快取（假時鐘、設定改變、清除）、`allow_restricted`、設定與推薦組合的轉換。
 - factory：兩條路徑各自的 `compute_type`／`cpu_threads`、cuBLAS 目錄（設定 + GPU 執行環境、不重複、檢查失敗只記 warning）、自動執行緒（mock `load_transcriber` 與 hardware）；預熱的順序（ASR → 預熱 → 保溫）、保溫只給本機服務、`keep_warm_secs = 0` 關閉、保溫請求與預熱相同且失敗時丟出帶模型名稱的 `WarmUpError`。
 - keep_warm（`tests/test_keep_warm.py`，假時鐘，背景執行緒的等待注入成「推進假時鐘」，不真的睡）：閒置未滿不送、滿了才送且之後每個間隔一次、翻譯活動延後下一次、`stop()` 後不再送、失敗的 warning 限流與恢復的 info、`stop()` 立即喚醒等待且不等進行中的請求、`ActivityTranslator` 在 `translate`／`stream` 的開始與結束（含例外）回報 `begin`／`end`、請求進行中不送保溫、程式錯誤也限流。pipeline：保溫在 worker 之前啟動，`stop()`、讀完、錯誤都會停止，擷取開不起來時不啟動，啟動失敗只是 warning，逐步模式不啟動。

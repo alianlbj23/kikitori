@@ -132,6 +132,20 @@ npm run tauri build -- --no-bundle --config <conf.json>
 - `08-overlay-screen.png`：實際螢幕擷取（`BitBlt` + `CAPTUREBLT`）：字幕視窗疊在主視窗上，背景透明、看得到後面的字幕紀錄；原文白字、譯文字幕黃粗體，各有半透明深色底板與描邊，在深色與淺色背景上都清楚；較舊的一句略淡。
 - `private/`（git 忽略，含動畫台詞）：日文原文與正體譯文的字幕紀錄、字幕視窗，外觀同上。
 
+### B2. 第一次啟動自動套用建議組合（WebDriver）— PASS
+
+`gui_acceptance.py --batch first-run`（選單 2；不播放任何聲音）。正式版建置（引擎以目前程式碼重新打包到 `data/build-first-run/kikitori-engine`），空的 `KIKITORI_CONFIG_DIR`，`results/20261105-180149-first-run`：
+
+| 步驟 | 結果 |
+|---|---|
+| 第一次啟動（不按任何按鈕） | 「待命中」後 0.5 s 出現訊息「已依這台電腦（NVIDIA GeForce RTX 5070，12 GB）套用建議組合：即時 small、完整 large-v3-turbo（GPU），翻譯 qwen3.5:9b。」與「到『模型』頁查看或修改」；設定檔 `asr.device=cuda`、small／large-v3-turbo float16、翻譯 qwen3.5:9b |
+| 之後 6 秒 | 沒有「還需要下載」（模型都已快取）、沒有「有更適合這台電腦的組合」（剛套用，`differs=false`） |
+| 「到『模型』頁查看或修改」 | 切到模型頁；自訂組合表單是 cuda／small／large-v3-turbo |
+| 同一個設定資料夾再啟動 | 20 秒內沒有任何訊息；設定檔逐位元組不變 |
+| 清理 | 沒有殘留行程 |
+
+截圖（都看過）：`10-first-run-notice.png`（字幕紀錄頁上方的訊息，文字完整、沒有溢出）、`11-first-run-models.png`（模型頁：RTX 5070、cuBLAS 可以使用、建議組合 small／large-v3-turbo／qwen3.5:9b，上方仍是同一則訊息）、`12-relaunch.png`（第二次啟動：沒有訊息）。
+
 ### C. 「關於」的授權資料夾 — PASS
 
 - 正式版建置找得到兩個資料夾（`<資源目錄>\licenses`、`<資源目錄>\kikitori-engine\THIRD_PARTY_LICENSES`），兩個按鈕都顯示。

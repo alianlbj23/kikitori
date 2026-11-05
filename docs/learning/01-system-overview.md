@@ -66,7 +66,7 @@ kikitori 聽電腦的聲音，把日文或英文即時翻成繁體中文，用�
 | 回應 | `{"id": 同一個數字, "result": {...}}` 或 `{"id":…, "error": {"code", "message"}}` | 引擎 → app |
 | 事件 | `{"event": "名稱", "data": {...}}`（沒有 id） | 引擎 → app，隨時都可能送 |
 
-方法共 12 個（`engine.info`、`hardware.detect`、`models.list`、`models.download`、`models.validate`、`devices.list`、`settings.get`、`settings.set`、`settings.apply_recommendation`、`session.start`、`session.stop`、`engine.shutdown`），定義在 `src/kikitori/engine/server.py` 的 `EngineServer.__init__` 裡的 `_handlers`。事件有 `subtitle`、`status`、`download_progress`、`log` 四種。完整欄位見 `docs/specs/pipeline-engine.md`。
+方法共 13 個（`engine.info`、`hardware.detect`、`models.list`、`models.download`、`models.validate`、`devices.list`、`settings.get`、`settings.set`、`settings.apply_recommendation`、`settings.preview_recommendation`、`session.start`、`session.stop`、`engine.shutdown`），定義在 `src/kikitori/engine/server.py` 的 `EngineServer.__init__` 裡的 `_handlers`。事件有 `subtitle`、`status`、`download_progress`、`log` 四種。完整欄位見 `docs/specs/pipeline-engine.md`。
 
 ## 資料流全圖：從音效卡到字幕視窗
 
@@ -143,7 +143,7 @@ Python 引擎（`src/kikitori/`）：
 | 行程 | 執行緒 | 做什麼 |
 |---|---|---|
 | 引擎 | 主執行緒 | 讀 stdin、處理快速的請求 |
-| 引擎 | 背景工作執行緒（`engine/deferred.py`） | 處理慢的請求：`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation` |
+| 引擎 | 背景工作執行緒（`engine/deferred.py`） | 處理慢的請求：`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation` |
 | 引擎 | session 載入執行緒 | 載入模型，然後啟動 pipeline |
 | 引擎 | pipeline 的 3 條：capture、即時 worker、完整 worker | 切句、兩條辨識翻譯路徑 |
 | 引擎 | 擷取執行緒（WASAPI／soundcard）或系統回呼（ScreenCaptureKit） | 從裝置讀聲音 |

@@ -153,8 +153,9 @@ class SubtitleUpdate:
 | `models.download` | `{"model": ..., "accept_license"?: bool}` | 開始下載，進度以事件回報；`"gpu-runtime"` 必須帶 `accept_license: true` |
 | `models.validate` | `{"settings"?: 部分設定}` | `{ok, errors, warnings}`（不存檔） |
 | `devices.list` | — | `{"devices": [DeviceInfo...]}` |
-| `settings.get` / `settings.set` | — / 部分設定（深度合併） | `{settings, path}`；`set` 驗證失敗回傳 `invalid_settings` |
-| `settings.apply_recommendation` | — | 套用推薦組合並存檔：`{settings, path, applied, recommendation}` |
+| `settings.get` / `settings.set` | — / 部分設定（深度合併） | `{settings, path, is_new}`；`set` 驗證失敗回傳 `invalid_settings`；`is_new` 表示還沒有設定檔（第一次執行） |
+| `settings.apply_recommendation` | `{"only_if_new"?: bool}` | 套用推薦組合並存檔：`{settings, path, is_new, applied, recommendation}`；`only_if_new` 時設定已存過就不寫（`applied: null`） |
+| `settings.preview_recommendation` | — | 套用「會」寫入什麼（不存檔）：`{patch, recommendation, differs, fingerprint}` |
 | `session.start` | `{"mode": "media" \| "interpret", "device_id": ...}` | `{"session_id": ...}` |
 | `session.stop` | — | `{}` |
 | `engine.shutdown` | — | `{}`，之後引擎結束 |
@@ -167,7 +168,7 @@ class SubtitleUpdate:
 | `log` | `{"level", "message"}`（不含密鑰） |
 
 - 協定版本 `protocol_version = 1`；不認得的方法回傳 `unknown_method` 錯誤。欄位與錯誤碼的完整定義以 `pipeline-engine.md` 為準。
-- 回應以 `id` 對應；耗時方法（`hardware.detect`、`models.*`、`settings.apply_recommendation`）在背景處理，可能晚於之後送出的請求才回應。
+- 回應以 `id` 對應；耗時方法（`hardware.detect`、`models.*`、`settings.apply_recommendation`、`settings.preview_recommendation`）在背景處理，可能晚於之後送出的請求才回應。
 - 引擎的日誌一律寫到 stderr 或 `log` 事件，**stdout 只寫協定訊息**。
 
 ## Tauri 程式（`app/`）

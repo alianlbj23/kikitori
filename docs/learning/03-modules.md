@@ -158,6 +158,7 @@ cd app/src-tauri && cargo clippy --all-targets -- -D warnings
   | `types.py` | `HardwareInfo`、`ModelCombination` 等 |
 
 - **推薦等級**：`nvidia_8gb`、`nvidia_4gb`、`nvidia_lt4gb`、`cpu`、`cpu_low`、`apple_silicon`（表見 `docs/specs/hardware.md`）。
+- **推薦怎麼到使用者手上**：第一次開 app（還沒有設定檔，`settings.get` 的 `is_new`）時 UI 自動套用推薦並說明；之後 UI 用 `settings.preview_recommendation` 問引擎「套用會不會改變設定」（`differs`），會的話提示「有更適合這台電腦的組合」。推薦怎麼變成設定只寫在 `engine/hardware_service.py`（`recommendation_patch()`），UI 的時機判斷與文字在 `app/src/lib/recommend.ts`。
 - **測試**：`tests/test_hardware_*.py`（不跑真的 `nvidia-smi`、不連外網）。
 - **常見改動**：調推薦 → `recommend.py`；但依專案規則，應先改 `docs/specs/asr.md`／`translate.md` 的依據數據。
 
@@ -173,7 +174,7 @@ cd app/src-tauri && cargo clippy --all-targets -- -D warnings
   | `protocol.py` | 請求解析、錯誤碼、`ProtocolError` |
   | `io.py` | `MessageWriter`（加鎖、flush）、有長度上限的讀行、`EventLogHandler`（logging → `log` 事件） |
   | `deferred.py` | 慢請求的背景工作執行緒（依序處理） |
-  | `hardware_service.py` | 偵測快取 10 秒、推薦組合 ↔ 設定的轉換 |
+  | `hardware_service.py` | 偵測快取 10 秒、推薦組合 ↔ 設定的轉換、預覽（`differs`、指紋） |
   | `services.py` | `EngineServices`：可替換的外部功能 |
   | `testing.py` | 假模式（`KIKITORI_ENGINE_FAKE=1`）：合成聲音、假 ASR／翻譯、假硬體 |
 

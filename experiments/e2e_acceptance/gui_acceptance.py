@@ -12,11 +12,15 @@
    （以 Win32 視窗樣式 WS_EX_TRANSPARENT 確認）→ 停止。
 6. 再播一次本專案自己寫的英文 TTS（沒有著作權問題）拍可以提交的截圖。
 
+另一個情境「第一次啟動」（`--batch first-run`，不播放任何聲音）：空的設定資料夾啟動 →
+不按任何按鈕，app 自己偵測硬體並套用建議組合（這台電腦：GPU 組合）、顯示說明 → 關閉 →
+同一個設定資料夾再啟動一次 → 不再自動套用、設定檔不變。
+
 設定檔放在本次結果資料夾（`KIKITORI_CONFIG_DIR`），不碰使用者的設定。截圖：含動畫台詞的放
 `screenshots/private/`（git 忽略），其餘放 `screenshots/`。
 
 執行（互動選單）：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py
-非互動：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py --batch run
+非互動：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py --batch run|first-run
 工具路徑以環境變數指定：KIKITORI_E2E_APP（kikitori-app.exe）、KIKITORI_E2E_TAURI_DRIVER、
 KIKITORI_E2E_EDGEDRIVER。
 """
@@ -36,7 +40,7 @@ import urllib.error
 import urllib.request
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from acceptance import EN_LINES, EN_VOICE, KANA, load_track, simplified_chars, tts_clip
 from e2e_common import HERE, RESULTS, ROOT, TARGET_OUTPUT, Player
@@ -368,8 +372,8 @@ return {
 
 
 class Run:
-    def __init__(self) -> None:
-        self.dir = RESULTS / (time.strftime("%Y%m%d-%H%M%S") + "-gui")
+    def __init__(self, suffix: str = "gui") -> None:
+        self.dir = RESULTS / (time.strftime("%Y%m%d-%H%M%S") + f"-{suffix}")
         self.dir.mkdir(parents=True, exist_ok=True)
         self.steps: dict[str, Any] = {}
 
@@ -852,10 +856,214 @@ def run_gui() -> int:
     return 0 if passed else 1
 
 
+FIRST_RUN_NOTICE = "已依這台電腦"
+NOTICES_JS = """
+return Array.from(document.querySelectorAll('#notices .notice')).map(n => ({
+  key: n.dataset.key || null,
+  tone: n.dataset.tone,
+  text: n.querySelector('p').textContent,
+  actions: Array.from(n.querySelectorAll('.notice-actions button')).map(b => b.textContent),
+}));
+"""
+
+
+class AppSession:
+    """一次 app 啟動：tauri-driver + WebDriver session，切到主視窗；離開時關閉並等行程結束。"""
+
+    def __init__(self, run: Run, config_dir: Path, label: str) -> None:
+        self.app = tool_path("KIKITORI_E2E_APP", DEFAULT_APP)
+        self.tauri_driver = tool_path("KIKITORI_E2E_TAURI_DRIVER")
+        self.edgedriver = tool_path("KIKITORI_E2E_EDGEDRIVER")
+        self.env = {
+            k: v for k, v in os.environ.items() if not k.startswith("KIKITORI_ENGINE")
+        }
+        self.env["KIKITORI_CONFIG_DIR"] = str(config_dir)
+        self.log_path = run.dir / f"tauri-driver-{label}.log"
+        self.wd = WebDriver(f"http://127.0.0.1:{DRIVER_PORT}")
+        self.driver: subprocess.Popen[bytes] | None = None
+
+    def __enter__(self) -> Self:
+        self.log = self.log_path.open("wb")
+        self.driver = subprocess.Popen(
+            [
+                str(self.tauri_driver),
+                "--port",
+                str(DRIVER_PORT),
+                "--native-port",
+                str(NATIVE_PORT),
+                "--native-driver",
+                str(self.edgedriver),
+            ],
+            env=self.env,
+            stdout=self.log,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        wait_port(DRIVER_PORT)
+        self.wd.start(self.app)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for handle in self.wd.handles():
+                self.wd.switch(handle)
+                if self.wd.title() == "kikitori":
+                    return self
+            time.sleep(0.5)
+        raise TimeoutError("main window not found")
+
+    def __exit__(self, *_: object) -> None:
+        try:
+            self.wd.quit()
+        except (WebDriverError, OSError) as exc:
+            logger.warning("closing the WebDriver session failed: %s", exc)
+        if self.driver is not None:
+            self.driver.terminate()
+            try:
+                self.driver.wait(15)
+            except subprocess.TimeoutExpired:
+                self.driver.kill()
+        self.log.close()
+        time.sleep(3)
+
+    def notices(self) -> list[dict[str, Any]]:
+        return self.wd.script(NOTICES_JS)
+
+
+def run_first_run() -> int:
+    """空的設定資料夾啟動兩次：第一次自動套用建議組合並說明，第二次不再套用。"""
+    run = Run("first-run")
+    config_dir = run.dir / "config"
+    config_dir.mkdir()
+    settings_path = config_dir / "settings.json"
+    print(f"results: {run.dir}")
+    run.check(
+        "config dir starts empty",
+        not any(config_dir.iterdir()),
+        str(config_dir),
+    )
+    seen_first: list[dict[str, Any]] = []
+    try:
+        with AppSession(run, config_dir, "first") as app:
+            wd = app.wd
+            t0 = time.monotonic()
+            wd.wait(
+                "engine ready",
+                lambda: wd.text("#status-label") == "待命中",
+                timeout=120,
+            )
+            notice = wd.wait(
+                "first-run notice",
+                lambda: next(
+                    (n for n in app.notices() if FIRST_RUN_NOTICE in n["text"]), None
+                ),
+                timeout=120,
+            )
+            secs = round(time.monotonic() - t0, 1)
+            settings = json.loads(settings_path.read_text("utf-8"))
+            asr, tr = settings["asr"], settings["translation"]
+            run.check(
+                "first launch auto-applies the GPU combination without a click",
+                asr["device"] == "cuda"
+                and asr["fast_model"] == "small"
+                and asr["final_model"] in ("large-v3-turbo", "large-v3")
+                and "RTX 5070" in notice["text"]
+                and asr["final_model"] in notice["text"]
+                and "GPU" in notice["text"],
+                {"secs": secs, "notice": notice, "asr": asr, "translation": tr},
+            )
+            # 讓缺模型的檢查與「有更適合的組合」檢查跑完
+            time.sleep(6)
+            seen_first = app.notices()
+            texts = " ".join(n["text"] for n in seen_first)
+            run.check(
+                "no missing-model prompt (models cached) and no offer right after applying",
+                "還需要下載" not in texts and "有更適合" not in texts,
+                seen_first,
+            )
+            wd.screenshot(SCREENSHOTS / "10-first-run-notice.png")
+            wd.script(
+                "document.querySelector('[data-key=\"first-run\"] .notice-actions button').click();"
+            )
+            wd.wait(
+                "models page",
+                lambda: wd.script(
+                    "return !document.getElementById('page-models').hidden;"
+                ),
+                timeout=10,
+            )
+            rec = wd.wait(
+                "recommendation",
+                lambda: (t := wd.text("#recommendation")) and "large-v3" in t and t,
+                timeout=60,
+            )
+            combo = wd.script(
+                "const f=document.getElementById('combo-form');"
+                "return {fast: f.elements.fast_model.value, final: f.elements.final_model.value,"
+                " device: f.elements.device.value};"
+            )
+            run.check(
+                "review link opens the models page showing the applied combination",
+                combo["device"] == "cuda" and combo["final"] == asr["final_model"],
+                {"combo_form": combo, "recommendation": rec[:300]},
+            )
+            wd.screenshot(SCREENSHOTS / "11-first-run-models.png")
+        before = settings_path.read_bytes()
+
+        with AppSession(run, config_dir, "second") as app:
+            wd = app.wd
+            wd.wait(
+                "engine ready",
+                lambda: wd.text("#status-label") == "待命中",
+                timeout=120,
+            )
+            # 第一次啟動在就緒後幾秒內就套用；多等一段時間確認第二次不會發生
+            seen: list[dict[str, Any]] = []
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                for n in app.notices():
+                    if n not in seen:
+                        seen.append(n)
+                time.sleep(0.5)
+            after = settings_path.read_bytes()
+            run.check(
+                "relaunch: no second auto-apply, settings file unchanged",
+                not any(FIRST_RUN_NOTICE in n["text"] for n in seen)
+                and after == before,
+                {"notices": seen, "file_unchanged": after == before},
+            )
+            run.check(
+                "relaunch: no better-combination offer (already applied)",
+                not any("有更適合" in n["text"] for n in seen),
+                seen,
+            )
+            wd.screenshot(SCREENSHOTS / "12-relaunch.png")
+    except Exception:
+        logger.exception("first-run acceptance aborted")
+        run.steps["aborted"] = {"passed": False, "detail": "exception (see log)"}
+    leftovers = {
+        name: app_pids(name)
+        for name in (
+            "kikitori-app.exe",
+            "kikitori-engine.exe",
+            "msedgedriver.exe",
+            "tauri-driver.exe",
+        )
+    }
+    run.check("no leftover processes", not any(leftovers.values()), leftovers)
+    passed = all(step["passed"] for step in run.steps.values())
+    (run.dir / "gui-results.json").write_text(
+        json.dumps(run.steps, ensure_ascii=False, indent=2), "utf-8"
+    )
+    print(
+        f"\nOVERALL: {'PASS' if passed else 'FAIL'}  (details: {run.dir / 'gui-results.json'})"
+    )
+    return 0 if passed else 1
+
+
 MENU = """
 kikitori 桌面程式驗收（WebDriver）
-  1) 執行完整流程
-  2) 離開
+  1) 執行完整流程（會播放測試聲音到虛擬喇叭）
+  2) 第一次啟動：空的設定資料夾自動套用建議組合，再啟動一次確認不重複套用（不播放聲音）
+  3) 離開
 """
 
 
@@ -865,8 +1073,10 @@ def main(argv: list[str]) -> int:
     )
     if argv == ["--batch", "run"]:
         return run_gui()
+    if argv == ["--batch", "first-run"]:
+        return run_first_run()
     if argv:
-        print("usage: gui_acceptance.py [--batch run]", file=sys.stderr)
+        print("usage: gui_acceptance.py [--batch run|first-run]", file=sys.stderr)
         return 2
     while True:
         print(MENU)
@@ -877,6 +1087,8 @@ def main(argv: list[str]) -> int:
         if choice == "1":
             return run_gui()
         if choice == "2":
+            return run_first_run()
+        if choice == "3":
             return 0
         print(f"無效的選項：{choice!r}")
 

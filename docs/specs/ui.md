@@ -1,6 +1,6 @@
 # Spec: ui（Tauri 桌面程式）
 
-> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。
+> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。之後加上自動推薦（第一次執行自動套用、更適合的組合提示、缺少模型的一鍵下載；見「自動推薦」）。
 > 上層約定：`docs/specs/app-architecture.md`（行程架構、引擎協定、視窗、更新）與 `docs/specs/pipeline-engine.md`（協定欄位細節、設定檔結構）。本文件只補充 UI 端的設計，不改協定。
 
 ## 範圍
@@ -79,9 +79,20 @@
   - **儲存**：`ok=false`、檢查中、本地格式錯誤、或引擎回 `invalid_settings`（訊息依欄位路徑標到對應欄位，例如 `asr.cuda_library_dirs[2]` → 資料夾欄）時「儲存組合」停用。檢查本身無法執行（逾時、引擎重啟中）時仍可儲存並說明原因——`settings.set` 一樣會驗證欄位，卡住的檢查不應鎖住使用者。規則在 `canSave()`。
   - 送出的部分設定一律包含組合的全部欄位，「自動」明確送 `null`；未儲存的修改在重新讀取清單時保留，「還原成目前設定」放棄修改。
 
+#### 自動推薦
+
+預設設定是安全的 CPU 組合（即時 base、完整 small），有 GPU 的使用者若沒找到「套用建議組合」就一直用慢的 CPU 模型；推薦改變（裝好 GPU 加速元件、Ollama 裝了新模型）時也沒有人告訴使用者。所以：
+
+- **第一次執行**（`settings.get` 的 `is_new=true`，每個視窗最多一次，`lib/recommend.ts` 的 `FirstRunGate`）：等 `hardware.detect` 完成 → `settings.apply_recommendation {"only_if_new": true}` → 不阻擋操作的訊息，例如「已依這台電腦（NVIDIA GeForce RTX 5070，12 GB）套用建議組合：即時 small、完整 large-v3-turbo（GPU），翻譯 qwen3.5:9b。」附「到『模型』頁查看或修改」。缺 cuBLAS 時另說明下載 GPU 加速元件後可改用顯示卡。
+  - 偵測失敗：保留預設組合並說明原因（「無法偵測這台電腦的硬體：…先使用預設的組合（即時 base、完整 small）…」）；設定檔沒寫，下次啟動會再試。套用失敗：說明原因、請使用者到模型頁確認（逾時的請求仍可能已寫入，所以不宣稱用的是預設值），並重新讀取設定。
+  - **不覆寫使用者的選擇**：偵測期間使用者存了組合 → 不送套用；送出後才存的情況由引擎的 `only_if_new` 在同一把鎖內擋下（`applied: null` → 不顯示訊息）。自動套用不清掉組合表單尚未儲存的修改。
+  - 之後手動修改組合不會再被自動套用（設定檔已存在，`is_new=false`）；只會出現下面的提示。
+- **「有更適合這台電腦的組合」**：啟動時（第一次執行處理完之後）、引擎重啟後（例如 GPU 加速元件安裝後自動重啟）、進入模型頁與按「重新偵測」時送 `settings.preview_recommendation`。`differs=true` 且指紋不在 `settings.ui.dismissed_recommendations` 時顯示訊息（列出新組合）與「套用」（`settings.apply_recommendation`）、「不要再提醒」（指紋加入 `ui.dismissed_recommendations`，保留最近 10 個，`settings.set {"ui": {...}}`）、「關閉」（只在這個視窗不再顯示）。不同的推薦有不同指紋，會再提醒一次。套用、儲存自訂組合時立即收起，並丟掉還在路上的預覽回應（`Latest`），剛存的組合不會被舊的比較結果誤判。比較只在引擎做（`differs`），UI 不自己比對設定。
+- **缺少的模型**：自動套用、按「套用」之後、儲存自訂組合之後，重新讀取 `models.list`；選用的 ASR 模型（即時、完整，去重）有未下載的 → 訊息「還需要下載 large-v3-turbo（共約 1.6 GB）才能開始。」與「下載缺少的模型」（只下載這幾個，不會自動下載 GB 級的檔案）。下載中原地更新進度（「正在下載 large-v3-turbo 40%…」），失敗顯示原因與「重新下載」，完成後「模型已下載完成，可以按『開始』了。」選用的模型還在下載時按「開始」只提示等待，不送 `session.start`；`session.start` 之後收到 `status error` 的 `model_not_downloaded` 時，同樣列出缺少的模型並提供下載（找不到缺少的模型時才顯示原本的說明）。
+
 #### 回應順序
 
-背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`）可能晚於之後送出的請求才回應。Rust 端一律以 `id` 配對（`connection.rs`），不依賴順序；前端的即時檢查以 `Latest`（遞增 token）只套用**最新一次**輸入的結果，較慢回來的舊結果直接丟棄。測試：`connection.rs` 的亂序回應單元測試、`engine.rs` 對 `fake_engine.py`（背景方法延遲 0.3 秒）確認後送出的 `settings.get` 先回應且兩邊都拿到自己的結果、`combination.test.ts` 模擬兩個重疊請求反向完成。
+背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation`）可能晚於之後送出的請求才回應。Rust 端一律以 `id` 配對（`connection.rs`），不依賴順序；前端的即時檢查以 `Latest`（遞增 token）只套用**最新一次**輸入的結果，較慢回來的舊結果直接丟棄。測試：`connection.rs` 的亂序回應單元測試、`engine.rs` 對 `fake_engine.py`（背景方法延遲 0.3 秒）確認後送出的 `settings.get` 先回應且兩邊都拿到自己的結果、`combination.test.ts` 模擬兩個重疊請求反向完成。
 
 ### 設定頁
 
@@ -135,7 +146,7 @@
 | `line_reader.rs` | 有上限的逐行讀取（1 MiB，與引擎相同）；超長行丟棄並讀到行尾，串流不會失去同步。 |
 | `connection.rs` | 傳送請求（NDJSON）、以 `id` 配對回應、每個請求一個期限（涵蓋寫入與等待）。逾時的請求從等待表移除，晚到的回應記錄後丟棄。格式錯誤的行記錄 error（附截短的內容）後略過，不影響其他訊息。輸出關閉時所有等待中的請求立即失敗。 |
 | `engine.rs` | 引擎行程：選擇指令（含正式版資源目錄的路徑）、spawn（不經 shell，Windows 加 `CREATE_NO_WINDOW`）、stderr 轉到 app 日誌、`engine.info` 握手並檢查 `protocol_version == 1`、意外結束時自動重啟（1 s、2 s、4 s 退避；60 秒內超過 3 次就停在「失敗」等使用者按重新啟動）、結束程式時先送 `engine.shutdown`，3 秒內（請求與等待共用同一個期限，`shutdown_within`）沒結束就強制結束；同步版 `shutdown_blocking` 給更新器的 `on_before_exit` 用（見「自動更新」）。 |
-| `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses` 與字幕視窗指令。 |
+| `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses` 與字幕視窗指令。 |
 | `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查）、穿透與可見狀態。 |
 | `updater.rs` | 檢查與安裝更新的指令 `update_check`／`update_install`（tauri-plugin-updater 的 Rust API），安裝前關閉引擎（見「自動更新」）。 |
 | `lib.rs` | 外掛（log、window-state、updater、process、opener、global-shortcut）、狀態、事件轉發、全域快速鍵、生命週期（關閉主視窗即結束程式）。 |
@@ -224,7 +235,7 @@ npm run tauri dev
 
 | 指令（在 `app/` 或 `app/src-tauri/`） | 內容 |
 |---|---|
-| `npm test` | vitest：更新指令的結果與進度事件驗證、字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化 |
+| `npm test` | vitest：更新指令的結果與進度事件驗證、字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、`app_about`（兩個授權資料夾路徑，可為 `null`、型別錯誤時拒絕）、格式化、自動推薦（`recommend.test.ts`：第一次執行只套用一次且先等偵測、訊息文字、不是新設定檔或使用者已存組合時不套用、引擎回 `applied: null` 視為略過、提示依 `differs` 與指紋顯示／隱藏、「不要再提醒」清單、缺少模型的提示與進度、下載中不能開始、`api.ts` 呼叫的每個指令都在 `build.rs` 與 `capabilities/main.json`） |
 | `npm run build` | `tsc` 型別檢查 + `vite build` |
 | `cargo test` | 更新前關閉引擎（`fake_engine.py`：在 runtime worker 上同步呼叫，`engine.shutdown` 讓引擎自己結束；`--ignore-shutdown` 不回應時在期限後強制結束；沒有引擎時立即返回）、更新指令的逾時範圍與進度事件格式、協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；正式版資源目錄的引擎路徑與覆寫、`about_info`（兩個授權資料夾各自只在存在時回報；`licenses` 與 `tauri.sidecar.conf.json` 的資源名稱一致；`LicenseFolder` 只接受 `app`／`engine`）、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
 | `cargo clippy --all-targets -- -D warnings` | lint |

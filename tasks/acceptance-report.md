@@ -13,6 +13,7 @@
 | 「關於」頁授權資料夾 | PASS | 兩個資料夾存在、按鈕開啟檔案總管 |
 | Windows 安裝與自動更新（以 `e5d3f68` 重跑） | PASS | 安裝 0.1.0 → 偵測 0.1.1 → 更新前先關閉引擎（40 ms，結束碼 0）→ 安裝 → 重開為 0.1.1、設定保留；壞簽章被拒；同版本顯示「目前已是最新版本」；解除安裝乾淨 — `experiments/update_acceptance/README.md` |
 | Linux（Docker：Ubuntu 22.04／24.04、Debian 12） | PASS | PulseAudio 與 PipeWire 擷取、引擎端到端（CPU）、deb 安裝、AppImage、Xvfb 下 WebDriver 操作正式版 GUI — `experiments/linux_acceptance/README.md` |
+| 依電腦配置自動推薦（第一次啟動自動套用、更適合的組合提示、缺少模型一鍵下載） | PASS | 正式版建置、空設定資料夾：第一次啟動不按按鈕就套用 GPU 組合並顯示「已依這台電腦（NVIDIA GeForce RTX 5070，12 GB）套用建議組合：即時 small、完整 large-v3-turbo（GPU），翻譯 qwen3.5:9b。」；再啟動不重複套用、設定檔不變 — `experiments/e2e_acceptance/README.md` B2（`gui_acceptance.py --batch first-run`）；unittest／vitest／cargo test 涵蓋 `is_new`、`only_if_new`、`settings.preview_recommendation`、提示與缺少模型的規則 |
 | CI（`e5d3f68`） | PASS | test 41997011398、app 41997011314、release 演練 41997011477（三平台打包、安裝後自我檢查、簽章驗證）；deb 含 `Recommends: fonts-noto-cjk` |
 
 ### 驗收中找到並修正的問題（每項先寫重現測試）
