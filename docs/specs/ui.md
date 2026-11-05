@@ -173,7 +173,8 @@ opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端�
 ## 自動更新
 
 - `tauri-plugin-updater`，端點 `https://github.com/alianlbj23/kikitori/releases/latest/download/latest.json`，公鑰已寫入 `tauri.conf.json`（對應的私鑰只在維護者本機與 GitHub Secrets，不在 repo）。
-- `bundle.createUpdaterArtifacts: true`（Tauri v2 格式）。打包時需要 `TAURI_SIGNING_PRIVATE_KEY`（與密碼）環境變數，只放在本機與 GitHub Secrets。
+- `bundle.createUpdaterArtifacts: true`（Tauri v2 格式）。打包時需要 `TAURI_SIGNING_PRIVATE_KEY`（與密碼）環境變數，只放在本機與 GitHub Secrets。發布流程、`latest.json` 的平台鍵與 Secrets 設定見 `release-update.md`。
+- macOS：`bundle.macOS.signingIdentity` 為 `"-"`（ad-hoc 簽章，不做付費簽章與公證）。
 - 正式版啟動時檢查一次（15 秒逾時，失敗不打擾）；設定頁可手動檢查。流程：「kikitori x.y.z 已經推出」→「下載並安裝」→ 下載進度 →「已安裝，重新啟動後生效」→「立即重新啟動」（`relaunch`）。Windows 安裝程式使用 `passive` 模式，通常會自行關閉並重開程式。
 
 ## 打包與引擎資源

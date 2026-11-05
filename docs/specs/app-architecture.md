@@ -182,8 +182,8 @@ class SubtitleUpdate:
 
 ## CI/CD（GitHub Actions）
 
-- `test.yml`：任何分支 push 與 PR；Windows、Ubuntu、macOS 矩陣；Python 測試與 ruff、前端型別檢查與建置、`cargo test`／`cargo clippy`。
-- `release.yml`：push 到 main；先跑同一套測試；版本號與最新 release tag 不同時才在三平台打包（PyInstaller 引擎 + Tauri bundle）並建立 GitHub Release，附更新器所需的 `latest.json` 與簽章。macOS 不做付費簽章與公證。
+- `test.yml`：任何分支 push 與 PR；Windows、Ubuntu、macOS 矩陣；Python 測試與 ruff、版本號一致、引擎打包冒煙測試。`app.yml`（同樣的觸發與矩陣）：前端型別檢查、測試與建置，`cargo fmt`／`cargo clippy`／`cargo test`，Rust 依賴授權（cargo-deny）。
+- `release.yml`：push 到 main；先跑同一套測試；版本號與最新 release tag 不同時才在三平台打包（PyInstaller 引擎 + Tauri bundle）並建立 GitHub Release，附更新器所需的 `latest.json` 與簽章。macOS 不做付費簽章與公證（ad-hoc 簽章）。其他分支 commit 訊息含 `[release-dry-run]` 時只試建置、不發布。細節見 `release-update.md`（打包與測試平行，Release 在全部成功後才建立）。
 
 ## 共同規則
 

@@ -11,7 +11,7 @@
 | PyInstaller 打包（引擎 `kikitori-engine`） | `packaging/engine/` |
 | 版本號同步 | `scripts/sync_version.py` |
 | CI（測試、lint、版本檢查、三平台打包 + 冒煙測試） | `.github/workflows/test.yml` |
-| 之後由協調者加入 | Tauri 前端／Rust 的 CI job、`release.yml` |
+| Tauri 前端／Rust 的 CI、發布 | `.github/workflows/app.yml`、`.github/workflows/release.yml`（見 `release-update.md`） |
 
 ## 引擎打包（`packaging/engine/`）
 
@@ -154,13 +154,13 @@ Linux（Debian bookworm 容器、x86_64）one-folder：269 MB（`du`），啟動
 |---|---|---|
 | `python` | windows-latest、ubuntu-latest、macos-latest（arm64） | `uv sync --locked` → `unittest discover` → `ruff check` → `sync_version.py check` |
 | `engine-bundle` | 同上 | `uv sync --locked` → `build.py --no-sidecar --smoke`（建置 one-folder、掃禁止檔案、`--self-check`、假模式協定測試） |
-| `app`（佔位註解） | — | 由協調者加入：npm ci／typecheck／test／build、`cargo test`／`cargo clippy`（`--locked`） |
+| （`app.yml`） | 同上 | Tauri 前端與 Rust 的檢查另放在 `app.yml`（見 `release-update.md`）；`test.yml` 有 `workflow_call`，供 `release.yml` 重用 |
 
 CI runner 沒有音訊裝置、Ollama、模型與本機忽略的資料：測試以 Linux 容器（Debian bookworm、uv 管理的 Python 3.12、空的 HOME）與 Windows 上把 `APPDATA`／`LOCALAPPDATA`／`USERPROFILE`／`XDG_*` 指到空暫存目錄的方式驗證過。
 
-## release workflow（之後加入，`release.yml`）
+## release workflow（`release.yml`，已實作，細節見 `release-update.md`）
 
-依架構規格：push 到 main → 跑同一套測試 → 版本號與最新 release tag 不同時，三平台：
+依架構規格：push 到 main → 跑同一套測試 → 版本號與最新 release tag 不同時，三平台（實作上打包與測試平行，Release 在全部成功後才建立）：
 
 1. `uv sync --locked`、`build.py --smoke`（放到 `app/src-tauri/binaries/kikitori-engine/`）。
 2. `tauri build`（resources 帶入引擎目錄），以 `TAURI_SIGNING_PRIVATE_KEY`（GitHub Secrets）簽更新器檔案。
