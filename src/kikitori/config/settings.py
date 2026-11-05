@@ -18,11 +18,31 @@ from typing import Any, Literal, cast
 from kikitori.pipeline.types import MODES, Mode
 from kikitori.translate import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TranslatorConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 """目前的設定檔版本；改變結構時加一並在 `MIGRATIONS` 補上轉換。"""
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
-MIGRATIONS: dict[int, Migration] = {}
+
+
+def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
+    """v1 → v2：`asr.compute_type`（兩條路徑共用）拆成 `fast_compute_type`／`final_compute_type`。
+
+    hardware 的推薦對兩條路徑可能給不同精度，所以 v2 分開存；v1 的值原樣複製到兩邊。
+    v2 新增的 `*_cpu_threads`、`translation.allow_restricted` 缺少時用預設值，不必遷移。
+    `asr` 不是物件時原樣保留，交給驗證報錯（訊息才會帶正確的欄位路徑）。
+    """
+    result = dict(data)
+    asr = result.get("asr")
+    if isinstance(asr, Mapping) and "compute_type" in asr:
+        section = dict(asr)
+        value = section.pop("compute_type")
+        section.setdefault("fast_compute_type", value)
+        section.setdefault("final_compute_type", value)
+        result["asr"] = section
+    return result
+
+
+MIGRATIONS: dict[int, Migration] = {1: _migrate_v1_to_v2}
 """`MIGRATIONS[n]` 把版本 n 的設定 dict 轉成版本 n + 1。"""
 
 AsrDevice = Literal["auto", "cpu", "cuda"]
@@ -41,6 +61,7 @@ MAX_SUBTITLE_BYTES = 16 * 1024
 MAX_SUBTITLE_DEPTH = 5
 
 MAX_CUDA_DIRS = 16
+CPU_THREADS_RANGE = (1, 256)
 MAX_PATH_CHARS = 1024
 COMPUTE_TYPES: tuple[str, ...] = (
     "int8",
@@ -78,34 +99,52 @@ class ModeSettings:
 
 @dataclass(frozen=True)
 class AsrSettings:
-    """即時與完整路徑的 ASR 模型（asr registry 的 id）與運算裝置。
+    """即時與完整路徑的 ASR 模型（asr registry 的 id）與運算設定。
 
     預設值以「沒有 GPU 的一般電腦」為準（docs/specs/asr.md 的 CPU ≥ 16 GB 等級：
-    即時 base、完整 small），之後由 hardware 偵測推薦覆寫。
+    即時 base、完整 small），hardware 偵測後可用 `settings.apply_recommendation` 覆寫。
+    `device` 兩條路徑共用：asr 模組在同一行程內 CUDA 失敗一次就不再嘗試，分開設定
+    也無法讓兩條路徑各自成功，而 hardware 的推薦也一律讓兩條路徑用同一個裝置。
 
     Attributes:
         fast_model: 即時路徑的模型。
         final_model: 完整路徑的模型。
         device: "auto" 有可用的 CUDA 就用，否則 CPU。
-        compute_type: CTranslate2 精度；None 表示依裝置用 asr 模組的預設值。
-        cuda_library_dirs: cuBLAS 12 所在的目錄（絕對路徑），由 hardware 里程碑填入。
+        fast_compute_type: 即時路徑的 CTranslate2 精度；None 依實際裝置用 asr 的預設值。
+        final_compute_type: 完整路徑的精度；同上。
+        fast_cpu_threads: 即時路徑在 CPU 上的執行緒數；None 為自動
+            （`hardware.auto_cpu_threads()`：兩條路徑合計不超過實體核心數）。
+        final_cpu_threads: 完整路徑的執行緒數；同上。
+        cuda_library_dirs: 使用者指定的 cuBLAS 12 目錄（絕對路徑）；kikitori 下載的
+            GPU 執行環境不必列在這裡，factory 會自動加上。
     """
 
     fast_model: str = "base"
     final_model: str = "small"
     device: AsrDevice = "auto"
-    compute_type: str | None = None
+    fast_compute_type: str | None = None
+    final_compute_type: str | None = None
+    fast_cpu_threads: int | None = None
+    final_cpu_threads: int | None = None
     cuda_library_dirs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class TranslationSettings:
-    """OpenAI 相容翻譯 API 的位置與模型；`api_key_env` 是環境變數名稱，不是金鑰。"""
+    """OpenAI 相容翻譯 API 的位置與模型；`api_key_env` 是環境變數名稱，不是金鑰。
+
+    Attributes:
+        allow_restricted: 是否推薦有地區限制授權的翻譯模型（例如 HY-MT 的授權不適用於
+            歐盟、英國、南韓）。預設 False：引擎不知道使用者身在何處，用語系猜地區並不
+            可靠，而推薦了不能用的授權會讓使用者在不知情下違約；使用者在設定頁確認
+            自己不在這些地區後才打開。只影響推薦與驗證警告，不阻止使用者手動選用。
+    """
 
     base_url: str = DEFAULT_BASE_URL
     fast_model: str = "qwen3.5:4b"
     final_model: str = "qwen3.5:4b"
     api_key_env: str = DEFAULT_API_KEY_ENV
+    allow_restricted: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,7 +212,10 @@ class Settings:
                 "fast_model": self.asr.fast_model,
                 "final_model": self.asr.final_model,
                 "device": self.asr.device,
-                "compute_type": self.asr.compute_type,
+                "fast_compute_type": self.asr.fast_compute_type,
+                "final_compute_type": self.asr.final_compute_type,
+                "fast_cpu_threads": self.asr.fast_cpu_threads,
+                "final_cpu_threads": self.asr.final_cpu_threads,
                 "cuda_library_dirs": list(self.asr.cuda_library_dirs),
             },
             "translation": {
@@ -181,6 +223,7 @@ class Settings:
                 "fast_model": self.translation.fast_model,
                 "final_model": self.translation.final_model,
                 "api_key_env": self.translation.api_key_env,
+                "allow_restricted": self.translation.allow_restricted,
             },
             "pipeline": {
                 "partial_interval_ms": self.pipeline.partial_interval_ms,
@@ -370,7 +413,16 @@ def _parse_asr(data: Mapping[str, Any]) -> AsrSettings:
     section = _section(
         data,
         "asr",
-        ("fast_model", "final_model", "device", "compute_type", "cuda_library_dirs"),
+        (
+            "fast_model",
+            "final_model",
+            "device",
+            "fast_compute_type",
+            "final_compute_type",
+            "fast_cpu_threads",
+            "final_cpu_threads",
+            "cuda_library_dirs",
+        ),
     )
     models: dict[str, str] = {}
     for name in ("fast_model", "final_model"):
@@ -386,9 +438,21 @@ def _parse_asr(data: Mapping[str, Any]) -> AsrSettings:
             )
         models[name] = value
     device = _choice(section.get("device", default.device), "asr.device", ASR_DEVICES)
-    compute_type = section.get("compute_type", default.compute_type)
-    if compute_type is not None:
-        compute_type = _choice(compute_type, "asr.compute_type", COMPUTE_TYPES)
+    compute_types: dict[str, str | None] = {}
+    threads: dict[str, int | None] = {}
+    for role in ("fast", "final"):
+        name = f"{role}_compute_type"
+        value = section.get(name, getattr(default, name))
+        compute_types[name] = (
+            None if value is None else _choice(value, f"asr.{name}", COMPUTE_TYPES)
+        )
+        name = f"{role}_cpu_threads"
+        value = section.get(name, getattr(default, name))
+        threads[name] = (
+            None
+            if value is None
+            else _integer(value, f"asr.{name}", *CPU_THREADS_RANGE)
+        )
     dirs = section.get("cuda_library_dirs", list(default.cuda_library_dirs))
     if not isinstance(dirs, list) or len(dirs) > MAX_CUDA_DIRS:
         raise SettingsError(
@@ -408,7 +472,10 @@ def _parse_asr(data: Mapping[str, Any]) -> AsrSettings:
         fast_model=models["fast_model"],
         final_model=models["final_model"],
         device=cast(AsrDevice, device),
-        compute_type=compute_type,
+        fast_compute_type=compute_types["fast_compute_type"],
+        final_compute_type=compute_types["final_compute_type"],
+        fast_cpu_threads=threads["fast_cpu_threads"],
+        final_cpu_threads=threads["final_cpu_threads"],
         cuda_library_dirs=tuple(dirs),
     )
 
@@ -424,7 +491,9 @@ def _translator_check(path: str, **kwargs: object) -> None:
 def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
     default = TranslationSettings()
     section = _section(
-        data, "translation", ("base_url", "fast_model", "final_model", "api_key_env")
+        data,
+        "translation",
+        ("base_url", "fast_model", "final_model", "api_key_env", "allow_restricted"),
     )
     values: dict[str, str] = {}
     for name in ("base_url", "fast_model", "final_model", "api_key_env"):
@@ -444,7 +513,11 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
     _translator_check(
         "translation.api_key_env", model="x", api_key_env=values["api_key_env"]
     )
-    return TranslationSettings(**values)
+    allow_restricted = _boolean(
+        section.get("allow_restricted", default.allow_restricted),
+        "translation.allow_restricted",
+    )
+    return TranslationSettings(**values, allow_restricted=allow_restricted)
 
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:

@@ -22,17 +22,14 @@ from typing import Any
 
 from kikitori.asr.cache import default_cache_dir
 
-# _download_file／_Progress 是 asr.download 的內部函式：PyPI 的網址格式不同於 Hugging Face，無法透過
-# download_model() 下載，但續傳、Content-Range 檢查、雜湊驗證與取消邏輯完全相同，
-# 重寫一份只會讓兩邊分歧。
+# PyPI 的網址格式不同於 Hugging Face，無法透過 download_model() 下載；download_file()
+# 提供完全相同的續傳、Content-Range 檢查、雜湊驗證與取消邏輯，重寫一份只會讓兩邊分歧。
 from kikitori.asr.download import (
     DownloadCancelledError,
     Fetcher,
     ModelDownloadError,
     ProgressCallback,
-    UrllibFetcher,
-    _download_file,
-    _Progress,
+    download_file,
     validate_url,
 )
 from kikitori.asr.registry import ModelFile
@@ -403,14 +400,14 @@ def install_gpu_runtime(
         logger.info(
             "downloading %s %s from %s", CUBLAS_PACKAGE, CUBLAS_VERSION, wheel.url
         )
-        _download_file(
+        download_file(
             wheel.url,
             wheel_path,
             ModelFile(wheel.filename, wheel.size, wheel.sha256),
-            fetcher or UrllibFetcher(),
-            timeout,
-            cancel,
-            _Progress(progress, wheel.size, 0),
+            fetcher=fetcher,
+            timeout=timeout,
+            cancel=cancel,
+            progress=progress,
         )
 
     staging = root / f"{final_dir.name}.tmp"

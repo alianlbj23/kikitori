@@ -21,6 +21,7 @@ from kikitori.hardware.nvidia import (
     find_nvidia_smi,
     query_nvidia_gpus,
 )
+from kikitori.hardware.recommend import cpu_threads_per_model
 from kikitori.hardware.translation_server import (
     PROBE_TIMEOUT_SECS,
     probe_translation_server,
@@ -47,6 +48,17 @@ def _detect_gpus(name: OsName, timeout: float) -> tuple[list[GpuInfo], list[str]
     for problem in problems:
         logger.warning("nvidia-smi: %s", problem)
     return gpus, [f"gpu: {p}" for p in problems]
+
+
+def auto_cpu_threads() -> int:
+    """設定 `asr.*_cpu_threads` 為 null（自動）時每個 ASR 模型用的 CPU 執行緒數。
+
+    只偵測 CPU（不執行 nvidia-smi、不連網，毫秒等級），規則與 `recommend()` 相同：
+    `min(8, 實體核心 // 2)`；核心數未知時 0（CTranslate2 預設值）。
+    """
+    name = system.os_name(sys.platform)
+    cpu, _ = system.detect_cpu(name, platform.machine())
+    return cpu_threads_per_model(cpu)
 
 
 def detect(

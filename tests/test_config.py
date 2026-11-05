@@ -52,7 +52,16 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(s.pipeline.partial_interval_ms, 700)
         # 沒有 GPU 也跑得動的組合（asr.md 的 CPU 等級）
         self.assertEqual((s.asr.fast_model, s.asr.final_model), ("base", "small"))
-        self.assertEqual((s.asr.compute_type, s.asr.cuda_library_dirs), (None, ()))
+        self.assertEqual(s.asr.device, "auto")
+        self.assertEqual(
+            (s.asr.fast_compute_type, s.asr.final_compute_type), (None, None)
+        )
+        self.assertEqual(
+            (s.asr.fast_cpu_threads, s.asr.final_cpu_threads), (None, None)
+        )
+        self.assertEqual(s.asr.cuda_library_dirs, ())
+        # HY-MT 的授權排除歐盟、英國、南韓；不知道使用者所在地時預設不推薦
+        self.assertFalse(s.translation.allow_restricted)
         self.assertEqual(s.pipeline.no_speech_threshold, 0.6)
         self.assertEqual(s.subtitle, {})
 
@@ -150,7 +159,12 @@ class ValidationTest(unittest.TestCase):
         self.assertInvalid(_with("asr.final_model", 3), "asr.final_model")
 
     def test_asr_compute_type_and_cuda_dirs(self) -> None:
-        self.assertInvalid(_with("asr.compute_type", "int4"), "asr.compute_type")
+        self.assertInvalid(
+            _with("asr.fast_compute_type", "int4"), "asr.fast_compute_type"
+        )
+        self.assertInvalid(_with("asr.final_compute_type", 8), "asr.final_compute_type")
+        # v1 的共用欄位在 v2 已拆成兩條路徑，直接送會被當成未知欄位
+        self.assertInvalid(_with("asr.compute_type", "int8"), "asr.compute_type")
         self.assertInvalid(
             _with("asr.cuda_library_dirs", "C:/cuda"), "asr.cuda_library_dirs"
         )
@@ -163,12 +177,42 @@ class ValidationTest(unittest.TestCase):
         absolute = str(Path(tempfile.gettempdir()).resolve())
         s = Settings.from_dict(
             _with(
-                "asr", {"compute_type": "int8_float16", "cuda_library_dirs": [absolute]}
+                "asr",
+                {
+                    "fast_compute_type": "int8_float16",
+                    "final_compute_type": "float16",
+                    "cuda_library_dirs": [absolute],
+                },
             )
         )
-        self.assertEqual(s.asr.compute_type, "int8_float16")
+        self.assertEqual(
+            (s.asr.fast_compute_type, s.asr.final_compute_type),
+            ("int8_float16", "float16"),
+        )
         self.assertEqual(s.asr.cuda_library_dirs, (absolute,))
         self.assertEqual(s.to_dict()["asr"]["cuda_library_dirs"], [absolute])
+
+    def test_asr_cpu_threads(self) -> None:
+        for bad in (0, -1, 257, 2.0, True, "4"):
+            with self.subTest(value=bad):
+                self.assertInvalid(
+                    _with("asr.fast_cpu_threads", bad), "asr.fast_cpu_threads"
+                )
+        self.assertInvalid(_with("asr.final_cpu_threads", 0), "asr.final_cpu_threads")
+        s = Settings.from_dict(
+            _with("asr", {"fast_cpu_threads": 4, "final_cpu_threads": None})
+        )
+        self.assertEqual((s.asr.fast_cpu_threads, s.asr.final_cpu_threads), (4, None))
+        self.assertEqual(s.to_dict()["asr"]["fast_cpu_threads"], 4)
+        self.assertIsNone(s.to_dict()["asr"]["final_cpu_threads"])
+
+    def test_translation_allow_restricted(self) -> None:
+        self.assertInvalid(
+            _with("translation.allow_restricted", "yes"), "translation.allow_restricted"
+        )
+        s = Settings.from_dict(_with("translation.allow_restricted", True))
+        self.assertTrue(s.translation.allow_restricted)
+        self.assertTrue(s.to_dict()["translation"]["allow_restricted"])
 
     def test_translation_fields_use_translator_validation(self) -> None:
         self.assertInvalid(
@@ -242,6 +286,59 @@ class MigrationTest(unittest.TestCase):
         )
         self.assertEqual(result, {"schema_version": 3, "steps": [1, 2]})
 
+    def test_v1_compute_type_is_split_per_path(self) -> None:
+        v1 = {
+            "schema_version": 1,
+            "asr": {
+                "fast_model": "tiny",
+                "final_model": "medium",
+                "device": "cuda",
+                "compute_type": "int8_float16",
+                "cuda_library_dirs": [],
+            },
+            "translation": {"fast_model": "qwen3.5:9b", "final_model": "qwen3.5:9b"},
+        }
+        s = Settings.from_dict(v1)
+        self.assertEqual(s.schema_version, SCHEMA_VERSION)
+        self.assertEqual((s.asr.fast_model, s.asr.final_model), ("tiny", "medium"))
+        self.assertEqual(s.asr.device, "cuda")
+        self.assertEqual(
+            (s.asr.fast_compute_type, s.asr.final_compute_type),
+            ("int8_float16", "int8_float16"),
+        )
+        self.assertEqual(
+            (s.asr.fast_cpu_threads, s.asr.final_cpu_threads), (None, None)
+        )
+        self.assertFalse(s.translation.allow_restricted)
+        self.assertEqual(s.translation.fast_model, "qwen3.5:9b")
+        # 遷移不改動呼叫端的 dict
+        self.assertEqual(v1["asr"]["compute_type"], "int8_float16")  # type: ignore[index]
+
+    def test_v1_without_asr_or_with_null_compute_type(self) -> None:
+        self.assertEqual(Settings.from_dict({"schema_version": 1}).asr, Settings().asr)
+        s = Settings.from_dict({"schema_version": 1, "asr": {"compute_type": None}})
+        self.assertEqual(s.asr, Settings().asr)
+
+    def test_v1_invalid_values_still_fail_validation(self) -> None:
+        with self.assertRaises(SettingsError) as ctx:
+            Settings.from_dict({"schema_version": 1, "asr": {"compute_type": "int4"}})
+        self.assertTrue(str(ctx.exception).startswith("asr.fast_compute_type"))
+        with self.assertRaises(SettingsError) as ctx:
+            Settings.from_dict({"schema_version": 1, "asr": "cuda"})
+        self.assertTrue(str(ctx.exception).startswith("asr"))
+
+    def test_v1_file_is_migrated_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(
+                json.dumps({"schema_version": 1, "asr": {"compute_type": "int8"}}),
+                encoding="utf-8",
+            )
+            s = load_settings(path)
+            assert s is not None
+            self.assertEqual(s.asr.fast_compute_type, "int8")
+            self.assertEqual(s.to_dict()["schema_version"], SCHEMA_VERSION)
+
     def test_missing_migration_step(self) -> None:
         with self.assertRaises(SettingsError):
             migrate({"schema_version": 1}, migrations={}, current=2)
@@ -265,7 +362,9 @@ class MergeTest(unittest.TestCase):
         with self.assertRaises(SettingsError):
             Settings().merged("nope")
         with self.assertRaises(SettingsError):
-            Settings().merged({"schema_version": 2})
+            Settings().merged({"schema_version": SCHEMA_VERSION + 1})
+        with self.assertRaises(SettingsError):
+            Settings().merged({"schema_version": SCHEMA_VERSION - 1})
 
     def test_merge_subtitle_keys(self) -> None:
         s = Settings().merged({"subtitle": {"a": 1}}).merged({"subtitle": {"b": 2}})

@@ -27,6 +27,10 @@ CAPTURE_UNAVAILABLE = "capture_unavailable"
 CAPTURE_ERROR = "capture_error"
 UNKNOWN_MODEL = "unknown_model"
 DOWNLOAD_IN_PROGRESS = "download_in_progress"
+LICENSE_NOT_ACCEPTED = "license_not_accepted"
+"""`models.download gpu-runtime` 沒有帶 `accept_license: true`（NVIDIA EULA）。"""
+GPU_RUNTIME_UNSUPPORTED = "gpu_runtime_unsupported"
+"""這個平台沒有 GPU 執行環境（只有 Windows／Linux x86-64）。"""
 INTERNAL_ERROR = "internal_error"
 
 

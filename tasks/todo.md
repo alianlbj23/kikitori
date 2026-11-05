@@ -167,7 +167,8 @@
   - 結果：pipeline（即時最新槽＋完整有界 FIFO、依序送出）、config（嚴格驗證、原子寫入）、stdio NDJSON 引擎（全部方法與事件有子行程測試）、`kikitori` 互動選單；本機 CPU 實測即時字幕延遲中位數 0.85 s、完整字幕 2.85 s（anime.wav，base／small＋qwen3.5:4b）。
 - [x] 里程碑 5：聲音擷取
   - 結果：Windows（PyAudioWPatch）loopback 與麥克風本機實測可錄；Linux（soundcard）、macOS（ScreenCaptureKit）只以假物件測試，待真機驗證。
-- [ ] 里程碑 6：硬體偵測與模型組合
+- [x] 里程碑 6：硬體偵測與模型組合
+  - 結果：hardware 模組（標準庫偵測、推薦、手動組合驗證、使用者同意 NVIDIA EULA 後下載 cuBLAS）已接上引擎（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`models.download gpu-runtime`）；設定 schema v2；本機推薦 small／large-v3-turbo CUDA float16 + qwen3.5:9b。
 - [ ] 里程碑 7：Tauri 介面
   - 第一階段結果：Tauri v2 + Vite + TypeScript；主視窗（模式、裝置、字幕紀錄、模型頁、設定頁）與透明置頂字幕視窗（即時→完整原地取代、滑鼠穿透、Ctrl+Alt+K）；Rust 引擎橋接（逐行驗證、id 配對與逾時、自動重啟）；vitest 60、cargo test 44、clippy、debug build 通過；更新器公鑰已寫入。待做：sidecar 打包整合、Linux／macOS 實機確認。
 - [ ] 里程碑 8：CI/CD

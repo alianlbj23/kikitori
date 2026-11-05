@@ -17,6 +17,7 @@ from kikitori.asr.download import (
     DownloadCancelledError,
     ModelDownloadError,
     ModelIntegrityError,
+    download_file,
     download_model,
     is_downloaded,
     model_dir,
@@ -380,6 +381,84 @@ class FakeFetcherDownloadTest(unittest.TestCase):
         (directory / MARKER_NAME).write_text("not json", encoding="utf-8")
         with self.assertLogs("kikitori.asr.download", level="WARNING"):
             self.assertFalse(is_downloaded(self.spec, self.cache))
+
+
+class DownloadFileTest(unittest.TestCase):
+    """公開的單檔下載（GPU 執行環境等非 Hugging Face 來源共用）。"""
+
+    URL = "https://example.org/pkg/blob.whl"
+    DATA = b"0123456789" * 300_000  # 3 MB，跨越多個區塊
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dest = Path(self._tmp.name) / "blob.whl"
+        self.file = ModelFile(
+            "blob.whl", len(self.DATA), hashlib.sha256(self.DATA).hexdigest()
+        )
+
+    def test_downloads_verifies_and_reports_file_progress(self) -> None:
+        fetcher = _FakeFetcher({"blob.whl": _FakeResponse(200, self.DATA)})
+        events: list[tuple[int, int]] = []
+        download_file(
+            self.URL,
+            self.dest,
+            self.file,
+            fetcher=fetcher,
+            timeout=7.0,
+            progress=lambda d, t: events.append((d, t)),
+        )
+        self.assertEqual(self.dest.read_bytes(), self.DATA)
+        self.assertFalse(self.dest.with_name("blob.whl.part").exists())
+        self.assertEqual(fetcher.calls[0][0], self.URL)
+        self.assertEqual(fetcher.calls[0][2], 7.0)
+        self.assertEqual(events[0], (0, len(self.DATA)))
+        self.assertEqual(events[-1], (len(self.DATA), len(self.DATA)))
+        self.assertTrue(all(t == len(self.DATA) for _, t in events))
+
+    def test_resumes_partial_file(self) -> None:
+        self.dest.with_name("blob.whl.part").write_bytes(self.DATA[:1000])
+        rest = self.DATA[1000:]
+        fetcher = _FakeFetcher(
+            {
+                "blob.whl": _FakeResponse(
+                    206,
+                    rest,
+                    {
+                        "Content-Range": f"bytes 1000-{len(self.DATA) - 1}/{len(self.DATA)}",
+                        "Content-Length": str(len(rest)),
+                    },
+                )
+            }
+        )
+        download_file(self.URL, self.dest, self.file, fetcher=fetcher)
+        self.assertEqual(fetcher.calls[0][1]["Range"], "bytes=1000-")
+        self.assertEqual(self.dest.read_bytes(), self.DATA)
+
+    def test_hash_mismatch_removes_partial(self) -> None:
+        fetcher = _FakeFetcher({"blob.whl": _FakeResponse(200, b"x" * len(self.DATA))})
+        with self.assertRaises(ModelIntegrityError):
+            download_file(self.URL, self.dest, self.file, fetcher=fetcher)
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.dest.with_name("blob.whl.part").exists())
+
+    def test_cancel(self) -> None:
+        cancel = threading.Event()
+        cancel.set()
+        fetcher = _FakeFetcher({"blob.whl": _FakeResponse(200, self.DATA)})
+        with self.assertRaises(DownloadCancelledError):
+            download_file(
+                self.URL, self.dest, self.file, fetcher=fetcher, cancel=cancel
+            )
+        self.assertFalse(self.dest.exists())
+
+    def test_rejects_insecure_url_and_bad_timeout(self) -> None:
+        fetcher = _FakeFetcher({})
+        with self.assertRaises(ValueError):
+            download_file("http://example.org/x", self.dest, self.file, fetcher=fetcher)
+        with self.assertRaises(ValueError):
+            download_file(self.URL, self.dest, self.file, fetcher=fetcher, timeout=0)
+        self.assertEqual(fetcher.calls, [])
 
 
 class ValidateUrlTest(unittest.TestCase):

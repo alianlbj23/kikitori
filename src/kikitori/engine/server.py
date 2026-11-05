@@ -25,6 +25,8 @@ from kikitori.capture.errors import (
 from kikitori.capture.types import AudioSource, DeviceKind
 from kikitori.config import SettingsError
 from kikitori.engine import protocol as p
+from kikitori.engine.deferred import Deferred, DeferredRunner
+from kikitori.engine.hardware_service import HardwareService, recommendation_patch
 from kikitori.engine.io import (
     LINE_TOO_LONG,
     ChannelClosedError,
@@ -32,14 +34,19 @@ from kikitori.engine.io import (
     MessageWriter,
     read_lines,
 )
-from kikitori.engine.services import EngineServices, platform_name
+from kikitori.engine.services import (
+    EngineServices,
+    ProgressCallback,
+    platform_name,
+)
+from kikitori.hardware import GPU_RUNTIME_ID
 from kikitori.pipeline import MODES, Mode, Pipeline, PipelineState, SubtitleUpdate
 from kikitori.pipeline.factory import UnknownModelError, pipeline_config
-from kikitori.translate.presets import PRESETS, normalize_model_name
 
 ENGINE_NAME = "kikitori-engine"
 STOP_TIMEOUT = 5.0
 DOWNLOAD_JOIN_TIMEOUT = 2.0
+DEFERRED_JOIN_TIMEOUT = 2.0
 PROGRESS_INTERVAL = 0.25
 MAX_DEVICE_ID_CHARS = 512
 
@@ -47,7 +54,11 @@ KIND_FOR_MODE: dict[Mode, DeviceKind] = {"media": "loopback", "interpret": "micr
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[[dict[str, Any]], Mapping[str, Any]]
+DownloadJob = Callable[[ProgressCallback, threading.Event], None]
+"""背景下載：`(progress, cancel)`；失敗時丟例外。"""
+
+Handler = Callable[[dict[str, Any]], Mapping[str, Any] | Deferred]
+"""處理函式：回傳結果（立即回應），或 `Deferred`（在背景工作執行緒上完成後回應）。"""
 
 
 def engine_version() -> str:
@@ -115,6 +126,9 @@ class EngineServer:
         self._next_session_id = 1
         self._downloads: dict[str, _Download] = {}
         self._downloads_lock = threading.Lock()
+        # 偵測硬體可能要數秒：在背景工作執行緒上處理，stdin 仍能立即處理 session.stop 等。
+        self._deferred = DeferredRunner(self._send)
+        self._hardware = HardwareService(services.hardware, services.models)
         # 回應寫出後才執行的動作：讓 UI 先拿到 session_id，再收到該 session 的事件。
         self._after_response: list[Callable[[], None]] = []
         self._handlers: dict[str, Handler] = {
@@ -122,9 +136,11 @@ class EngineServer:
             "hardware.detect": self._hardware_detect,
             "models.list": self._models_list,
             "models.download": self._models_download,
+            "models.validate": self._models_validate,
             "devices.list": self._devices_list,
             "settings.get": self._settings_get,
             "settings.set": self._settings_set,
+            "settings.apply_recommendation": self._settings_apply_recommendation,
             "session.start": self._session_start,
             "session.stop": self._session_stop,
             "engine.shutdown": self._engine_shutdown,
@@ -203,14 +219,19 @@ class EngineServer:
                 )
             )
             return
+        if isinstance(result, Deferred):
+            # 回應由工作執行緒在完成時寫出（以 id 對應，可能晚於之後的請求）。
+            self._deferred.submit(request.id, request.method, result.job)
+            return
         self._send(p.response(request.id, result))
         actions, self._after_response = self._after_response, []
         for action in actions:
             action()
 
     def close(self) -> None:
-        """停止 session、取消下載（可重複呼叫）。"""
+        """停止 session、放棄尚未開始的背景請求、取消下載（可重複呼叫）。"""
         self._stop_session()
+        self._deferred.close(DEFERRED_JOIN_TIMEOUT)
         with self._downloads_lock:
             downloads = list(self._downloads.values())
         for download in downloads:
@@ -258,9 +279,11 @@ class EngineServer:
             "fake": self._services.fake,
         }
 
-    def _hardware_detect(self, params: dict[str, Any]) -> Mapping[str, Any]:
+    def _hardware_detect(self, params: dict[str, Any]) -> Deferred:
         p.reject_unknown_params(params)
-        return self._services.hardware.detect()
+        # 設定在收到請求時取出：之後的 settings.set 不影響這次偵測
+        settings = self._services.settings_store.get()
+        return Deferred(lambda: self._hardware.report(settings))
 
     def _devices_list(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)
@@ -290,59 +313,117 @@ class EngineServer:
             ) from exc
         return self._settings_result()
 
-    # --- models -----------------------------------------------------------------
-
-    def _models_list(self, params: dict[str, Any]) -> Mapping[str, Any]:
+    def _settings_apply_recommendation(self, params: dict[str, Any]) -> Deferred:
         p.reject_unknown_params(params)
         settings = self._services.settings_store.get()
-        asr = [dataclasses.asdict(m) for m in self._services.models.asr_models()]
-        installed: list[str] | None
-        error: str | None = None
-        try:
-            installed = self._services.models.installed_translation_models(settings)
-        except (OSError, ValueError) as exc:
-            # 翻譯服務沒開是常態（例如還沒裝 Ollama），不讓整個方法失敗。
-            installed = None
-            error = f"{type(exc).__name__}: {exc}"
-            logger.info("cannot list translation models: %s", error)
-        names = (
-            None if installed is None else {normalize_model_name(m) for m in installed}
-        )
-        presets = [
-            {
-                "model": preset.model,
-                "label": preset.label,
-                "license": preset.license,
-                "license_url": preset.license_url,
-                "commercial_use": preset.commercial_use,
-                "excluded_regions": list(preset.excluded_regions),
-                "installed": None if names is None else preset.model in names,
+
+        def job() -> Mapping[str, Any]:
+            _, rec = self._hardware.recommendation(settings)
+            patch = recommendation_patch(rec)
+            try:
+                self._services.settings_store.update(patch)
+            except OSError as exc:
+                logger.error("cannot save settings: %s", exc)
+                raise p.ProtocolError(
+                    p.SETTINGS_IO_ERROR, f"cannot save settings: {exc}"
+                ) from exc
+            # SettingsError 不轉成 invalid_settings：推薦組合不合法是程式錯誤（internal_error）
+            return {
+                **self._settings_result(),
+                "applied": patch,
+                "recommendation": rec.to_dict(),
             }
-            for preset in PRESETS.values()
-        ]
-        return {
-            "asr": asr,
-            "translation": {
-                "base_url": settings.translation.base_url,
-                "installed": installed,
-                "error": error,
-                "presets": presets,
-            },
-        }
+
+        return Deferred(job)
+
+    # --- models -----------------------------------------------------------------
+
+    def _models_list(self, params: dict[str, Any]) -> Deferred:
+        p.reject_unknown_params(params)
+        settings = self._services.settings_store.get()
+        return Deferred(lambda: self._hardware.models_list(settings))
+
+    def _models_validate(self, params: dict[str, Any]) -> Deferred:
+        p.reject_unknown_params(params, ("settings",))
+        current = self._services.settings_store.get()
+        patch = params.get("settings", {})
+        if not isinstance(patch, dict):
+            raise p.ProtocolError(
+                p.INVALID_PARAMS,
+                f"settings must be an object, got {type(patch).__name__}",
+            )
+        # 格式錯誤在這裡就回 invalid_settings（與 settings.set 相同）；只有合法的設定
+        # 才需要偵測硬體來檢查組合。
+        try:
+            candidate = current.merged(patch)
+        except SettingsError as exc:
+            raise p.ProtocolError(p.INVALID_SETTINGS, str(exc)) from exc
+        return Deferred(lambda: self._hardware.validate(candidate))
 
     def _models_download(self, params: dict[str, Any]) -> Mapping[str, Any]:
-        p.reject_unknown_params(params, ("model",))
+        p.reject_unknown_params(params, ("model", "accept_license"))
         model = params.get("model")
         if not isinstance(model, str) or not model:
             raise p.ProtocolError(
                 p.INVALID_PARAMS, f"model must be a non-empty string, got {model!r}"
             )
+        if model == GPU_RUNTIME_ID:
+            return self._download_gpu_runtime(params)
+        if "accept_license" in params:
+            raise p.ProtocolError(
+                p.INVALID_PARAMS,
+                f"accept_license only applies to {GPU_RUNTIME_ID!r}",
+            )
         known = {m.id: m for m in self._services.models.asr_models()}
         if model not in known:
+            available = ", ".join([*known, GPU_RUNTIME_ID])
             raise p.ProtocolError(
                 p.UNKNOWN_MODEL,
-                f"unknown ASR model {model[:100]!r}; available: {', '.join(known)}",
+                f"unknown model {model[:100]!r}; available: {available}",
             )
+        catalog = self._services.models
+
+        def download(progress: ProgressCallback, cancel: threading.Event) -> None:
+            catalog.download(model, progress, cancel)
+
+        return self._start_download(model, known[model].size_bytes, download)
+
+    def _download_gpu_runtime(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        """NVIDIA cuBLAS：使用者必須明確同意 NVIDIA EULA（`accept_license: true`）。"""
+        accepted = params.get("accept_license", False)
+        if not isinstance(accepted, bool):
+            raise p.ProtocolError(
+                p.INVALID_PARAMS,
+                f"accept_license must be true or false, got {accepted!r}",
+            )
+        status = self._services.hardware.gpu_runtime_status()
+        # 平台不支援時不要求同意授權：那裡根本不會下載 NVIDIA 的檔案
+        if not status.supported:
+            raise p.ProtocolError(
+                p.GPU_RUNTIME_UNSUPPORTED,
+                "the GPU runtime is only available on Windows and Linux x86-64",
+            )
+        if not accepted:
+            raise p.ProtocolError(
+                p.LICENSE_NOT_ACCEPTED,
+                f"downloading {status.package} {status.version} from PyPI requires "
+                f"accepting the {status.license}: {status.license_url} "
+                "(resend with accept_license: true after the user agrees)",
+            )
+        logger.info("user accepted the %s (%s)", status.license, status.license_url)
+
+        def install(progress: ProgressCallback, cancel: threading.Event) -> None:
+            try:
+                self._services.hardware.install_gpu_runtime(progress, cancel)
+            finally:
+                # 不論成功與否，cuBLAS 的狀態可能變了；下一次偵測不能用舊結果
+                self._hardware.invalidate()
+
+        return self._start_download(GPU_RUNTIME_ID, status.download_bytes or 0, install)
+
+    def _start_download(
+        self, model: str, expected_total: int, job: DownloadJob
+    ) -> Mapping[str, Any]:
         with self._downloads_lock:
             if model in self._downloads:
                 raise p.ProtocolError(
@@ -352,50 +433,54 @@ class EngineServer:
             self._downloads[model] = download
         download.thread = threading.Thread(
             target=self._run_download,
-            args=(download, known[model].size_bytes),
+            args=(download, expected_total, job),
             name=f"download-{model}",
             daemon=True,
         )
         self._after_response.append(download.thread.start)
         return {"model": model, "started": True}
 
-    def _run_download(self, download: _Download, expected_total: int) -> None:
+    def _run_download(
+        self, download: _Download, expected_total: int, job: DownloadJob
+    ) -> None:
         last_sent = 0.0
         last_fraction = -1.0
+        total = expected_total
 
-        def send(downloaded: int, total: int, state: str, error: str | None) -> None:
+        def send(downloaded: int, size: int, state: str, error: str | None) -> None:
             self._send_event(
                 "download_progress",
                 {
                     "model": download.model,
                     "downloaded_bytes": downloaded,
-                    "total_bytes": total,
+                    "total_bytes": size,
                     "state": state,
                     "error": error,
                 },
             )
 
-        def progress(downloaded: int, total: int) -> None:
-            nonlocal last_sent, last_fraction
+        def progress(downloaded: int, reported_total: int) -> None:
+            nonlocal last_sent, last_fraction, total
+            total = reported_total
             now = time.monotonic()
-            fraction = downloaded / total if total > 0 else 0.0
+            fraction = downloaded / reported_total if reported_total > 0 else 0.0
             # 1 MiB 回報一次，GB 級模型會有上千次；節流避免塞爆 stdout。
             if now - last_sent < PROGRESS_INTERVAL and fraction - last_fraction < 0.01:
                 return
             last_sent, last_fraction = now, fraction
-            send(downloaded, total, "downloading", None)
+            send(downloaded, reported_total, "downloading", None)
 
         try:
             send(0, expected_total, "downloading", None)
-            self._services.models.download(download.model, progress, download.cancel)
-            send(expected_total, expected_total, "done", None)
-            logger.info("model %s downloaded", download.model)
+            job(progress, download.cancel)
+            send(total, total, "done", None)
+            logger.info("%s downloaded", download.model)
         except ChannelClosedError:
             logger.error("download of %s: protocol output closed", download.model)
         except Exception as exc:
             logger.exception("download of %s failed", download.model)
             try:
-                send(0, expected_total, "error", f"{type(exc).__name__}: {exc}")
+                send(0, total, "error", f"{type(exc).__name__}: {exc}")
             except ChannelClosedError:
                 logger.error("cannot report download failure: protocol output closed")
         finally:

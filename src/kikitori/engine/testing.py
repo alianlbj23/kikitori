@@ -5,8 +5,18 @@
 的文字。設定檔仍用真實的 `SettingsStore`（測試以 `KIKITORI_CONFIG_DIR` 指到暫存目錄）。
 """
 
+import dataclasses
+import hashlib
+import io
+import logging
+import os
+import tempfile
 import threading
-from collections.abc import Iterator
+import time
+import zipfile
+from collections.abc import Iterator, Mapping
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -17,9 +27,31 @@ from kikitori.capture.errors import DeviceNotFoundError
 from kikitori.capture.types import AudioSource
 from kikitori.config import Settings, SettingsStore, default_settings_path
 from kikitori.engine.services import (
-    BasicHardwareProvider,
     EngineServices,
     ProgressCallback,
+)
+from kikitori.hardware import (
+    CUBLAS_VERSION,
+    CpuInfo,
+    CublasInfo,
+    GpuInfo,
+    GpuRuntimeError,
+    GpuRuntimeStatus,
+    HardwareInfo,
+    MemoryInfo,
+    ModelCombination,
+    TranslationServerInfo,
+    gpu_runtime_status,
+    install_gpu_runtime,
+    installed_runtime_dir,
+    models_overview,
+)
+from kikitori.hardware.gpu_runtime import (
+    CUBLAS_PACKAGE,
+    LICENSE_NAME,
+    LICENSE_URL,
+    RuntimeWheel,
+    WheelMember,
 )
 from kikitori.pipeline import (
     Mode,
@@ -35,6 +67,9 @@ ENDLESS_DEVICE = "fake:microphone:endless"
 FAKE_MODEL_SIZE = 4 * 1024 * 1024
 
 FAKE_INSTALLED_TRANSLATION_MODELS = ["qwen3.5:4b"]
+GIB = 1024**3
+
+logger = logging.getLogger(__name__)
 
 
 def _speech_track() -> npt.NDArray[np.int16]:
@@ -151,10 +186,6 @@ class FakeModelCatalog:
                 for model, downloaded in self._downloaded.items()
             ]
 
-    def installed_translation_models(self, settings: Settings) -> list[str]:
-        """假裝本機 Ollama 裝了 qwen3.5:4b。"""
-        return list(FAKE_INSTALLED_TRANSLATION_MODELS)
-
     def download(
         self,
         model_id: str,
@@ -181,8 +212,256 @@ class FakeModelCatalog:
                 raise FileNotFoundError(f"ASR model {model_id} is not downloaded")
 
 
+class _FakeWheelResponse:
+    """`asr.download.Response`：以小區塊回傳 wheel 內容，可設定每塊的延遲。"""
+
+    CHUNK = 16 * 1024
+
+    def __init__(
+        self, status: int, body: bytes, headers: dict[str, str], delay: float
+    ) -> None:
+        self.status = status
+        self._body = body
+        self._headers = {k.lower(): v for k, v in headers.items()}
+        self._delay = delay
+
+    def header(self, name: str) -> str | None:
+        """回應標頭（不分大小寫）。"""
+        return self._headers.get(name.lower())
+
+    def read(self, size: int) -> bytes:
+        """回傳最多一個小區塊；慢速情境下每塊等待 `delay` 秒（讓取消測試來得及）。"""
+        if self._delay and self._body:
+            time.sleep(self._delay)
+        chunk = self._body[: min(size, self.CHUNK)]
+        self._body = self._body[len(chunk) :]
+        return chunk
+
+    def close(self) -> None:
+        """沒有真正的連線。"""
+
+
+class FakeWheelFetcher:
+    """`asr.download.Fetcher`：不連網，直接回傳記憶體中的假 cuBLAS wheel（支援 Range）。"""
+
+    def __init__(self, payload: bytes, *, corrupt: bool, delay: float) -> None:
+        """
+        Args:
+            payload: wheel 的位元組。
+            corrupt: 回傳等長的零位元組（SHA-256 不符，模擬下載內容損壞）。
+            delay: 每個區塊的延遲秒數。
+        """
+        self._payload = bytes(len(payload)) if corrupt else payload
+        self._delay = delay
+
+    def open(
+        self, url: str, headers: Mapping[str, str], timeout: float
+    ) -> _FakeWheelResponse:
+        """依 `Range` 標頭回傳 200 或 206。"""
+        offset = 0
+        range_header = headers.get("Range")
+        if range_header is not None:
+            offset = int(range_header.removeprefix("bytes=").rstrip("-"))
+        body = self._payload[offset:]
+        response_headers = {"Content-Length": str(len(body))}
+        if offset:
+            response_headers["Content-Range"] = (
+                f"bytes {offset}-{len(self._payload) - 1}/{len(self._payload)}"
+            )
+        return _FakeWheelResponse(
+            206 if offset else 200, body, response_headers, self._delay
+        )
+
+
+def _fake_wheel(library_bytes: int) -> tuple[RuntimeWheel, bytes]:
+    """建立與真實 wheel 同樣結構（同名成員）的小 zip，回傳 wheel 定義與內容。"""
+    members = (
+        ("nvidia/cublas/bin/cublas64_12.dll", "cublas64_12.dll", b"A"),
+        ("nvidia/cublas/bin/cublasLt64_12.dll", "cublasLt64_12.dll", b"B"),
+        (
+            f"nvidia_cublas_cu12-{CUBLAS_VERSION}.dist-info/License.txt",
+            "License.txt",
+            b"L",
+        ),
+    )
+    buffer = io.BytesIO()
+    wheel_members: list[WheelMember] = []
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for archive_path, filename, fill in members:
+            data = fill * (library_bytes if filename != "License.txt" else 64)
+            archive.writestr(archive_path, data)
+            wheel_members.append(WheelMember(archive_path, filename, len(data)))
+    payload = buffer.getvalue()
+    wheel = RuntimeWheel(
+        platform_tag="fake_amd64",
+        url=(
+            "https://fake.invalid/packages/"
+            f"nvidia_cublas_cu12-{CUBLAS_VERSION}-py3-none-fake_amd64.whl"
+        ),
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        members=tuple(wheel_members),
+    )
+    return wheel, payload
+
+
+FAKE_HARDWARE_ENV = "KIKITORI_ENGINE_FAKE_HARDWARE"
+"""假模式的硬體情境（只在 `KIKITORI_ENGINE_FAKE=1` 時讀取），見 `FAKE_HARDWARE_PROFILES`。"""
+FAKE_HARDWARE_PROFILES = ("nvidia", "apple", "slow-runtime", "broken-runtime")
+"""
+- `nvidia`（預設）：8 GB NVIDIA GPU、尚未安裝 cuBLAS、本機翻譯伺服器裝了 qwen3.5:4b。
+- `apple`：Apple Silicon，沒有 GPU 執行環境（`gpu-runtime` 下載回 `gpu_runtime_unsupported`）。
+- `slow-runtime`：同 nvidia，但 GPU 執行環境下載很慢（測試結束引擎時的取消）。
+- `broken-runtime`：同 nvidia，但下載內容雜湊不符（測試失敗事件）。
+"""
+
+
+class FakeHardwareProvider:
+    """假硬體：固定的偵測結果，GPU 執行環境用真的安裝流程裝到暫存目錄（假 wheel、不連網）。
+
+    推薦、驗證與總覽都走真的 `kikitori.hardware` 程式碼，只有偵測與網路是假的；
+    安裝後 cuBLAS 變成可用、推薦改為 GPU 等級，和真實流程一樣。
+    """
+
+    def __init__(self, catalog: FakeModelCatalog, profile: str = "nvidia") -> None:
+        """
+        Args:
+            catalog: 假模式的 ASR 模型清單（`models.list` 的 ASR 部分以它為準）。
+            profile: `FAKE_HARDWARE_PROFILES` 之一。
+        """
+        if profile not in FAKE_HARDWARE_PROFILES:
+            raise ValueError(f"unknown fake hardware profile {profile!r}")
+        self._catalog = catalog
+        self._profile = profile
+        # 行程結束時刪除；背景下載可能還在寫，清理失敗不影響測試結果
+        self._tmp = tempfile.TemporaryDirectory(
+            prefix="kikitori-fake-gpu-", ignore_cleanup_errors=True
+        )
+        self._root = Path(self._tmp.name)
+        self._wheel: RuntimeWheel | None = None
+        self._fetcher: FakeWheelFetcher | None = None
+        if profile != "apple":
+            slow = profile == "slow-runtime"
+            self._wheel, payload = _fake_wheel(256 * 1024 if slow else 32 * 1024)
+            self._fetcher = FakeWheelFetcher(
+                payload, corrupt=profile == "broken-runtime", delay=0.1 if slow else 0
+            )
+
+    def detect(self, settings: Settings) -> HardwareInfo:
+        """固定的硬體；cuBLAS 是否可用取決於假 GPU 執行環境是否已安裝。"""
+        server = TranslationServerInfo(
+            base_url=settings.translation.base_url,
+            is_local=True,
+            reachable=True,
+            models=tuple(FAKE_INSTALLED_TRANSLATION_MODELS),
+        )
+        if self._wheel is None:
+            return HardwareInfo(
+                os="macos",
+                os_version="Fake macOS 15",
+                machine="arm64",
+                cpu=CpuInfo("Fake M-series", 8, 8, "arm64"),
+                memory=MemoryInfo(16 * GIB, 8 * GIB),
+                gpus=(),
+                apple_silicon=True,
+                cublas=CublasInfo(supported_platform=False, available=False),
+                translation_server=server,
+            )
+        runtime = installed_runtime_dir(self._root, self._wheel)
+        cublas = (
+            CublasInfo(True, True, (str(runtime),), "runtime")
+            if runtime is not None
+            else CublasInfo(supported_platform=True, available=False)
+        )
+        return HardwareInfo(
+            os="windows",
+            os_version="Fake Windows 11",
+            machine="AMD64",
+            cpu=CpuInfo("Fake 8-Core CPU", 8, 16, "AMD64"),
+            memory=MemoryInfo(32 * GIB, 16 * GIB),
+            gpus=(GpuInfo(0, "Fake GeForce 8GB", 8188, 600, "560.94", "8.9"),),
+            apple_silicon=False,
+            cublas=cublas,
+            translation_server=server,
+        )
+
+    def models_overview(
+        self, info: HardwareInfo, recommendation: ModelCombination
+    ) -> dict[str, Any]:
+        """真的 `models_overview()`，但 ASR 與 GPU 執行環境換成假模式的狀態。"""
+        overview = models_overview(
+            info,
+            recommendation,
+            cache_dir=self._root / "asr-cache",
+            runtime_root=self._root,
+        )
+        registry = {entry["id"]: entry for entry in overview["asr"]}
+        asr: list[dict[str, Any]] = []
+        for model in self._catalog.asr_models():
+            entry = dict(
+                registry.get(
+                    model.id,
+                    {
+                        "no_speech_reliable": None,
+                        "cpu_ram_mb": None,
+                        "vram_mb": None,
+                        "vram_int8_mb": None,
+                        "recommended_for": [],
+                    },
+                )
+            )
+            entry.update(dataclasses.asdict(model))
+            asr.append(entry)
+        runtime = self.gpu_runtime_status().to_dict()
+        runtime["cublas_available"] = info.cublas.available
+        runtime["cublas_source"] = info.cublas.source
+        return {**overview, "asr": asr, "gpu_runtime": runtime}
+
+    def gpu_runtime_status(self) -> GpuRuntimeStatus:
+        """假 wheel 的安裝狀態；apple 情境為不支援。"""
+        if self._wheel is None:
+            return GpuRuntimeStatus(
+                supported=False,
+                installed=False,
+                package=CUBLAS_PACKAGE,
+                version=CUBLAS_VERSION,
+                path=None,
+                download_bytes=None,
+                installed_bytes=None,
+                license=LICENSE_NAME,
+                license_url=LICENSE_URL,
+            )
+        return gpu_runtime_status(self._root, self._wheel)
+
+    def install_gpu_runtime(
+        self, progress: ProgressCallback, cancel: threading.Event
+    ) -> None:
+        """真的 `install_gpu_runtime()`，wheel 與 fetcher 換成假的。"""
+        if self._wheel is None or self._fetcher is None:
+            raise GpuRuntimeError("the fake apple profile has no GPU runtime")
+        install_gpu_runtime(
+            self._root,
+            progress=progress,
+            cancel=cancel,
+            fetcher=self._fetcher,
+            wheel=self._wheel,
+        )
+
+
+def _fake_hardware_profile() -> str:
+    value = os.environ.get(FAKE_HARDWARE_ENV, "").strip() or "nvidia"
+    if value not in FAKE_HARDWARE_PROFILES:
+        logger.warning(
+            "%s must be one of %s; using nvidia",
+            FAKE_HARDWARE_ENV,
+            ", ".join(FAKE_HARDWARE_PROFILES),
+        )
+        return "nvidia"
+    return value
+
+
 def fake_services() -> EngineServices:
-    """假模式的完整服務。"""
+    """假模式的完整服務（硬體情境由 `KIKITORI_ENGINE_FAKE_HARDWARE` 選擇）。"""
     catalog = FakeModelCatalog()
 
     def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
@@ -206,7 +485,7 @@ def fake_services() -> EngineServices:
         list_devices=lambda: list(FAKE_DEVICES),
         open_source=open_fake_source,
         build_components=build_components,
-        hardware=BasicHardwareProvider(),
+        hardware=FakeHardwareProvider(catalog, _fake_hardware_profile()),
         models=catalog,
         fake=True,
     )

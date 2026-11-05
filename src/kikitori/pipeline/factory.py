@@ -6,8 +6,9 @@ Silero 或翻譯器實作。`kikitori.asr` 的實作（CTranslate2 Whisper、下
 ASR 的公開 API 若改變，只需要修改本檔。
 """
 
+import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -24,6 +25,8 @@ from kikitori.pipeline.types import (
 from kikitori.translate import OpenAICompatibleTranslator, TranslatorConfig
 
 TranscriberRole = Literal["fast", "final"]
+
+logger = logging.getLogger(__name__)
 
 # 即時字幕重試只會更晚，逾時也要比完整路徑短；完整路徑用翻譯模組的預設值。
 FAST_TRANSLATE_READ_TIMEOUT = 10.0
@@ -74,7 +77,8 @@ def create_transcriber(
     role: TranscriberRole,
     languages: tuple[str, ...] | None,
     compute_type: str | None = None,
-    cuda_library_dirs: tuple[str, ...] = (),
+    cpu_threads: int = 0,
+    cuda_library_dirs: Sequence[str | Path] = (),
 ) -> Transcriber:
     """載入 ASR 模型（不下載）。
 
@@ -84,7 +88,8 @@ def create_transcriber(
         role: "fast" 用 greedy 解碼（延遲低）；"final" 用 beam search 與溫度 fallback。
         languages: 自動偵測時的候選語言；None 表示不限制。
         compute_type: CTranslate2 精度；None 用 asr 模組依裝置的預設值。
-        cuda_library_dirs: cuBLAS 12 所在目錄（hardware 里程碑填入）。
+        cpu_threads: CPU 執行緒數；0 表示 CTranslate2 預設值。
+        cuda_library_dirs: cuBLAS 12 所在目錄（見 `asr_cuda_library_dirs()`）。
 
     Raises:
         UnknownModelError: 模型 id 不在清單中。
@@ -104,10 +109,46 @@ def create_transcriber(
         spec,
         device=device,
         compute_type=compute_type,
+        cpu_threads=cpu_threads,
         options=options,
         cuda_library_dirs=[Path(d) for d in cuda_library_dirs],
         download=False,
     )
+
+
+def asr_cuda_library_dirs(settings: Settings) -> list[Path]:
+    """要預載 cuBLAS 的目錄：設定指定的目錄在前，再加上已安裝的 GPU 執行環境。
+
+    GPU 執行環境由使用者在 UI 下載（`models.download gpu-runtime`），不寫進設定，
+    所以每次建立元件時都重新檢查；這樣安裝完成後的下一個 session 就會用到它。
+    檢查失敗（例如磁碟讀取錯誤）只記 warning：最壞情況是 ASR 改用 CPU。
+    """
+    from kikitori.hardware import installed_runtime_dir
+
+    dirs = [Path(d) for d in settings.asr.cuda_library_dirs]
+    try:
+        runtime = installed_runtime_dir()
+    except OSError as exc:
+        logger.warning("cannot check the GPU runtime: %s", exc)
+        runtime = None
+    if runtime is not None and runtime not in dirs:
+        dirs.append(runtime)
+    return dirs
+
+
+def resolve_cpu_threads(value: int | None, device: AsrDevice) -> int:
+    """設定的執行緒數 → `load_transcriber(cpu_threads=...)`。
+
+    None（自動）時：`device="cuda"` 用 0（GPU 推論不看這個值），否則用
+    `hardware.auto_cpu_threads()`（兩條路徑同時在 CPU 上跑也不超過實體核心數）。
+    """
+    if value is not None:
+        return value
+    if device == "cuda":
+        return 0
+    from kikitori.hardware import auto_cpu_threads
+
+    return auto_cpu_threads()
 
 
 def no_speech_reliable(model_id: str) -> bool:
@@ -214,6 +255,7 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
     languages = candidate_languages(mode, settings.partner_language)
     fast_translator, final_translator = create_translators(settings)
     asr = settings.asr
+    cuda_dirs = asr_cuda_library_dirs(settings)
     return PipelineComponents(
         voice_model=SileroVad(),
         fast_transcriber=create_transcriber(
@@ -221,16 +263,18 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
             device=asr.device,
             role="fast",
             languages=languages,
-            compute_type=asr.compute_type,
-            cuda_library_dirs=asr.cuda_library_dirs,
+            compute_type=asr.fast_compute_type,
+            cpu_threads=resolve_cpu_threads(asr.fast_cpu_threads, asr.device),
+            cuda_library_dirs=cuda_dirs,
         ),
         final_transcriber=create_transcriber(
             asr.final_model,
             device=asr.device,
             role="final",
             languages=languages,
-            compute_type=asr.compute_type,
-            cuda_library_dirs=asr.cuda_library_dirs,
+            compute_type=asr.final_compute_type,
+            cpu_threads=resolve_cpu_threads(asr.final_cpu_threads, asr.device),
+            cuda_library_dirs=cuda_dirs,
         ),
         fast_translator=fast_translator,
         final_translator=final_translator,

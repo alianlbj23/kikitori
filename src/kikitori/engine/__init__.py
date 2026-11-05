@@ -9,7 +9,7 @@ from kikitori.engine.main import FAKE_ENV, run_engine
 from kikitori.engine.protocol import PROTOCOL_VERSION
 from kikitori.engine.server import EngineServer
 from kikitori.engine.services import (
-    BasicHardwareProvider,
+    DefaultHardwareProvider,
     EngineServices,
     HardwareProvider,
     ModelCatalog,
@@ -19,7 +19,7 @@ from kikitori.engine.services import (
 __all__ = [
     "FAKE_ENV",
     "PROTOCOL_VERSION",
-    "BasicHardwareProvider",
+    "DefaultHardwareProvider",
     "EngineServer",
     "EngineServices",
     "HardwareProvider",

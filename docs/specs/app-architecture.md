@@ -129,11 +129,13 @@ class SubtitleUpdate:
 
 - 偵測：作業系統、CPU 核心數、RAM、NVIDIA GPU 與 VRAM（`nvidia-smi`，有 timeout）、Apple Silicon。
 - `recommend()` 回傳模型組合（ASR 即時／完整模型、運算裝置與精度、翻譯模型）；使用者可在設定頁覆寫。
+- GPU 執行環境（cuBLAS 12）不隨安裝檔散布：使用者同意 NVIDIA CUDA EULA 後，引擎才從 PyPI 下載官方 `nvidia-cublas-cu12` 並驗證 SHA-256（見 `hardware.md`）。
+- 推薦預設不含有地區限制授權的翻譯模型（例如 HY-MT），除非使用者在設定中開啟 `translation.allow_restricted`。
 
 ### config
 
 - 設定檔：使用者設定目錄下的 `kikitori/settings.json`（Windows `%APPDATA%`、macOS `~/Library/Application Support`、Linux `$XDG_CONFIG_HOME` 或 `~/.config`）。
-- 讀取時驗證型別與範圍；版本欄位供未來遷移；不存密碼與 API key。
+- 讀取時驗證型別與範圍；不存密碼與 API key。目前 `schema_version = 2`，遷移規則見 `pipeline-engine.md`。
 
 ## 引擎協定（stdio NDJSON）
 
@@ -148,9 +150,11 @@ class SubtitleUpdate:
 | `engine.info` | — | 版本、協定版本、平台 |
 | `hardware.detect` | — | 硬體資訊與推薦組合 |
 | `models.list` | — | 可選的 ASR 模型、本機 Ollama 模型、是否已下載 |
-| `models.download` | `{"model": ...}` | 開始下載，進度以事件回報 |
-| `devices.list` | — | `DeviceInfo` 列表 |
-| `settings.get` / `settings.set` | `{...}` | 目前設定；`set` 驗證失敗回傳錯誤 |
+| `models.download` | `{"model": ..., "accept_license"?: bool}` | 開始下載，進度以事件回報；`"gpu-runtime"` 必須帶 `accept_license: true` |
+| `models.validate` | `{"settings"?: 部分設定}` | `{ok, errors, warnings}`（不存檔） |
+| `devices.list` | — | `{"devices": [DeviceInfo...]}` |
+| `settings.get` / `settings.set` | — / 部分設定（深度合併） | `{settings, path}`；`set` 驗證失敗回傳 `invalid_settings` |
+| `settings.apply_recommendation` | — | 套用推薦組合並存檔：`{settings, path, applied, recommendation}` |
 | `session.start` | `{"mode": "media" \| "interpret", "device_id": ...}` | `{"session_id": ...}` |
 | `session.stop` | — | `{}` |
 | `engine.shutdown` | — | `{}`，之後引擎結束 |
@@ -159,10 +163,11 @@ class SubtitleUpdate:
 |---|---|
 | `subtitle` | `SubtitleUpdate` 的欄位 |
 | `status` | `{"state": "idle" \| "loading" \| "running" \| "error", "detail": ...}` |
-| `download_progress` | `{"model", "downloaded_bytes", "total_bytes"}` |
+| `download_progress` | `{"model", "downloaded_bytes", "total_bytes", "state": "downloading" \| "done" \| "error", "error"}`；`model` 可能是 `"gpu-runtime"` |
 | `log` | `{"level", "message"}`（不含密鑰） |
 
-- 協定版本 `protocol_version = 1`；不認得的方法回傳 `unknown_method` 錯誤。
+- 協定版本 `protocol_version = 1`；不認得的方法回傳 `unknown_method` 錯誤。欄位與錯誤碼的完整定義以 `pipeline-engine.md` 為準。
+- 回應以 `id` 對應；耗時方法（`hardware.detect`、`models.*`、`settings.apply_recommendation`）在背景處理，可能晚於之後送出的請求才回應。
 - 引擎的日誌一律寫到 stderr 或 `log` 事件，**stdout 只寫協定訊息**。
 
 ## Tauri 程式（`app/`）

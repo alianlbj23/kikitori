@@ -34,10 +34,11 @@ Message = dict[str, Any]
 class EngineProcess:
     """一個假模式引擎子行程與它的訊息紀錄。"""
 
-    def __init__(self, config_dir: str) -> None:
+    def __init__(self, config_dir: str, hardware_profile: str = "nvidia") -> None:
         env = dict(os.environ)
         env["KIKITORI_ENGINE_FAKE"] = "1"
         env["KIKITORI_CONFIG_DIR"] = config_dir
+        env["KIKITORI_ENGINE_FAKE_HARDWARE"] = hardware_profile
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "kikitori", "engine"],
             stdin=subprocess.PIPE,
@@ -145,11 +146,14 @@ class EngineProcess:
 
 
 class EngineTestCase(unittest.TestCase):
+    hardware_profile = "nvidia"
+    """`engine/testing.py` 的假硬體情境（`KIKITORI_ENGINE_FAKE_HARDWARE`）。"""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.config_dir = Path(self._tmp.name)
-        self.engine = EngineProcess(str(self.config_dir))
+        self.engine = EngineProcess(str(self.config_dir), self.hardware_profile)
         self.addCleanup(self._close)
 
     def _close(self) -> None:
@@ -235,23 +239,82 @@ class BasicProtocolTest(EngineTestCase):
 
     def test_hardware_detect(self) -> None:
         result = self.engine.request("hardware.detect")["result"]
-        self.assertIsNone(result["recommendation"])
         hw = result["hardware"]
-        self.assertIsInstance(hw["cpu_count"], int)
-        self.assertTrue(hw["ram_bytes"] is None or hw["ram_bytes"] > 0)
-        self.assertEqual(hw["gpus"], [])
-        self.assertIsInstance(hw["apple_silicon"], bool)
+        # 第一版的欄位仍在（只增不改）
+        self.assertEqual(hw["cpu_count"], 16)
+        self.assertEqual(hw["ram_bytes"], 32 * 1024**3)
+        self.assertFalse(hw["apple_silicon"])
+        self.assertEqual(hw["gpus"][0]["name"], "Fake GeForce 8GB")
+        self.assertEqual(hw["gpus"][0]["memory_total_mb"], 8188)
+        self.assertEqual(hw["cpu"]["physical_cores"], 8)
+        self.assertEqual(
+            hw["cublas"],
+            {
+                "supported_platform": True,
+                "available": False,
+                "library_dirs": [],
+                "source": None,
+            },
+        )
+        self.assertTrue(hw["translation_server"]["reachable"])
+        self.assertEqual(hw["errors"], [])
+        rec = result["recommendation"]
+        # 有 GPU 但缺 cuBLAS → CPU 等級，並提示下載 GPU 執行環境
+        self.assertEqual(rec["tier"], "cpu")
+        self.assertTrue(rec["gpu_runtime_missing"])
+        self.assertEqual(
+            rec["fast_asr"],
+            {
+                "model": "base",
+                "device": "cpu",
+                "compute_type": "int8",
+                "cpu_threads": 4,
+            },
+        )
+        self.assertEqual(rec["final_asr"]["model"], "small")
+        self.assertEqual(rec["translation_fast"], "qwen3.5:4b")
+        self.assertTrue(any("cuBLAS" in w for w in rec["warnings"]))
 
     def test_models_list(self) -> None:
         result = self.engine.request("models.list")["result"]
         asr = {m["id"]: m for m in result["asr"]}
         self.assertTrue(asr["base"]["downloaded"])
         self.assertFalse(asr["fake-missing"]["downloaded"])
-        self.assertEqual(
-            set(asr["base"]),
+        self.assertLessEqual(
             {"id", "size_bytes", "license", "speed_tier", "downloaded"},
+            set(asr["base"]),
         )
+        self.assertEqual(asr["base"]["recommended_for"], ["fast"])
+        self.assertEqual(asr["small"]["recommended_for"], ["final"])
+        self.assertTrue(asr["base"]["no_speech_reliable"])
+        self.assertIsNone(asr["fake-missing"]["vram_mb"])
+
+        runtime = result["gpu_runtime"]
+        self.assertEqual(runtime["id"], "gpu-runtime")
+        self.assertTrue(runtime["supported"])
+        self.assertFalse(runtime["installed"])
+        self.assertFalse(runtime["cublas_available"])
+        self.assertEqual(
+            runtime["license_url"], "https://docs.nvidia.com/cuda/eula/index.html"
+        )
+        self.assertGreater(runtime["download_bytes"], 0)
+
         translation = result["translation"]
+        self.assertEqual(
+            translation["server"],
+            {
+                "base_url": "http://localhost:11434/v1",
+                "is_local": True,
+                "reachable": True,
+                "error": None,
+            },
+        )
+        models = {m["name"]: m for m in translation["models"]}
+        self.assertTrue(models["qwen3.5:4b"]["installed"])
+        self.assertEqual(models["qwen3.5:4b"]["recommended_for"], ["fast", "final"])
+        self.assertFalse(models["qwen3.5:9b"]["installed"])
+        # 第一版的欄位
+        self.assertEqual(translation["base_url"], "http://localhost:11434/v1")
         self.assertEqual(translation["installed"], ["qwen3.5:4b"])
         self.assertIsNone(translation["error"])
         presets = {p["model"]: p for p in translation["presets"]}
@@ -259,11 +322,37 @@ class BasicProtocolTest(EngineTestCase):
         self.assertFalse(presets["qwen3.5:9b"]["installed"])
         self.assertIn("license", presets["qwen3.5:9b"])
 
+    def test_hardware_methods_reject_unknown_params(self) -> None:
+        for method in (
+            "hardware.detect",
+            "models.list",
+            "settings.apply_recommendation",
+        ):
+            with self.subTest(method=method):
+                self.assertError(
+                    self.engine.request(method, {"force": True}), "invalid_params"
+                )
+
+    def test_deferred_responses_keep_request_order(self) -> None:
+        # 背景請求依送出的順序回應；立即回應的請求也照常處理
+        first, second = 9001, 9002
+        self.engine.send({"id": first, "method": "hardware.detect"})
+        self.engine.send({"id": second, "method": "models.list"})
+        info = self.engine.request("engine.info")
+        self.assertIn("result", info)
+        a = self.engine.wait_for(lambda m: m.get("id") == first)
+        b = self.engine.wait_for(lambda m: m.get("id") == second)
+        self.assertIn("result", a)
+        self.assertIn("result", b)
+        self.assertLess(self.engine.seen.index(a), self.engine.seen.index(b))
+
 
 class SettingsProtocolTest(EngineTestCase):
     def test_get_defaults_and_path(self) -> None:
         result = self.engine.request("settings.get")["result"]
-        self.assertEqual(result["settings"]["schema_version"], 1)
+        self.assertEqual(result["settings"]["schema_version"], 2)
+        self.assertFalse(result["settings"]["translation"]["allow_restricted"])
+        self.assertIsNone(result["settings"]["asr"]["fast_cpu_threads"])
         self.assertEqual(result["settings"]["media"]["pause_secs"], 0.6)
         self.assertEqual(Path(result["path"]), self.config_dir / "settings.json")
 
@@ -330,6 +419,250 @@ class DownloadProtocolTest(EngineTestCase):
             self.engine.request("models.download", {"model": "huge-v9"}),
             "unknown_model",
         )
+
+
+NVIDIA_EULA_URL = "https://docs.nvidia.com/cuda/eula/index.html"
+
+
+class GpuRuntimeProtocolTest(EngineTestCase):
+    def test_license_must_be_accepted_explicitly(self) -> None:
+        for params in (
+            {"model": "gpu-runtime"},
+            {"model": "gpu-runtime", "accept_license": False},
+        ):
+            with self.subTest(params=params):
+                response = self.engine.request("models.download", params)
+                self.assertError(response, "license_not_accepted")
+                self.assertIn(NVIDIA_EULA_URL, response["error"]["message"])
+        self.assertError(
+            self.engine.request(
+                "models.download", {"model": "gpu-runtime", "accept_license": "yes"}
+            ),
+            "invalid_params",
+        )
+        # accept_license 只適用於 GPU 執行環境
+        self.assertError(
+            self.engine.request(
+                "models.download", {"model": "base", "accept_license": True}
+            ),
+            "invalid_params",
+        )
+        self.assertFalse(
+            any(m.get("event") == "download_progress" for m in self.engine.seen)
+        )
+
+    def test_install_reports_progress_and_enables_cuda(self) -> None:
+        response = self.engine.request(
+            "models.download", {"model": "gpu-runtime", "accept_license": True}
+        )
+        self.assertEqual(response["result"], {"model": "gpu-runtime", "started": True})
+        first = self.engine.wait_event("download_progress")
+        self.assertEqual(
+            (first["model"], first["downloaded_bytes"], first["state"]),
+            ("gpu-runtime", 0, "downloading"),
+        )
+        self.assertGreater(first["total_bytes"], 0)
+        done = self.engine.wait_event(
+            "download_progress", lambda d: d["state"] != "downloading"
+        )
+        self.assertEqual((done["model"], done["state"]), ("gpu-runtime", "done"))
+        self.assertEqual(done["downloaded_bytes"], first["total_bytes"])
+        self.assertIsNone(done["error"])
+
+        result = self.engine.request("hardware.detect")["result"]
+        self.assertTrue(result["hardware"]["cublas"]["available"])
+        self.assertEqual(result["hardware"]["cublas"]["source"], "runtime")
+        rec = result["recommendation"]
+        self.assertEqual(rec["tier"], "nvidia_8gb")
+        self.assertFalse(rec["gpu_runtime_missing"])
+        self.assertEqual(
+            rec["fast_asr"],
+            {
+                "model": "small",
+                "device": "cuda",
+                "compute_type": "float16",
+                "cpu_threads": 0,
+            },
+        )
+        runtime = self.engine.request("models.list")["result"]["gpu_runtime"]
+        self.assertTrue(runtime["installed"])
+        self.assertIsInstance(runtime["path"], str)
+        self.assertEqual(runtime["cublas_source"], "runtime")
+
+
+class BrokenGpuRuntimeTest(EngineTestCase):
+    hardware_profile = "broken-runtime"
+
+    def test_hash_mismatch_is_an_error_event(self) -> None:
+        self.engine.request(
+            "models.download", {"model": "gpu-runtime", "accept_license": True}
+        )
+        failed = self.engine.wait_event(
+            "download_progress", lambda d: d["state"] != "downloading"
+        )
+        self.assertEqual((failed["model"], failed["state"]), ("gpu-runtime", "error"))
+        self.assertIn("SHA-256", failed["error"])
+        hw = self.engine.request("hardware.detect")["result"]["hardware"]
+        self.assertFalse(hw["cublas"]["available"])
+
+
+class UnsupportedGpuRuntimeTest(EngineTestCase):
+    hardware_profile = "apple"
+
+    def test_unsupported_platform(self) -> None:
+        # 不支援的平台不要求同意授權，直接回 gpu_runtime_unsupported
+        for params in (
+            {"model": "gpu-runtime", "accept_license": True},
+            {"model": "gpu-runtime"},
+        ):
+            with self.subTest(params=params):
+                self.assertError(
+                    self.engine.request("models.download", params),
+                    "gpu_runtime_unsupported",
+                )
+        result = self.engine.request("hardware.detect")["result"]
+        self.assertTrue(result["hardware"]["apple_silicon"])
+        self.assertEqual(result["recommendation"]["tier"], "apple_silicon")
+        runtime = self.engine.request("models.list")["result"]["gpu_runtime"]
+        self.assertFalse(runtime["supported"])
+
+
+class SlowGpuRuntimeTest(EngineTestCase):
+    hardware_profile = "slow-runtime"
+
+    def test_shutdown_cancels_download(self) -> None:
+        params = {"model": "gpu-runtime", "accept_license": True}
+        self.assertIn("result", self.engine.request("models.download", params))
+        self.engine.wait_event("download_progress", lambda d: d["downloaded_bytes"] > 0)
+        self.assertError(
+            self.engine.request("models.download", params), "download_in_progress"
+        )
+        self.assertEqual(self.engine.request("engine.shutdown")["result"], {})
+        self.assertEqual(self.engine.proc.wait(WAIT), 0)
+        cancelled = self.engine.wait_event(
+            "download_progress", lambda d: d["state"] != "downloading"
+        )
+        self.assertEqual(cancelled["state"], "error")
+        self.assertIn("cancel", cancelled["error"])
+
+
+class ValidateProtocolTest(EngineTestCase):
+    def test_current_settings(self) -> None:
+        result = self.engine.request("models.validate")["result"]
+        self.assertEqual(set(result), {"ok", "errors", "warnings"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+        # 預設 device=auto，但這台假電腦缺 cuBLAS：會提醒實際用 CPU
+        self.assertTrue(any("CPU" in w for w in result["warnings"]))
+
+    def test_candidate_is_checked_without_saving(self) -> None:
+        candidate = {
+            "asr": {"device": "cuda", "final_model": "fake-missing"},
+            "translation": {"fast_model": "qwen3.5:9b"},
+        }
+        result = self.engine.request("models.validate", {"settings": candidate})[
+            "result"
+        ]
+        self.assertFalse(result["ok"])
+        joined = "\n".join(result["errors"])
+        self.assertIn("cuBLAS", joined)
+        self.assertIn("fake-missing", joined)  # 不在 asr registry
+        self.assertTrue(any("qwen3.5:9b" in w for w in result["warnings"]))
+        settings = self.engine.request("settings.get")["result"]["settings"]
+        self.assertEqual(settings["asr"]["device"], "auto")
+
+    def test_param_errors(self) -> None:
+        bad = self.engine.request(
+            "models.validate", {"settings": {"asr": {"device": "gpu"}}}
+        )
+        self.assertError(bad, "invalid_settings")
+        self.assertIn("asr.device", bad["error"]["message"])
+        self.assertError(
+            self.engine.request("models.validate", {"settings": 3}), "invalid_params"
+        )
+        self.assertError(
+            self.engine.request("models.validate", {"combination": {}}),
+            "invalid_params",
+        )
+
+
+class ApplyRecommendationTest(EngineTestCase):
+    def test_applies_and_persists(self) -> None:
+        result = self.engine.request("settings.apply_recommendation")["result"]
+        applied = result["applied"]
+        self.assertEqual(
+            applied["asr"],
+            {
+                "fast_model": "base",
+                "final_model": "small",
+                "device": "cpu",
+                "fast_compute_type": "int8",
+                "final_compute_type": "int8",
+                "fast_cpu_threads": 4,
+                "final_cpu_threads": 4,
+            },
+        )
+        self.assertEqual(
+            applied["translation"],
+            {"fast_model": "qwen3.5:4b", "final_model": "qwen3.5:4b"},
+        )
+        self.assertEqual(result["recommendation"]["tier"], "cpu")
+        settings = result["settings"]
+        for key, value in applied["asr"].items():
+            self.assertEqual(settings["asr"][key], value)
+        saved = json.loads(
+            (self.config_dir / "settings.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["asr"]["device"], "cpu")
+        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(Path(result["path"]), self.config_dir / "settings.json")
+
+    def test_after_gpu_runtime_install_switches_to_cuda(self) -> None:
+        self.engine.request(
+            "models.download", {"model": "gpu-runtime", "accept_license": True}
+        )
+        done = self.engine.wait_event(
+            "download_progress", lambda d: d["state"] != "downloading"
+        )
+        self.assertEqual(done["state"], "done")
+        settings = self.engine.request("settings.apply_recommendation")["result"][
+            "settings"
+        ]
+        self.assertEqual(settings["asr"]["device"], "cuda")
+        self.assertEqual(
+            (settings["asr"]["fast_model"], settings["asr"]["final_model"]),
+            ("small", "large-v3-turbo"),
+        )
+        self.assertIsNone(settings["asr"]["fast_cpu_threads"])
+
+
+class SettingsMigrationProtocolTest(EngineTestCase):
+    def test_v1_file_is_read_as_v2(self) -> None:
+        self.engine.dispose()
+        v1 = {"schema_version": 1, "asr": {"device": "cuda", "compute_type": "int8"}}
+        (self.config_dir / "settings.json").write_text(json.dumps(v1), encoding="utf-8")
+        self.engine = EngineProcess(str(self.config_dir))
+        settings = self.engine.request("settings.get")["result"]["settings"]
+        self.assertEqual(settings["schema_version"], 2)
+        self.assertEqual(
+            (
+                settings["asr"]["fast_compute_type"],
+                settings["asr"]["final_compute_type"],
+            ),
+            ("int8", "int8"),
+        )
+        self.assertNotIn("compute_type", settings["asr"])
+        # 讀取不覆寫檔案；第一次 settings.set 才以新版格式存檔
+        self.assertEqual(
+            json.loads((self.config_dir / "settings.json").read_text(encoding="utf-8")),
+            v1,
+        )
+        self.engine.request("settings.set", {"mode": "interpret"})
+        saved = json.loads(
+            (self.config_dir / "settings.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(saved["asr"]["fast_compute_type"], "int8")
 
 
 class SessionProtocolTest(EngineTestCase):

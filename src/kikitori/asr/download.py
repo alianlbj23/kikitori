@@ -294,6 +294,51 @@ def _download_file(
     progress.done = base + file.size
 
 
+def download_file(
+    url: str,
+    dest: Path,
+    file: ModelFile,
+    *,
+    fetcher: Fetcher | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECS,
+    cancel: threading.Event | None = None,
+    progress: ProgressCallback | None = None,
+) -> None:
+    """下載單一檔案到 `dest`，與 `download_model()` 用同一套續傳與驗證邏輯。
+
+    給不在 Hugging Face 的檔案使用（例如 hardware 模組從 PyPI 下載 cuBLAS wheel）。
+    先寫到 `<dest>.part`（已存在時以 `Range` 續傳），檢查 Content-Length／
+    Content-Range、邊下載邊算 SHA-256，相符才改名成 `dest`；不符時刪掉 `.part`。
+
+    Args:
+        url: 檔案網址；只允許 https（或本機迴路的 http），轉址也一樣。
+        dest: 目的檔案路徑（父目錄必須存在）。
+        file: 預期的檔名、大小與 SHA-256。
+        fetcher: HTTP 實作；省略時用 `UrllibFetcher`。
+        timeout: 連線與每次讀取的逾時秒數。
+        cancel: 被設定時在下一個區塊之前停止，丟 `DownloadCancelledError`（保留 `.part`）。
+        progress: 進度回報 `(downloaded_bytes, file.size)`。
+
+    Raises:
+        ModelDownloadError: 網路、HTTP、大小不符。
+        ModelIntegrityError: SHA-256 不符。
+        DownloadCancelledError: 被取消。
+        ValueError: 網址或逾時不合法。
+    """
+    if not timeout > 0:
+        raise ValueError(f"timeout must be positive, got {timeout}")
+    validate_url(url)
+    _download_file(
+        url,
+        dest,
+        file,
+        UrllibFetcher() if fetcher is None else fetcher,
+        timeout,
+        cancel,
+        _Progress(progress, file.size, 0),
+    )
+
+
 def download_model(
     spec: ModelSpec,
     cache_dir: Path,

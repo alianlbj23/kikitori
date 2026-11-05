@@ -1,6 +1,6 @@
 # Spec: pipeline-engine（雙路徑協調器、設定檔、stdio 引擎）
 
-> 狀態：已採用（2026-11-05，Milestone 4，使用者授權自主實作）。
+> 狀態：已採用（2026-11-05，Milestone 4，使用者授權自主實作）；Milestone 6（2026-11-05）接上 hardware 模組，變更列在「協定變更（Milestone 6）」。
 > 上層約定：`docs/specs/app-architecture.md` 的 pipeline、config、engine 協定各節；本文件不得與之矛盾，只補充架構規格沒寫死的細節。
 > 依賴的模組：`vad-segmenter.md`、`translate.md`、`capture.md`、`asr.md`（只透過 `kikitori.asr.types` 與 `pipeline/factory.py` 的接縫）。
 
@@ -143,22 +143,28 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 - 環境變數 `KIKITORI_CONFIG_DIR`（絕對路徑）可覆寫目錄，給測試與可攜版使用；不是絕對路徑就忽略並記 warning。
 
-### 結構（`schema_version = 1`）
+### 結構（`schema_version = 2`）
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "mode": "media",
   "target_language": "zh-TW",
   "partner_language": "ja",
   "media":     {"pause_secs": 0.6, "max_secs": 10.0, "device_id": null},
   "interpret": {"pause_secs": 0.5, "max_secs": 8.0,  "device_id": null},
-  "asr": {"fast_model": "base", "final_model": "small", "device": "auto", "compute_type": null, "cuda_library_dirs": []},
+  "asr": {
+    "fast_model": "base", "final_model": "small", "device": "auto",
+    "fast_compute_type": null, "final_compute_type": null,
+    "fast_cpu_threads": null, "final_cpu_threads": null,
+    "cuda_library_dirs": []
+  },
   "translation": {
     "base_url": "http://localhost:11434/v1",
     "fast_model": "qwen3.5:4b",
     "final_model": "qwen3.5:4b",
-    "api_key_env": "KIKITORI_TRANSLATE_API_KEY"
+    "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
+    "allow_restricted": false
   },
   "pipeline": {"partial_interval_ms": 700, "no_speech_threshold": 0.6, "context_lines": 3, "asr_prompt_context": true},
   "subtitle": {}
@@ -174,10 +180,12 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `*.max_secs` | 數字，[1, 30]，且大於 `pause_secs` |
 | `*.device_id` | `null`（預設裝置）或 1–512 字元的字串 |
 | `asr.fast_model`／`final_model` | 1–100 字元，只含英數與 `._-`（不在這裡檢查 registry：設定不依賴 asr 實作；載入時才報「未知模型」） |
-| `asr.device` | `auto` \| `cpu` \| `cuda` |
-| `asr.compute_type` | `null`（asr 依裝置的預設：CPU int8、CUDA float16）或 CTranslate2 精度名稱（`int8`、`int8_float16`、`float16`…） |
-| `asr.cuda_library_dirs` | 最多 16 個絕對路徑（cuBLAS 12 所在目錄，交給 `load_transcriber(cuda_library_dirs=…)`；hardware 里程碑填入） |
+| `asr.device` | `auto` \| `cpu` \| `cuda`；兩條路徑共用（asr 在同一行程 CUDA 失敗一次就不再試，分開設定沒有意義；hardware 的推薦也一律兩條路徑同一裝置） |
+| `asr.fast_compute_type`／`final_compute_type` | `null`（asr 依實際裝置的預設：CPU int8、CUDA float16）或 CTranslate2 精度名稱（`int8`、`int8_float32`、`int8_float16`、`int8_bfloat16`、`int16`、`float16`、`bfloat16`、`float32`） |
+| `asr.fast_cpu_threads`／`final_cpu_threads` | `null`（自動：`device="cuda"` 時 0＝CTranslate2 預設；否則 `hardware.auto_cpu_threads()`＝`min(8, 實體核心 // 2)`，兩條路徑同時在 CPU 上也不超過實體核心數）或整數 [1, 256] |
+| `asr.cuda_library_dirs` | 最多 16 個絕對路徑（使用者自行指定的 cuBLAS 12 目錄）；kikitori 下載的 GPU 執行環境不必列入，factory 建立元件時自動加在後面 |
 | `translation.*` | 交給 `TranslatorConfig` 驗證（`base_url` 必須 http/https、模型名稱非空、`api_key_env` 是合法變數名稱）；模型名稱另限 200 字元 |
+| `translation.allow_restricted` | 布林，預設 **false**：是否推薦有地區限制授權的翻譯模型（HY-MT 的授權不適用於歐盟、英國、南韓）。引擎不知道使用者所在地、用語系猜地區不可靠，推薦了不能用的授權會讓使用者在不知情下違約，所以預設不推薦；UI 在設定頁讓使用者確認「我不在歐盟／英國／南韓」後再設為 true。只影響 `recommend()` 與 `models.validate` 的警告，不阻止手動選用 |
 | `pipeline.partial_interval_ms` | 整數，[200, 5000] |
 | `pipeline.no_speech_threshold` | 數字，[0, 1] |
 | `pipeline.context_lines` | 整數，[0, 10] |
@@ -192,7 +200,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 ### 讀寫
 
 - 讀：檔案不存在 → 預設值（不寫檔）。不是 UTF-8 JSON、不是物件、驗證失敗 → `SettingsError`。檔案大於 1 MiB → `SettingsError`（避免讀進異常大的檔案）。
-- **遷移**：`schema_version` 必須是正整數；小於目前版本時依序套用 `MIGRATIONS[n]`（n → n+1，目前沒有）；大於目前版本 → `SettingsError`（新版程式寫的檔案，不覆寫）。
+- **遷移**：`schema_version` 必須是正整數；小於目前版本時依序套用 `MIGRATIONS[n]`（n → n+1）；大於目前版本 → `SettingsError`（新版程式寫的檔案，不覆寫）。遷移只在記憶體中進行，檔案在下一次 `settings.set`／`settings.apply_recommendation` 時才以新版格式寫回。
+  - **1 → 2**（Milestone 6）：`asr.compute_type` 拆成 `asr.fast_compute_type` 與 `asr.final_compute_type`（v1 的值複製到兩邊）。新增的 `asr.fast_cpu_threads`、`asr.final_cpu_threads`（null）與 `translation.allow_restricted`（false）用預設值。v1 的欄位名稱在 v2 是未知欄位（`settings.set {"asr": {"compute_type": …}}` 回 `invalid_settings`）。
 - 寫：先寫同目錄的暫存檔（UTF-8、縮排 2、`ensure_ascii=False`）、`flush` + `fsync`，再 `os.replace` 成正式檔名，中途失敗刪掉暫存檔並往上拋 `OSError`。
 - `SettingsStore`（執行緒安全）：`load()` 讀檔；檔案無效時保留預設值並回傳警告，**不覆寫**原檔；之後第一次 `update()` 存檔前把無效檔案改名為 `settings.json.invalid`（保留給使用者檢查）。`update(partial)`：深度合併（物件遞迴合併、其他值整個取代）→ 驗證 → 存檔 → 更新記憶體；驗證失敗時檔案與記憶體都不變。
 
@@ -220,8 +229,10 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `device_not_found` | 裝置 id 格式錯誤或不存在 |
 | `capture_unavailable` | 這台機器無法擷取（`BackendUnavailableError`） |
 | `capture_error`／`permission_denied`／`device_lost` | `devices.list`／`session.start` 的其他擷取錯誤 |
-| `unknown_model` | `models.download` 的模型不在清單中 |
-| `download_in_progress` | 同一個模型已在下載 |
+| `unknown_model` | `models.download` 的模型不在清單中（ASR id 或 `gpu-runtime`） |
+| `download_in_progress` | 同一個模型（或 GPU 執行環境）已在下載 |
+| `license_not_accepted` | `models.download {"model": "gpu-runtime"}` 沒有帶 `"accept_license": true`；`message` 含 NVIDIA EULA 網址 `https://docs.nvidia.com/cuda/eula/index.html` |
+| `gpu_runtime_unsupported` | 這個平台沒有 GPU 執行環境（只有 Windows／Linux x86-64；macOS、ARM 回這個） |
 | `internal_error` | 未預期的例外（traceback 寫 stderr；訊息只有例外類別與簡短說明） |
 
 - 空行略過。不合法的行只回錯誤，不會讓引擎結束。
@@ -231,12 +242,14 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | 方法 | 參數 | 結果 |
 |---|---|---|
 | `engine.info` | — | `{"name": "kikitori-engine", "version", "protocol_version": 1, "platform": "windows"\|"macos"\|"linux"\|<其他>, "machine", "python_version", "fake": bool}` |
-| `hardware.detect` | — | `{"hardware": {"os", "os_version", "machine", "cpu_count", "ram_bytes", "gpus": [], "apple_silicon"}, "recommendation": null}`（之後 hardware 模組換掉 provider） |
-| `models.list` | — | `{"asr": [{"id", "size_bytes", "license", "speed_tier", "downloaded"}], "translation": {"base_url", "installed": [名稱] \| null, "error": 訊息 \| null, "presets": [{"model", "label", "license", "commercial_use", "excluded_regions", "installed"}]}}` |
-| `models.download` | `{"model": <ASR id>}` | `{"model", "started": true}`；在背景下載，進度以 `download_progress` 事件回報 |
+| `hardware.detect`（背景） | — | `{"hardware": HardwareInfo, "recommendation": ModelCombination}`，形狀見下方與 `hardware.md`；一律重新偵測 |
+| `models.list`（背景） | — | `{"asr": [...], "gpu_runtime": {...}, "translation": {...}}`，見下方 |
+| `models.download` | `{"model": <ASR id>}` 或 `{"model": "gpu-runtime", "accept_license": true}` | `{"model", "started": true}`；在背景下載，進度以 `download_progress` 事件回報 |
+| `models.validate`（背景） | `{"settings"?: 部分設定物件}` | `{"ok": bool, "errors": [字串], "warnings": [字串]}` |
 | `devices.list` | — | `{"devices": [DeviceInfo]}` |
 | `settings.get` | — | `{"settings": {...}, "path": 設定檔路徑}` |
 | `settings.set` | 部分設定物件（深度合併） | 同 `settings.get` |
+| `settings.apply_recommendation`（背景） | — | `{"settings", "path", "applied": 寫入的部分設定, "recommendation": ModelCombination}` |
 | `session.start` | `{"mode": "media"\|"interpret", "device_id"?: str \| null}` | `{"session_id": int}` |
 | `session.stop` | — | `{}`（沒有 session 也回 `{}`） |
 | `engine.shutdown` | — | `{}`，之後結束 |
@@ -244,8 +257,21 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 - 會啟動背景工作的方法（`session.start`、`models.download`）在**回應寫出之後**才啟動背景執行緒，所以 UI 一定先拿到 `session_id`，才收到該 session 的事件。
 - `settings.set` 在 session 執行中也可呼叫，新設定從下一個 session 生效。
 - `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → 建立元件（載入模型可能要數秒）→ 開裝置 → `status running`。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
-- `models.list` 的翻譯部分呼叫 `GET {base_url}/models`（OpenAI 相容），連線與讀取 timeout 3 秒；失敗時 `installed: null` 並在 `error` 說明（不讓整個方法失敗）。`http://localhost` 改連 `127.0.0.1`（理由見 `translate.md`）。
-- `models.download`：背景 daemon 執行緒呼叫 factory 的 `download_asr_model()`；`engine.shutdown` 時以 `cancel` 事件取消。
+- **背景方法**（表中標「背景」）：會執行 `nvidia-smi`、連線翻譯伺服器（最久數秒），所以不在讀 stdin 的主執行緒上處理，而是交給**一條**背景工作執行緒（`engine/deferred.py`），完成時才寫出回應。
+  - 背景方法之間：依收到的順序執行與回應（不會同時跑兩次偵測）。
+  - 與其他方法之間：以 `id` 對應，回應可能晚於之後送出的請求（例如 `hardware.detect` 進行中送 `session.stop`，`session.stop` 先回應）。
+  - 參數驗證錯誤（`invalid_params`、`models.validate` 的 `invalid_settings`）在主執行緒上立即回應；設定在**收到請求時**取出，之後的 `settings.set` 不影響這次執行。
+  - 偵測結果快取 10 秒（同一組 `translation.base_url`／`api_key_env`／`asr.cuda_library_dirs`）：`models.list`、`models.validate`、`settings.apply_recommendation` 重用，`hardware.detect` 一律重新偵測並更新快取；GPU 執行環境下載結束（成功或失敗）時清掉快取。
+  - `engine.shutdown`／stdin EOF：尚未開始的背景請求直接丟棄（不回應；Tauri 端在管線關閉時讓等待中的請求失敗），進行中的最多等 2 秒。
+- `hardware.detect`：`hardware` 為 `HardwareInfo.to_dict()`——`os`、`os_version`、`machine`、`cpu {model, physical_cores, logical_cores, architecture}`、`cpu_count`、`memory {total_bytes, available_bytes}`、`ram_bytes`、`gpus [{index, name, memory_total_mb, memory_used_mb, driver_version, compute_capability}]`、`apple_silicon`、`cublas {supported_platform, available, library_dirs, source}`、`translation_server {base_url, is_local, reachable, models, error}`、`errors`；`recommendation` 為 `{tier, fast_asr {model, device, compute_type, cpu_threads}, final_asr {…}, translation_fast, translation_final, translation_budget_gb, gpu_runtime_missing, reasons, warnings}`。推薦依設定的 `translation.allow_restricted`。偵測的單項失敗不會讓方法失敗（見 `errors`）。
+- `models.list`：`hardware.models_overview()` 的結果——`asr [{id, size_bytes, downloaded, license, speed_tier, no_speech_reliable, cpu_ram_mb, vram_mb, vram_int8_mb, recommended_for: ["fast"|"final"]}]`、`gpu_runtime {id: "gpu-runtime", supported, installed, package, version, path, download_bytes, installed_bytes, license, license_url, cublas_available, cublas_source}`、`translation {server {base_url, is_local, reachable, error}, models [{name, label, installed, known, recommended_for, license, license_url, commercial_use, excluded_regions, approx_vram_gb}]}`——另保留第一版的 `translation.base_url`、`translation.installed`（伺服器回報的名稱或 null）、`translation.error`、`translation.presets`（只增不改）。翻譯伺服器的模型清單來自 hardware 的 `probe_translation_server()`（timeout 2 秒、`localhost` 依序試 127.0.0.1／::1）。
+- `models.download`：
+  - ASR：背景 daemon 執行緒呼叫 factory 的 `download_asr_model()`；`accept_license` 不適用於 ASR 模型（帶了回 `invalid_params`）。
+  - **GPU 執行環境**（`"model": "gpu-runtime"`）：NVIDIA cuBLAS 12 的 wheel（約 570 MB，從 PyPI 下載，NVIDIA CUDA Toolkit EULA）。UI 必須先顯示授權說明與連結（`models.list` 的 `gpu_runtime.license`／`license_url`），使用者同意後才送 `{"model": "gpu-runtime", "accept_license": true}`；檢查順序：`accept_license` 不是布林 → `invalid_params`；平台不支援 → `gpu_runtime_unsupported`（不論是否同意，因為不會下載任何 NVIDIA 檔案）；省略或 `false` → `license_not_accepted`（訊息含 EULA 網址）。背景執行 `hardware.install_gpu_runtime()`，`download_progress` 的 `model` 為 `"gpu-runtime"`、`total_bytes` 為 wheel 大小；下載完成後還要驗證與解壓（數秒，期間沒有進度事件）才送 `done`。已安裝時立即送 `done`。
+  - `engine.shutdown`／stdin EOF 時以 `cancel` 事件取消下載（GPU 執行環境會送 `state: "error"`、`error` 含 `DownloadCancelledError`，`.part` 保留供續傳）。
+  - 裝好 GPU 執行環境後，下一個 session 自動用到它（factory 每次建立元件都檢查）。但若這個引擎行程先前已經嘗試過 CUDA 而失敗（例如 `device=auto` 在沒有 cuBLAS 時跑過 session），asr 在同一行程內不再嘗試 CUDA——UI 應在安裝完成後重啟引擎（沒有 session 在跑時）。
+- `models.validate`：設定頁「檢查組合」。`settings` 是要檢查的部分設定，與目前設定深度合併後（**不存檔**）轉成組合交給 `hardware.validate_combination()`（`downloaded_asr` 為已下載的 ASR 模型、`allow_restricted` 取自合併後的設定）；省略時檢查目前設定。合併後的設定不合法 → `invalid_settings`（與 `settings.set` 相同）；`settings` 不是物件 → `invalid_params`。`errors` 非空時 `ok=false`（例如選 cuda 但缺 cuBLAS、未知的 ASR 模型）；是否阻擋儲存由 UI 決定。訊息為繁體中文。
+- `settings.apply_recommendation`：把目前硬體的推薦組合寫進設定（深度合併並存檔，等同 `settings.set`），回應帶實際寫入的 `applied` 與 `recommendation`。對應規則：`asr.fast_model／final_model` ← 推薦模型；`asr.device` ← 推薦的裝置（`cuda`／`cpu`，不用 `auto`：推薦 CPU（例如缺 cuBLAS）時若存 auto，asr 會先試 CUDA 而失敗，之後整個行程都不再試）；`asr.*_compute_type` ← 推薦精度；`asr.*_cpu_threads` ← 推薦值，0 存成 null；`translation.fast_model／final_model` ← 推薦模型（推薦為 null，即翻譯伺服器不在本機時，不改）；`cuda_library_dirs`、`allow_restricted` 與其他欄位不動。設定檔無法寫入 → `settings_io_error`。UI 也可以只顯示 `hardware.detect` 的推薦、讓使用者修改後用 `settings.set` 存，但「套用推薦」一律用這個方法，讓轉換規則只存在引擎裡。
 
 ### 事件
 
@@ -269,10 +295,24 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 可注入的服務（測試與之後的里程碑）
 
-`EngineServices`：`settings_store`、`list_devices`、`open_source`、`build_components(settings, mode)`、`hardware`（`HardwareProvider.detect()`）、`models`（`ModelCatalog.list()`／`download()`）。
+`EngineServices`：`settings_store`、`list_devices`、`open_source`、`build_components(settings, mode)`、`hardware`（`HardwareProvider`：`detect(settings) -> HardwareInfo`、`models_overview(info, rec)`、`gpu_runtime_status()`、`install_gpu_runtime(progress, cancel)`）、`models`（`ModelCatalog`：`asr_models()`、`download(model_id, progress, cancel)`）。
 
-- 預設實作：真實 capture、`pipeline/factory.py`、`BasicHardwareProvider`（標準庫：`platform`、`os.cpu_count()`、Windows `GlobalMemoryStatusEx`／POSIX `sysconf`）。
+- 預設實作：真實 capture、`pipeline/factory.py`、`DefaultHardwareProvider`（直接呼叫 `kikitori.hardware`）。推薦與組合驗證是純函式，由 `engine/hardware_service.py` 直接呼叫，不經 provider。
 - **假模式**：環境變數 `KIKITORI_ENGINE_FAKE=1` 時改用 `kikitori/engine/testing.py`：合成音訊（`fake:loopback:speech` 兩段「人聲」後結束、`fake:microphone:endless` 只有靜音不會結束）、依振幅判斷的 `VoiceModel`、回固定文字的 ASR 與翻譯、會回報進度的假下載。`engine.info` 的 `fake` 為 true，啟動時記 warning。只給測試與 UI 開發用。
+- **假硬體**（`FakeHardwareProvider`）：偵測結果固定，推薦／驗證／總覽走真的 hardware 程式碼；GPU 執行環境以真的 `install_gpu_runtime()` 安裝假 wheel（記憶體中的小 zip、假 fetcher，不連網）到行程專屬的暫存目錄，所以安裝後 cuBLAS 變成可用、推薦改為 GPU 等級。環境變數 `KIKITORI_ENGINE_FAKE_HARDWARE` 選情境：`nvidia`（預設：8 GB GPU、缺 cuBLAS、本機翻譯伺服器裝了 qwen3.5:4b）、`apple`（Apple Silicon，`gpu-runtime` 不支援）、`slow-runtime`（下載慢，測取消）、`broken-runtime`（下載內容雜湊不符）。
+
+### 協定變更（Milestone 6）
+
+給 UI（`app/`）的變更清單；`protocol_version` 維持 1——全部是新增，既有欄位的意義沒有改變，唯一的例外是設定檔 schema（第 8 點）。
+
+1. **`hardware.detect`**：改由 hardware 模組偵測；`recommendation` 不再是 null，而是 `ModelCombination`（`tier`、`fast_asr`／`final_asr` 物件、`translation_fast`／`final`、`translation_budget_gb`、`gpu_runtime_missing`、`reasons`、`warnings`）。`hardware` 新增 `cpu`、`memory`、`cublas`、`translation_server`、`errors`；`gpus[]` 的項目是 `{index, name, memory_total_mb, memory_used_mb, driver_version, compute_capability}`（第一版的 `gpus` 一律是空陣列，沒有約定過項目形狀；UI 目前解析的 `vram_bytes` 不存在，請改讀 `memory_total_mb`）。回應改在背景執行，可能晚於之後送出的其他請求（以 `id` 對應）。
+2. **`models.list`**：新增 `gpu_runtime` 物件、`translation.server`、`translation.models`；`asr[]` 新增 `no_speech_reliable`、`cpu_ram_mb`、`vram_mb`、`vram_int8_mb`、`recommended_for`。第一版的 `translation.base_url／installed／error／presets` 保留。背景執行。
+3. **`models.download`**：新增 `{"model": "gpu-runtime", "accept_license": true}`；進度事件 `download_progress` 的 `model` 為 `"gpu-runtime"`。ASR 模型帶 `accept_license` 回 `invalid_params`。
+4. **新方法 `models.validate`**：`{"settings"?: 部分設定}` → `{"ok", "errors", "warnings"}`（不存檔）。背景執行。
+5. **新方法 `settings.apply_recommendation`**：無參數 → `{"settings", "path", "applied", "recommendation"}`（會存檔）。背景執行。
+6. **新錯誤碼**：`license_not_accepted`（訊息含 `https://docs.nvidia.com/cuda/eula/index.html`）、`gpu_runtime_unsupported`。`unknown_model` 的訊息改為列出 ASR 模型與 `gpu-runtime`。
+7. **建議 UI 流程**：設定頁開啟 → `hardware.detect`（顯示推薦與 `warnings`；`gpu_runtime_missing=true` 時顯示「下載 GPU 執行環境」按鈕與授權說明）→ 使用者同意 → `models.download {"model":"gpu-runtime","accept_license":true}` → `done` 後（沒有 session 在跑時）重啟引擎 → `hardware.detect` → 「套用推薦」呼叫 `settings.apply_recommendation`；手動修改時先 `models.validate {"settings": 表單}` 顯示錯誤／警告，再 `settings.set`。在設定頁提供「我不在歐盟／英國／南韓」開關對應 `translation.allow_restricted`。
+8. **設定 schema 2**：`asr.compute_type` 移除，改為 `asr.fast_compute_type`／`asr.final_compute_type`；新增 `asr.fast_cpu_threads`／`asr.final_cpu_threads`（null＝自動）與 `translation.allow_restricted`（預設 false）。舊設定檔自動遷移；`settings.set` 送 `asr.compute_type` 會回 `invalid_settings`。`settings.get` 的 `schema_version` 為 2。
 
 ## 入口
 
@@ -284,11 +324,13 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 只有這個檔案匯入 `kikitori.asr`（除了 `asr.types`），而且在函式內延遲匯入：
 
-- `create_transcriber(model_id, *, device, role, languages, compute_type, cuda_library_dirs) -> Transcriber`：`load_transcriber(spec, device=..., compute_type=..., options=FAST_DECODE/FINAL_DECODE + candidate_languages, cuda_library_dirs=..., download=False)`；模型未下載 → `FileNotFoundError`（引擎轉成 `model_not_downloaded`）。
+- `create_transcriber(model_id, *, device, role, languages, compute_type, cpu_threads, cuda_library_dirs) -> Transcriber`：`load_transcriber(spec, device=..., compute_type=..., cpu_threads=..., options=FAST_DECODE/FINAL_DECODE + candidate_languages, cuda_library_dirs=..., download=False)`；模型未下載 → `FileNotFoundError`（引擎轉成 `model_not_downloaded`）。
+- `asr_cuda_library_dirs(settings)`：`asr.cuda_library_dirs` 在前，再加上 `hardware.installed_runtime_dir()`（已安裝時、不重複）；檢查失敗只記 warning。
+- `resolve_cpu_threads(value, device)`：設定值；null 時 `device="cuda"` 回 0，否則 `hardware.auto_cpu_threads()`。
 - `no_speech_reliable(model_id)`：registry 的 `no_speech_reliable`，設定 `PipelineComponents.final_no_speech_reliable`。
 - `create_transcript_filter(no_speech_threshold)`：asr 的 `rejection_reason` + `FilterConfig`。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`is_downloaded`、`download_model`、`default_cache_dir`。
-- `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
+- `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
 
 ## Tech Stack
 
@@ -297,7 +339,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 ## Commands
 
 ```text
-測試（本模組）：uv run python -m unittest tests.test_config tests.test_pipeline tests.test_engine
+測試（本模組）：uv run python -m unittest tests.test_config tests.test_pipeline tests.test_pipeline_factory tests.test_engine tests.test_engine_hardware
 測試（全部）：  uv run python -m unittest discover -s tests
 Lint：          uv run ruff check
 引擎：          uv run kikitori engine
@@ -331,13 +373,16 @@ src/kikitori/
     io.py                → MessageWriter（鎖、flush）、行讀取（長度上限）、EventLogHandler（logging → log 事件）
     main.py              → run_engine()：stdio 與 logging 設定、選擇服務
     services.py          → EngineServices、HardwareProvider、ModelCatalog 與預設實作
+    deferred.py          → 背景工作執行緒（耗時請求完成後才回應）
+    hardware_service.py  → 偵測快取、models.list／validate、設定 ↔ 推薦組合的轉換
     server.py            → EngineServer：分派、session、下載
-    testing.py           → 假模式服務
+    testing.py           → 假模式服務（含假硬體與假 GPU 執行環境）
 tests/
   test_config.py
   test_pipeline.py
   test_pipeline_factory.py → 設定 → asr／翻譯器參數（mock load_transcriber）
   test_engine.py         → 子行程 `python -m kikitori engine`（假模式）
+  test_engine_hardware.py → 同行程：背景工作執行緒、偵測快取、設定與推薦組合的轉換
   test_cli.py
 experiments/pipeline_smoke/
   smoke.py、README.md
@@ -348,6 +393,8 @@ experiments/pipeline_smoke/
 - config：預設值、每種驗證錯誤（型別、範圍、未知欄位、布林當數字、max ≤ pause）、round-trip、深度合併、原子寫入（替換失敗時原檔不變、沒有殘留暫存檔）、新版 schema 拒絕、三平台路徑（注入 system／env／home）、`KIKITORI_CONFIG_DIR`、無效檔案改名。
 - pipeline（逐步模式、假 VoiceModel／Transcriber／Translator）：即時→完整順序與取代、最新槽丟舊工作、句子結束後丟即時工作、完整結果不丟且依序（含佇列背壓）、兩種模式的語言路由、中文不翻譯、不支援組合、非語音過濾與「清除」完整結果、前文與 ASR prompt、尾巴裁切、翻譯錯誤為 warning、ASR 錯誤為 error 狀態、完整模型 no_speech 不可靠時改用即時模型的值、即時辨識慢時自動拉長間隔（假時鐘）；執行緒模式：`ArraySource` 跑完送 `idle`、`stop()` 乾淨結束（以事件等待，不用 sleep 判斷）、worker 例外變 `error`。
 - engine：子行程（假模式、`KIKITORI_CONFIG_DIR` 指到暫存目錄）交換 NDJSON：`engine.info`、`unknown_method`、壞 JSON／非物件／錯型別 id／超長行、`settings.get`／`set`（成功、驗證錯誤）、`devices.list`、`hardware.detect`、`models.list`、`models.download` 進度事件、session 產生字幕事件與 `idle`、`session.stop`、`session_active`、`engine.shutdown` 與 stdin EOF 結束碼 0、stdout 每一行都是合法 JSON；另以同行程測 `MessageWriter`、請求解析。
+- engine（Milestone 6）：子行程測 `hardware.detect`（假 GPU、缺 cuBLAS 的推薦）、`models.list`（新舊欄位）、背景請求的回應順序、`gpu-runtime` 授權閘門（缺少／false／非布林、ASR 帶 `accept_license`）、安裝進度與安裝後推薦改為 GPU、雜湊不符的 `error` 事件、不支援的平台、`engine.shutdown` 取消下載與 `download_in_progress`、`models.validate`（目前設定、候選設定不存檔、參數錯誤）、`settings.apply_recommendation`（安裝前 CPU、安裝後 CUDA、存檔）、v1 設定檔遷移；同行程測背景工作執行緒（FIFO、錯誤碼、結束時丟棄）、偵測快取（假時鐘、設定改變、清除）、`allow_restricted`、設定與推薦組合的轉換。
+- factory：兩條路徑各自的 `compute_type`／`cpu_threads`、cuBLAS 目錄（設定 + GPU 執行環境、不重複、檢查失敗只記 warning）、自動執行緒（mock `load_transcriber` 與 hardware）。
 - 不連網、不開真實裝置、不載入真模型。
 
 ## Boundaries

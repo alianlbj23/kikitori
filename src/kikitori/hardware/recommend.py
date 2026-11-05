@@ -14,6 +14,7 @@ from kikitori.asr.registry import MODELS, ModelSpec
 from kikitori.hardware.types import (
     AsrChoice,
     AsrDeviceChoice,
+    CpuInfo,
     GpuInfo,
     HardwareInfo,
     ModelCombination,
@@ -124,11 +125,12 @@ def _cuda_problem(info: HardwareInfo, gpu: GpuInfo) -> str | None:
     return None
 
 
-def _cpu_threads(info: HardwareInfo) -> int:
-    # 即時與完整模型會同時跑，兩者合計不超過實體核心數（asr.md）
-    cores = info.cpu.physical_cores or (
-        info.cpu.logical_cores // 2 if info.cpu.logical_cores else 0
-    )
+def cpu_threads_per_model(cpu: CpuInfo) -> int:
+    """每個 ASR 模型在 CPU 上的執行緒數；核心數未知時 0（CTranslate2 預設值）。
+
+    即時與完整模型會同時跑，兩者合計不超過實體核心數（asr.md），每個最多 8。
+    """
+    cores = cpu.physical_cores or (cpu.logical_cores // 2 if cpu.logical_cores else 0)
     if cores <= 0:
         return 0
     return max(1, min(MAX_CPU_THREADS_PER_MODEL, cores // 2))
@@ -150,7 +152,7 @@ class _AsrPlan:
 
 
 def _cpu_plan(info: HardwareInfo, warnings: list[str]) -> _AsrPlan:
-    threads = _cpu_threads(info)
+    threads = cpu_threads_per_model(info.cpu)
     total = info.memory.total_bytes
     cores = info.cpu.physical_cores or (
         info.cpu.logical_cores // 2 if info.cpu.logical_cores else None

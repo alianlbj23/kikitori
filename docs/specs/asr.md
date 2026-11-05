@@ -94,7 +94,7 @@ class Transcriber(Protocol):
 | `tokenizer.py` | Whisper byte-level BPE（讀 `tokenizer.json`） | `WhisperTokenizer` |
 | `registry.py` | 可選模型清單（固定 revision 與 SHA-256、資源用量、`no_speech_reliable`） | `ModelSpec`、`MODELS`、`get_model()` |
 | `cache.py` | 使用者快取目錄 | `default_cache_dir()` |
-| `download.py` | 下載、續傳、驗證 | `download_model()`、`is_downloaded()`、`model_dir()`、`ModelDownloadError` |
+| `download.py` | 下載、續傳、驗證 | `download_model()`、`download_file()`（單檔，hardware 下載 cuBLAS wheel 用）、`is_downloaded()`、`model_dir()`、`ModelDownloadError` |
 | `whisper.py` | CTranslate2 推論 | `WhisperTranscriber`、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`、`preload_cuda_libraries()` |
 | `filtering.py` | 幻覺過濾 | `FilterConfig`、`rejection_reason()` |
 

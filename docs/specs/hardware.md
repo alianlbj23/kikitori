@@ -28,8 +28,8 @@
 | `system.py` | OS、CPU、RAM（各平台） | `detect_cpu()`、`detect_memory()`、`detect_apple_silicon()`、解析器 |
 | `nvidia.py` | `nvidia-smi` 與 cuBLAS 搜尋 | `query_nvidia_gpus()`、`find_cublas()`、`NvidiaSmiError` |
 | `translation_server.py` | `GET {base_url}/models` | `probe_translation_server()` |
-| `detection.py` | 組合上述偵測 | `detect()` |
-| `recommend.py` | 推薦與覆寫驗證（純函式） | `recommend()`、`validate_combination()` |
+| `detection.py` | 組合上述偵測 | `detect()`、`auto_cpu_threads()`（只偵測 CPU；設定 `asr.*_cpu_threads` 為 null 時用） |
+| `recommend.py` | 推薦與覆寫驗證（純函式） | `recommend()`、`validate_combination()`、`cpu_threads_per_model()` |
 | `gpu_runtime.py` | cuBLAS wheel 下載安裝 | `install_gpu_runtime()`、`gpu_runtime_status()`、`installed_runtime_dir()`、`GpuRuntimeError` |
 | `overview.py` | `models.list` 的總覽 | `models_overview()` |
 | `__init__.py` | 對外匯出 | `hardware_report()`（`hardware.detect` 的完整結果） |
@@ -145,7 +145,7 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 1. 位置：`<asr 快取的上一層>/gpu-runtime/cublas-12.8.4.1/`（Windows `%LOCALAPPDATA%\kikitori\gpu-runtime\...`、macOS 不支援、Linux `$XDG_CACHE_HOME/kikitori/gpu-runtime/...`）。
 2. 已安裝（標記 `kikitori-gpu-runtime.json` 相符且每個檔案大小正確）→ 直接回傳。
 3. 檢查磁碟空間（wheel 剩餘大小 + 解出大小）。
-4. 下載到 `gpu-runtime/downloads/<wheel>.part`：沿用 `asr.download` 的 `_download_file()`（https-only 含轉址、每次連線與讀取 timeout 30 s、`Range` 續傳、Content-Length／Content-Range 檢查、邊下載邊算 SHA-256、雜湊不符刪 `.part`、`threading.Event` 取消、進度 `(downloaded, total)`）。
+4. 下載到 `gpu-runtime/downloads/<wheel>.part`：沿用 `asr.download` 的公開函式 `download_file()`（https-only 含轉址、每次連線與讀取 timeout 30 s、`Range` 續傳、Content-Length／Content-Range 檢查、邊下載邊算 SHA-256、雜湊不符刪 `.part`、`threading.Event` 取消、進度 `(downloaded, total)`）。
 5. 解壓到 `cublas-12.8.4.1.tmp/`：只取寫死的成員、比對 `ZipInfo.file_size`、串流複製時計數防止超量（壓縮炸彈）、zipfile 讀完自動驗 CRC-32；寫標記後 `os.replace` 成正式目錄。失敗時刪暫存目錄；已驗證的 wheel 保留，重試時重算 SHA-256 後直接解壓。
 6. 成功後刪掉 wheel 與空的 `downloads/`。
 
@@ -178,13 +178,15 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 
 `translation.models` 為 translate 預設組與伺服器上已安裝模型的聯集；`installed` 在伺服器連不上時為 null；不認得的模型 `known=false`、授權欄位為 null。
 
-## 引擎整合（由協調者接線）
+## 引擎整合（Milestone 6 已接線，協定細節見 `pipeline-engine.md`）
 
-- `hardware.detect` → `hardware_report(base_url=s.translation.base_url, api_key_env=s.translation.api_key_env, cuda_library_dirs=..., allow_restricted=...)`，回傳 `{"hardware": HardwareInfo.to_dict(), "recommendation": ModelCombination.to_dict()}`；`hardware` 保留舊欄位 `cpu_count`、`ram_bytes`、`gpus`、`apple_silicon`、`os`、`os_version`、`machine`。會執行外部程式與網路請求（數秒以內），不要在讀 stdin 的執行緒上呼叫。
-- `models.list` → `models_overview(detect(...), recommend(info))`。
-- `models.download {"model": "gpu-runtime"}`（`GPU_RUNTIME_ID`）→ `install_gpu_runtime(progress=..., cancel=...)`，進度用同一個 `download_progress` 事件（`model = "gpu-runtime"`）。
-- 建立 pipeline 時：`load_transcriber(..., device=choice.device, compute_type=choice.compute_type, cpu_threads=choice.cpu_threads, cuda_library_dirs=[Path(d) for d in info.cublas.library_dirs])`；也可直接用 `installed_runtime_dir()`。
-- 設定頁儲存手動組合前呼叫 `validate_combination()`。
+- `hardware.detect` → `detect(base_url=s.translation.base_url, api_key_env=s.translation.api_key_env, cuda_library_dirs=s.asr.cuda_library_dirs)` + `recommend(info, allow_restricted=s.translation.allow_restricted)`，與 `hardware_report()` 相同的 `{"hardware": HardwareInfo.to_dict(), "recommendation": ModelCombination.to_dict()}`（拆開呼叫是為了快取 `HardwareInfo` 給下面三個方法重用）；`hardware` 保留舊欄位 `cpu_count`、`ram_bytes`、`gpus`、`apple_silicon`、`os`、`os_version`、`machine`。在引擎的背景工作執行緒上執行，不佔用讀 stdin 的執行緒。
+- `models.list` → `models_overview(info, recommend(info))`，另保留第一版的 `translation.base_url／installed／error／presets`。
+- `models.download {"model": "gpu-runtime", "accept_license": true}`（`GPU_RUNTIME_ID`）→ `install_gpu_runtime(progress=..., cancel=...)`，進度用同一個 `download_progress` 事件（`model = "gpu-runtime"`）。沒有 `accept_license: true` 時回 `license_not_accepted`（訊息含 EULA 網址）；`engine.shutdown` 時取消。
+- `models.validate` → `validate_combination(combination_from_settings(設定), info, downloaded_asr=已下載的 ASR, allow_restricted=設定)`。
+- `settings.apply_recommendation` → `recommend(info)` 轉成設定（`engine/hardware_service.py` 的 `recommendation_patch()`）後存檔。
+- 建立 pipeline 時（`pipeline/factory.py`）：每條路徑 `load_transcriber(..., device=s.asr.device, compute_type=s.asr.<role>_compute_type, cpu_threads=…, cuda_library_dirs=s.asr.cuda_library_dirs + [installed_runtime_dir()])`；`cpu_threads` 為 null 時用 `auto_cpu_threads()`（device=cuda 時 0）。
+- 地區限制：設定 `translation.allow_restricted` 預設 **false**（引擎不知道使用者所在地，預設不推薦 HY-MT；使用者在設定頁確認不在歐盟／英國／南韓後才打開）。
 
 ## 本機實測（2026-11-05，Windows 11、Ryzen 7 5700X、64 GB、RTX 5070 12 GB、驅動 621.01、Ollama 本機）
 
@@ -250,7 +252,6 @@ Lint：uv run ruff check
 - 多 GPU 時以 VRAM 最大的一張估計；若 `CUDA_VISIBLE_DEVICES`／`CUDA_DEVICE_ORDER` 讓 CTranslate2 用到別張，推薦可能不準。
 - VRAM 預算用固定的 1 GB 保留，不看偵測當下其他程式的實際用量（`memory.used` 也包含已載入的 Ollama 模型，無法區分）。
 - 容器內的 cgroup 記憶體上限不列入 RAM。
-- `gpu_runtime.py` 引用了 `asr.download` 的內部函式 `_download_file`／`_Progress`；建議 asr 之後把它們公開成 `download_file()`。
 - 沒有跨行程鎖：兩個引擎同時安裝 GPU 執行環境可能互相覆寫暫存檔（雜湊與大小驗證會擋下錯誤檔案）。
 
 ## 邊界

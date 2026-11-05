@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from kikitori.hardware.detection import detect
+from kikitori.hardware.detection import auto_cpu_threads, detect
 from kikitori.hardware.gpu_runtime import (
     CUBLAS_VERSION,
     GPU_RUNTIME_ID,
@@ -22,7 +22,11 @@ from kikitori.hardware.gpu_runtime import (
     installed_runtime_dir,
 )
 from kikitori.hardware.overview import models_overview
-from kikitori.hardware.recommend import recommend, validate_combination
+from kikitori.hardware.recommend import (
+    cpu_threads_per_model,
+    recommend,
+    validate_combination,
+)
 from kikitori.hardware.types import (
     AsrChoice,
     CpuInfo,
@@ -74,6 +78,8 @@ __all__ = [
     "ModelCombination",
     "TranslationServerInfo",
     "ValidationResult",
+    "auto_cpu_threads",
+    "cpu_threads_per_model",
     "default_runtime_root",
     "detect",
     "gpu_runtime_status",
