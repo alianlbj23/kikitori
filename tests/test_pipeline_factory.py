@@ -268,28 +268,40 @@ class WarmUpTranslationTest(unittest.TestCase):
         self.assertEqual(len(log), 1)
         self.assertIn("no response", logs.output[0])
 
-    def test_build_session_components_warms_while_loading(self) -> None:
+    def test_warm_up_runs_after_asr_is_loaded(self) -> None:
+        # 不能與 ASR 同時載入：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示
+        # 記憶體會過時（端到端驗收時 llama-server 以 CUDA 錯誤當掉）。依序載入時它看到的
+        # 是 ASR 載入後真正剩下的記憶體，不夠時會自己把部分層放到 CPU。
         components = object()
+        order: list[str] = []
         with (
             mock.patch.object(
-                factory, "build_components", return_value=components
+                factory,
+                "build_components",
+                side_effect=lambda *a: order.append("asr") or components,
             ) as build,
-            mock.patch.object(factory, "warm_up_translation") as warm,
+            mock.patch.object(
+                factory,
+                "warm_up_translation",
+                side_effect=lambda *a: order.append("translation"),
+            ) as warm,
         ):
             result = factory.build_session_components(Settings(), "interpret")
         self.assertIs(result, components)
+        self.assertEqual(order, ["asr", "translation"])
         build.assert_called_once_with(Settings(), "interpret")
         warm.assert_called_once_with(Settings(), "interpret")
 
-    def test_build_errors_propagate(self) -> None:
+    def test_build_errors_propagate_without_warming(self) -> None:
         with (
             mock.patch.object(
                 factory, "build_components", side_effect=FileNotFoundError("x")
             ),
-            mock.patch.object(factory, "warm_up_translation"),
+            mock.patch.object(factory, "warm_up_translation") as warm,
             self.assertRaises(FileNotFoundError),
         ):
             factory.build_session_components(Settings(), "media")
+        warm.assert_not_called()
 
     def test_engine_uses_the_warming_builder(self) -> None:
         from kikitori.engine.services import default_services

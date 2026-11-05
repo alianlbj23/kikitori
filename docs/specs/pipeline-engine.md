@@ -258,7 +258,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 - 會啟動背景工作的方法（`session.start`、`models.download`）在**回應寫出之後**才啟動背景執行緒，所以 UI 一定先拿到 `session_id`，才收到該 session 的事件。
 - `settings.set` 在 session 執行中也可呼叫，新設定從下一個 session 生效。
-- `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → 建立元件（載入模型可能要數秒；同時預熱翻譯模型，見 factory 的 `build_session_components()`）→ 開裝置 → `status running`。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
+- `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → 建立元件（載入模型可能要數秒；之後預熱翻譯模型，見 factory 的 `build_session_components()`）→ 開裝置 → `status running`。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
 - **背景方法**（表中標「背景」）：會執行 `nvidia-smi`、連線翻譯伺服器（最久數秒），所以不在讀 stdin 的主執行緒上處理，而是交給**一條**背景工作執行緒（`engine/deferred.py`），完成時才寫出回應。
   - 背景方法之間：依收到的順序執行與回應（不會同時跑兩次偵測）。
   - 與其他方法之間：以 `id` 對應，回應可能晚於之後送出的請求（例如 `hardware.detect` 進行中送 `session.stop`，`session.stop` 先回應）。
@@ -332,7 +332,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 - `no_speech_reliable(model_id)`：registry 的 `no_speech_reliable`，設定 `PipelineComponents.final_no_speech_reliable`。
 - `create_transcript_filter(no_speech_threshold)`：asr 的 `rejection_reason` + `FilterConfig`。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`is_downloaded`、`download_model`、`default_cache_dir`。
-- `build_session_components(settings, mode)`：engine 實際用的建立函式。載入 ASR 的同時以另一條執行緒呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
+- `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`）。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
 - `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
 
 ## Tech Stack

@@ -342,24 +342,16 @@ def warm_up_translation(
 
 
 def build_session_components(settings: Settings, mode: Mode) -> PipelineComponents:
-    """engine 用的元件建立：載入 ASR 的同時預熱翻譯模型，兩者都完成才回傳。
+    """engine 用的元件建立：先載入 ASR，再預熱翻譯模型，兩者都完成才回傳。
 
-    兩件事互不相干（GPU 上的 ASR 與翻譯伺服器），並行可以少等數秒；session 在這段期間
-    維持 `loading`，`running` 時第一句就能即時翻譯。
+    session 在這段期間維持 `loading`，`running` 時第一句就能即時翻譯。刻意不並行：兩個
+    行程同時在 GPU 上配置記憶體時，Ollama 載入模型前估算的可用顯示記憶體會過時，
+    端到端驗收時 llama-server 因此以 CUDA 錯誤當掉；依序載入時它看到 ASR 載入後真正
+    剩下的記憶體，不夠時會自己把部分層放到 CPU。
 
     Raises:
-        同 `build_components()`。
+        同 `build_components()`（失敗時不預熱）。
     """
-    warm = threading.Thread(
-        target=warm_up_translation,
-        args=(settings, mode),
-        name="translation-warm-up",
-        daemon=True,
-    )
-    warm.start()
-    try:
-        return build_components(settings, mode)
-    finally:
-        warm.join(WARM_UP_READ_TIMEOUT + 10)
-        if warm.is_alive():
-            logger.warning("translation warm-up still running; starting anyway")
+    components = build_components(settings, mode)
+    warm_up_translation(settings, mode)
+    return components
