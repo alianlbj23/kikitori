@@ -31,7 +31,10 @@ export const en: Messages = {
   "rail.mode": "Mode",
   "rail.device": "Audio source",
   "mode.media.name": "Video translation",
-  "mode.media.note": "Japanese and English into Traditional Chinese",
+  "mode.media.note": "{source} into {target}",
+  "mode.media.noteAuto": "Any detected language into {target}",
+  "mode.media.noteOriginal": "{source} (original only)",
+  "mode.interpret.noteOriginal": "{own} ⇄ {partner} (original only)",
   "mode.interpret.name": "Live interpreting",
   "mode.interpret.note": "{own} ⇄ {partner}",
   "device.hint.media": "Video translation captures the sound your computer is playing.",
@@ -48,6 +51,115 @@ export const en: Messages = {
   "engine.restart": "Restart engine",
   "engine.failedNotice": "The engine could not start: {reason}",
   "engine.log": "Engine notice: {message}",
+  // ------------------------------------------------------------ engine message codes (hardware.md; params localized in lib/messages.ts)
+  "engine.asr_gpu":
+    "{gpu_name} ({vram_mb} MiB VRAM): {fast_model} for live subtitles, {final_model} for final subtitles ({compute_type})",
+  "engine.asr_gpu_int8_saves_vram":
+    "int8_float16 halves the VRAM used by speech recognition, leaving more for the translation model",
+  "engine.asr_final_no_speech_unreliable":
+    "{final_model} cannot tell speech from silence (no_speech); {fast_model}'s no_speech and the voice detector filter non-speech instead",
+  "engine.asr_large_v3_remote_translation":
+    "Translation does not run on this computer, so final subtitles use {final_model} (similar quality, reliable no_speech, about 0.33 s per sentence)",
+  "engine.asr_apple_silicon":
+    "Apple Silicon: speech recognition runs on the CPU on macOS; {fast_model} for live subtitles, {final_model} for final subtitles",
+  "engine.asr_apple_silicon_untested":
+    "Apple Silicon latency has not been measured yet; using the same models as a CPU with 16 GB of RAM or more",
+  "engine.asr_cpu":
+    "Speech recognition runs on the CPU (16 GB of RAM or more): {fast_model} for live subtitles, {final_model} for final subtitles",
+  "engine.asr_cpu_large_models_slow":
+    "medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles",
+  "engine.asr_cpu_low":
+    "Lightweight models keep latency and memory low: {fast_model} for live subtitles, {final_model} for final subtitles",
+  "engine.cpu_low_ram": "{ram_gb} GB of RAM is less than 16 GB",
+  "engine.cpu_few_cores": "{physical_cores} physical CPU cores (at most {max_cores})",
+  "engine.cpu_info_incomplete": "The hardware information is incomplete",
+  "engine.multiple_gpus": "{gpu_count} NVIDIA GPUs found; using {gpu_name}, the one with the most VRAM",
+  "engine.cuda_platform_unsupported":
+    "CTranslate2 has no CUDA build for this platform (Windows and Linux x86-64 only); speech recognition uses the CPU",
+  "engine.cuda_driver_too_old":
+    "NVIDIA driver {driver_version} is too old (CUDA 12 needs {min_driver} or newer); speech recognition uses the CPU until the driver is updated",
+  "engine.cuda_compute_capability_unknown":
+    "Cannot read the GPU's compute capability (the driver may be too old); speech recognition uses the CPU",
+  "engine.cuda_compute_capability_unsupported":
+    "{gpu_name} (compute capability {compute_capability}) does not support CTranslate2's float16/int8 acceleration; speech recognition uses the CPU",
+  "engine.gpu_runtime_missing":
+    "cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU",
+  "engine.asr_vram_insufficient":
+    "Not enough VRAM for the speech recognition models (about {need_mb} MiB needed); speech recognition uses the CPU",
+  "engine.memory_unknown": "Cannot read the amount of memory; using the lightest speech recognition models",
+  "engine.asr_low_quality_model": "{model} makes noticeably more recognition errors",
+  "engine.asr_language_quality_low": "{model} recognizes {language} poorly (error rate above 20% on public benchmarks)",
+  "engine.translation_remote":
+    "The translation server is not on this computer ({base_url}); choose one of its models in the custom combination on the Models page",
+  "engine.translation_cpu":
+    "No usable GPU: the translation model runs on the CPU, so the smallest model is chosen (CPU speed not measured)",
+  "engine.translation_budget_vram":
+    "About {budget_gb} GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve",
+  "engine.translation_budget_unified":
+    "About {budget_gb} GB of unified memory is left for the translation model after speech recognition and the system reserve",
+  "engine.translation_same_model":
+    "Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5–18 s",
+  "engine.translation_different_models": "Live and final translation use different models",
+  "engine.translation_better_model_available":
+    "Chose {model} from the installed models; installing {better_model} gives better quality",
+  "engine.translation_not_needed":
+    "{source_language} and {target_language} are the same spoken language: no translation model is needed, only script conversion",
+  "engine.source_language_auto":
+    "The listening language is detected automatically: the translation model is chosen to translate any language into {target_language}",
+  "engine.translation_server_unreachable":
+    "Cannot connect to the translation server {base_url} (is Ollama running?); installed models cannot be checked",
+  "engine.translation_model_list_unavailable": "Cannot get the translation server's model list: {error}",
+  "engine.low_ram_for_translation":
+    "Less than 8 GB of RAM: running the translation model and speech recognition together may not fit",
+  "engine.translation_model_not_installed": "The recommended translation model {model} is not installed yet",
+  "engine.translation_model_exceeds_budget":
+    "{model} needs about {model_gb} GB, more than the {budget_gb} GB available; Ollama will run part of it on the CPU, which is slower",
+  "engine.translation_unsupported": "No recommended translation model supports {source_language} → {target_language}",
+  "engine.combination_not_object": "The model combination must be an object",
+  "engine.asr_path_not_object": "{path} must be an object",
+  "engine.asr_model_unknown": "{path}: unknown speech recognition model {model} (available: {available})",
+  "engine.asr_device_invalid": "{path}: the device must be automatic, CPU or CUDA",
+  "engine.asr_compute_type_not_string": "{path}: the precision must be text or empty",
+  "engine.asr_cpu_threads_invalid": "{path}: CPU threads must be a whole number from 0 to 256",
+  "engine.asr_cuda_no_gpu": "{path}: CUDA is selected but no NVIDIA GPU was found",
+  "engine.asr_cuda_platform_unsupported":
+    "{path}: CUDA is selected but CTranslate2 has no CUDA build for this platform (Windows and Linux x86-64 only)",
+  "engine.asr_cuda_driver_too_old":
+    "{path}: CUDA is selected but NVIDIA driver {driver_version} is too old (CUDA 12 needs {min_driver} or newer)",
+  "engine.asr_cuda_compute_capability_unknown":
+    "{path}: CUDA is selected but the GPU's compute capability is unknown (the driver may be too old)",
+  "engine.asr_cuda_compute_capability_unsupported":
+    "{path}: CUDA is selected but {gpu_name} (compute capability {compute_capability}) does not support CTranslate2's float16/int8 acceleration",
+  "engine.asr_cuda_cublas_missing": "{path}: CUDA is selected but cuBLAS is not installed; download the GPU runtime first",
+  "engine.asr_compute_type_unknown": "{path}: unknown precision {compute_type} (available: {available})",
+  "engine.translation_model_name_invalid": "{field} must be a model name of 1–{max_chars} characters, or empty",
+  "engine.asr_auto_uses_cpu": "{path}: automatic will use the CPU (the GPU cannot run speech recognition now)",
+  "engine.asr_compute_type_cpu_fallback":
+    "{path}: the CPU does not support {compute_type}; CTranslate2 will use another precision (usually float32, slower)",
+  "engine.asr_compute_type_gpu_fallback":
+    "{path}: compute capability {compute_capability} does not support {compute_type}; CTranslate2 will use float32 or int8_float32 (slower, more VRAM)",
+  "engine.asr_model_slow_on_cpu": "{path}: {model} needs 3.6 s or more per sentence on a CPU; subtitles will lag noticeably",
+  "engine.asr_model_not_downloaded":
+    "{path}: speech recognition model {model} is not downloaded yet; it is downloaded before starting",
+  "engine.asr_model_language_unsupported": "{path}: {model} cannot recognize {language}",
+  "engine.asr_fast_larger_than_final":
+    "The live model {fast_model} is larger than the final model {final_model}: live subtitles may be slower than final ones",
+  "engine.asr_no_speech_unavailable":
+    "Neither {fast_model} nor {final_model} can filter non-speech with no_speech; singing and noise are more likely to be transcribed",
+  "engine.translation_model_not_on_server": "The translation server does not have {model}",
+  "engine.translation_model_language_unsupported": "{model} does not support {source_language} → {target_language}",
+  "engine.translation_license_non_commercial": "The license of {model} ({license}) forbids commercial use",
+  "engine.translation_license_region_restricted": "The license of {model} ({license}) does not apply in {regions}",
+  "engine.translation_models_differ":
+    "Live and final translation use different models: the local Ollama takes 1.5–18 s each time it switches models",
+  "engine.vram_overflow":
+    "Speech recognition and translation need about {need_mb} MiB of VRAM, more than the {available_mb} MiB available on {gpu_name}; they may be slow or fail to load",
+  "engine.asr_ram_over_half": "The speech recognition models on the CPU use more than half of the RAM",
+  "engine.translation_disabled": "Translation is off: only the original text is shown and no translation model is needed",
+  "engineParam.fast_asr": "Live subtitle recognition",
+  "engineParam.final_asr": "Final subtitle recognition",
+  "engineParam.translation_fast": "The live translation model",
+  "engineParam.translation_final": "The final translation model",
 
   // ------------------------------------------------------------ status
   "status.starting": "Starting the engine",
@@ -68,13 +180,14 @@ export const en: Messages = {
   "status.code.capture_error": "An error occurred while capturing audio.",
   "status.code.pipeline_error": "An error occurred while processing speech.",
   "status.code.load_error": "Loading the model failed.",
+  "status.code.translation_model_missing": "The translation server does not have the translation model yet.",
+  "status.code.translation_server_auth_failed": "The translation server rejected the request — check the API key.",
   "status.errorDetail": "An error occurred: {detail}",
   "status.errorUnknown": "An unknown error occurred.",
 
   // ------------------------------------------------------------ notices
   "notice.close": "Close",
   "notice.closeLabel": "Close this message",
-  "notice.waitDownloads": "Still downloading {models}. Press Start once the download finishes.",
   "notice.settingsFieldsUnreadable": {
     one: "{count} field in the settings file could not be read; using the default for now: {fields}",
     other: "{count} fields in the settings file could not be read; using the defaults for now: {fields}",
@@ -105,6 +218,9 @@ export const en: Messages = {
   "error.restartEngine": "Couldn't restart the engine",
   "error.readOverlayState": "Couldn't read the subtitle window state",
   "error.readBridge": "Couldn't read the engine state",
+  "error.readLanguages": "Couldn't read the language list",
+  "error.setTranslation": "Couldn't switch \"Show translation\"",
+  "error.previewLanguages": "Couldn't get the recommended combination",
 
   // ------------------------------------------------------------ engine error codes
   "error.code.invalid_settings": "Invalid setting",
@@ -119,6 +235,9 @@ export const en: Messages = {
     "Agree to the NVIDIA CUDA EULA before downloading the GPU acceleration component",
   "error.code.gpu_runtime_unsupported":
     "This platform does not support the GPU acceleration component (only Windows and Linux on x86-64)",
+  "error.code.pull_unsupported": "The translation server is not Ollama, so kikitori cannot download translation models for you",
+  "error.code.translation_server_unreachable": "Cannot connect to the translation server",
+  "error.code.translation_server_auth_failed": "The translation server rejected the request — check the API key",
   "error.code.unknown_method": "The engine version does not match the app; this operation is not supported",
   "error.code.invalid_params": "Invalid parameters were sent to the engine",
   "error.code.invalid_request": "A malformed request was sent to the engine",
@@ -140,6 +259,9 @@ export const en: Messages = {
   "transcript.overlayVisible": "Show subtitle window",
   "transcript.clickThrough": "Click-through",
   "transcript.clear": "Clear",
+  "transcript.showTranslation": "Show translation",
+  "transcript.noTranslation": "(no translation)",
+  "transcript.translating": "Translating",
   "transcript.emptyTitle": "No subtitles yet",
   "transcript.emptyBody":
     "Choose a mode and an audio source, then press Start. Every sentence heard is listed here, original above and translation below.",
@@ -242,6 +364,24 @@ export const en: Messages = {
   "missing.offer": "{models} (about {size} in total) must be downloaded before you can start.",
   "missing.done": "The models are downloaded. You can press Start now.",
   "missing.download": "Download missing models",
+  "startdl.title": "Downloading models before starting",
+  "startdl.itemAsr": "Speech recognition model {model}",
+  "startdl.itemTranslation": "Translation model {model}",
+  "startdl.pending": "Waiting",
+  "startdl.preparing": "Preparing the download",
+  "startdl.progress": "{percent}%, {done} of {total}",
+  "startdl.done": "Done",
+  "startdl.failed": "Download failed: {error}",
+  "startdl.stillMissing": "{model} was already downloaded, but the engine still reports it missing.",
+  "startdl.downloading": "Subtitles start automatically once the downloads finish.",
+  "startdl.starting": "Downloads finished; starting.",
+  "startdl.failedHelp": "A download failed. Press Retry, or choose other models on the Models page.",
+  "startdl.pullUnsupported": "The translation server {url} is not Ollama, so kikitori cannot download translation models for you. Install {models} on that server yourself, or choose an installed model on the Models page. You can also turn off \"Show translation\" to see the original only.",
+  "startdl.serverUnreachable": "Cannot connect to the translation server {url}. If you use Ollama, start it first (open the Ollama app, or run ollama serve in a terminal), then press Retry. You can also turn off \"Show translation\" to see the original only.",
+  "startdl.authFailed": "The translation server {url} rejected the request — check the API key (the environment variable named in Settings), then press Retry.",
+  "startdl.retry": "Retry",
+  "startdl.cancel": "Cancel",
+  "startdl.cancelLabel": "Stop waiting for the downloads and do not start automatically",
 
   "gpu.title": "GPU acceleration component",
   "gpu.lede":
@@ -385,12 +525,47 @@ export const en: Messages = {
   "settings.regionHelp":
     "When checked, the recommended setup also considers region-restricted models. When unchecked, you can still pick them in the custom setup, with a warning.",
   "settings.languageLegend": "Languages",
-  "settings.target": "Translation language",
-  "settings.targetHelp": "Video translation always translates into Traditional Chinese.",
-  "settings.partner": "Other person's language when interpreting",
+  "settings.languageLede": "Choose the language you listen to and the subtitle language; the models recommended for them are listed below. Nothing is downloaded now: missing models are downloaded the first time you press Start.",
+  "settings.languageModeMedia": "These are the languages for video translation.",
+  "settings.languageModeInterpret": "These are the languages for live interpreting.",
+  "settings.source": "Listening language",
+  "settings.sourceHelp": "The language spoken in the video. With \"Detect automatically\" each sentence is identified first, and very short ones may be identified wrongly.",
+  "settings.own": "My language",
+  "settings.ownHelp": "The language you speak; what the other person says is translated into it.",
+  "settings.languageFilter": "Type to filter",
+  "settings.languageFilterLabel": "Filter {field}",
+  "settings.applyRecommended": "Also switch to the recommended models",
+  "settings.applyRecommendedHelp": "Changes the recognition models, device and translation models; when unticked, only the languages change.",
+  "settings.saveLanguages": "Save languages",
+  "settings.languagesSaved": "Languages saved.",
+  "settings.languagesSavedWithModels": "Languages saved, and the recommended models are now in use.",
+  "settings.languagesSavedNoPreview": "Languages saved; the recommended combination was not ready, so the models did not change.",
+  "settings.languagesSavedNextStart": "Saved; takes effect the next time you start.",
+  "settings.languagesUnavailable": "Languages can be chosen once the engine is ready.",
+  "language.auto": "Detect automatically",
+  "preview.title": "Recommended combination",
+  "preview.checking": "Working out the recommended combination for these languages",
+  "preview.unavailable": "The recommended combination is not available right now: {reason}",
+  "preview.translation": "Translation model",
+  "preview.installed": "Installed",
+  "preview.downloadOnFirstUse": "Downloaded on first use, about {size}",
+  "preview.downloadUnknownSize": "Downloaded on first use (size unknown)",
+  "preview.installedUnknown": "Cannot tell whether it is installed (the translation server did not answer)",
+  "preview.notNeeded": "No translation needed",
+  "preview.translationOff": "\"Show translation\" is off, so no translation model is needed",
+  "preview.unsupported": "No translation model supports this language combination",
+  "preview.remote": "The translation server is not on this computer; choose its model in the custom combination on the Models page",
+  "preview.allInstalled": "All the models needed are installed.",
+  "preview.total": "The first start downloads about {size}.",
+  "preview.totalUnknown": "The first start downloads models, some of unknown size (about {size} known).",
+  "settings.target": "Subtitle language",
+  "settings.targetHelp": "The language of the subtitles. When it is the same spoken language as the listening language, nothing is translated; Chinese is only converted between scripts.",
+  "settings.partner": "Other person's language",
   "settings.partnerHelp":
-    "During live interpreting, what you say in Chinese is translated into this language, and what the other person says is translated into Chinese.",
-  "settings.styleLegend": "Subtitle appearance",
+    "What you say is translated into this language, and what they say into yours. The two must be told apart, so they cannot be the same (Traditional and Simplified Chinese count as the same).",
+  "settings.styleLegend": "Subtitles",
+  "settings.showTranslation": "Show translation",
+  "settings.showTranslationHelp": "When off, only the original is shown, in the main subtitle size and colour: the engine translates nothing, needs no translation server and leaves the GPU free. Switching while running applies at once; lines already shown are not translated afterwards.",
   "settings.previewOriginal": "次の駅で降りましょう。",
   "settings.previewTranslation": "Let's get off at the next station.",
   "settings.fontSize": "Translation font size",
@@ -410,7 +585,8 @@ export const en: Messages = {
   "validation.urlInvalid": "This is not a valid URL.",
   "validation.envPattern": "Use only letters, digits and underscores, not starting with a digit.",
   "validation.envTooLong": "The name is too long (at most {max} characters).",
-  "validation.partner": "Choose Japanese or English.",
+  "validation.partner": "The other person's language must differ from yours (Traditional and Simplified Chinese count as the same language).",
+  "validation.language": "Choose a language from the list.",
   "validation.fontSize": "The font size must be between {min} and {max}.",
   "validation.opacity": "The background opacity must be between 0% and 100%.",
   "validation.position": "Choose top or bottom.",

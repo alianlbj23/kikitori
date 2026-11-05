@@ -128,6 +128,8 @@ const STATUS_CODE: Readonly<Record<string, StringKey>> = {
   capture_error: "status.code.capture_error",
   pipeline_error: "status.code.pipeline_error",
   load_error: "status.code.load_error",
+  translation_model_missing: "status.code.translation_model_missing",
+  translation_server_auth_failed: "status.code.translation_server_auth_failed",
 };
 
 /** Explanation for a `status: error` event, preferring our wording over raw detail. */

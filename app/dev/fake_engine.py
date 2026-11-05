@@ -13,6 +13,20 @@ NVIDIA machine without cuBLAS, a GPU runtime behind the NVIDIA EULA gate, and
 background methods answered on one worker thread after a short delay, so later
 requests can be answered first, as with the real engine.
 
+Milestones 12–14 (languages, lazy downloads, original-only subtitles) are
+imitated the same way, mirroring `src/kikitori/engine/testing.py`: messages are
+`{code, params, message}` objects, `languages.list` and
+`settings.preview_languages` answer from the language table below,
+`session.start` reports `translation_model_missing` (with `data.models`) before
+`model_not_downloaded`, `models.pull_translation` "downloads" with
+`download_progress` events of `kind: "translation"` (the total grows as Ollama's
+does), and `session.set_translation` switches a running session.
+`--translation-server` picks the fake translation server: `ollama` (default),
+`openai` (reachable but not Ollama: `pull_unsupported`, no model check at start),
+`offline` (`translation_server_unreachable`) or `auth` (rejects the API key:
+`translation_server_auth_failed`). The rules are the real engine's; this is only
+a shape-correct stand-in.
+
 Point the app at it with
     KIKITORI_ENGINE_CMD='["uv","run","--no-project","python","app/dev/fake_engine.py"]'
 or use `npm run menu` in app/.
@@ -31,6 +45,7 @@ import json
 import os
 import platform
 import queue
+import re
 import sys
 import threading
 import time
@@ -104,6 +119,67 @@ LANGUAGE_WHISPER: dict[str, str] = {
 # The canned lines above are translated for the default languages only.
 CANNED_TARGETS = ("zh-TW", "ja")
 
+# (code, english_name, native_name, rtl, no_space) in the engine's order; mirrors
+# src/kikitori/languages/catalog.py.
+LANGUAGES: list[tuple[str, str, str, bool, bool]] = [
+    ("ja", "Japanese", "日本語", False, True),
+    ("en", "English", "English", False, False),
+    ("zh-TW", "Chinese (Traditional, Taiwan)", "繁體中文", False, True),
+    ("zh-CN", "Chinese (Simplified)", "简体中文", False, True),
+    ("ko", "Korean", "한국어", False, False),
+    ("es", "Spanish", "Español", False, False),
+    ("fr", "French", "Français", False, False),
+    ("de", "German", "Deutsch", False, False),
+    ("pt", "Portuguese", "Português", False, False),
+    ("ru", "Russian", "Русский", False, False),
+    ("it", "Italian", "Italiano", False, False),
+    ("ar", "Arabic", "العربية", True, False),
+    ("hi", "Hindi", "हिन्दी", False, False),
+    ("id", "Indonesian", "Bahasa Indonesia", False, False),
+    ("vi", "Vietnamese", "Tiếng Việt", False, False),
+    ("th", "Thai", "ไทย", False, True),
+    ("tr", "Turkish", "Türkçe", False, False),
+    ("pl", "Polish", "Polski", False, False),
+    ("nl", "Dutch", "Nederlands", False, False),
+    ("uk", "Ukrainian", "Українська", False, False),
+]
+# ASR quality grade per model, in LANGUAGES order (catalog.py `_QUALITY_ROWS`).
+ASR_QUALITY: dict[str, str] = {
+    "large-v3": "BAABAABAAAABBACABAAB",
+    "large-v3-turbo": "BBBBAABAAAACCACCBAAB",
+    "medium": "BABBBABAAAACCBCBBAAB",
+    "small": "BACCBABBABACCBCCBBBB",
+    "base": "CACCCACBBCBCCCCCCCCC",
+    "tiny": "CBCCCBCCCCCCCCCCCCCC",
+}
+# Translation presets the fake knows (size in GB of weights, languages it supports).
+TRANSLATION_SIZES_GB: dict[str, float] = {
+    "qwen3.5:4b": 3.3,
+    "qwen3.5:9b": 6.6,
+    "hy-mt1.5-7b:latest": 4.6,
+    "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS": 4.3,
+}
+# A pull of this name fails halfway, like `FAKE_BROKEN_PULL` in testing.py.
+BROKEN_PULL = "fake-broken-pull:1b"
+PULL_BYTES = 4 * 1024 * 1024
+TRANSLATION_SERVER_PROFILES = ("ollama", "openai", "offline", "auth")
+TRANSLATION_MODEL_NAME = re.compile(r"(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
+
+
+def message(code: str, english: str, **params: Any) -> dict[str, Any]:
+    """A structured engine message (hardware.md「訊息碼」); `english` is the fallback template."""
+    text = english.format(**params)
+    return {"code": code, "params": params, "message": text}
+
+
+def asr_quality(model: str, language: str) -> str | None:
+    row = ASR_QUALITY.get(model)
+    codes = [code for code, *_ in LANGUAGES]
+    if row is None or language not in codes:
+        return None
+    return row[codes.index(language)]
+
+
 ASR_MODELS: list[dict[str, Any]] = [
     {"id": "tiny", "size_bytes": 77_000_000, "license": "MIT", "speed_tier": "fastest"},
     {"id": "base", "size_bytes": 145_000_000, "license": "MIT", "speed_tier": "fast"},
@@ -157,6 +233,7 @@ EULA_URL = "https://docs.nvidia.com/cuda/eula/index.html"
 # Long enough that a request sent right after a background one is answered first.
 BACKGROUND_DELAY_SECS = 0.3
 
+# `installed` here is the starting state; FakeEngine tracks it as pulls complete.
 TRANSLATION_MODELS: list[dict[str, Any]] = [
     {
         "name": name,
@@ -184,7 +261,7 @@ TRANSLATION_MODELS: list[dict[str, Any]] = [
         ),
         (
             "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
-            "Sakura-GalTransl 7B v3（非商用）",
+            "Sakura-GalTransl 7B v3",
             False,
             "CC BY-NC-SA 4.0",
             False,
@@ -418,19 +495,30 @@ class Session(threading.Thread):
         settings = settings or DEFAULT_SETTINGS
         self.target = settings["target_language"]
         self.partner = settings["partner_language"]
-        self.translation_enabled = settings["translation"]["enabled"]
+        # Read by the session thread for each sentence; `session.set_translation`
+        # flips it (a bool assignment, so no lock is needed).
+        self.translation_enabled: bool = settings["translation"]["enabled"]
         self.stop_event = threading.Event()
+        # Checked before "loading" ends, like the real engine's translation-model
+        # and ASR checks: (code, detail, data) of a start that must fail.
+        self.start_error: tuple[str, str, dict[str, Any] | None] | None = None
 
-    def status(self, state: str, detail: str | None = None) -> None:
-        self.writer.event(
-            "status",
-            {
-                "state": state,
-                "detail": detail,
-                "session_id": self.session_id,
-                "code": None,
-            },
-        )
+    def status(
+        self,
+        state: str,
+        detail: str | None = None,
+        code: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "state": state,
+            "detail": detail,
+            "session_id": self.session_id,
+            "code": code,
+        }
+        if data is not None:
+            payload["data"] = data
+        self.writer.event("status", payload)
 
     def run(self) -> None:
         try:
@@ -442,7 +530,14 @@ class Session(threading.Thread):
             raise
 
     def _run(self) -> None:
-        self.status("loading", "載入模型中（假）")
+        self.status("loading")
+        if self.start_error is not None:
+            code, detail, data = self.start_error
+            if self.stop_event.wait(0.3):
+                self.status("idle")
+                return
+            self.status("error", detail, code, data)
+            return
         if self.stop_event.wait(1.0):
             self.status("idle")
             return
@@ -535,8 +630,18 @@ class Session(threading.Thread):
 
 
 class FakeEngine:
-    def __init__(self, writer: Writer, ignore_shutdown: bool = False) -> None:
+    def __init__(
+        self,
+        writer: Writer,
+        ignore_shutdown: bool = False,
+        translation_server: str = "ollama",
+    ) -> None:
         self.writer = writer
+        self.translation_server = translation_server
+        self.translation_installed = {
+            m["name"] for m in TRANSLATION_MODELS if m["installed"]
+        }
+        self.pulling: set[str] = set()
         # Imitates an engine stuck mid-inference: `engine.shutdown` is never
         # answered, so the app has to fall back to killing the process.
         self.ignore_shutdown = ignore_shutdown
@@ -549,6 +654,7 @@ class FakeEngine:
         self.next_session_id = 1
         self.lock = threading.Lock()
         self.after_response: list[Callable[[], None]] = []
+        self.after_background: list[Callable[[], None]] = []
         self.methods: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "engine.info": self.engine_info,
             "models.download": self.models_download,
@@ -557,6 +663,8 @@ class FakeEngine:
             "settings.set": self.settings_set,
             "session.start": self.session_start,
             "session.stop": self.session_stop,
+            "session.set_translation": self.session_set_translation,
+            "languages.list": self.languages_list,
             "engine.shutdown": lambda _p: {},
         }
         # Like the real engine, these run on one worker thread in arrival order
@@ -567,6 +675,8 @@ class FakeEngine:
             "models.validate": self.models_validate,
             "settings.apply_recommendation": self.settings_apply_recommendation,
             "settings.preview_recommendation": self.settings_preview_recommendation,
+            "settings.preview_languages": self.settings_preview_languages,
+            "models.pull_translation": self.models_pull_translation,
         }
         self.jobs: queue.Queue[tuple[int, str, dict[str, Any]] | None] = queue.Queue()
         self.worker = threading.Thread(
@@ -584,6 +694,7 @@ class FakeEngine:
             try:
                 result = self.background[method](params)
             except ProtocolError as exc:
+                self.after_background.clear()
                 self.writer.send(
                     {
                         "id": request_id,
@@ -592,6 +703,11 @@ class FakeEngine:
                 )
                 continue
             self.writer.send({"id": request_id, "result": result})
+            # Like the engine's `Deferred.after`: work that emits events starts
+            # only after its answer is written.
+            for action in self.after_background:
+                action()
+            self.after_background.clear()
 
     def stop_worker(self) -> None:
         self.jobs.put(None)
@@ -613,8 +729,36 @@ class FakeEngine:
     def _runtime_installed(self) -> bool:
         return GPU_RUNTIME_ID in self.downloaded
 
-    def recommendation(self) -> dict[str, Any]:
-        """A fixed 8 GB NVIDIA machine; CPU combination until the runtime is installed."""
+    def _translation_needed(self, settings: dict[str, Any]) -> bool:
+        """False for "original only" and for media mode with one spoken language."""
+        if not settings["translation"]["enabled"]:
+            return False
+        if settings["mode"] == "interpret" or settings["source_language"] == "auto":
+            return True
+        return (
+            LANGUAGE_WHISPER[settings["source_language"]]
+            != LANGUAGE_WHISPER[settings["target_language"]]
+        )
+
+    def _languages(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: settings[key]
+            for key in (
+                "mode",
+                "source_language",
+                "target_language",
+                "partner_language",
+            )
+        }
+
+    def recommendation(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        """A fixed 8 GB NVIDIA machine; CPU combination until the runtime is installed.
+
+        Depends on the languages like the real recommendation: same spoken
+        language in media mode → no translation model; C-grade recognition of a
+        listening language → a warning per language.
+        """
+        settings = settings or self.settings
         if self._runtime_installed():
             fast = {"model": "small", "device": "cuda", "compute_type": "float16"}
             final = {
@@ -623,24 +767,98 @@ class FakeEngine:
                 "compute_type": "float16",
             }
             threads, tier, budget = 0, "nvidia_8gb", 4.9
-            warnings: list[str] = []
+            warnings: list[dict[str, Any]] = []
+            reasons = [
+                message(
+                    "asr_gpu",
+                    "{gpu_name} ({vram_mb} MiB VRAM): {fast_model} for live subtitles, "
+                    "{final_model} for final subtitles ({compute_type})",
+                    gpu_name="NVIDIA GeForce RTX 4060 (fake)",
+                    vram_mb=8188,
+                    fast_model="small",
+                    final_model="large-v3-turbo",
+                    compute_type="float16",
+                )
+            ]
         else:
             fast = {"model": "base", "device": "cpu", "compute_type": "int8"}
             final = {"model": "small", "device": "cpu", "compute_type": "int8"}
             threads, tier, budget = 4, "cpu", 7.0
-            warnings = [
-                "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
+            reasons = [
+                message(
+                    "asr_cpu",
+                    "Speech recognition runs on the CPU (16 GB of RAM or more): "
+                    "{fast_model} for live subtitles, {final_model} for final subtitles",
+                    fast_model="base",
+                    final_model="small",
+                )
             ]
+            warnings = [
+                message(
+                    "gpu_runtime_missing",
+                    "cuBLAS is not installed: GPU acceleration needs the GPU runtime "
+                    "download (about 570 MB); until then speech recognition uses the CPU",
+                )
+            ]
+        heard = (
+            [settings["target_language"], settings["partner_language"]]
+            if settings["mode"] == "interpret"
+            else []
+            if settings["source_language"] == "auto"
+            else [settings["source_language"]]
+        )
+        for language in heard:
+            if asr_quality(final["model"], language) == "C":
+                warnings.append(
+                    message(
+                        "asr_language_quality_low",
+                        "{model} recognizes {language} poorly (error rate above 20% on "
+                        "public benchmarks)",
+                        model=final["model"],
+                        language=language,
+                    )
+                )
+        needed = (
+            settings["mode"] == "interpret"
+            or settings["source_language"] == "auto"
+            or (
+                LANGUAGE_WHISPER[settings["source_language"]]
+                != LANGUAGE_WHISPER[settings["target_language"]]
+            )
+        )
+        if needed:
+            status, model = "recommended", "qwen3.5:4b"
+            reasons.append(
+                message(
+                    "translation_budget_vram",
+                    "About {budget_gb:.1f} GB of VRAM is left for the translation model "
+                    "after speech recognition and a 1 GB reserve",
+                    budget_gb=budget,
+                )
+            )
+        else:
+            status, model = "not_needed", None
+            reasons.append(
+                message(
+                    "translation_not_needed",
+                    "{source_language} and {target_language} are the same spoken "
+                    "language: no translation model is needed, only script conversion",
+                    source_language=settings["source_language"],
+                    target_language=settings["target_language"],
+                )
+            )
         return {
             "tier": tier,
             "fast_asr": {**fast, "cpu_threads": threads},
             "final_asr": {**final, "cpu_threads": threads},
-            "translation_fast": "qwen3.5:4b",
-            "translation_final": "qwen3.5:4b",
+            "translation_fast": model,
+            "translation_final": model,
             "translation_budget_gb": budget,
             "gpu_runtime_missing": not self._runtime_installed(),
-            "reasons": ["假引擎：依假的 8 GB 顯示卡推薦"],
+            "reasons": reasons,
             "warnings": warnings,
+            "translation_status": status,
+            "languages": self._languages(settings),
         }
 
     def hardware_detect(self, _params: dict[str, Any]) -> dict[str, Any]:
@@ -683,9 +901,13 @@ class FakeEngine:
                 "translation_server": {
                     "base_url": self.settings["translation"]["base_url"],
                     "is_local": True,
-                    "reachable": True,
-                    "models": ["qwen3.5:4b"],
-                    "error": None,
+                    "reachable": self._server_reachable(),
+                    "models": sorted(self.translation_installed)
+                    if self._server_reachable()
+                    else None,
+                    "error": None
+                    if self._server_reachable()
+                    else "fake translation server is offline",
                 },
                 "errors": [],
             },
@@ -728,10 +950,20 @@ class FakeEngine:
                 "server": {
                     "base_url": self.settings["translation"]["base_url"],
                     "is_local": True,
-                    "reachable": True,
-                    "error": None,
+                    "reachable": self._server_reachable(),
+                    "error": None
+                    if self._server_reachable()
+                    else "fake translation server is offline",
                 },
-                "models": TRANSLATION_MODELS,
+                "models": [
+                    {
+                        **m,
+                        "installed": m["name"] in self.translation_installed
+                        if self._server_reachable()
+                        else None,
+                    }
+                    for m in TRANSLATION_MODELS
+                ],
             },
         }
 
@@ -743,25 +975,70 @@ class FakeEngine:
         merged = deep_merge(self.settings, candidate)
         validate_settings(merged)
         asr, tr = merged["asr"], merged["translation"]
-        errors: list[str] = []
-        warnings: list[str] = []
-        ids = {m["id"] for m in ASR_MODELS}
+        errors: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        ids = [m["id"] for m in ASR_MODELS]
         for role in ("fast", "final"):
             model = asr[f"{role}_model"]
+            path = f"{role}_asr"
             if model not in ids:
-                errors.append(f"{role}_asr.model：未知的 ASR 模型 {model!r}")
+                errors.append(
+                    message(
+                        "asr_model_unknown",
+                        "{path}: unknown speech recognition model {model} (available: {available})",
+                        path=path,
+                        model=model,
+                        available=", ".join(ids),
+                    )
+                )
             elif model not in self.downloaded:
-                warnings.append(f"{role}_asr：{model} 尚未下載")
+                warnings.append(
+                    message(
+                        "asr_model_not_downloaded",
+                        "{path}: speech recognition model {model} is not downloaded yet; "
+                        "it is downloaded before starting",
+                        path=path,
+                        model=model,
+                    )
+                )
         if asr["device"] == "cuda" and not self._runtime_installed():
-            errors.append("選了 CUDA，但 cuBLAS 未安裝；請先下載 GPU 執行環境")
-        for name in {tr["fast_model"], tr["final_model"]}:
+            errors.append(
+                message(
+                    "asr_cuda_cublas_missing",
+                    "{path}: CUDA is selected but cuBLAS is not installed; download the "
+                    "GPU runtime first",
+                    path="fast_asr",
+                )
+            )
+        for name in sorted({tr["fast_model"], tr["final_model"]}):
             info = next((m for m in TRANSLATION_MODELS if m["name"] == name), None)
-            if info is None or not info["installed"]:
-                warnings.append(f"翻譯模型 {name} 不在翻譯伺服器上")
-            elif info["excluded_regions"] and not tr["allow_restricted"]:
-                warnings.append(f"{name} 的授權不適用於歐盟、英國、南韓")
-            elif info["commercial_use"] is False:
-                warnings.append(f"{name} 為非商用授權")
+            if name not in self.translation_installed:
+                warnings.append(
+                    message(
+                        "translation_model_not_on_server",
+                        "The translation server does not have {model}",
+                        model=name,
+                    )
+                )
+            elif info and info["excluded_regions"] and not tr["allow_restricted"]:
+                warnings.append(
+                    message(
+                        "translation_license_region_restricted",
+                        "The license of {model} ({license}) does not apply in {regions}",
+                        model=name,
+                        license=info["license"],
+                        regions=",".join(info["excluded_regions"]),
+                    )
+                )
+            elif info and info["commercial_use"] is False:
+                warnings.append(
+                    message(
+                        "translation_license_non_commercial",
+                        "The license of {model} ({license}) forbids commercial use",
+                        model=name,
+                        license=info["license"],
+                    )
+                )
         return {"ok": not errors, "errors": errors, "warnings": warnings}
 
     def recommendation_patch(self, rec: dict[str, Any]) -> dict[str, Any]:
@@ -776,10 +1053,17 @@ class FakeEngine:
                 "fast_cpu_threads": fast["cpu_threads"] or None,
                 "final_cpu_threads": final["cpu_threads"] or None,
             },
-            "translation": {
-                "fast_model": rec["translation_fast"],
-                "final_model": rec["translation_final"],
-            },
+            # Not recommended (not needed / unsupported): the models are left as they are.
+            **(
+                {
+                    "translation": {
+                        "fast_model": rec["translation_fast"],
+                        "final_model": rec["translation_final"],
+                    }
+                }
+                if rec["translation_fast"] is not None
+                else {}
+            ),
         }
 
     def settings_apply_recommendation(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -798,15 +1082,206 @@ class FakeEngine:
     ) -> dict[str, Any]:
         rec = self.recommendation()
         patch = self.recommendation_patch(rec)
-        text = json.dumps(
-            patch, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        )
         return {
             "patch": patch,
             "recommendation": rec,
             "differs": deep_merge(self.settings, patch) != self.settings,
-            "fingerprint": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+            "fingerprint": self._fingerprint(patch, rec["languages"]),
         }
+
+    def _fingerprint(self, patch: dict[str, Any], languages: dict[str, Any]) -> str:
+        """Like the engine: changes with the patch and with the languages."""
+        text = json.dumps(
+            {"patch": patch, "languages": languages},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    def _server_reachable(self) -> bool:
+        return self.translation_server != "offline"
+
+    def languages_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise ProtocolError("invalid_params", "languages.list takes no parameters")
+        return {
+            "languages": [
+                {
+                    "code": code,
+                    "english_name": english,
+                    "native_name": native,
+                    "whisper_code": LANGUAGE_WHISPER[code],
+                    "rtl": rtl,
+                    "no_space": no_space,
+                    "asr_quality": {
+                        model: row[i] for model, row in ASR_QUALITY.items()
+                    },
+                }
+                for i, (code, english, native, rtl, no_space) in enumerate(LANGUAGES)
+            ]
+        }
+
+    def _preview_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Current settings with the requested languages, validated (invalid_* errors)."""
+        allowed = {"source_language", "target_language", "partner_language", "mode"}
+        unknown = set(params) - allowed
+        if unknown:
+            raise ProtocolError("invalid_params", f"unknown parameter {min(unknown)}")
+        if "mode" in params and params["mode"] not in ("media", "interpret"):
+            raise ProtocolError(
+                "invalid_params", "mode: expected 'media' or 'interpret'"
+            )
+        merged = deep_merge(self.settings, params)
+        validate_settings(merged)
+        return merged
+
+    def settings_preview_languages(self, params: dict[str, Any]) -> dict[str, Any]:
+        """What these languages would use and download; saves and downloads nothing."""
+        settings = params.get("_settings") or self._preview_settings(params)
+        rec = self.recommendation(settings)
+        patch = self.recommendation_patch(rec)
+        preview = deep_merge(settings, patch)
+        sizes = {m["id"]: int(m["size_bytes"]) for m in ASR_MODELS}
+        asr_roles: dict[str, list[str]] = {}
+        for role in ("fast", "final"):
+            asr_roles.setdefault(preview["asr"][f"{role}_model"], []).append(role)
+        asr = [
+            {
+                "model": model,
+                "roles": roles,
+                "installed": model in self.downloaded,
+                "size_bytes": sizes.get(model),
+                "download_bytes": 0 if model in self.downloaded else sizes.get(model),
+            }
+            for model, roles in asr_roles.items()
+        ]
+        translation: list[dict[str, Any]] = []
+        needed = self._translation_needed(settings)
+        if needed:
+            tr_roles: dict[str, list[str]] = {}
+            for role in ("fast", "final"):
+                tr_roles.setdefault(preview["translation"][f"{role}_model"], []).append(
+                    role
+                )
+            for model, roles in tr_roles.items():
+                gb = TRANSLATION_SIZES_GB.get(model)
+                size = None if gb is None else int(gb * 1e9)
+                installed = (
+                    model in self.translation_installed
+                    if self._server_reachable()
+                    else None
+                )
+                translation.append(
+                    {
+                        "model": model,
+                        "roles": roles,
+                        "installed": installed,
+                        "size_bytes": size,
+                        "size_approximate": True,
+                        "download_bytes": 0 if installed else size,
+                    }
+                )
+        missing = [m for m in asr + translation if m["installed"] is not True]
+        messages = (
+            []
+            if settings["translation"]["enabled"]
+            else [
+                message(
+                    "translation_disabled",
+                    "Translation is off: only the original text is shown and no "
+                    "translation model is needed",
+                )
+            ]
+        )
+        return {
+            "languages": self._languages(settings),
+            "recommendation": rec,
+            "patch": patch,
+            "settings": preview,
+            "differs": preview != self.settings,
+            "fingerprint": self._fingerprint(patch, rec["languages"]),
+            "models": {"asr": asr, "translation": translation},
+            "translation_needed": needed,
+            "download_bytes": sum(m["download_bytes"] or 0 for m in missing),
+            "download_size_known": all(
+                m["download_bytes"] is not None for m in missing
+            ),
+            "messages": messages,
+        }
+
+    def models_pull_translation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Ollama `/api/pull` stand-in; errors depend on `--translation-server`."""
+        model = params.get("model")
+        if (
+            set(params) != {"model"}
+            or not isinstance(model, str)
+            or not TRANSLATION_MODEL_NAME.fullmatch(model)
+        ):
+            raise ProtocolError(
+                "invalid_params", "model: expected a translation model name"
+            )
+        base_url = self.settings["translation"]["base_url"]
+        if self.translation_server == "offline":
+            raise ProtocolError(
+                "translation_server_unreachable",
+                f"cannot connect to the translation server {base_url}",
+            )
+        if self.translation_server == "auth":
+            raise ProtocolError(
+                "translation_server_auth_failed",
+                f"the translation server {base_url} rejected the API key (HTTP 401)",
+            )
+        if self.translation_server == "openai":
+            raise ProtocolError(
+                "pull_unsupported",
+                f"the translation server {base_url} is not Ollama; install {model} there yourself",
+            )
+        with self.lock:
+            if model in self.pulling:
+                raise ProtocolError(
+                    "download_in_progress", f"{model} is already downloading"
+                )
+            self.pulling.add(model)
+        thread = threading.Thread(target=self._pull, args=(model,), daemon=True)
+        self.after_background.append(thread.start)
+        return {"model": model, "started": True}
+
+    def _pull(self, model: str) -> None:
+        """Four steps like testing.py; the total grows as Ollama reports more layers."""
+
+        def event(done: int, total: int, state: str, error: str | None = None) -> None:
+            self.writer.event(
+                "download_progress",
+                {
+                    "model": model,
+                    "kind": "translation",
+                    "downloaded_bytes": done,
+                    "total_bytes": total,
+                    "state": state,
+                    "error": error,
+                },
+            )
+
+        event(0, 0, "downloading")
+        step = PULL_BYTES // 4
+        for i in range(1, 5):
+            time.sleep(0.4)
+            if model == BROKEN_PULL and i == 3:
+                with self.lock:
+                    self.pulling.discard(model)
+                event(
+                    step * 2,
+                    PULL_BYTES,
+                    "error",
+                    "PullError: Ollama: simulated pull failure",
+                )
+                return
+            event(step * i, PULL_BYTES if i > 1 else step * 2, "downloading")
+        with self.lock:
+            self.pulling.discard(model)
+            self.translation_installed.add(model)
+        event(PULL_BYTES, PULL_BYTES, "done")
 
     def models_download(self, params: dict[str, Any]) -> dict[str, Any]:
         model = params.get("model")
@@ -844,11 +1319,13 @@ class FakeEngine:
 
     def _download(self, model: str, total: int) -> None:
         steps = 20
+        kind = "gpu_runtime" if model == GPU_RUNTIME_ID else "asr"
         for i in range(steps + 1):
             self.writer.event(
                 "download_progress",
                 {
                     "model": model,
+                    "kind": kind,
                     "downloaded_bytes": total * i // steps,
                     "total_bytes": total,
                     "state": "downloading",
@@ -863,6 +1340,7 @@ class FakeEngine:
             "download_progress",
             {
                 "model": model,
+                "kind": kind,
                 "downloaded_bytes": total,
                 "total_bytes": total,
                 "state": "done",
@@ -899,13 +1377,59 @@ class FakeEngine:
         with self.lock:
             if self.session is not None and self.session.is_alive():
                 raise ProtocolError("session_active", "a session is already running")
-            session = Session(
-                self.next_session_id, mode, self.writer, copy.deepcopy(self.settings)
-            )
+            settings = copy.deepcopy(self.settings)
+            session = Session(self.next_session_id, mode, self.writer, settings)
+            session.start_error = self._start_error({**settings, "mode": mode})
             self.next_session_id += 1
             self.session = session
         self.after_response.append(session.start)
         return {"session_id": session.session_id}
+
+    def _start_error(
+        self, settings: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any] | None] | None:
+        """The engine's order: translation models (Ollama only), then ASR models."""
+        if self._translation_needed(settings) and self.translation_server == "ollama":
+            tr = settings["translation"]
+            missing = list(
+                dict.fromkeys(
+                    m
+                    for m in (tr["fast_model"], tr["final_model"])
+                    if m not in self.translation_installed
+                )
+            )
+            if missing:
+                return (
+                    "translation_model_missing",
+                    (
+                        "translation model(s) not installed on the Ollama server: "
+                        f"{', '.join(missing)}; download them with models.pull_translation"
+                    ),
+                    {"models": missing},
+                )
+        for role in ("fast", "final"):
+            model = settings["asr"][f"{role}_model"]
+            if model not in self.downloaded:
+                return (
+                    "model_not_downloaded",
+                    f"speech recognition model {model} is not downloaded",
+                    None,
+                )
+        return None
+
+    def session_set_translation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The "show translation" switch: saved, and applied to a running session."""
+        enabled = params.get("enabled")
+        if set(params) != {"enabled"} or not isinstance(enabled, bool):
+            raise ProtocolError("invalid_params", "enabled: expected a boolean")
+        self.settings_set({"translation": {"enabled": enabled}})
+        with self.lock:
+            session = self.session
+        session_id = None
+        if session is not None and session.is_alive():
+            session.translation_enabled = enabled
+            session_id = session.session_id
+        return {**self.settings_result(), "session_id": session_id}
 
     def session_stop(self, _params: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -947,6 +1471,10 @@ class FakeEngine:
                             "invalid_params", "settings: expected an object"
                         )
                     validate_settings(deep_merge(self.settings, candidate))
+                if method == "settings.preview_languages":
+                    # Like the engine: parameter and settings errors are answered at
+                    # once, and the settings are the ones current on receipt.
+                    params = {"_settings": self._preview_settings(params)}
                 self.jobs.put((request_id, method, params))
                 return True
             if method == "engine.shutdown" and self.ignore_shutdown:
@@ -978,12 +1506,23 @@ def main() -> int:
         action="store_true",
         help="never answer engine.shutdown (the app must kill the process)",
     )
+    parser.add_argument(
+        "--translation-server",
+        choices=TRANSLATION_SERVER_PROFILES,
+        default="ollama",
+        help="fake translation server: ollama (pulls work), openai (pull_unsupported), "
+        "offline (translation_server_unreachable), auth (translation_server_auth_failed)",
+    )
     args = parser.parse_args()
     if args.garbage_every < 0 or args.crash_after < 0:
         parser.error("arguments must be non-negative")
 
     writer = Writer(args.garbage_every)
-    engine = FakeEngine(writer, ignore_shutdown=args.ignore_shutdown)
+    engine = FakeEngine(
+        writer,
+        ignore_shutdown=args.ignore_shutdown,
+        translation_server=args.translation_server,
+    )
     if args.crash_after > 0:
 
         def crash() -> None:

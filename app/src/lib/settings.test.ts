@@ -35,7 +35,6 @@ describe("validateSettingsForm", () => {
     ["api_key_env", "1ABC"],
     ["api_key_env", "MY-KEY"],
     ["api_key_env", "sk-actual-secret value"],
-    ["partner_language", "ko"],
     ["font_size", "13"],
     ["font_size", "abc"],
     ["background_opacity_percent", "101"],
@@ -49,7 +48,7 @@ describe("validateSettingsForm", () => {
 });
 
 describe("settings patch", () => {
-  it("builds a partial settings object with the licence region and overlay style", () => {
+  it("builds a partial settings object with the licence region and overlay style (languages have their own section)", () => {
     const patch = settingsPatchFromForm({
       ...validForm(),
       base_url: "  https://api.example.com/v1 ",
@@ -58,7 +57,6 @@ describe("settings patch", () => {
       position: "top",
     });
     expect(patch).toEqual({
-      partner_language: "ja",
       translation: {
         base_url: "https://api.example.com/v1",
         api_key_env: "KIKITORI_TRANSLATE_API_KEY",
@@ -89,7 +87,7 @@ describe("parseSettingsResult", () => {
     const { settings, warnings, path } = parseSettingsResult({
       settings: {
         mode: "interpret",
-        partner_language: "fr",
+        partner_language: "<b>",
         interpret: { device_id: "mic-1" },
         asr: { fast_model: "tiny", final_model: "small", device: "cuda" },
         translation: { base_url: "http://h/v1", fast_model: "a", final_model: "b", api_key_env: "K" },

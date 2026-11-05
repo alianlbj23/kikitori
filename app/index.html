@@ -21,7 +21,7 @@
           <div class="modes" role="radiogroup" aria-labelledby="mode-heading">
             <button type="button" class="mode" role="radio" data-mode="media" aria-checked="true">
               <span class="mode-name" data-i18n="mode.media.name"></span>
-              <span class="mode-note" data-mode-note="media" data-i18n="mode.media.note"></span>
+              <span class="mode-note" data-mode-note="media"></span>
             </button>
             <button type="button" class="mode" role="radio" data-mode="interpret" aria-checked="false">
               <span class="mode-name" data-i18n="mode.interpret.name"></span>
@@ -54,6 +54,17 @@
       <main class="content">
         <div class="notices" id="notices" aria-live="assertive"></div>
 
+        <!-- Models missing for the chosen languages are downloaded when Start is pressed (lib/start-downloads.ts). -->
+        <section class="start-downloads" id="start-downloads" aria-labelledby="startdl-heading" hidden>
+          <h2 id="startdl-heading" data-i18n="startdl.title"></h2>
+          <ul class="startdl-items" id="startdl-items"></ul>
+          <p class="startdl-message" id="startdl-message" role="status" aria-live="polite"></p>
+          <div class="form-actions">
+            <button type="button" class="primary" id="startdl-retry" data-i18n="startdl.retry" hidden></button>
+            <button type="button" class="ghost" id="startdl-cancel" data-i18n="startdl.cancel" data-i18n-title="startdl.cancelLabel" hidden></button>
+          </div>
+        </section>
+
         <section class="page" id="page-transcript" aria-labelledby="transcript-heading">
           <header class="page-head">
             <div>
@@ -63,6 +74,7 @@
             <div class="page-tools">
               <label class="switch"><input type="checkbox" id="overlay-visible" /><span data-i18n="transcript.overlayVisible"></span></label>
               <label class="switch"><input type="checkbox" id="overlay-click-through" /><span data-i18n="transcript.clickThrough"></span></label>
+              <label class="switch"><input type="checkbox" id="show-translation" checked /><span data-i18n="transcript.showTranslation"></span></label>
               <button type="button" class="ghost" id="clear-transcript" data-i18n="transcript.clear"></button>
             </div>
           </header>
@@ -231,6 +243,50 @@
             </div>
           </fieldset>
 
+          <!-- Its own form: saving languages can also switch to the recommended models (lib/languages.ts). -->
+          <form id="languages-form" novalidate>
+            <fieldset class="block">
+              <legend data-i18n="settings.languageLegend"></legend>
+              <p class="block-lede" data-i18n="settings.languageLede"></p>
+              <p class="field-help" id="languages-mode-note"></p>
+              <div class="field-row">
+                <div class="field" id="field-source">
+                  <label for="f-source" data-i18n="settings.source"></label>
+                  <input type="search" class="lang-filter" id="f-source-filter" data-filter-for="source" data-i18n-placeholder="settings.languageFilter" autocomplete="off" spellcheck="false" />
+                  <select id="f-source" name="source"></select>
+                  <p class="field-help" data-i18n="settings.sourceHelp"></p>
+                  <p class="field-error" data-error-for="source"></p>
+                </div>
+                <div class="field" id="field-target">
+                  <label for="f-target" id="label-target"></label>
+                  <input type="search" class="lang-filter" id="f-target-filter" data-filter-for="target" data-i18n-placeholder="settings.languageFilter" autocomplete="off" spellcheck="false" />
+                  <select id="f-target" name="target"></select>
+                  <p class="field-help" id="help-target"></p>
+                  <p class="field-error" data-error-for="target"></p>
+                </div>
+                <div class="field" id="field-partner">
+                  <label for="f-partner" data-i18n="settings.partner"></label>
+                  <input type="search" class="lang-filter" id="f-partner-filter" data-filter-for="partner" data-i18n-placeholder="settings.languageFilter" autocomplete="off" spellcheck="false" />
+                  <select id="f-partner" name="partner"></select>
+                  <p class="field-help" data-i18n="settings.partnerHelp"></p>
+                  <p class="field-error" data-error-for="partner"></p>
+                </div>
+              </div>
+              <div class="language-preview" id="language-preview" role="status" aria-live="polite"></div>
+              <div class="field">
+                <label class="consent" for="f-apply-recommended">
+                  <input id="f-apply-recommended" name="apply_recommended" type="checkbox" checked />
+                  <span data-i18n="settings.applyRecommended"></span>
+                </label>
+                <p class="field-help" data-i18n="settings.applyRecommendedHelp"></p>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary" id="languages-save" data-i18n="settings.saveLanguages"></button>
+                <span class="form-status" id="languages-status" role="status"></span>
+              </div>
+            </fieldset>
+          </form>
+
           <form id="settings-form" novalidate>
             <fieldset class="block">
               <legend data-i18n="settings.translationLegend"></legend>
@@ -263,27 +319,15 @@
             </fieldset>
 
             <fieldset class="block">
-              <legend data-i18n="settings.languageLegend"></legend>
-              <div class="field-row">
-                <div class="field">
-                  <label for="f-target" data-i18n="settings.target"></label>
-                  <select id="f-target" disabled><option value="zh-TW" data-i18n-language="zh-TW"></option></select>
-                  <p class="field-help" data-i18n="settings.targetHelp"></p>
-                </div>
-                <div class="field">
-                  <label for="f-partner" data-i18n="settings.partner"></label>
-                  <select id="f-partner" name="partner_language">
-                    <option value="ja" data-i18n-language="ja"></option>
-                    <option value="en" data-i18n-language="en"></option>
-                  </select>
-                  <p class="field-help" data-i18n="settings.partnerHelp"></p>
-                  <p class="field-error" data-error-for="partner_language"></p>
-                </div>
-              </div>
-            </fieldset>
-
-            <fieldset class="block">
               <legend data-i18n="settings.styleLegend"></legend>
+              <!-- No name: applied at once (session.set_translation / settings.set), not with "儲存設定". -->
+              <div class="field">
+                <label class="switch" for="f-show-translation">
+                  <input id="f-show-translation" type="checkbox" checked />
+                  <span data-i18n="settings.showTranslation"></span>
+                </label>
+                <p class="field-help" data-i18n="settings.showTranslationHelp"></p>
+              </div>
               <div class="preview" id="style-preview" aria-hidden="true">
                 <div class="preview-line">
                   <span class="preview-orig" lang="ja" data-i18n="settings.previewOriginal"></span>

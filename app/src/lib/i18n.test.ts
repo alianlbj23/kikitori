@@ -115,7 +115,6 @@ describe("t and tp", () => {
       base_url: "ftp://x",
       api_key_env: "OK",
       allow_restricted: false,
-      partner_language: "ja",
       font_size: "32",
       background_opacity_percent: "50",
       position: "bottom",

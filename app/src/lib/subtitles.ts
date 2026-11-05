@@ -116,6 +116,29 @@ export function applySubtitle(
   return { sessionId: current.sessionId, lines, lastFinalId };
 }
 
+/** What one line shows, given the "顯示翻譯" switch. */
+export interface LineDisplay {
+  original: string;
+  /** Empty when translations are hidden; the translation line is then left out. */
+  translation: string;
+  /**
+   * Translations are off: the original takes the translation's primary style
+   * (size, colour, weight) instead of sitting small above an empty line.
+   */
+  originalOnly: boolean;
+}
+
+/**
+ * The text of `line` with translations shown or hidden. Lines translated before
+ * the switch was turned off keep their translation in the state, so turning it
+ * back on shows them again; the engine sends an empty translation while off.
+ */
+export function lineDisplay(line: SubtitleLine, showTranslation: boolean): LineDisplay {
+  return showTranslation
+    ? { original: line.original, translation: line.translation, originalOnly: false }
+    : { original: line.original, translation: "", originalOnly: true };
+}
+
 /** Trims to a new limit (e.g. after the user changes "lines on screen"). */
 export function trimSubtitles(state: SubtitleState, maxLines: number): SubtitleState {
   if (state.lines.length <= maxLines) return state;

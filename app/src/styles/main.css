@@ -486,6 +486,60 @@ input[type="range"] {
   gap: 8px;
 }
 
+/* ---------- Downloads before starting ---------- */
+
+.start-downloads {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  border-left: 4px solid var(--kihada);
+  box-shadow: 0 6px 18px rgb(24 32 58 / 0.08);
+  max-width: 80ch;
+}
+
+.start-downloads[data-tone="bad"] {
+  border-left-color: var(--beni);
+}
+
+.start-downloads h2 {
+  margin: 0 0 8px;
+  font-size: var(--t-md);
+}
+
+.startdl-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.startdl-items li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px minmax(0, 1.2fr);
+  gap: 10px;
+  align-items: center;
+  font-size: var(--t-sm);
+}
+
+.startdl-items li[data-tone="bad"] {
+  color: var(--beni);
+}
+
+.startdl-items .model-id {
+  overflow-wrap: anywhere;
+}
+
+.startdl-message {
+  margin: 10px 0 0;
+  max-width: 70ch;
+}
+
+.start-downloads[data-tone="bad"] .startdl-message {
+  color: var(--beni);
+}
+
 /* ---------- Transcript ---------- */
 
 .shortcut-note {
@@ -562,13 +616,15 @@ input[type="range"] {
   background: var(--kihada);
 }
 
+/* Placeholder words come from the dictionary (data-empty, set in main.ts). */
 .utt-tr:empty::before {
-  content: "（沒有譯文）";
+  content: attr(data-empty);
   color: var(--nezumi);
 }
 
-.utt.is-partial .utt-tr:empty::before {
-  content: "翻譯中";
+/* "顯示翻譯" off: the original is the only line, so no translation slot at all. */
+.utt.is-original-only .utt-tr {
+  display: none;
 }
 
 .empty {
@@ -892,6 +948,48 @@ textarea {
 
 .advanced[open] summary {
   color: var(--sumi);
+}
+
+/* ---------- Language section ---------- */
+
+.lang-filter {
+  margin-bottom: 4px;
+  font-size: var(--t-sm);
+}
+
+/* Fields of the other mode are hidden, not removed: their values are kept. */
+.field[hidden] {
+  display: none;
+}
+
+.language-preview {
+  margin: 4px 0 12px;
+  max-width: 70ch;
+  font-size: var(--t-sm);
+}
+
+.language-preview h3 {
+  margin: 0 0 6px;
+  font-size: var(--t-sm);
+  font-weight: 600;
+}
+
+.language-preview .facts dd[data-tone="download"] {
+  color: var(--sumi);
+}
+
+.language-preview .facts dd[data-tone="ok"],
+.language-preview .facts dd[data-tone="muted"] {
+  color: var(--nezumi);
+}
+
+.language-preview .facts dd[data-tone="warn"],
+.language-preview .is-error {
+  color: var(--beni);
+}
+
+.language-preview p {
+  margin: 8px 0 0;
 }
 
 /* Live result of models.validate, under the combination form. */

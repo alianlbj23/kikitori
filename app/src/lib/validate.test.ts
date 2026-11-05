@@ -64,8 +64,32 @@ describe("other events", () => {
       detail: null,
       session_id: null,
       code: null,
+      missing_translation_models: [],
     });
     expect(() => parseStatus({ state: "napping" })).toThrow(ValidationError);
+  });
+
+  it("reads the missing translation models of translation_model_missing (real engine capture)", () => {
+    const events = engine["status events"] as unknown[];
+    const missing = parseStatus(events[events.length - 1]);
+    expect(missing.code).toBe("translation_model_missing");
+    expect(missing.missing_translation_models).toEqual(["qwen3.5:9b"]);
+    // Names the engine could not pull are dropped; other codes never carry models.
+    expect(
+      parseStatus({ state: "error", code: "translation_model_missing", data: { models: ["ok:1b", "../x", "a b", 3, "ok:1b"] } })
+        .missing_translation_models,
+    ).toEqual(["ok:1b"]);
+    expect(parseStatus({ state: "error", code: "load_error", data: { models: ["x"] } }).missing_translation_models).toEqual([]);
+    expect(parseStatus({ state: "error", code: "translation_model_missing", data: [1] }).missing_translation_models).toEqual([]);
+  });
+
+  it("reads download_progress.kind, treating unknown kinds as none", () => {
+    const events = engine["download_progress events"] as unknown[];
+    const parsed = events.map(parseDownloadProgress);
+    expect(parsed.every((p) => p.kind === "translation")).toBe(true);
+    expect(parsed[parsed.length - 1]).toMatchObject({ model: "qwen3.5:9b", state: "done" });
+    expect(parseDownloadProgress({ model: "base", downloaded_bytes: 0, total_bytes: 0 }).kind).toBeNull();
+    expect(parseDownloadProgress({ model: "base", kind: "future", downloaded_bytes: 0, total_bytes: 0 }).kind).toBeNull();
   });
 
   it("parses download progress, defaulting state", () => {
@@ -128,6 +152,9 @@ describe("command results", () => {
     expect(parseOverlaySnapshot({ ...snap, locale: "pt-BR" }).locale).toBe("pt-BR");
     expect(parseOverlaySnapshot({ ...snap, locale: null }).locale).toBeNull();
     expect(parseOverlaySnapshot(snap).locale).toBeNull();
+    // Older Rust builds have no show_translation: translations were always shown.
+    expect(parseOverlaySnapshot(snap).show_translation).toBe(true);
+    expect(parseOverlaySnapshot({ ...snap, show_translation: false }).show_translation).toBe(false);
     expect(parseOverlaySnapshot({ ...snap, locale: "<script>" }).locale).toBeNull();
   });
 
@@ -198,7 +225,10 @@ describe("hardware.detect (real engine, fake NVIDIA hardware)", () => {
     expect(r.translation_budget_gb).toBe(7);
     expect(r.gpu_runtime_missing).toBe(true);
     expect(r.reasons.length).toBeGreaterThan(0);
-    expect(r.warnings[0]).toContain("cuBLAS");
+    // Coded messages since Milestone 12 (hardware.md「訊息碼」).
+    expect(r.warnings[0]).toMatchObject({ code: "gpu_runtime_missing", params: {} });
+    expect(r.translation_status).toBe("recommended");
+    expect(parseHardware({ ...detect, recommendation: { ...detect.recommendation, translation_status: "odd" } }).recommendation.translation_status).toBeNull();
   });
 
   it("accepts coded reasons and warnings from newer engines next to plain strings", () => {

@@ -20,6 +20,9 @@ import type {
   DeviceInfo,
   DownloadProgressEvent,
   HardwareReport,
+  LanguageChoice,
+  LanguageInfo,
+  LanguagePreview,
   LicenseFolder,
   LogEvent,
   Mode,
@@ -32,6 +35,7 @@ import type {
   UpdateDownloadEvent,
   UpdateInfo,
 } from "./types";
+import { parseLanguageList, parseLanguagePreview } from "./languages";
 import { parseAppliedRecommendation, parseSettingsResult, type SettingsResult } from "./settings";
 import {
   asCommandError,
@@ -101,6 +105,23 @@ export const api = {
   async previewRecommendation(): Promise<RecommendationPreview> {
     return parseRecommendationPreview(await invoke("settings_preview_recommendation"));
   },
+  /**
+   * Downloads a translation model on the user's Ollama server. Rejects with
+   * `pull_unsupported` (not Ollama), `translation_server_unreachable` or
+   * `translation_server_auth_failed`; progress arrives as `download_progress`
+   * events with `kind: "translation"`.
+   */
+  async modelsPullTranslation(model: string): Promise<void> {
+    await invoke("models_pull_translation", { model });
+  },
+  /** The engine's listening / subtitle language list (the UI keeps no copy). */
+  async languagesList(): Promise<LanguageInfo[]> {
+    return parseLanguageList(await invoke("languages_list"));
+  },
+  /** The models a language combination would use and what is not installed yet (nothing is saved). */
+  async previewLanguages(languages: Partial<LanguageChoice>): Promise<LanguagePreview> {
+    return parseLanguagePreview(await invoke("settings_preview_languages", { languages }));
+  },
   async devicesList(): Promise<DeviceInfo[]> {
     return parseDevices(await invoke("devices_list"));
   },
@@ -117,6 +138,10 @@ export const api = {
   },
   async sessionStop(): Promise<void> {
     await invoke("session_stop");
+  },
+  /** "顯示翻譯": saves `translation.enabled` and switches a running session at once. */
+  async sessionSetTranslation(enabled: boolean): Promise<SettingsResult> {
+    return parseSettingsResult(await invoke("session_set_translation", { enabled }));
   },
   async about(): Promise<AboutInfo> {
     return parseAbout(await invoke("app_about"));
@@ -170,6 +195,10 @@ export const api = {
   async overlaySetLocale(locale: string): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_set_locale", { locale }));
   },
+  /** Tells the overlay whether translations are shown (originals are promoted when not). */
+  async overlaySetShowTranslation(enabled: boolean): Promise<OverlaySnapshot> {
+    return parseOverlaySnapshot(await invoke("overlay_set_show_translation", { enabled }));
+  },
 };
 
 /**
@@ -209,6 +238,9 @@ const ENGINE_CODES: Readonly<Record<string, StringKey>> = {
   download_in_progress: "error.code.download_in_progress",
   license_not_accepted: "error.code.license_not_accepted",
   gpu_runtime_unsupported: "error.code.gpu_runtime_unsupported",
+  pull_unsupported: "error.code.pull_unsupported",
+  translation_server_unreachable: "error.code.translation_server_unreachable",
+  translation_server_auth_failed: "error.code.translation_server_auth_failed",
   unknown_method: "error.code.unknown_method",
   invalid_params: "error.code.invalid_params",
   invalid_request: "error.code.invalid_request",

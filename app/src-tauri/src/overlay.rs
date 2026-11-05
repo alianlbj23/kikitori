@@ -91,6 +91,11 @@ pub struct OverlaySnapshot {
     /// UI locale chosen in the main window (e.g. `zh-TW`, `en`); `None` until
     /// the main window has sent one, and the overlay then follows the OS.
     pub locale: Option<String>,
+    /// Settings `translation.enabled`: false = "original only", and the overlay
+    /// shows the original in the translation's (primary) style. Kept here rather
+    /// than in [`OverlayStyle`] because it is not appearance: the engine stores
+    /// it under `translation`, not in the opaque `subtitle` object.
+    pub show_translation: bool,
 }
 
 #[derive(Debug)]
@@ -100,6 +105,7 @@ struct Inner {
     visible: bool,
     shortcut_registered: bool,
     locale: Option<String>,
+    show_translation: bool,
 }
 
 /// Checks a UI locale tag: a 2–3 letter language subtag, optionally followed
@@ -142,6 +148,9 @@ impl Default for OverlayState {
             visible: false,
             shortcut_registered: false,
             locale: None,
+            // The engine's default (`translation.enabled: true`) until the main
+            // window sends the saved value.
+            show_translation: true,
         }))
     }
 }
@@ -160,7 +169,12 @@ impl OverlayState {
             shortcut: CLICK_THROUGH_SHORTCUT,
             shortcut_registered: s.shortcut_registered,
             locale: s.locale.clone(),
+            show_translation: s.show_translation,
         })
+    }
+
+    pub fn set_show_translation(&self, enabled: bool) {
+        self.with(|s| s.show_translation = enabled);
     }
 
     pub fn set_locale(&self, locale: String) -> Result<(), String> {
@@ -267,6 +281,26 @@ mod tests {
         };
         assert!(state.set_style(bad).is_err());
         assert_eq!(state.snapshot().style, OverlayStyle::default());
+    }
+
+    #[test]
+    fn show_translation_starts_on_and_follows_the_main_window() {
+        let state = OverlayState::default();
+        assert!(state.snapshot().show_translation);
+        state.set_show_translation(false);
+        assert!(!state.snapshot().show_translation);
+        // The flag survives a style change (they are set by different commands).
+        state
+            .set_style(OverlayStyle {
+                font_size: 40,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!state.snapshot().show_translation);
+        let json = serde_json::to_value(state.snapshot()).unwrap();
+        assert_eq!(json["show_translation"], serde_json::json!(false));
+        state.set_show_translation(true);
+        assert!(state.snapshot().show_translation);
     }
 
     #[test]

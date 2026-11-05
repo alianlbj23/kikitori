@@ -16,6 +16,7 @@ import type {
   CombinationCheck,
   CommandError,
   DeviceInfo,
+  DownloadKind,
   DownloadProgressEvent,
   EngineInfo,
   GpuInfo,
@@ -33,6 +34,7 @@ import type {
   SubtitleEvent,
   TranslationModel,
   TranslationServerInfo,
+  TranslationStatus,
   UpdateDownloadEvent,
   UpdateInfo,
 } from "./types";
@@ -145,22 +147,37 @@ export function parseSubtitle(v: unknown): SubtitleEvent {
   return ev;
 }
 
+/** Translation model names as the engine accepts them (`models.pull_translation`). */
+export const TRANSLATION_MODEL_NAME = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
+
 export function parseStatus(v: unknown): StatusEvent {
   const p = "status";
   const o = obj(v, p);
+  const code = optStr(o, "code", p);
+  const data = typeof o.data === "object" && o.data !== null && !Array.isArray(o.data) ? (o.data as Obj) : {};
+  // Only names the engine could pull are kept: they are sent back to it as-is.
+  const missing =
+    code === "translation_model_missing"
+      ? strList(data.models, 10, 200).filter((m) => TRANSLATION_MODEL_NAME.test(m))
+      : [];
   return {
     state: oneOf(o, "state", p, ["idle", "loading", "running", "error"] as const),
     detail: optStr(o, "detail", p),
     session_id: optUint(o, "session_id", p),
-    code: optStr(o, "code", p),
+    code,
+    missing_translation_models: [...new Set(missing)],
   };
 }
+
+const DOWNLOAD_KINDS: readonly DownloadKind[] = ["asr", "gpu_runtime", "translation"];
 
 export function parseDownloadProgress(v: unknown): DownloadProgressEvent {
   const p = "download_progress";
   const o = obj(v, p);
   return {
     model: str(o, "model", p, 200),
+    // Unknown kinds (a newer engine) are treated like none: matched by name only.
+    kind: (DOWNLOAD_KINDS as readonly unknown[]).includes(o.kind) ? (o.kind as DownloadKind) : null,
     downloaded_bytes: uint(o, "downloaded_bytes", p),
     total_bytes: uint(o, "total_bytes", p),
     state:
@@ -245,6 +262,8 @@ export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
     shortcut_registered: bool(o, "shortcut_registered", p),
     // Older Rust builds have no locale; a malformed one is ignored (the overlay follows the OS).
     locale: typeof o.locale === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(o.locale) ? o.locale : null,
+    // Older Rust builds have no flag: translations were always shown then.
+    show_translation: o.show_translation !== false,
   };
 }
 
@@ -302,8 +321,13 @@ export function parseRecommendation(v: unknown, p = "recommendation"): Recommend
     gpu_runtime_missing: bool(o, "gpu_runtime_missing", p),
     reasons: parseEngineMessages(o.reasons),
     warnings: parseEngineMessages(o.warnings),
+    translation_status: (TRANSLATION_STATUSES as readonly unknown[]).includes(o.translation_status)
+      ? (o.translation_status as TranslationStatus)
+      : null,
   };
 }
+
+const TRANSLATION_STATUSES: readonly TranslationStatus[] = ["recommended", "remote", "not_needed", "unsupported"];
 
 /**
  * `settings.preview_recommendation`. The fingerprint ends up in the settings

@@ -96,6 +96,11 @@ pub struct StatusPayload {
     pub session_id: Option<u64>,
     #[serde(default)]
     pub code: Option<String>,
+    /// Extra facts for some codes (Milestone 13: `translation_model_missing`
+    /// carries `{"models": [...]}`); absent otherwise, and left out when
+    /// forwarded so other payloads keep their exact shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +125,14 @@ pub struct DownloadProgressPayload {
     pub state: DownloadState,
     #[serde(default)]
     pub error: Option<String>,
+    /// What is being downloaded (Milestone 13): `asr`, `gpu_runtime` or
+    /// `translation`; ASR and translation models may share a name. Kept as a
+    /// checked string so a kind added by a newer engine is still forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
+
+const MAX_KIND_CHARS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -264,6 +276,16 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             if let Some(c) = &p.code {
                 check_non_empty_len("status.code", c, MAX_CODE_CHARS)?;
             }
+            if let Some(d) = &p.data {
+                // The whole line is already bounded (MAX_LINE_BYTES); this keeps
+                // one status from carrying a large blob into every window.
+                let size = serde_json::to_vec(d).map_or(usize::MAX, |v| v.len());
+                if size > MAX_TEXT_CHARS {
+                    return Err(shape(format!(
+                        "status.data is {size} bytes, limit {MAX_TEXT_CHARS}"
+                    )));
+                }
+            }
             EngineEvent::Status(p)
         }
         "download_progress" => {
@@ -271,6 +293,15 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             check_non_empty_len("download_progress.model", &p.model, MAX_MODEL_CHARS)?;
             if let Some(e) = &p.error {
                 check_len("download_progress.error", e, MAX_TEXT_CHARS)?;
+            }
+            if let Some(k) = &p.kind
+                && (k.is_empty()
+                    || k.len() > MAX_KIND_CHARS
+                    || !k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+            {
+                return Err(shape(format!(
+                    "download_progress.kind is not an identifier: {k:?}"
+                )));
             }
             EngineEvent::DownloadProgress(p)
         }
@@ -499,6 +530,62 @@ mod tests {
             parse(r#"{"event":"status","data":{"state":"sleeping"}}"#),
             Err(ParseError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn status_event_keeps_data_for_translation_model_missing() {
+        let line = r#"{"event":"status","data":{"state":"error","detail":"missing","session_id":3,"code":"translation_model_missing","data":{"models":["qwen3.5:9b"]}}}"#;
+        let Some(Incoming::Event(EngineEvent::Status(s))) = parse(line).unwrap() else {
+            panic!("expected status");
+        };
+        assert_eq!(s.data.as_ref().unwrap()["models"], json!(["qwen3.5:9b"]));
+        // Forwarded to the webview unchanged.
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["data"],
+            json!({"models": ["qwen3.5:9b"]})
+        );
+        // Without data the forwarded payload has no `data` key at all.
+        let Some(Incoming::Event(EngineEvent::Status(plain))) =
+            parse(r#"{"event":"status","data":{"state":"idle"}}"#).unwrap()
+        else {
+            panic!("expected status");
+        };
+        assert!(serde_json::to_value(&plain).unwrap().get("data").is_none());
+        for bad in [
+            r#"{"event":"status","data":{"state":"error","data":[1]}}"#,
+            r#"{"event":"status","data":{"state":"error","data":"x"}}"#,
+        ] {
+            assert!(matches!(parse(bad), Err(ParseError::Shape(_))), "{bad}");
+        }
+        let huge = json!({"event": "status", "data": {"state": "error", "data": {"models": ["m".repeat(MAX_TEXT_CHARS)]}}});
+        assert!(matches!(
+            parse(&huge.to_string()),
+            Err(ParseError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn download_progress_kind() {
+        let got = parse(r#"{"event":"download_progress","data":{"model":"qwen3.5:9b","kind":"translation","downloaded_bytes":0,"total_bytes":0,"state":"downloading","error":null}}"#)
+            .unwrap()
+            .unwrap();
+        let Incoming::Event(EngineEvent::DownloadProgress(p)) = got else {
+            panic!("expected download_progress");
+        };
+        assert_eq!(p.kind.as_deref(), Some("translation"));
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["kind"],
+            json!("translation")
+        );
+        for bad in [json!(""), json!("Translation"), json!("<b>"), json!(1)] {
+            let line = json!({"event": "download_progress", "data": {
+                "model": "m", "kind": bad, "downloaded_bytes": 0, "total_bytes": 0
+            }});
+            assert!(
+                matches!(parse(&line.to_string()), Err(ParseError::Shape(_))),
+                "{line}"
+            );
+        }
     }
 
     #[test]

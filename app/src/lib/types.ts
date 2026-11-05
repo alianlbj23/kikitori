@@ -11,7 +11,6 @@ import type { UiLocalePreference } from "./i18n";
 import type { EngineMessage } from "./messages";
 
 export type Mode = "media" | "interpret";
-export type PartnerLanguage = "ja" | "en";
 
 export interface SubtitleEvent {
   utterance_id: number;
@@ -32,12 +31,22 @@ export interface StatusEvent {
   detail: string | null;
   session_id: number | null;
   code: string | null;
+  /**
+   * Translation models the session needs but the Ollama server lacks
+   * (`code: "translation_model_missing"`, `data.models`); empty otherwise.
+   */
+  missing_translation_models: string[];
 }
 
 export type DownloadState = "downloading" | "done" | "error";
 
+/** What a `download_progress` event is about; null from engines older than Milestone 13. */
+export type DownloadKind = "asr" | "gpu_runtime" | "translation";
+
 export interface DownloadProgressEvent {
   model: string;
+  /** ASR and translation models may share a name, so the kind tells them apart. */
+  kind: DownloadKind | null;
   downloaded_bytes: number;
   total_bytes: number;
   state: DownloadState;
@@ -86,6 +95,8 @@ export interface OverlaySnapshot {
   shortcut_registered: boolean;
   /** UI locale the main window chose; null until it has sent one (follow the OS). */
   locale: string | null;
+  /** Settings `translation.enabled`; false = show originals in the primary style. */
+  show_translation: boolean;
 }
 
 export interface DeviceInfo {
@@ -171,7 +182,15 @@ export interface Recommendation {
   /** Plain strings from older engines, `{code, params, message}` from newer ones. */
   reasons: EngineMessage[];
   warnings: EngineMessage[];
+  /**
+   * Why translation models are (not) recommended: `recommended`, `remote`
+   * (server not on this computer), `not_needed` (same spoken language) or
+   * `unsupported` (no model supports the pair); null from older engines.
+   */
+  translation_status: TranslationStatus | null;
 }
+
+export type TranslationStatus = "recommended" | "remote" | "not_needed" | "unsupported";
 
 export interface HardwareReport {
   hardware: HardwareInfo;
@@ -254,11 +273,15 @@ export type ComputeType =
   | "bfloat16"
   | "float32";
 
-/** The subset of the engine settings (pipeline-engine.md "config", schema 2) the UI edits. */
+/** The subset of the engine settings (pipeline-engine.md "config", schema 3) the UI edits. */
 export interface Settings {
   mode: Mode;
+  /** Media mode's listening language (language list code) or "auto". */
+  source_language: string;
+  /** Media mode's subtitle language; in interpret mode, "my language". */
   target_language: string;
-  partner_language: PartnerLanguage;
+  /** Interpret mode's other language. */
+  partner_language: string;
   media_device_id: string | null;
   interpret_device_id: string | null;
   asr: {
@@ -275,6 +298,8 @@ export interface Settings {
     cuda_library_dirs: string[];
   };
   translation: {
+    /** false = original only: the engine translates nothing. */
+    enabled: boolean;
     base_url: string;
     fast_model: string;
     final_model: string;
@@ -322,6 +347,57 @@ export interface AppliedRecommendation {
    */
   applied: Record<string, unknown> | null;
   recommendation: Recommendation;
+}
+
+/** One entry of `languages.list` (the engine's language catalog). */
+export interface LanguageInfo {
+  /** Language list code used in settings and subtitles (e.g. `zh-TW`). */
+  code: string;
+  english_name: string;
+  native_name: string;
+  /** Whisper's code; zh-TW and zh-CN are both `zh`. */
+  whisper_code: string;
+  /** Written right to left (Arabic). */
+  rtl: boolean;
+  /** Written without spaces between words (ja, zh, th). */
+  no_space: boolean;
+}
+
+/** A language combination as `settings.preview_languages` normalized it. */
+export interface LanguageChoice {
+  mode: Mode;
+  source_language: string;
+  target_language: string;
+  partner_language: string;
+}
+
+/** One model of a previewed combination. */
+export interface PreviewModel {
+  model: string;
+  roles: ModelRole[];
+  /** null when the translation server could not be asked. */
+  installed: boolean | null;
+  size_bytes: number | null;
+  /** Bytes to download before first use; 0 when installed. */
+  download_bytes: number | null;
+  /** Translation sizes are the preset's weight size, so only approximate. */
+  size_approximate: boolean;
+}
+
+/** `settings.preview_languages`: what choosing these languages would use (nothing is saved). */
+export interface LanguagePreview {
+  languages: LanguageChoice;
+  recommendation: Recommendation;
+  /** Model settings that applying the recommendation would write. */
+  patch: Record<string, unknown>;
+  asr: PreviewModel[];
+  translation: PreviewModel[];
+  /** false when only originals are shown or both languages are the same spoken language. */
+  translation_needed: boolean;
+  download_bytes: number;
+  download_size_known: boolean;
+  /** Notes about the preview itself (e.g. `translation_disabled`). */
+  messages: EngineMessage[];
 }
 
 /** `app_about`: license facts for the settings page. */

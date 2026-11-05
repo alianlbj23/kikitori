@@ -8,7 +8,7 @@
  * engine's English `message`, so a newer engine never shows a blank line.
  */
 
-import { tDynamic, type MessageParams } from "./i18n";
+import { joinList, languageName, regionName, t, tDynamic, type MessageParams } from "./i18n";
 
 export interface CodedEngineMessage {
   /** Stable id, e.g. `gpu_runtime_missing`; looked up as `engine.<code>`. */
@@ -60,11 +60,44 @@ export function parseEngineMessages(v: unknown, maxItems = 50): EngineMessage[] 
 
 export type Translate = (key: string, params: MessageParams) => string | null;
 
+const LANGUAGE_PARAMS = new Set(["language", "source_language", "target_language"]);
+
+/**
+ * One parameter as the sentence should show it (hardware.md「訊息碼」): language
+ * codes become language names (`auto` → "detect automatically"), the ASR path
+ * and translation field ids become the labels the models page uses, region
+ * codes become names, and `*_gb` amounts get one decimal like the English
+ * template (`{ram_gb:.1f}`). Model and GPU names stay as they are.
+ */
+export function localizeParam(name: string, value: string | number): string | number {
+  if (typeof value === "number") {
+    return name.endsWith("_gb") ? value.toFixed(1) : value;
+  }
+  if (LANGUAGE_PARAMS.has(name)) return value === "auto" ? t("language.auto") : languageName(value);
+  if (name === "path" && value === "fast_asr") return t("engineParam.fast_asr");
+  if (name === "path" && value === "final_asr") return t("engineParam.final_asr");
+  if (name === "field" && value === "translation_fast") return t("engineParam.translation_fast");
+  if (name === "field" && value === "translation_final") return t("engineParam.translation_final");
+  if (name === "regions") {
+    return joinList(
+      value
+        .split(",")
+        .map((r) => r.trim())
+        .filter((r) => r !== "")
+        .map(regionName),
+    );
+  }
+  return value;
+}
+
 /**
  * The text to show for an engine message in the interface language. `translate`
- * is the dictionary lookup (replaceable in tests).
+ * is the dictionary lookup (replaceable in tests); parameters are localized
+ * first (`localizeParam`). Unknown codes show the engine's English `message`.
  */
 export function formatEngineMessage(m: EngineMessage, translate: Translate = tDynamic): string {
   if (typeof m === "string") return m;
-  return translate(`engine.${m.code}`, m.params) ?? m.message;
+  const params: Record<string, string | number> = {};
+  for (const [name, value] of Object.entries(m.params)) params[name] = localizeParam(name, value);
+  return translate(`engine.${m.code}`, params) ?? m.message;
 }

@@ -6,7 +6,9 @@
  * click-through from the main window via Rust — and can move, resize and hide
  * itself. It cannot control the engine (see capabilities/overlay.json). Its
  * interface language is the one the main window pushes through Rust
- * (`OverlaySnapshot.locale`), or the OS language until then.
+ * (`OverlaySnapshot.locale`), or the OS language until then. With "顯示翻譯"
+ * off (`OverlaySnapshot.show_translation`) each line is the original alone, in
+ * the primary subtitle style.
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -25,7 +27,7 @@ import {
   type UiLocale,
 } from "../lib/i18n";
 import { DEFAULT_OVERLAY_STYLE } from "../lib/settings";
-import { applySubtitle, emptySubtitles, trimSubtitles, type SubtitleState } from "../lib/subtitles";
+import { applySubtitle, emptySubtitles, lineDisplay, trimSubtitles, type SubtitleState } from "../lib/subtitles";
 import type { OverlaySnapshot, OverlayStyle } from "../lib/types";
 
 const frame = byId("frame");
@@ -38,6 +40,7 @@ const appWindow = getCurrentWindow();
 let subtitles: SubtitleState = emptySubtitles();
 let style: OverlayStyle = DEFAULT_OVERLAY_STYLE;
 let clickThrough = false;
+let showTranslation = true;
 
 function applyStyle(next: OverlayStyle): void {
   style = next;
@@ -71,6 +74,7 @@ function applyLocale(locale: string | null): void {
 function applySnapshot(s: OverlaySnapshot): void {
   applyLocale(s.locale);
   clickThrough = s.click_through;
+  showTranslation = s.show_translation;
   frame.classList.toggle("is-interactive", !clickThrough);
   applyStyle(s.style);
 }
@@ -78,14 +82,19 @@ function applySnapshot(s: OverlaySnapshot): void {
 function render(): void {
   replace(
     lines,
-    ...subtitles.lines.map((line) =>
-      h(
+    ...subtitles.lines.map((line) => {
+      const shown = lineDisplay(line, showTranslation);
+      const classes = ["line", line.isFinal ? "" : "is-partial", shown.originalOnly ? "is-original-only" : ""];
+      // dir="auto": Arabic lines run right to left, each span on its own.
+      return h(
         "div",
-        { class: line.isFinal ? "line" : "line is-partial" },
-        h("span", { class: "orig", lang: htmlLang(line.sourceLanguage) }, line.original),
-        h("span", { class: "tr", lang: htmlLang(line.targetLanguage) }, line.translation),
-      ),
-    ),
+        { class: classes.filter(Boolean).join(" ") },
+        h("span", { class: "orig", lang: htmlLang(line.sourceLanguage), dir: "auto" }, shown.original),
+        shown.originalOnly
+          ? null
+          : h("span", { class: "tr", lang: htmlLang(line.targetLanguage), dir: "auto" }, shown.translation),
+      );
+    }),
   );
   // The hint helps place an empty window; with subtitles or click-through on
   // it would only cover the video.

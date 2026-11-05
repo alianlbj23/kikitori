@@ -6,16 +6,18 @@
  * edits, checks form input before sending it (so mistakes are pointed at the
  * right field immediately), and builds the partial objects `settings.set` and
  * `models.validate` deep-merge. Two forms exist: the settings page (translation
- * service, licence region, language, subtitle appearance) and the model
+ * service, licence region, subtitle appearance) and the model
  * combination on the models page (ASR and translation models, device,
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
+ * The language section has its own module (`languages.ts`).
  * Overlay appearance lives in the engine's opaque `subtitle` object, the UI's
  * own state (dismissed recommendation offers, interface language) in the opaque
  * `ui` object. Validation messages come from the i18n dictionary.
  */
 
 import { isUiLocale, t, type UiLocalePreference } from "./i18n";
+import { isLanguageCode } from "./languages";
 
 import type {
   AppliedRecommendation,
@@ -23,7 +25,6 @@ import type {
   ComputeType,
   Mode,
   OverlayStyle,
-  PartnerLanguage,
   Settings,
   UiState,
 } from "./types";
@@ -55,6 +56,7 @@ const ASR_MODEL_ID = /^[A-Za-z0-9._-]{1,100}$/;
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: "media",
+  source_language: "ja",
   target_language: "zh-TW",
   partner_language: "ja",
   media_device_id: null,
@@ -70,6 +72,7 @@ export const DEFAULT_SETTINGS: Settings = {
     cuda_library_dirs: [],
   },
   translation: {
+    enabled: true,
     base_url: "http://localhost:11434/v1",
     fast_model: "qwen3.5:4b",
     final_model: "qwen3.5:4b",
@@ -96,6 +99,17 @@ function pickStr(o: Obj, key: string, fallback: string, warn: Warn, path: string
   const v = o[key];
   if (typeof v === "string" && v.length <= 2000) return v;
   if (v !== undefined) warn(`${path}${key}`);
+  return fallback;
+}
+
+/**
+ * A language code from the settings. Only the format is checked: the engine
+ * owns the language list and has validated the value already.
+ */
+function pickLanguage(o: Obj, key: string, fallback: string, allowAuto: boolean, warn: Warn): string {
+  const v = o[key];
+  if (isLanguageCode(v, allowAuto)) return v;
+  if (v !== undefined) warn(key);
   return fallback;
 }
 
@@ -238,8 +252,9 @@ export function parseSettingsResult(result: unknown): SettingsResult {
   return {
     settings: {
       mode: pickEnum(root, "mode", ["media", "interpret"] as const, d.mode, warn, ""),
-      target_language: pickStr(root, "target_language", d.target_language, warn, ""),
-      partner_language: pickEnum(root, "partner_language", ["ja", "en"] as const, d.partner_language, warn, ""),
+      source_language: pickLanguage(root, "source_language", d.source_language, true, warn),
+      target_language: pickLanguage(root, "target_language", d.target_language, false, warn),
+      partner_language: pickLanguage(root, "partner_language", d.partner_language, false, warn),
       media_device_id: pickNullableStr(media, "device_id", warn, "media."),
       interpret_device_id: pickNullableStr(interpret, "device_id", warn, "interpret."),
       asr: {
@@ -253,6 +268,7 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         cuda_library_dirs: pickPaths(asr, "cuda_library_dirs", warn, "asr."),
       },
       translation: {
+        enabled: pickBool(tr, "enabled", d.translation.enabled, warn, "translation."),
         base_url: pickStr(tr, "base_url", d.translation.base_url, warn, "translation."),
         fast_model: pickStr(tr, "fast_model", d.translation.fast_model, warn, "translation."),
         final_model: pickStr(tr, "final_model", d.translation.final_model, warn, "translation."),
@@ -298,7 +314,6 @@ export interface SettingsForm {
   api_key_env: string;
   /** Checkbox: "I am not in the EU, UK or South Korea and accept the licences". */
   allow_restricted: boolean;
-  partner_language: string;
   font_size: string;
   background_opacity_percent: string;
   position: string;
@@ -335,9 +350,6 @@ export function validateSettingsForm(form: SettingsForm): FormErrors {
   } else if (env.length > ENV_NAME_MAX) {
     errors.api_key_env = t("validation.envTooLong", { max: ENV_NAME_MAX });
   }
-  if (form.partner_language !== "ja" && form.partner_language !== "en") {
-    errors.partner_language = t("validation.partner");
-  }
   const size = parseIntField(form.font_size);
   if (size === null || size < FONT_SIZE_RANGE[0] || size > FONT_SIZE_RANGE[1]) {
     errors.font_size = t("validation.fontSize", { min: FONT_SIZE_RANGE[0], max: FONT_SIZE_RANGE[1] });
@@ -368,7 +380,6 @@ export function overlayStyleFromForm(form: SettingsForm): OverlayStyle {
 /** Partial settings for `settings.set`; call only after validation passed. */
 export function settingsPatchFromForm(form: SettingsForm): Record<string, unknown> {
   return {
-    partner_language: form.partner_language as PartnerLanguage,
     translation: {
       base_url: form.base_url.trim(),
       api_key_env: form.api_key_env.trim(),
@@ -383,7 +394,6 @@ export function formFromSettings(s: Settings): SettingsForm {
     base_url: s.translation.base_url,
     api_key_env: s.translation.api_key_env,
     allow_restricted: s.translation.allow_restricted,
-    partner_language: s.partner_language,
     font_size: String(s.subtitle.font_size),
     background_opacity_percent: String(Math.round(s.subtitle.background_opacity * 100)),
     position: s.subtitle.position,
@@ -524,7 +534,6 @@ export function formFieldForEnginePath(message: string): keyof SettingsForm | nu
     "translation.base_url": "base_url",
     "translation.api_key_env": "api_key_env",
     "translation.allow_restricted": "allow_restricted",
-    partner_language: "partner_language",
     "subtitle.font_size": "font_size",
     "subtitle.background_opacity": "background_opacity_percent",
     "subtitle.position": "position",

@@ -6,7 +6,9 @@
  * (subtitle ordering, validation, wording, combination-check rules) live in
  * `lib/`; this file only holds UI state and renders it. Every text comes from
  * the i18n dictionary, and every render function can run again after the
- * interface language changes (`onLocaleChanged`).
+ * interface language changes (`onLocaleChanged`). The language section, the
+ * downloads before starting and the "顯示翻譯" switch follow the same split
+ * (`lib/languages.ts`, `lib/start-downloads.ts`, `lib/translation-toggle.ts`).
  */
 
 import { getVersion } from "@tauri-apps/api/app";
@@ -55,10 +57,25 @@ import {
   type StringKey,
   type UiLocalePreference,
 } from "../lib/i18n";
+import {
+  AUTO_LANGUAGE,
+  filterLanguageOptions,
+  languageFormFromSettings,
+  languageOptions,
+  languagesSave,
+  previewMatches,
+  previewNotes,
+  previewRequest,
+  previewRows,
+  previewSummary,
+  validateLanguageForm,
+  type LanguageErrors,
+  type LanguageField,
+  type LanguageForm,
+} from "../lib/languages";
 import { formatEngineMessage, type EngineMessage } from "../lib/messages";
 import {
   FirstRunGate,
-  blockingDownloads,
   dismissedWith,
   missingModels,
   missingModelsView,
@@ -85,7 +102,9 @@ import {
   type FormErrors,
   type SettingsForm,
 } from "../lib/settings";
-import { applySubtitle, emptySubtitles, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
+import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
+import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
+import { setShowTranslation } from "../lib/translation-toggle";
 import type {
   AboutInfo,
   AppliedRecommendation,
@@ -95,6 +114,8 @@ import type {
   DownloadProgressEvent,
   EngineState,
   HardwareReport,
+  LanguageInfo,
+  LanguagePreview,
   LicenseFolder,
   Mode,
   ModelsList,
@@ -149,7 +170,27 @@ interface State {
   uiLocale: UiLocalePreference;
   /** A language chosen while the engine was not ready; saved once it is. */
   uiLocaleUnsaved: boolean;
+  /** `languages.list` (null until the engine answered). */
+  languages: LanguageInfo[] | null;
+  /** The language section's current choice (selects may be filtered, so it lives here). */
+  langForm: LanguageForm | null;
+  /** The language section differs from the saved settings; reloads keep the edits. */
+  langDirty: boolean;
+  /** Text typed into each language menu's filter. */
+  langFilters: Record<LanguageField, string>;
+  /** What the language section shows below the menus. */
+  langPreview: LanguagePreviewView;
+  /** The "顯示翻譯" switch is being applied. */
+  translationBusy: boolean;
 }
+
+/** State of the recommended-combination preview under the language menus. */
+type LanguagePreviewView =
+  | { state: "unavailable" }
+  | { state: "local_errors" }
+  | { state: "checking" }
+  | { state: "ready"; preview: LanguagePreview }
+  | { state: "error"; message: string };
 
 const state: State = {
   bridge: null,
@@ -177,6 +218,12 @@ const state: State = {
   missing: null,
   uiLocale: "system",
   uiLocaleUnsaved: false,
+  languages: null,
+  langForm: null,
+  langDirty: false,
+  langFilters: { source: "", target: "", partner: "" },
+  langPreview: { state: "unavailable" },
+  translationBusy: false,
 };
 
 const firstRunGate = new FirstRunGate();
@@ -205,6 +252,36 @@ const el = {
   transcriptEmpty: byId("transcript-empty"),
   overlayVisible: byId<HTMLInputElement>("overlay-visible"),
   overlayClick: byId<HTMLInputElement>("overlay-click-through"),
+  showTranslation: byId<HTMLInputElement>("show-translation"),
+  settingsShowTranslation: byId<HTMLInputElement>("f-show-translation"),
+  startDownloads: byId("start-downloads"),
+  startDownloadsItems: byId("startdl-items"),
+  startDownloadsMessage: byId("startdl-message"),
+  startDownloadsRetry: byId<HTMLButtonElement>("startdl-retry"),
+  startDownloadsCancel: byId<HTMLButtonElement>("startdl-cancel"),
+  languagesForm: byId<HTMLFormElement>("languages-form"),
+  languagesModeNote: byId("languages-mode-note"),
+  langFields: {
+    source: byId("field-source"),
+    target: byId("field-target"),
+    partner: byId("field-partner"),
+  } as Record<LanguageField, HTMLElement>,
+  langSelects: {
+    source: byId<HTMLSelectElement>("f-source"),
+    target: byId<HTMLSelectElement>("f-target"),
+    partner: byId<HTMLSelectElement>("f-partner"),
+  } as Record<LanguageField, HTMLSelectElement>,
+  langFilters: {
+    source: byId<HTMLInputElement>("f-source-filter"),
+    target: byId<HTMLInputElement>("f-target-filter"),
+    partner: byId<HTMLInputElement>("f-partner-filter"),
+  } as Record<LanguageField, HTMLInputElement>,
+  labelTarget: byId("label-target"),
+  helpTarget: byId("help-target"),
+  languagePreview: byId("language-preview"),
+  applyRecommended: byId<HTMLInputElement>("f-apply-recommended"),
+  languagesSave: byId<HTMLButtonElement>("languages-save"),
+  languagesStatus: byId("languages-status"),
   shortcutNote: byId("shortcut-note"),
   clear: byId<HTMLButtonElement>("clear-transcript"),
   hardware: byId("hardware"),
@@ -321,8 +398,10 @@ function renderStatus(): void {
   el.restart.hidden = !(phase === "failed" || phase === "stopped");
 
   const ready = engineReady();
-  el.start.disabled = !ready || state.busy;
-  el.start.dataset.state = state.busy ? "busy" : sessionActive() ? "running" : "idle";
+  // While models are downloaded for a start, the start happens by itself.
+  const waiting = startFlow.active;
+  el.start.disabled = !ready || state.busy || waiting;
+  el.start.dataset.state = state.busy || waiting ? "busy" : sessionActive() ? "running" : "idle";
   el.start.textContent = sessionActive() ? t("start.stop") : t("start.start");
   for (const button of el.modes) {
     const mode = button.dataset.mode as Mode;
@@ -338,12 +417,23 @@ function renderStatus(): void {
 }
 
 function renderModeNotes(): void {
-  const partner = state.settings?.partner_language ?? "ja";
+  const s = state.settings ?? DEFAULT_SETTINGS;
+  const original = !s.translation.enabled;
+  const target = languageName(s.target_language);
+  if (el.modeNotes.media) {
+    const auto = s.source_language === AUTO_LANGUAGE;
+    const source = auto ? t("language.auto") : languageName(s.source_language);
+    el.modeNotes.media.textContent = original
+      ? t("mode.media.noteOriginal", { source })
+      : auto
+        ? t("mode.media.noteAuto", { target })
+        : t("mode.media.note", { source, target });
+  }
   if (el.modeNotes.interpret) {
-    el.modeNotes.interpret.textContent = t("mode.interpret.note", {
-      own: languageName("zh"),
-      partner: languageName(partner),
-    });
+    const params = { own: target, partner: languageName(s.partner_language) };
+    el.modeNotes.interpret.textContent = original
+      ? t("mode.interpret.noteOriginal", params)
+      : t("mode.interpret.note", params);
   }
 }
 
@@ -372,6 +462,10 @@ async function setMode(mode: Mode): Promise<void> {
   state.mode = mode;
   renderStatus();
   renderDevices();
+  // The language section shows the languages of the selected mode.
+  if (state.langForm) state.langForm = { ...state.langForm, mode };
+  renderLanguages();
+  scheduleLanguagePreview(0);
   const deviceId = mode === "media" ? state.settings?.media_device_id : state.settings?.interpret_device_id;
   try {
     const { settings } = await api.settingsSet(devicePatch(mode, deviceId ?? null));
@@ -400,21 +494,17 @@ async function toggleSession(): Promise<void> {
       await api.sessionStop();
       state.sessionState = "idle";
     } else {
-      const waiting = state.settings ? blockingDownloads(state.settings.asr, state.downloads) : [];
-      if (waiting.length) {
-        // Starting now would only fail with model_not_downloaded.
-        notify(t("notice.waitDownloads", { models: joinList(waiting) }));
+      startFlow.reset();
+      // Chosen speech models that are not downloaded yet (or still downloading):
+      // fetch them first, then start by itself. Translation models are checked by
+      // the engine (only it knows whether the server is Ollama) and reported as
+      // translation_model_missing, which lands in the same flow.
+      const missing = asrStartItems();
+      if (missing.length) {
+        startFlow.begin(missing);
         return;
       }
-      const deviceId = el.device.value === "" ? null : el.device.value;
-      const sessionId = await api.sessionStart(state.mode, deviceId);
-      state.sessionId = sessionId;
-      state.subtitles = emptySubtitles(sessionId);
-      state.sessionState = "loading";
-      renderTranscript();
-      if (state.overlay && !state.overlay.visible) {
-        await setOverlayVisible(true);
-      }
+      await startSession();
     }
   } catch (e) {
     reportError(sessionActive() ? "error.stop" : "error.start", e);
@@ -424,12 +514,92 @@ async function toggleSession(): Promise<void> {
   }
 }
 
+/** `session.start` with the current mode and device; resets the transcript. */
+async function startSession(): Promise<void> {
+  const deviceId = el.device.value === "" ? null : el.device.value;
+  const sessionId = await api.sessionStart(state.mode, deviceId);
+  state.sessionId = sessionId;
+  state.subtitles = emptySubtitles(sessionId);
+  state.sessionState = "loading";
+  renderTranscript();
+  if (state.overlay && !state.overlay.visible) {
+    await setOverlayVisible(true);
+  }
+}
+
+/** The chosen ASR models the latest model list says are not downloaded. */
+function asrStartItems(): StartItemRequest[] {
+  if (!state.settings || !state.models) return [];
+  return missingModels(state.settings.asr, state.models.asr).map((m) => ({
+    kind: "asr",
+    model: m.id,
+    sizeBytes: m.size_bytes,
+  }));
+}
+
+// ---------------------------------------------------------------- downloads before starting
+
+const startFlow = new StartDownloads({
+  downloadAsr: (model) => api.modelsDownload(model),
+  pullTranslation: (model) => api.modelsPullTranslation(model),
+  start: async () => {
+    // Reported here; the flow only needs to know the round is over.
+    try {
+      await startSession();
+    } catch (e) {
+      reportError("error.start", e);
+    }
+    renderStatus();
+  },
+  errorCode: engineCode,
+  describe: describeError,
+  onChange: () => {
+    renderStartDownloads();
+    renderStatus();
+  },
+});
+
+/** Approximate size of a translation preset (weights), for the progress before Ollama reports one. */
+function translationSize(model: string): number | null {
+  const gb = state.models?.translation.models.find((m) => m.name === model)?.approx_vram_gb;
+  return gb === undefined || gb === null ? null : Math.round(gb * 1e9);
+}
+
+function renderStartDownloads(): void {
+  const view = startDownloadsView(startFlow.state, state.settings?.translation.base_url ?? "");
+  el.startDownloads.hidden = view === null;
+  if (!view) return;
+  el.startDownloads.dataset.tone = view.tone;
+  replace(
+    el.startDownloadsItems,
+    ...view.items.map((item) =>
+      h(
+        "li",
+        { "data-tone": item.tone },
+        h("span", { class: "model-id" }, item.label),
+        item.percent === null ? h("span") : h("progress", { max: 100, value: item.percent, "aria-label": item.label }),
+        h("span", {}, item.text),
+      ),
+    ),
+  );
+  el.startDownloadsMessage.textContent = view.message;
+  el.startDownloadsRetry.hidden = !view.canRetry;
+  el.startDownloadsRetry.disabled = !engineReady();
+  el.startDownloadsCancel.hidden = !view.canCancel;
+}
+
 // ---------------------------------------------------------------- transcript
 
 const lineElements = new Map<number, HTMLLIElement>();
 
+function showsTranslation(): boolean {
+  return state.settings?.translation.enabled ?? true;
+}
+
 function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
+  const shown = lineDisplay(line, showsTranslation());
   li.classList.toggle("is-partial", !line.isFinal);
+  li.classList.toggle("is-original-only", shown.originalOnly);
   const [time, lang, text] = li.children as unknown as [HTMLElement, HTMLElement, HTMLElement];
   time.textContent = formatTimecode(line.startSample);
   lang.textContent = languageShort(line.sourceLanguage);
@@ -438,10 +608,12 @@ function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
     target: languageName(line.targetLanguage),
   });
   const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
-  orig.textContent = line.original;
+  orig.textContent = shown.original;
   orig.lang = htmlLang(line.sourceLanguage);
-  tr.textContent = line.translation;
+  tr.textContent = shown.translation;
   tr.lang = htmlLang(line.targetLanguage);
+  // Shown by CSS when the translation is empty (not translated yet, or failed).
+  tr.dataset.empty = line.isFinal ? t("transcript.noTranslation") : t("transcript.translating");
 }
 
 function newLineElement(): HTMLLIElement {
@@ -450,7 +622,8 @@ function newLineElement(): HTMLLIElement {
     { class: "utt" },
     h("span", { class: "utt-time" }),
     h("span", { class: "utt-lang" }),
-    h("div", { class: "utt-text" }, h("p", { class: "utt-orig" }), h("p", { class: "utt-tr" })),
+    // dir="auto": Arabic runs right to left, line by line.
+    h("div", { class: "utt-text" }, h("p", { class: "utt-orig", dir: "auto" }), h("p", { class: "utt-tr", dir: "auto" })),
   );
 }
 
@@ -504,6 +677,54 @@ async function setOverlayVisible(visible: boolean): Promise<void> {
     reportError(visible ? "error.showOverlay" : "error.hideOverlay", e);
   }
   renderOverlay();
+}
+
+// ---------------------------------------------------------------- "顯示翻譯"
+
+function renderTranslationSwitches(): void {
+  const on = showsTranslation();
+  for (const input of [el.showTranslation, el.settingsShowTranslation]) {
+    input.checked = on;
+    input.disabled = state.translationBusy || !engineReady();
+  }
+}
+
+/**
+ * Both switches (subtitle log and settings page) change `translation.enabled`;
+ * a running session switches at once (lib/translation-toggle.ts).
+ */
+async function changeShowTranslation(enabled: boolean): Promise<void> {
+  state.translationBusy = true;
+  renderTranslationSwitches();
+  try {
+    const result = await setShowTranslation(enabled, state.sessionState, {
+      sessionSetTranslation: (on) => api.sessionSetTranslation(on),
+      settingsSet: (patch) => api.settingsSet(patch),
+      overlaySetShowTranslation: (on) => api.overlaySetShowTranslation(on),
+    });
+    state.settings = result.settings.settings;
+    if (result.overlay) state.overlay = result.overlay;
+    else reportError("error.setTranslation", result.overlayError);
+    renderTranscript();
+    renderModeNotes();
+    // The preview says whether a translation model is needed at all.
+    scheduleLanguagePreview(0);
+  } catch (e) {
+    reportError("error.setTranslation", e);
+  } finally {
+    state.translationBusy = false;
+    renderTranslationSwitches();
+  }
+}
+
+/** Sends the saved "顯示翻譯" to the overlay (engine start, reconnect). */
+async function pushOverlayShowTranslation(): Promise<void> {
+  if (!state.settings) return;
+  try {
+    state.overlay = await api.overlaySetShowTranslation(state.settings.translation.enabled);
+  } catch (e) {
+    reportError("error.setTranslation", e);
+  }
 }
 
 // ---------------------------------------------------------------- models page: hardware
@@ -830,6 +1051,24 @@ async function offerMissingModels(): Promise<boolean> {
   return missing.length > 0;
 }
 
+/**
+ * `session.start` reported `model_not_downloaded`: download the chosen ASR
+ * models that are missing and start again. Returns whether any were found.
+ */
+async function downloadMissingThenStart(): Promise<boolean> {
+  if (!state.settings || !engineReady()) return false;
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("error.readModels", e);
+    return false;
+  }
+  renderModels();
+  const items = asrStartItems();
+  if (items.length) startFlow.begin(items);
+  return items.length > 0;
+}
+
 function renderMissingNotice(): void {
   if (!state.missing) return;
   const view = missingModelsView(state.missing, state.models?.asr ?? null, state.downloads);
@@ -959,7 +1198,7 @@ async function downloadGpuRuntime(): Promise<void> {
   // The engine refuses without the flag too; this keeps the button honest.
   if (!state.gpuLicenseAccepted) return;
   const id = state.models?.gpu_runtime.id ?? GPU_RUNTIME_ID;
-  state.downloads.set(id, { model: id, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
+  state.downloads.set(id, { model: id, kind: null, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
   // Agreement is per download: a later retry asks again.
   state.gpuLicenseAccepted = false;
   renderGpuRuntime();
@@ -1136,7 +1375,7 @@ async function loadModels(): Promise<void> {
 }
 
 async function downloadModel(id: string): Promise<void> {
-  state.downloads.set(id, { model: id, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
+  state.downloads.set(id, { model: id, kind: null, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
   renderModels();
   try {
     await api.modelsDownload(id);
@@ -1371,7 +1610,6 @@ const FORM_FIELDS: (keyof SettingsForm)[] = [
   "base_url",
   "api_key_env",
   "allow_restricted",
-  "partner_language",
   "font_size",
   "background_opacity_percent",
   "position",
@@ -1384,7 +1622,6 @@ function readForm(): SettingsForm {
     base_url: field("base_url").value,
     api_key_env: field("api_key_env").value,
     allow_restricted: (field("allow_restricted") as HTMLInputElement).checked,
-    partner_language: field("partner_language").value,
     font_size: field("font_size").value,
     background_opacity_percent: field("background_opacity_percent").value,
     position: field("position").value,
@@ -1460,6 +1697,241 @@ async function pushOverlayStyle(): Promise<void> {
     renderOverlay();
   } catch (e) {
     reportError("error.applyStyle", e);
+  }
+}
+
+// ---------------------------------------------------------------- settings page: languages
+
+const LANGUAGE_FIELDS: readonly LanguageField[] = ["source", "target", "partner"];
+const LANGUAGE_PREVIEW_DEBOUNCE_MS = 250;
+const languagePreviews = new Latest();
+let languagePreviewTimer: number | undefined;
+
+/** Fields of the current mode: media uses source + target, interpret target + partner. */
+function languageFieldsFor(mode: Mode): readonly LanguageField[] {
+  return mode === "media" ? ["source", "target"] : ["target", "partner"];
+}
+
+/** Puts the saved languages into the section unless the user has unsaved edits (or `force`). */
+function fillLanguageForm(settings: Settings, force = false): void {
+  if (state.langDirty && !force) return;
+  state.langForm = languageFormFromSettings(settings, state.mode, el.applyRecommended.checked);
+  state.langDirty = false;
+  for (const f of LANGUAGE_FIELDS) {
+    state.langFilters[f] = "";
+    el.langFilters[f].value = "";
+  }
+  el.languagesStatus.textContent = "";
+  showLanguageErrors({});
+  renderLanguages();
+}
+
+function renderLanguageOptions(field: LanguageField): void {
+  const form = state.langForm;
+  const select = el.langSelects[field];
+  const list = state.languages;
+  if (!form || !list) {
+    replace(select);
+    return;
+  }
+  const value = form[field];
+  const options = filterLanguageOptions(languageOptions(list, field === "source"), state.langFilters[field], value);
+  replace(select, ...options.map((o) => h("option", { value: o.value, dir: "auto" }, o.label)));
+  select.value = value;
+}
+
+function renderLanguages(): void {
+  const form = state.langForm;
+  const mode = form?.mode ?? state.mode;
+  const used = languageFieldsFor(mode);
+  for (const f of LANGUAGE_FIELDS) {
+    el.langFields[f].hidden = !used.includes(f);
+    renderLanguageOptions(f);
+    const usable = !!form && !!state.languages && engineReady();
+    el.langSelects[f].disabled = !usable;
+    el.langFilters[f].disabled = !usable;
+  }
+  el.languagesModeNote.textContent = mode === "media" ? t("settings.languageModeMedia") : t("settings.languageModeInterpret");
+  el.labelTarget.textContent = mode === "media" ? t("settings.target") : t("settings.own");
+  el.helpTarget.textContent = mode === "media" ? t("settings.targetHelp") : t("settings.ownHelp");
+  const labels: Record<LanguageField, string> = {
+    source: t("settings.source"),
+    target: el.labelTarget.textContent,
+    partner: t("settings.partner"),
+  };
+  for (const f of LANGUAGE_FIELDS) el.langFilters[f].setAttribute("aria-label", t("settings.languageFilterLabel", { field: labels[f] }));
+  renderLanguagePreview();
+}
+
+function showLanguageErrors(errors: LanguageErrors): void {
+  for (const f of LANGUAGE_FIELDS) {
+    const message = errors[f] ?? "";
+    const slot = el.languagesForm.querySelector<HTMLElement>(`[data-error-for="${f}"]`);
+    if (slot) slot.textContent = message;
+    el.langFields[f].classList.toggle("has-error", message !== "");
+    el.langSelects[f].setAttribute("aria-invalid", String(message !== ""));
+  }
+}
+
+function renderLanguagePreview(): void {
+  const v = state.langPreview;
+  switch (v.state) {
+    case "unavailable":
+      replace(el.languagePreview, h("p", {}, t("settings.languagesUnavailable")));
+      break;
+    case "local_errors":
+      replace(el.languagePreview);
+      break;
+    case "checking":
+      replace(el.languagePreview, h("p", {}, t("preview.checking")));
+      break;
+    case "error":
+      replace(el.languagePreview, h("p", { class: "is-error" }, t("preview.unavailable", { reason: v.message })));
+      break;
+    case "ready": {
+      const rows = previewRows(v.preview);
+      const notes = previewNotes(v.preview);
+      replace(
+        el.languagePreview,
+        h("h3", {}, t("preview.title")),
+        h(
+          "dl",
+          { class: "facts" },
+          ...rows.flatMap((r) => [
+            h("dt", {}, r.label),
+            h("dd", { "data-tone": r.tone }, r.model ? withNote(r.model, r.status) : r.status),
+          ]),
+        ),
+        h("p", {}, previewSummary(v.preview)),
+        notes.length ? h("ul", { class: "notes" }, ...notes.map((m) => h("li", {}, formatEngineMessage(m)))) : null,
+      );
+      break;
+    }
+  }
+  const checking = v.state === "checking" && !!state.langForm?.applyRecommended;
+  el.languagesSave.disabled =
+    !engineReady() || !state.languages || !state.langForm || v.state === "local_errors" || checking;
+}
+
+/** Local checks now, then (debounced) `settings.preview_languages` for the current choice. */
+function scheduleLanguagePreview(delay = LANGUAGE_PREVIEW_DEBOUNCE_MS): void {
+  window.clearTimeout(languagePreviewTimer);
+  const form = state.langForm;
+  if (!form || !state.languages || !engineReady()) {
+    languagePreviews.invalidate();
+    state.langPreview = { state: "unavailable" };
+    renderLanguagePreview();
+    return;
+  }
+  const errors = validateLanguageForm(form, state.languages);
+  showLanguageErrors(errors);
+  if (Object.keys(errors).length > 0) {
+    languagePreviews.invalidate();
+    state.langPreview = { state: "local_errors" };
+  } else {
+    state.langPreview = { state: "checking" };
+    languagePreviewTimer = window.setTimeout(() => void runLanguagePreview(form), delay);
+  }
+  renderLanguagePreview();
+}
+
+/** Maps the engine's `invalid_settings` path to the language field it is about. */
+function languageFieldForEnginePath(message: string): LanguageField | null {
+  const path = message.split(":", 1)[0]?.trim();
+  if (path === "source_language") return "source";
+  if (path === "target_language") return "target";
+  if (path === "partner_language") return "partner";
+  return null;
+}
+
+async function runLanguagePreview(form: LanguageForm): Promise<void> {
+  const token = languagePreviews.next();
+  let next: LanguagePreviewView;
+  try {
+    next = { state: "ready", preview: await api.previewLanguages(previewRequest(form)) };
+  } catch (e) {
+    const ce = asCommandError(e);
+    const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? languageFieldForEnginePath(ce.message) : null;
+    if (field && ce?.kind === "engine" && languagePreviews.isCurrent(token)) {
+      showLanguageErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      next = { state: "local_errors" };
+    } else {
+      console.error("settings.preview_languages failed", e);
+      next = { state: "error", message: describeError(e) };
+    }
+  }
+  // An answer for an earlier choice must not replace the one for the current choice.
+  if (!languagePreviews.isCurrent(token)) return;
+  state.langPreview = next;
+  renderLanguagePreview();
+}
+
+function chooseLanguage(field: LanguageField, value: string): void {
+  if (!state.langForm) return;
+  state.langForm = { ...state.langForm, [field]: value };
+  state.langDirty = true;
+  el.languagesStatus.textContent = "";
+  scheduleLanguagePreview();
+}
+
+async function loadLanguages(): Promise<void> {
+  try {
+    state.languages = await api.languagesList();
+  } catch (e) {
+    reportError("error.readLanguages", e);
+  }
+  renderLanguages();
+  scheduleLanguagePreview(0);
+}
+
+async function submitLanguages(): Promise<void> {
+  const form = state.langForm;
+  const list = state.languages;
+  if (!form || !list) return;
+  const errors = validateLanguageForm(form, list);
+  showLanguageErrors(errors);
+  if (Object.keys(errors).length > 0) {
+    el.languagesStatus.textContent = t("form.fixFields");
+    return;
+  }
+  const preview = state.langPreview.state === "ready" ? state.langPreview.preview : null;
+  const save = languagesSave(form, list, preview);
+  el.languagesSave.disabled = true;
+  el.languagesStatus.textContent = t("common.saving");
+  try {
+    const { settings } = await api.settingsSet(save.patch);
+    state.settings = settings;
+    state.langDirty = false;
+    if (save.withModels) {
+      // A deliberate model choice: never auto-applied over, and the combination
+      // form and the "better combination" offer follow the new settings.
+      state.userChoseModels = true;
+      forgetPreview();
+      fillCombo(settings, true);
+      renderModels();
+    }
+    fillLanguageForm(settings, true);
+    renderModeNotes();
+    el.languagesStatus.textContent = sessionActive()
+      ? t("settings.languagesSavedNextStart")
+      : save.withModels
+        ? t("settings.languagesSavedWithModels")
+        : form.applyRecommended && !previewMatches(preview, form)
+          ? t("settings.languagesSavedNoPreview")
+          : t("settings.languagesSaved");
+    // `differs` and the download sizes changed with the saved settings.
+    scheduleLanguagePreview(0);
+  } catch (e) {
+    const ce = asCommandError(e);
+    const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? languageFieldForEnginePath(ce.message) : null;
+    if (field && ce?.kind === "engine") {
+      showLanguageErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      el.languagesStatus.textContent = t("form.fixFields");
+    } else {
+      el.languagesStatus.textContent = describeError(e);
+    }
+  } finally {
+    renderLanguagePreview();
   }
 }
 
@@ -1592,6 +2064,9 @@ function onLocaleChanged(): void {
   renderDevices();
   renderTranscript();
   renderOverlay();
+  renderTranslationSwitches();
+  renderLanguages();
+  renderStartDownloads();
   renderHardware();
   renderModels();
   renderCheck();
@@ -1629,11 +2104,15 @@ async function loadEngineData(): Promise<void> {
     state.mode = settings.mode;
     fillForm(settings);
     fillCombo(settings);
+    fillLanguageForm(settings);
     renderSettingsPath();
+    renderTranslationSwitches();
     await pushOverlayStyle();
+    await pushOverlayShowTranslation();
   } catch (e) {
     reportError("error.readSettings", e);
   }
+  await loadLanguages();
   try {
     state.devices = await api.devicesList();
   } catch (e) {
@@ -1658,6 +2137,12 @@ function onBridge(status: BridgeStatus): void {
   }
   renderStatus();
   renderCheck();
+  renderTranslationSwitches();
+  if (status.phase !== "ready") {
+    // A restarted engine has no downloads for the start in flight any more.
+    startFlow.cancel();
+    scheduleLanguagePreview(0);
+  }
   if (status.phase === "ready" && !wasReady) void loadEngineData();
   if (status.phase === "failed") {
     notify(t("engine.failedNotice", { reason: status.detail ?? t("common.unknownCause") }), "bad", [
@@ -1747,6 +2232,37 @@ function wire(): void {
     }
     renderOverlay();
   });
+  for (const input of [el.showTranslation, el.settingsShowTranslation]) {
+    input.addEventListener("change", () => void changeShowTranslation(input.checked));
+  }
+  el.startDownloadsRetry.addEventListener("click", () => startFlow.retry());
+  el.startDownloadsCancel.addEventListener("click", () => startFlow.cancel());
+  for (const f of LANGUAGE_FIELDS) {
+    el.langSelects[f].addEventListener("change", () => chooseLanguage(f, el.langSelects[f].value));
+    el.langFilters[f].addEventListener("input", () => {
+      state.langFilters[f] = el.langFilters[f].value;
+      renderLanguageOptions(f);
+    });
+    // Enter in the filter picks the first match instead of submitting the form.
+    el.langFilters[f].addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const current = state.langForm?.[f];
+      const first = Array.from(el.langSelects[f].options).find((o) => o.value !== current) ?? null;
+      if (first && state.langFilters[f].trim() !== "") {
+        chooseLanguage(f, first.value);
+        renderLanguageOptions(f);
+      }
+    });
+  }
+  el.applyRecommended.addEventListener("change", () => {
+    if (state.langForm) state.langForm = { ...state.langForm, applyRecommended: el.applyRecommended.checked };
+    renderLanguagePreview();
+  });
+  el.languagesForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void submitLanguages();
+  });
   el.clear.addEventListener("click", () => {
     state.subtitles = emptySubtitles(state.subtitles.sessionId);
     renderTranscript();
@@ -1790,9 +2306,14 @@ async function subscribe(): Promise<void> {
       if (s.session_id !== null && state.sessionId !== null && s.session_id < state.sessionId) return;
       if (s.session_id !== null) state.sessionId = s.session_id;
       state.sessionState = s.state;
-      if (s.state === "error" && s.code === "model_not_downloaded") {
-        // Offer exactly the missing models; fall back to the generic message.
-        void offerMissingModels().then((found) => {
+      if (s.state === "error" && s.code === "translation_model_missing" && s.missing_translation_models.length) {
+        // Pull them on the user's Ollama, then start again (lib/start-downloads.ts).
+        startFlow.begin(
+          s.missing_translation_models.map((model) => ({ kind: "translation", model, sizeBytes: translationSize(model) })),
+        );
+      } else if (s.state === "error" && s.code === "model_not_downloaded") {
+        // Download exactly the missing models and start again; fall back to the generic message.
+        void downloadMissingThenStart().then((found) => {
           if (!found) notify(describeStatusError(s.code, s.detail), "bad");
         });
       } else if (s.state === "error") {
@@ -1805,6 +2326,15 @@ async function subscribe(): Promise<void> {
       renderTranscript();
     }),
     events.download((p) => {
+      startFlow.onProgress(p);
+      // Translation pulls only matter to the start flow; the models page lists
+      // ASR models and the GPU runtime by name.
+      if (p.kind === "translation") {
+        if (p.state === "done" && state.page === "models") void loadModels();
+        return;
+      }
+      // Downloads for a start are shown in their own panel, not as notices too.
+      const quiet = startFlow.tracks("asr", p.model);
       state.downloads.set(p.model, p);
       if (p.state === "done") {
         state.downloads.delete(p.model);
@@ -1815,10 +2345,10 @@ async function subscribe(): Promise<void> {
           // "still needed" while the list is being reloaded.
           const listed = state.models?.asr.find((m) => m.id === p.model);
           if (listed) listed.downloaded = true;
-          notify(t("download.done", { model: p.model }));
+          if (!quiet) notify(t("download.done", { model: p.model }));
           void loadModels();
         }
-      } else if (p.state === "error") {
+      } else if (p.state === "error" && !quiet) {
         const what = p.model === GPU_RUNTIME_ID ? t("gpu.name") : p.model;
         notify(t("download.failed", { what, error: p.error ?? t("common.unknownReason") }), "bad");
       }

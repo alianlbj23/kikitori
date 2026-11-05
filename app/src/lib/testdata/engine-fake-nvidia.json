@@ -1,9 +1,10 @@
 {
-  "_comment": "Responses of the real engine in fake mode (KIKITORI_ENGINE_FAKE=1, KIKITORI_ENGINE_FAKE_HARDWARE=nvidia, empty KIKITORI_CONFIG_DIR, requests in this order), captured 2026-11-05 for parser tests. Regenerate when the protocol changes.",
+  "_comment": "Responses and events of the real engine in fake mode (KIKITORI_ENGINE_FAKE=1, KIKITORI_ENGINE_FAKE_HARDWARE=nvidia, KIKITORI_ENGINE_FAKE_TRANSLATION=ollama, empty KIKITORI_CONFIG_DIR, requests in this order), written by app/dev/capture_engine_fake.py for parser tests. Regenerate when the protocol changes.",
   "settings.get": {
     "settings": {
-      "schema_version": 2,
+      "schema_version": 3,
       "mode": "media",
+      "source_language": "ja",
       "target_language": "zh-TW",
       "partner_language": "ja",
       "media": {
@@ -27,6 +28,7 @@
         "cuda_library_dirs": []
       },
       "translation": {
+        "enabled": true,
         "base_url": "http://localhost:11434/v1",
         "fast_model": "qwen3.5:4b",
         "final_model": "qwen3.5:4b",
@@ -110,14 +112,46 @@
       "translation_budget_gb": 7.0,
       "gpu_runtime_missing": true,
       "reasons": [
-        "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
-        "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
-        "扣掉 ASR 與 1 GB 保留後，約 7.0 GB VRAM 可給翻譯模型",
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
+        {
+          "code": "asr_cpu",
+          "params": {
+            "fast_model": "base",
+            "final_model": "small"
+          },
+          "message": "Speech recognition runs on the CPU (16 GB of RAM or more): base for live subtitles, small for final subtitles"
+        },
+        {
+          "code": "asr_cpu_large_models_slow",
+          "params": {},
+          "message": "medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles"
+        },
+        {
+          "code": "translation_budget_vram",
+          "params": {
+            "budget_gb": 7.0
+          },
+          "message": "About 7.0 GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve"
+        },
+        {
+          "code": "translation_same_model",
+          "params": {},
+          "message": "Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5-18 s"
+        }
       ],
       "warnings": [
-        "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
-      ]
+        {
+          "code": "gpu_runtime_missing",
+          "params": {},
+          "message": "cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU"
+        }
+      ],
+      "translation_status": "recommended",
+      "languages": {
+        "mode": "media",
+        "source_language": "ja",
+        "target_language": "zh-TW",
+        "partner_language": "ja"
+      }
     }
   },
   "models.list": {
@@ -270,7 +304,7 @@
         },
         {
           "name": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
-          "label": "Sakura-GalTransl 7B v3（非商用）",
+          "label": "Sakura-GalTransl 7B v3",
           "installed": false,
           "known": true,
           "recommended_for": [],
@@ -333,7 +367,7 @@
         },
         {
           "model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
-          "label": "Sakura-GalTransl 7B v3（非商用）",
+          "label": "Sakura-GalTransl 7B v3",
           "license": "CC BY-NC-SA 4.0",
           "license_url": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
           "commercial_use": false,
@@ -378,22 +412,55 @@
       "translation_budget_gb": 7.0,
       "gpu_runtime_missing": true,
       "reasons": [
-        "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
-        "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
-        "扣掉 ASR 與 1 GB 保留後，約 7.0 GB VRAM 可給翻譯模型",
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
+        {
+          "code": "asr_cpu",
+          "params": {
+            "fast_model": "base",
+            "final_model": "small"
+          },
+          "message": "Speech recognition runs on the CPU (16 GB of RAM or more): base for live subtitles, small for final subtitles"
+        },
+        {
+          "code": "asr_cpu_large_models_slow",
+          "params": {},
+          "message": "medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles"
+        },
+        {
+          "code": "translation_budget_vram",
+          "params": {
+            "budget_gb": 7.0
+          },
+          "message": "About 7.0 GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve"
+        },
+        {
+          "code": "translation_same_model",
+          "params": {},
+          "message": "Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5-18 s"
+        }
       ],
       "warnings": [
-        "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
-      ]
+        {
+          "code": "gpu_runtime_missing",
+          "params": {},
+          "message": "cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU"
+        }
+      ],
+      "translation_status": "recommended",
+      "languages": {
+        "mode": "media",
+        "source_language": "ja",
+        "target_language": "zh-TW",
+        "partner_language": "ja"
+      }
     },
     "differs": true,
-    "fingerprint": "c7a98aaa9f0c1cc5"
+    "fingerprint": "2dffebbd9310677d"
   },
   "settings.apply_recommendation": {
     "settings": {
-      "schema_version": 2,
+      "schema_version": 3,
       "mode": "media",
+      "source_language": "ja",
       "target_language": "zh-TW",
       "partner_language": "ja",
       "media": {
@@ -417,6 +484,7 @@
         "cuda_library_dirs": []
       },
       "translation": {
+        "enabled": true,
         "base_url": "http://localhost:11434/v1",
         "fast_model": "qwen3.5:4b",
         "final_model": "qwen3.5:4b",
@@ -469,14 +537,875 @@
       "translation_budget_gb": 7.0,
       "gpu_runtime_missing": true,
       "reasons": [
-        "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
-        "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
-        "扣掉 ASR 與 1 GB 保留後，約 7.0 GB VRAM 可給翻譯模型",
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
+        {
+          "code": "asr_cpu",
+          "params": {
+            "fast_model": "base",
+            "final_model": "small"
+          },
+          "message": "Speech recognition runs on the CPU (16 GB of RAM or more): base for live subtitles, small for final subtitles"
+        },
+        {
+          "code": "asr_cpu_large_models_slow",
+          "params": {},
+          "message": "medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles"
+        },
+        {
+          "code": "translation_budget_vram",
+          "params": {
+            "budget_gb": 7.0
+          },
+          "message": "About 7.0 GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve"
+        },
+        {
+          "code": "translation_same_model",
+          "params": {},
+          "message": "Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5-18 s"
+        }
       ],
       "warnings": [
-        "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
-      ]
+        {
+          "code": "gpu_runtime_missing",
+          "params": {},
+          "message": "cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU"
+        }
+      ],
+      "translation_status": "recommended",
+      "languages": {
+        "mode": "media",
+        "source_language": "ja",
+        "target_language": "zh-TW",
+        "partner_language": "ja"
+      }
     }
+  },
+  "languages.list": {
+    "languages": [
+      {
+        "code": "ja",
+        "english_name": "Japanese",
+        "native_name": "日本語",
+        "whisper_code": "ja",
+        "rtl": false,
+        "no_space": true,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "B",
+          "medium": "B",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "en",
+        "english_name": "English",
+        "native_name": "English",
+        "whisper_code": "en",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "B",
+          "medium": "A",
+          "small": "A",
+          "base": "A",
+          "tiny": "B"
+        }
+      },
+      {
+        "code": "zh-TW",
+        "english_name": "Chinese (Traditional, Taiwan)",
+        "native_name": "繁體中文",
+        "whisper_code": "zh",
+        "rtl": false,
+        "no_space": true,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "B",
+          "medium": "B",
+          "small": "C",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "zh-CN",
+        "english_name": "Chinese (Simplified)",
+        "native_name": "简体中文",
+        "whisper_code": "zh",
+        "rtl": false,
+        "no_space": true,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "B",
+          "medium": "B",
+          "small": "C",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "ko",
+        "english_name": "Korean",
+        "native_name": "한국어",
+        "whisper_code": "ko",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "B",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "es",
+        "english_name": "Spanish",
+        "native_name": "Español",
+        "whisper_code": "es",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "A",
+          "base": "A",
+          "tiny": "B"
+        }
+      },
+      {
+        "code": "fr",
+        "english_name": "French",
+        "native_name": "Français",
+        "whisper_code": "fr",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "B",
+          "medium": "B",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "de",
+        "english_name": "German",
+        "native_name": "Deutsch",
+        "whisper_code": "de",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "B",
+          "base": "B",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "pt",
+        "english_name": "Portuguese",
+        "native_name": "Português",
+        "whisper_code": "pt",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "A",
+          "base": "B",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "ru",
+        "english_name": "Russian",
+        "native_name": "Русский",
+        "whisper_code": "ru",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "it",
+        "english_name": "Italian",
+        "native_name": "Italiano",
+        "whisper_code": "it",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "A",
+          "base": "B",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "ar",
+        "english_name": "Arabic",
+        "native_name": "العربية",
+        "whisper_code": "ar",
+        "rtl": true,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "C",
+          "medium": "C",
+          "small": "C",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "hi",
+        "english_name": "Hindi",
+        "native_name": "हिन्दी",
+        "whisper_code": "hi",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "C",
+          "medium": "C",
+          "small": "C",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "id",
+        "english_name": "Indonesian",
+        "native_name": "Bahasa Indonesia",
+        "whisper_code": "id",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "B",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "vi",
+        "english_name": "Vietnamese",
+        "native_name": "Tiếng Việt",
+        "whisper_code": "vi",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "C",
+          "large-v3-turbo": "C",
+          "medium": "C",
+          "small": "C",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "th",
+        "english_name": "Thai",
+        "native_name": "ไทย",
+        "whisper_code": "th",
+        "rtl": false,
+        "no_space": true,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "C",
+          "medium": "B",
+          "small": "C",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "tr",
+        "english_name": "Turkish",
+        "native_name": "Türkçe",
+        "whisper_code": "tr",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "B",
+          "medium": "B",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "pl",
+        "english_name": "Polish",
+        "native_name": "Polski",
+        "whisper_code": "pl",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "nl",
+        "english_name": "Dutch",
+        "native_name": "Nederlands",
+        "whisper_code": "nl",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "A",
+          "large-v3-turbo": "A",
+          "medium": "A",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      },
+      {
+        "code": "uk",
+        "english_name": "Ukrainian",
+        "native_name": "Українська",
+        "whisper_code": "uk",
+        "rtl": false,
+        "no_space": false,
+        "asr_quality": {
+          "large-v3": "B",
+          "large-v3-turbo": "B",
+          "medium": "B",
+          "small": "B",
+          "base": "C",
+          "tiny": "C"
+        }
+      }
+    ]
+  },
+  "settings.preview_languages": {
+    "languages": {
+      "mode": "media",
+      "source_language": "ko",
+      "target_language": "es",
+      "partner_language": "ja"
+    },
+    "recommendation": {
+      "tier": "cpu",
+      "fast_asr": {
+        "model": "base",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4
+      },
+      "final_asr": {
+        "model": "small",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4
+      },
+      "translation_fast": "qwen3.5:4b",
+      "translation_final": "qwen3.5:4b",
+      "translation_budget_gb": 7.0,
+      "gpu_runtime_missing": true,
+      "reasons": [
+        {
+          "code": "asr_cpu",
+          "params": {
+            "fast_model": "base",
+            "final_model": "small"
+          },
+          "message": "Speech recognition runs on the CPU (16 GB of RAM or more): base for live subtitles, small for final subtitles"
+        },
+        {
+          "code": "asr_cpu_large_models_slow",
+          "params": {},
+          "message": "medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles"
+        },
+        {
+          "code": "translation_budget_vram",
+          "params": {
+            "budget_gb": 7.0
+          },
+          "message": "About 7.0 GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve"
+        },
+        {
+          "code": "translation_same_model",
+          "params": {},
+          "message": "Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5-18 s"
+        }
+      ],
+      "warnings": [
+        {
+          "code": "gpu_runtime_missing",
+          "params": {},
+          "message": "cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU"
+        }
+      ],
+      "translation_status": "recommended",
+      "languages": {
+        "mode": "media",
+        "source_language": "ko",
+        "target_language": "es",
+        "partner_language": "ja"
+      }
+    },
+    "patch": {
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "cpu",
+        "fast_compute_type": "int8",
+        "final_compute_type": "int8",
+        "fast_cpu_threads": 4,
+        "final_cpu_threads": 4
+      },
+      "translation": {
+        "fast_model": "qwen3.5:4b",
+        "final_model": "qwen3.5:4b"
+      }
+    },
+    "settings": {
+      "schema_version": 3,
+      "mode": "media",
+      "source_language": "ko",
+      "target_language": "es",
+      "partner_language": "ja",
+      "media": {
+        "pause_secs": 0.6,
+        "max_secs": 10.0,
+        "device_id": null
+      },
+      "interpret": {
+        "pause_secs": 0.5,
+        "max_secs": 8.0,
+        "device_id": null
+      },
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "cpu",
+        "fast_compute_type": "int8",
+        "final_compute_type": "int8",
+        "fast_cpu_threads": 4,
+        "final_cpu_threads": 4,
+        "cuda_library_dirs": []
+      },
+      "translation": {
+        "enabled": true,
+        "base_url": "http://localhost:11434/v1",
+        "fast_model": "qwen3.5:4b",
+        "final_model": "qwen3.5:4b",
+        "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
+        "allow_restricted": false,
+        "keep_warm_secs": 240
+      },
+      "pipeline": {
+        "partial_interval_ms": 700,
+        "no_speech_threshold": 0.6,
+        "context_lines": 3,
+        "asr_prompt_context": true
+      },
+      "subtitle": {},
+      "ui": {}
+    },
+    "differs": true,
+    "fingerprint": "b0ced6d8d52bd140",
+    "models": {
+      "asr": [
+        {
+          "model": "base",
+          "roles": [
+            "fast"
+          ],
+          "installed": true,
+          "size_bytes": 4194304,
+          "download_bytes": 0
+        },
+        {
+          "model": "small",
+          "roles": [
+            "final"
+          ],
+          "installed": true,
+          "size_bytes": 4194304,
+          "download_bytes": 0
+        }
+      ],
+      "translation": [
+        {
+          "model": "qwen3.5:4b",
+          "roles": [
+            "fast",
+            "final"
+          ],
+          "installed": true,
+          "size_bytes": 3300000000,
+          "size_approximate": true,
+          "download_bytes": 0
+        }
+      ]
+    },
+    "translation_needed": true,
+    "download_bytes": 0,
+    "download_size_known": true,
+    "messages": []
+  },
+  "settings.preview_languages interpret": {
+    "languages": {
+      "mode": "interpret",
+      "source_language": "ja",
+      "target_language": "zh-TW",
+      "partner_language": "en"
+    },
+    "recommendation": {
+      "tier": "cpu",
+      "fast_asr": {
+        "model": "base",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4
+      },
+      "final_asr": {
+        "model": "small",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4
+      },
+      "translation_fast": "qwen3.5:4b",
+      "translation_final": "qwen3.5:4b",
+      "translation_budget_gb": 7.0,
+      "gpu_runtime_missing": true,
+      "reasons": [
+        {
+          "code": "asr_cpu",
+          "params": {
+            "fast_model": "base",
+            "final_model": "small"
+          },
+          "message": "Speech recognition runs on the CPU (16 GB of RAM or more): base for live subtitles, small for final subtitles"
+        },
+        {
+          "code": "asr_cpu_large_models_slow",
+          "params": {},
+          "message": "medium and larger models need 3.6 s or more per sentence on a CPU, too slow for live subtitles"
+        },
+        {
+          "code": "translation_budget_vram",
+          "params": {
+            "budget_gb": 7.0
+          },
+          "message": "About 7.0 GB of VRAM is left for the translation model after speech recognition and a 1 GB reserve"
+        },
+        {
+          "code": "translation_same_model",
+          "params": {},
+          "message": "Live and final translation use the same model: each sentence takes under 0.3 s on a GPU, while switching models in Ollama takes 1.5-18 s"
+        }
+      ],
+      "warnings": [
+        {
+          "code": "gpu_runtime_missing",
+          "params": {},
+          "message": "cuBLAS is not installed: GPU acceleration needs the GPU runtime download (about 570 MB); until then speech recognition uses the CPU"
+        },
+        {
+          "code": "asr_language_quality_low",
+          "params": {
+            "model": "small",
+            "language": "zh-TW"
+          },
+          "message": "small recognizes zh-TW poorly (error rate above 20% on public benchmarks)"
+        }
+      ],
+      "translation_status": "recommended",
+      "languages": {
+        "mode": "interpret",
+        "source_language": "ja",
+        "target_language": "zh-TW",
+        "partner_language": "en"
+      }
+    },
+    "patch": {
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "cpu",
+        "fast_compute_type": "int8",
+        "final_compute_type": "int8",
+        "fast_cpu_threads": 4,
+        "final_cpu_threads": 4
+      },
+      "translation": {
+        "fast_model": "qwen3.5:4b",
+        "final_model": "qwen3.5:4b"
+      }
+    },
+    "settings": {
+      "schema_version": 3,
+      "mode": "interpret",
+      "source_language": "ja",
+      "target_language": "zh-TW",
+      "partner_language": "en",
+      "media": {
+        "pause_secs": 0.6,
+        "max_secs": 10.0,
+        "device_id": null
+      },
+      "interpret": {
+        "pause_secs": 0.5,
+        "max_secs": 8.0,
+        "device_id": null
+      },
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "cpu",
+        "fast_compute_type": "int8",
+        "final_compute_type": "int8",
+        "fast_cpu_threads": 4,
+        "final_cpu_threads": 4,
+        "cuda_library_dirs": []
+      },
+      "translation": {
+        "enabled": true,
+        "base_url": "http://localhost:11434/v1",
+        "fast_model": "qwen3.5:4b",
+        "final_model": "qwen3.5:4b",
+        "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
+        "allow_restricted": false,
+        "keep_warm_secs": 240
+      },
+      "pipeline": {
+        "partial_interval_ms": 700,
+        "no_speech_threshold": 0.6,
+        "context_lines": 3,
+        "asr_prompt_context": true
+      },
+      "subtitle": {},
+      "ui": {}
+    },
+    "differs": true,
+    "fingerprint": "3976be07a488337e",
+    "models": {
+      "asr": [
+        {
+          "model": "base",
+          "roles": [
+            "fast"
+          ],
+          "installed": true,
+          "size_bytes": 4194304,
+          "download_bytes": 0
+        },
+        {
+          "model": "small",
+          "roles": [
+            "final"
+          ],
+          "installed": true,
+          "size_bytes": 4194304,
+          "download_bytes": 0
+        }
+      ],
+      "translation": [
+        {
+          "model": "qwen3.5:4b",
+          "roles": [
+            "fast",
+            "final"
+          ],
+          "installed": true,
+          "size_bytes": 3300000000,
+          "size_approximate": true,
+          "download_bytes": 0
+        }
+      ]
+    },
+    "translation_needed": true,
+    "download_bytes": 0,
+    "download_size_known": true,
+    "messages": []
+  },
+  "models.validate": {
+    "ok": true,
+    "errors": [],
+    "warnings": [
+      {
+        "code": "asr_model_slow_on_cpu",
+        "params": {
+          "path": "fast_asr",
+          "model": "medium"
+        },
+        "message": "fast_asr: medium needs 3.6 s or more per sentence on a CPU; subtitles will lag noticeably"
+      },
+      {
+        "code": "asr_model_not_downloaded",
+        "params": {
+          "path": "fast_asr",
+          "model": "medium"
+        },
+        "message": "fast_asr: speech recognition model medium is not downloaded yet; it is downloaded before starting"
+      },
+      {
+        "code": "asr_fast_larger_than_final",
+        "params": {
+          "fast_model": "medium",
+          "final_model": "small"
+        },
+        "message": "The live model medium is larger than the final model small: live subtitles may be slower than final ones"
+      }
+    ]
+  },
+  "session.start": {
+    "session_id": 1
+  },
+  "status events": [
+    {
+      "state": "idle",
+      "detail": null,
+      "session_id": null,
+      "code": null
+    },
+    {
+      "state": "loading",
+      "detail": null,
+      "session_id": 1,
+      "code": null
+    },
+    {
+      "state": "error",
+      "detail": "translation model(s) not installed on the Ollama server: qwen3.5:9b; download them with models.pull_translation",
+      "session_id": 1,
+      "code": "translation_model_missing",
+      "data": {
+        "models": [
+          "qwen3.5:9b"
+        ]
+      }
+    }
+  ],
+  "models.pull_translation": {
+    "model": "qwen3.5:9b",
+    "started": true
+  },
+  "download_progress events": [
+    {
+      "model": "qwen3.5:9b",
+      "kind": "translation",
+      "downloaded_bytes": 0,
+      "total_bytes": 0,
+      "state": "downloading",
+      "error": null
+    },
+    {
+      "model": "qwen3.5:9b",
+      "kind": "translation",
+      "downloaded_bytes": 1048576,
+      "total_bytes": 4194304,
+      "state": "downloading",
+      "error": null
+    },
+    {
+      "model": "qwen3.5:9b",
+      "kind": "translation",
+      "downloaded_bytes": 2097152,
+      "total_bytes": 4194304,
+      "state": "downloading",
+      "error": null
+    },
+    {
+      "model": "qwen3.5:9b",
+      "kind": "translation",
+      "downloaded_bytes": 3145728,
+      "total_bytes": 4194304,
+      "state": "downloading",
+      "error": null
+    },
+    {
+      "model": "qwen3.5:9b",
+      "kind": "translation",
+      "downloaded_bytes": 4194304,
+      "total_bytes": 4194304,
+      "state": "downloading",
+      "error": null
+    },
+    {
+      "model": "qwen3.5:9b",
+      "kind": "translation",
+      "downloaded_bytes": 4194304,
+      "total_bytes": 4194304,
+      "state": "done",
+      "error": null
+    }
+  ],
+  "session.set_translation": {
+    "settings": {
+      "schema_version": 3,
+      "mode": "media",
+      "source_language": "ja",
+      "target_language": "zh-TW",
+      "partner_language": "ja",
+      "media": {
+        "pause_secs": 0.6,
+        "max_secs": 10.0,
+        "device_id": null
+      },
+      "interpret": {
+        "pause_secs": 0.5,
+        "max_secs": 8.0,
+        "device_id": null
+      },
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "cpu",
+        "fast_compute_type": "int8",
+        "final_compute_type": "int8",
+        "fast_cpu_threads": 4,
+        "final_cpu_threads": 4,
+        "cuda_library_dirs": []
+      },
+      "translation": {
+        "enabled": false,
+        "base_url": "http://localhost:11434/v1",
+        "fast_model": "qwen3.5:9b",
+        "final_model": "qwen3.5:9b",
+        "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
+        "allow_restricted": false,
+        "keep_warm_secs": 240
+      },
+      "pipeline": {
+        "partial_interval_ms": 700,
+        "no_speech_threshold": 0.6,
+        "context_lines": 3,
+        "asr_prompt_context": true
+      },
+      "subtitle": {},
+      "ui": {}
+    },
+    "path": "C:/fake/settings.json",
+    "is_new": false,
+    "session_id": null
   }
 }

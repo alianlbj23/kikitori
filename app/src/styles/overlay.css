@@ -160,6 +160,32 @@ body {
   display: none;
 }
 
+/*
+ * "顯示翻譯" off: the original is the only line, so it takes the translation's
+ * place — primary size, weight and subtitle yellow (white while still being
+ * heard, like a partial translation) — instead of staying small above nothing.
+ */
+.line.is-original-only .orig {
+  font-size: var(--fs);
+  font-weight: 700;
+  color: var(--sub-yellow);
+}
+
+.line.is-original-only.is-partial .orig {
+  color: var(--sub-white);
+}
+
+/*
+ * Languages written without spaces (ja, zh, th) still need line breaks inside a
+ * long sentence; Thai breaks at word boundaries the browser finds itself, the
+ * others anywhere. Right-to-left text (Arabic) gets its direction from
+ * dir="auto" on each span.
+ */
+.orig:lang(th),
+.tr:lang(th) {
+  overflow-wrap: break-word;
+}
+
 /* Earlier, already-finished lines step back so the newest one leads. */
 .line:not(:last-child) {
   opacity: 0.78;

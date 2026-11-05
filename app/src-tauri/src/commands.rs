@@ -22,9 +22,11 @@ type CmdResult<T> = Result<T, RequestError>;
 
 const QUICK: Duration = Duration::from_secs(10);
 /// Background methods (`hardware.detect`, `models.list`, `models.validate`,
-/// `settings.apply_recommendation`, `settings.preview_recommendation`) run `nvidia-smi` and probe the translation
-/// server (2 s timeout per address), and the engine runs them one at a time in
-/// arrival order, so a request may first wait for the ones queued before it.
+/// `settings.apply_recommendation`, `settings.preview_recommendation`,
+/// `settings.preview_languages`, `models.pull_translation`) run `nvidia-smi` and
+/// probe the translation server (2 s timeout per address), and the engine runs
+/// them one at a time in arrival order, so a request may first wait for the
+/// ones queued before it.
 const BACKGROUND: Duration = Duration::from_secs(45);
 /// The engine answers `session.start` after validating, before loading models.
 const SESSION_START: Duration = Duration::from_secs(30);
@@ -32,6 +34,10 @@ const SESSION_START: Duration = Duration::from_secs(30);
 const SESSION_STOP: Duration = Duration::from_secs(15);
 
 const MAX_MODEL_ID_CHARS: usize = 100;
+/// Translation model names follow the engine's rule (`models.pull_translation`).
+const MAX_TRANSLATION_MODEL_CHARS: usize = 200;
+/// Language list codes (`zh-TW`) and aliases the engine normalizes (`zh_Hant`).
+const MAX_LANGUAGE_CHARS: usize = 16;
 /// `models.download` id of the optional NVIDIA cuBLAS runtime (hardware.md).
 pub const GPU_RUNTIME_ID: &str = "gpu-runtime";
 const MAX_DEVICE_ID_CHARS: usize = 512;
@@ -59,6 +65,32 @@ pub fn validate_model_id(model: &str) -> Result<(), RequestError> {
     {
         return Err(invalid(
             "model id may only contain letters, digits, '.', '_' and '-'",
+        ));
+    }
+    Ok(())
+}
+
+/// Translation model names are server tags such as `qwen3.5:9b` or
+/// `hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS`; same rule as the engine
+/// (letters, digits and `._:/-`, starting with a letter or digit, no `..`), so
+/// nothing path-like reaches the Ollama pull.
+pub fn validate_translation_model(model: &str) -> Result<(), RequestError> {
+    let count = model.chars().count();
+    if count == 0 || count > MAX_TRANSLATION_MODEL_CHARS {
+        return Err(invalid(format!(
+            "translation model must be 1–{MAX_TRANSLATION_MODEL_CHARS} characters"
+        )));
+    }
+    let first_ok = model
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    let chars_ok = model
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'));
+    if !first_ok || !chars_ok || model.contains("..") {
+        return Err(invalid(
+            "translation model may only contain letters, digits and '._:/-', start with a letter or digit, and not contain '..'",
         ));
     }
     Ok(())
@@ -105,6 +137,58 @@ impl Mode {
             Mode::Interpret => "interpret",
         }
     }
+}
+
+/// The language combination the settings page previews (`settings.preview_languages`).
+/// Every field is optional; the engine fills the rest from the saved settings and
+/// validates the codes against its language list.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageChoice {
+    pub mode: Option<Mode>,
+    pub source_language: Option<String>,
+    pub target_language: Option<String>,
+    pub partner_language: Option<String>,
+}
+
+/// Only the shape of a language code is checked here (letters, digits, `-`,
+/// `_`): the list of supported languages lives in the engine, so a new language
+/// does not need a new app build.
+fn validate_language_code(field: &str, code: &str) -> Result<(), RequestError> {
+    if code.is_empty()
+        || code.len() > MAX_LANGUAGE_CHARS
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(invalid(format!(
+            "{field} must be a language code of 1–{MAX_LANGUAGE_CHARS} letters, digits, '-' or '_'"
+        )));
+    }
+    Ok(())
+}
+
+pub fn preview_languages_params(choice: &LanguageChoice) -> Result<Value, RequestError> {
+    let mut params = Map::new();
+    if let Some(mode) = choice.mode {
+        params.insert("mode".into(), json!(mode.as_str()));
+    }
+    for (field, value) in [
+        ("source_language", &choice.source_language),
+        ("target_language", &choice.target_language),
+        ("partner_language", &choice.partner_language),
+    ] {
+        if let Some(code) = value {
+            validate_language_code(field, code)?;
+            params.insert(field.into(), json!(code));
+        }
+    }
+    Ok(Value::Object(params))
+}
+
+pub fn pull_translation_params(model: &str) -> Result<Value, RequestError> {
+    validate_translation_model(model)?;
+    Ok(json!({ "model": model }))
 }
 
 pub fn session_start_params(mode: Mode, device_id: Option<&str>) -> Result<Value, RequestError> {
@@ -180,6 +264,36 @@ pub async fn models_validate(
     bridge.request("models.validate", params, BACKGROUND).await
 }
 
+/// Starts downloading a translation model on the user's Ollama server; progress
+/// arrives as `download_progress` events with `kind: "translation"`.
+#[tauri::command]
+pub async fn models_pull_translation(
+    bridge: State<'_, EngineBridge>,
+    model: String,
+) -> CmdResult<Value> {
+    let params = pull_translation_params(&model)?;
+    bridge
+        .request("models.pull_translation", params, BACKGROUND)
+        .await
+}
+
+#[tauri::command]
+pub async fn languages_list(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("languages.list", json!({}), QUICK).await
+}
+
+/// What choosing these languages would use and download, without saving.
+#[tauri::command]
+pub async fn settings_preview_languages(
+    bridge: State<'_, EngineBridge>,
+    languages: LanguageChoice,
+) -> CmdResult<Value> {
+    let params = preview_languages_params(&languages)?;
+    bridge
+        .request("settings.preview_languages", params, BACKGROUND)
+        .await
+}
+
 #[tauri::command]
 pub async fn devices_list(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
     bridge.request("devices.list", json!({}), QUICK).await
@@ -240,6 +354,22 @@ pub async fn session_start(
 pub async fn session_stop(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
     bridge
         .request("session.stop", json!({}), SESSION_STOP)
+        .await
+}
+
+/// The "show translation" switch: saved in the settings and applied to a
+/// running session at once.
+#[tauri::command]
+pub async fn session_set_translation(
+    bridge: State<'_, EngineBridge>,
+    enabled: bool,
+) -> CmdResult<Value> {
+    bridge
+        .request(
+            "session.set_translation",
+            json!({ "enabled": enabled }),
+            QUICK,
+        )
         .await
 }
 
@@ -390,6 +520,19 @@ pub fn overlay_set_locale(
     overlay.set_locale(locale).map_err(invalid)?;
     broadcast_overlay(&app, &overlay);
     Ok(overlay.snapshot())
+}
+
+/// Tells the overlay whether translations are shown; without them it promotes
+/// the original to the primary subtitle style (settings `translation.enabled`).
+#[tauri::command]
+pub fn overlay_set_show_translation(
+    app: AppHandle,
+    overlay: State<'_, OverlayState>,
+    enabled: bool,
+) -> OverlaySnapshot {
+    overlay.set_show_translation(enabled);
+    broadcast_overlay(&app, &overlay);
+    overlay.snapshot()
 }
 
 /// Applies click-through to the overlay window; shared with the global shortcut.
@@ -620,6 +763,67 @@ mod tests {
         for bad in [json!("../etc"), json!("/tmp"), json!(1), json!(null)] {
             assert!(serde_json::from_value::<LicenseFolder>(bad).is_err());
         }
+    }
+
+    #[test]
+    fn translation_model_names() {
+        for ok in [
+            "qwen3.5:9b",
+            "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+            "hy-mt1.5-7b:latest",
+        ] {
+            assert!(validate_translation_model(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            ":latest",
+            "a..b",
+            "../x",
+            "qwen 9b",
+            "qwen;rm",
+            "\u{6a21}\u{578b}",
+        ] {
+            assert!(validate_translation_model(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_translation_model(&"a".repeat(201)).is_err());
+        assert_eq!(
+            pull_translation_params("qwen3.5:9b").unwrap(),
+            json!({"model": "qwen3.5:9b"})
+        );
+    }
+
+    #[test]
+    fn preview_languages_params_send_only_the_given_fields() {
+        assert_eq!(
+            preview_languages_params(&LanguageChoice::default()).unwrap(),
+            json!({})
+        );
+        let choice: LanguageChoice = serde_json::from_value(json!({
+            "mode": "interpret", "target_language": "zh-TW", "partner_language": "ko"
+        }))
+        .unwrap();
+        assert_eq!(
+            preview_languages_params(&choice).unwrap(),
+            json!({"mode": "interpret", "target_language": "zh-TW", "partner_language": "ko"})
+        );
+        let auto = LanguageChoice {
+            source_language: Some("auto".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            preview_languages_params(&auto).unwrap(),
+            json!({"source_language": "auto"})
+        );
+        for bad in ["", "zh TW", "<b>", "abcdefghijklmnopq"] {
+            let choice = LanguageChoice {
+                target_language: Some(bad.into()),
+                ..Default::default()
+            };
+            assert!(preview_languages_params(&choice).is_err(), "{bad:?}");
+        }
+        // Unknown fields and modes are refused while deserializing the argument.
+        assert!(serde_json::from_value::<LanguageChoice>(json!({"language": "ja"})).is_err());
+        assert!(serde_json::from_value::<LanguageChoice>(json!({"mode": "karaoke"})).is_err());
     }
 
     #[test]

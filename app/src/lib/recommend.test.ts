@@ -48,6 +48,7 @@ function gpuRec(overrides: Partial<Recommendation> = {}): Recommendation {
     translation_fast: "qwen3.5:9b",
     translation_final: "qwen3.5:9b",
     translation_budget_gb: 8.21,
+    translation_status: "recommended",
     gpu_runtime_missing: false,
     reasons: [],
     warnings: [],
@@ -225,6 +226,7 @@ describe("missing models", () => {
   const models = (): AsrModel[] => parseModels(engine["models.list"]).asr;
   const progress = (model: string, state: DownloadProgressEvent["state"], done = 0, total = 100): DownloadProgressEvent => ({
     model,
+    kind: "asr",
     downloaded_bytes: done,
     total_bytes: total,
     state,
