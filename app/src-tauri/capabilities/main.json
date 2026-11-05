@@ -7,7 +7,6 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:app:allow-version",
-    "updater:default",
     "process:allow-restart",
     {
       "identifier": "opener:allow-open-url",
@@ -31,6 +30,8 @@
     "allow-overlay-get-state",
     "allow-overlay-set-style",
     "allow-overlay-set-click-through",
-    "allow-overlay-set-visible"
+    "allow-overlay-set-visible",
+    "allow-update-check",
+    "allow-update-install"
   ]
 }

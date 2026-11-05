@@ -14,6 +14,8 @@ import {
   parseOverlayStyle,
   parseStatus,
   parseSubtitle,
+  parseUpdateDownloadEvent,
+  parseUpdateInfo,
 } from "./validate";
 
 const subtitle = {
@@ -299,5 +301,45 @@ describe("models.validate", () => {
 
   it("rejects a missing ok flag", () => {
     expect(() => parseCombinationCheck({ errors: [] })).toThrow(ValidationError);
+  });
+});
+
+describe("update_check / update_install", () => {
+  it("parses a found update and no update", () => {
+    expect(parseUpdateInfo({ version: "0.2.0", currentVersion: "0.1.0", notes: "kikitori v0.2.0" })).toEqual({
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "kikitori v0.2.0",
+    });
+    expect(parseUpdateInfo({ version: "0.2.0", currentVersion: "0.1.0", notes: null })?.notes).toBeNull();
+    expect(parseUpdateInfo(null)).toBeNull();
+  });
+
+  it("rejects a malformed update", () => {
+    expect(() => parseUpdateInfo({ currentVersion: "0.1.0" })).toThrow(ValidationError);
+    expect(() => parseUpdateInfo("0.2.0")).toThrow(ValidationError);
+    expect(() => parseUpdateInfo({ version: "x".repeat(101), currentVersion: "0.1.0" })).toThrow(ValidationError);
+  });
+
+  it("parses download progress events", () => {
+    expect(parseUpdateDownloadEvent({ event: "Started", data: { contentLength: 42 } })).toEqual({
+      event: "Started",
+      contentLength: 42,
+    });
+    expect(parseUpdateDownloadEvent({ event: "Started", data: { contentLength: null } })).toEqual({
+      event: "Started",
+      contentLength: null,
+    });
+    expect(parseUpdateDownloadEvent({ event: "Progress", data: { chunkLength: 7 } })).toEqual({
+      event: "Progress",
+      chunkLength: 7,
+    });
+    expect(parseUpdateDownloadEvent({ event: "Finished" })).toEqual({ event: "Finished" });
+  });
+
+  it("rejects unknown or malformed progress events", () => {
+    expect(() => parseUpdateDownloadEvent({ event: "Paused" })).toThrow(ValidationError);
+    expect(() => parseUpdateDownloadEvent({ event: "Progress", data: { chunkLength: -1 } })).toThrow(ValidationError);
+    expect(() => parseUpdateDownloadEvent({ event: "Progress" })).toThrow(ValidationError);
   });
 });

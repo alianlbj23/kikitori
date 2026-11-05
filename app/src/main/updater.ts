@@ -1,13 +1,18 @@
 /**
- * In-app updates through tauri-plugin-updater.
+ * In-app updates (tauri-plugin-updater, driven from Rust).
  *
  * Role: checks GitHub Releases' `latest.json` (endpoint and public key are in
- * tauri.conf.json), then lets the user download, install and restart. All copy
- * is Traditional Chinese; the caller decides where messages appear.
+ * tauri.conf.json), then lets the user download, install and restart. Check and
+ * install go through the app's `update_check`／`update_install` commands
+ * (`src-tauri/src/updater.rs`), which shut the engine down before the Windows
+ * installer replaces its files. All copy is Traditional Chinese; the caller
+ * decides where messages appear.
  */
 
 import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+
+import { api } from "../lib/api";
+import type { UpdateInfo } from "../lib/types";
 
 const CHECK_TIMEOUT_MS = 15_000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
@@ -31,9 +36,9 @@ function describe(e: unknown): string {
  * when `reportFailures` is set (manual checks) and logged otherwise.
  */
 export async function checkForUpdate(ui: UpdateUi, reportFailures: boolean): Promise<string | null> {
-  let update: Update | null;
+  let update: UpdateInfo | null;
   try {
-    update = await check({ timeout: CHECK_TIMEOUT_MS });
+    update = await api.updateCheck(CHECK_TIMEOUT_MS);
   } catch (e) {
     console.error("update check failed:", e);
     if (reportFailures) ui.failed(`無法檢查更新：${describe(e)}`);
@@ -41,28 +46,26 @@ export async function checkForUpdate(ui: UpdateUi, reportFailures: boolean): Pro
   }
   if (!update) return null;
   const found = update;
-  ui.offer(found.version, found.body ?? null, async () => {
+  ui.offer(found.version, found.notes, async () => {
     let total: number | null = null;
     let received = 0;
     try {
-      await found.downloadAndInstall(
-        (event) => {
-          if (event.event === "Started") {
-            total = event.data.contentLength ?? null;
-            ui.progress(total ? 0 : null);
-          } else if (event.event === "Progress") {
-            received += event.data.chunkLength;
-            ui.progress(total ? Math.min(100, Math.floor((received / total) * 100)) : null);
-          }
-        },
-        { timeout: DOWNLOAD_TIMEOUT_MS },
-      );
+      await api.updateInstall((event) => {
+        if (event.event === "Started") {
+          total = event.contentLength;
+          ui.progress(total ? 0 : null);
+        } else if (event.event === "Progress") {
+          received += event.chunkLength;
+          ui.progress(total ? Math.min(100, Math.floor((received / total) * 100)) : null);
+        }
+      }, DOWNLOAD_TIMEOUT_MS);
     } catch (e) {
       console.error("update install failed:", e);
       ui.failed(`更新失敗：${describe(e)}`);
       return;
     }
-    // On Windows the installer usually closes the app itself before this point.
+    // On Windows the app has exited before this point (engine stopped first,
+    // then the installer runs); macOS and Linux get here and offer a restart.
     ui.installed(found.version, async () => {
       try {
         await relaunch();

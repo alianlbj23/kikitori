@@ -1,9 +1,10 @@
 //! kikitori desktop app entry point.
 //!
 //! Role: assembles the Tauri app — plugins (log, window state, updater, process,
-//! opener, global shortcut), managed state (the engine bridge and overlay state), command
-//! handlers and the app lifecycle (start the engine on launch, shut it down on
-//! exit, quit when the main window closes).
+//! opener, global shortcut), managed state (the engine bridge, overlay state and the
+//! pending update), command handlers and the app lifecycle (start the engine on
+//! launch, shut it down on exit — and before a Windows update exits the app, see
+//! `updater.rs` — and quit when the main window closes).
 
 mod commands;
 mod connection;
@@ -11,6 +12,7 @@ mod engine;
 mod line_reader;
 mod overlay;
 mod protocol;
+mod updater;
 
 use std::sync::Arc;
 
@@ -130,6 +132,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(OverlayState::default())
+        .manage(updater::PendingUpdate::default())
         .setup(|app| {
             let handle = app.handle().clone();
             register_click_through_shortcut(&handle);
@@ -172,6 +175,8 @@ pub fn run() {
             commands::overlay_set_style,
             commands::overlay_set_click_through,
             commands::overlay_set_visible,
+            updater::update_check,
+            updater::update_install,
         ])
         .build(tauri::generate_context!());
 

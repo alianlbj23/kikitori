@@ -54,6 +54,29 @@ pub fn third_party_licenses_dir(resource_dir: &Path) -> PathBuf {
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a process that is already exiting gets before it is killed.
+const KILL_GRACE: Duration = Duration::from_millis(500);
+/// Grace period for the engine when an update is about to replace its files:
+/// the installer starts right after, so a stuck engine is killed rather than waited for.
+pub const UPDATE_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// How an engine shutdown ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// No engine process was running.
+    NotRunning,
+    /// The engine exited on its own after `engine.shutdown`.
+    Exited,
+    /// The engine did not exit within the grace period and was killed.
+    Killed,
+}
+
+/// Upper bound of [`EngineBridge::shutdown_blocking`]: the grace period, then the
+/// kill (a short wait for a process that is already exiting, the kill itself),
+/// plus a margin for scheduling.
+pub fn blocking_shutdown_bound(grace: Duration) -> Duration {
+    grace + KILL_GRACE + KILL_WAIT_TIMEOUT + Duration::from_millis(500)
+}
 
 /// Where the engine command came from (shown in the UI and logs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -539,22 +562,58 @@ impl EngineBridge {
 
     /// Asks the engine to exit, then kills it if it does not within the deadline.
     pub async fn shutdown(&self) {
+        self.shutdown_within(SHUTDOWN_TIMEOUT).await;
+    }
+
+    /// Sends `engine.shutdown` and waits for the process to exit; the request and
+    /// the wait share one `grace` deadline, after which the engine is killed.
+    /// The bridge stays down afterwards (no automatic restart) until [`Self::start`].
+    pub async fn shutdown_within(&self, grace: Duration) -> ShutdownOutcome {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         let running = self.inner.current.read().await.clone();
         let Some(r) = running else {
-            return;
+            return ShutdownOutcome::NotRunning;
         };
         r.stopping.store(true, Ordering::SeqCst);
-        if let Err(e) = r
-            .conn
-            .request("engine.shutdown", json!({}), SHUTDOWN_TIMEOUT)
-            .await
-        {
-            log::warn!("engine.shutdown failed ({e}); killing the engine");
+        let deadline = tokio::time::Instant::now() + grace;
+        if let Err(e) = r.conn.request("engine.shutdown", json!({}), grace).await {
+            log::warn!("engine.shutdown failed ({e}); killing the engine if it does not exit");
         }
-        if !wait_exited(r.exited.clone(), SHUTDOWN_TIMEOUT).await {
-            log::warn!("engine did not exit within {SHUTDOWN_TIMEOUT:?}; killing it");
-            self.kill_current().await;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if wait_exited(r.exited.clone(), left).await {
+            return ShutdownOutcome::Exited;
+        }
+        log::warn!("engine did not exit within {grace:?}; killing it");
+        self.kill_current().await;
+        ShutdownOutcome::Killed
+    }
+
+    /// Blocking [`Self::shutdown_within`] for synchronous callers that must not
+    /// return before the engine is gone: tauri-plugin-updater's `on_before_exit`
+    /// hook, which on Windows is followed by the installer and `std::process::exit`
+    /// (`RunEvent::Exit` and its shutdown never run). The work runs on `runtime`
+    /// (where the engine's I/O tasks live) while this thread waits, at most
+    /// [`blocking_shutdown_bound`]; `None` means the bound was hit and the caller
+    /// proceeds anyway. Must not be called on a current-thread runtime's only thread.
+    pub fn shutdown_blocking(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        grace: Duration,
+    ) -> Option<ShutdownOutcome> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bridge = self.clone();
+        runtime.spawn(async move {
+            let outcome = bridge.shutdown_within(grace).await;
+            // The waiter may have given up already; nothing else to tell.
+            let _ = tx.send(outcome);
+        });
+        let bound = blocking_shutdown_bound(grace);
+        match rx.recv_timeout(bound) {
+            Ok(outcome) => Some(outcome),
+            Err(e) => {
+                log::error!("engine shutdown did not finish within {bound:?} ({e}); continuing");
+                None
+            }
         }
     }
 }
@@ -600,7 +659,7 @@ async fn supervise(
 
 async fn kill_and_wait(child: &mut Child, reason: &str) -> String {
     // Give a process that is exiting on its own a moment before killing it.
-    if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+    if let Ok(Ok(status)) = tokio::time::timeout(KILL_GRACE, child.wait()).await {
         return format!("{reason}; engine exited ({status})");
     }
     if let Err(e) = child.start_kill() {
@@ -939,6 +998,85 @@ mod tests {
                 .unwrap();
             bridge.shutdown().await;
             wait_until("stopped", || bridge.status().phase == BridgePhase::Stopped).await;
+        }
+
+        /// Runs [`EngineBridge::shutdown_blocking`] the way the updater's
+        /// `on_before_exit` hook does: synchronously, off the async context.
+        async fn shutdown_like_the_updater(
+            bridge: &EngineBridge,
+            grace: Duration,
+        ) -> (Option<ShutdownOutcome>, Duration) {
+            let runtime = tokio::runtime::Handle::current();
+            let bridge = bridge.clone();
+            let started = Instant::now();
+            let outcome =
+                tokio::task::spawn_blocking(move || bridge.shutdown_blocking(&runtime, grace))
+                    .await
+                    .expect("shutdown_blocking panicked");
+            (outcome, started.elapsed())
+        }
+
+        /// Windows updates exit through `std::process::exit` right after the hook,
+        /// so the hook itself must end the engine via `engine.shutdown`. The app
+        /// still holds the engine's stdin here, so only the request can stop it.
+        /// Called directly on a runtime worker, as inside `download_and_install`.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn update_hook_shuts_the_engine_down_before_returning() {
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(Ok(fake_command(&[])), rec.clone());
+            bridge.start().await.expect("handshake");
+            bridge
+                .request(
+                    "session.start",
+                    json!({"mode": "media", "device_id": null}),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+            let started = Instant::now();
+            let outcome = crate::updater::shutdown_engine_before_exit(
+                &bridge,
+                &tokio::runtime::Handle::current(),
+            );
+            let elapsed = started.elapsed();
+            assert_eq!(outcome, Some(ShutdownOutcome::Exited));
+            assert!(elapsed < UPDATE_SHUTDOWN_GRACE, "took {elapsed:?}");
+            wait_until("stopped", || bridge.status().phase == BridgePhase::Stopped).await;
+            let detail = bridge.status().detail.unwrap_or_default();
+            assert!(
+                detail.contains("engine exited (") && !detail.contains("killed"),
+                "{detail}"
+            );
+            // Not a crash: no automatic restart afterwards.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            assert_eq!(bridge.status().phase, BridgePhase::Stopped);
+        }
+
+        /// An engine that never answers (stuck mid-inference) is killed once the
+        /// grace period is over, so the installer is not kept waiting.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn update_hook_kills_an_engine_that_ignores_shutdown() {
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(Ok(fake_command(&["--ignore-shutdown"])), rec.clone());
+            bridge.start().await.expect("handshake");
+            let grace = Duration::from_millis(800);
+            let (outcome, elapsed) = shutdown_like_the_updater(&bridge, grace).await;
+            assert_eq!(outcome, Some(ShutdownOutcome::Killed));
+            assert!(elapsed >= grace, "killed too early: {elapsed:?}");
+            assert!(elapsed < blocking_shutdown_bound(grace), "took {elapsed:?}");
+            wait_until("stopped", || bridge.status().phase == BridgePhase::Stopped).await;
+            let detail = bridge.status().detail.unwrap_or_default();
+            assert!(detail.contains("killed"), "{detail}");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn update_hook_without_a_running_engine_returns_at_once() {
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(Ok(fake_command(&[])), rec.clone());
+            let (outcome, elapsed) =
+                shutdown_like_the_updater(&bridge, UPDATE_SHUTDOWN_GRACE).await;
+            assert_eq!(outcome, Some(ShutdownOutcome::NotRunning));
+            assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

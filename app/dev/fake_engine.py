@@ -18,7 +18,8 @@ Point the app at it with
 or use `npm run menu` in app/.
 
 Fault injection (for exercising the bridge): `--garbage-every N` writes an invalid
-line after every N subtitle events; `--crash-after SECONDS` exits with status 3.
+line after every N subtitle events; `--crash-after SECONDS` exits with status 3;
+`--ignore-shutdown` never answers `engine.shutdown` (an engine stuck mid-inference).
 """
 
 from __future__ import annotations
@@ -459,8 +460,11 @@ class Session(threading.Thread):
 
 
 class FakeEngine:
-    def __init__(self, writer: Writer) -> None:
+    def __init__(self, writer: Writer, ignore_shutdown: bool = False) -> None:
         self.writer = writer
+        # Imitates an engine stuck mid-inference: `engine.shutdown` is never
+        # answered, so the app has to fall back to killing the process.
+        self.ignore_shutdown = ignore_shutdown
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         self.downloaded = {"tiny", "base", "small"}
         self.downloading: set[str] = set()
@@ -837,6 +841,9 @@ class FakeEngine:
                     validate_settings(deep_merge(self.settings, candidate))
                 self.jobs.put((request_id, method, params))
                 return True
+            if method == "engine.shutdown" and self.ignore_shutdown:
+                log("ignoring engine.shutdown (--ignore-shutdown)")
+                return True
             handler = self.methods.get(method) if isinstance(method, str) else None
             if handler is None:
                 raise ProtocolError("unknown_method", f"unknown method {method!r}")
@@ -858,12 +865,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Fake kikitori engine (stdio NDJSON).")
     parser.add_argument("--garbage-every", type=int, default=0, metavar="N")
     parser.add_argument("--crash-after", type=float, default=0.0, metavar="SECONDS")
+    parser.add_argument(
+        "--ignore-shutdown",
+        action="store_true",
+        help="never answer engine.shutdown (the app must kill the process)",
+    )
     args = parser.parse_args()
     if args.garbage_every < 0 or args.crash_after < 0:
         parser.error("arguments must be non-negative")
 
     writer = Writer(args.garbage_every)
-    engine = FakeEngine(writer)
+    engine = FakeEngine(writer, ignore_shutdown=args.ignore_shutdown)
     if args.crash_after > 0:
 
         def crash() -> None:

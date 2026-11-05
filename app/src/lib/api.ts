@@ -6,7 +6,7 @@
  * every failure is turned into a Traditional Chinese sentence by `describeError`.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -27,6 +27,8 @@ import type {
   OverlayStyle,
   StatusEvent,
   SubtitleEvent,
+  UpdateDownloadEvent,
+  UpdateInfo,
 } from "./types";
 import { parseAppliedRecommendation, parseSettingsResult, type SettingsResult } from "./settings";
 import {
@@ -42,6 +44,8 @@ import {
   parseOverlaySnapshot,
   parseStatus,
   parseSubtitle,
+  parseUpdateDownloadEvent,
+  parseUpdateInfo,
 } from "./validate";
 
 export const EVENTS = {
@@ -104,6 +108,31 @@ export const api = {
   /** Opens a bundled license folder; Rust computes the path from the name. */
   async openThirdPartyLicenses(folder: LicenseFolder): Promise<void> {
     await invoke("open_third_party_licenses", { folder });
+  },
+  /**
+   * Checks `latest.json` for a newer version. Goes through Rust (not the
+   * updater plugin's JavaScript API) so installing can stop the engine first.
+   */
+  async updateCheck(timeoutMs: number): Promise<UpdateInfo | null> {
+    return parseUpdateInfo(await invoke("update_check", { timeoutMs }));
+  },
+  /**
+   * Downloads, verifies and installs the update found by `updateCheck`. On
+   * Windows the app exits during this call (the engine is shut down first).
+   */
+  async updateInstall(onEvent: (event: UpdateDownloadEvent) => void, timeoutMs: number): Promise<void> {
+    const channel = new Channel<unknown>();
+    channel.onmessage = (message) => {
+      let event: UpdateDownloadEvent;
+      try {
+        event = parseUpdateDownloadEvent(message);
+      } catch (e) {
+        console.error("dropping malformed update progress:", e);
+        return;
+      }
+      onEvent(event);
+    };
+    await invoke("update_install", { onEvent: channel, timeoutMs });
   },
   /** Opens the NVIDIA CUDA EULA; the opener permission allows no other URL. */
   async openNvidiaEula(): Promise<void> {

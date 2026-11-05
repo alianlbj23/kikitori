@@ -299,6 +299,19 @@ export interface AboutInfo {
   engine_licenses: string | null;
 }
 
+/** `update_check` result: a newer version announced by `latest.json`. */
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes: string | null;
+}
+
+/** Progress reported by `update_install` (same events as the updater plugin's). */
+export type UpdateDownloadEvent =
+  | { event: "Started"; contentLength: number | null }
+  | { event: "Progress"; chunkLength: number }
+  | { event: "Finished" };
+
 /** Argument of `open_third_party_licenses`: which bundled folder to open. */
 export type LicenseFolder = "app" | "engine";
 

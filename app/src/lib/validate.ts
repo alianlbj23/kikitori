@@ -32,6 +32,8 @@ import type {
   SubtitleEvent,
   TranslationModel,
   TranslationServerInfo,
+  UpdateDownloadEvent,
+  UpdateInfo,
 } from "./types";
 
 export class ValidationError extends Error {
@@ -464,6 +466,34 @@ export function parseAbout(v: unknown): AboutInfo {
     app_licenses: optStr(o, "app_licenses", p),
     engine_licenses: optStr(o, "engine_licenses", p),
   };
+}
+
+/** `update_check` result; `null` means no newer version. */
+export function parseUpdateInfo(v: unknown): UpdateInfo | null {
+  if (v === null) return null;
+  const p = "update_check";
+  const o = obj(v, p);
+  return {
+    version: str(o, "version", p, 100),
+    currentVersion: str(o, "currentVersion", p, 100),
+    notes: optStr(o, "notes", p),
+  };
+}
+
+/** One `update_install` progress message. */
+export function parseUpdateDownloadEvent(v: unknown): UpdateDownloadEvent {
+  const p = "update_install";
+  const o = obj(v, p);
+  switch (o.event) {
+    case "Started":
+      return { event: "Started", contentLength: optUint(obj(o.data, `${p}.data`), "contentLength", `${p}.data`) };
+    case "Progress":
+      return { event: "Progress", chunkLength: uint(obj(o.data, `${p}.data`), "chunkLength", `${p}.data`) };
+    case "Finished":
+      return { event: "Finished" };
+    default:
+      throw new ValidationError(`${p}.event`, "unknown download event");
+  }
 }
 
 /** Recognises the serialized Rust `RequestError`; anything else is not one. */

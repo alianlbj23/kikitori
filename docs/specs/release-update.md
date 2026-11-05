@@ -155,11 +155,11 @@ assemble 在 publish 模式以 `tauri.conf.json` 的公鑰（app 內建、用來
 
 ### app 端流程（`app/src/main/updater.ts`，見 `ui.md`）
 
-正式版啟動時檢查一次（15 秒逾時，失敗不打擾）；設定頁「關於」可手動檢查。找到新版 →「下載並安裝」→ 下載進度 → 外掛以內建公鑰驗證簽章 → 安裝 →「立即重新啟動」（`relaunch`）。
+正式版啟動時檢查一次（15 秒逾時，失敗不打擾）；設定頁「關於」可手動檢查。找到新版 →「下載並安裝」→ 下載進度 → 外掛以內建公鑰驗證簽章 → 安裝 →「立即重新啟動」（`relaunch`）。檢查與安裝經由 app 自己的 `update_check`／`update_install` 指令（`app/src-tauri/src/updater.rs`）呼叫外掛的 Rust API，而不是外掛的 JavaScript API：只有這樣才能換掉 `on_before_exit`，在 Windows 安裝程式覆寫檔案前先關閉引擎（細節見 `ui.md`「自動更新」）。
 
 | 平台 | 安裝方式 |
 |---|---|
-| Windows | 執行新的 NSIS 安裝檔（`installMode: passive`：只顯示進度，通常會自行關閉並重開程式） |
+| Windows | `on_before_exit`：送 `engine.shutdown`，3 秒內沒結束就強制結束引擎（外掛隨後直接 `std::process::exit`，不經過 `RunEvent::Exit`）→ 執行新的 NSIS 安裝檔（`installMode: passive`：只顯示進度，通常會自行關閉並重開程式） |
 | macOS | 解開 `.app.tar.gz`，以 rename 替換目前的 `.app`。經由更新器下載的檔案不帶隔離屬性，所以不會再出現 Gatekeeper 警告 |
 | Linux AppImage | 以新的 AppImage 取代目前檔案（需要對該檔案所在目錄有寫入權限） |
 | Linux deb | `pkexec dpkg -i`（或 zenity／kdialog 詢問密碼、最後退回終端機 sudo） |
@@ -210,4 +210,4 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 - 自動更新的完整一輪：裝 `v<n>` → 發布 `v<n+1>` → app 偵測、下載、驗證、安裝、重新啟動後版本正確。第一個 Release 之後才能測（需要兩個版本）。
 - macOS：下載的 DMG 在 Gatekeeper 的實際提示（應是「無法驗證開發者」而非「已損毀」）、強制打開後能正常執行、自動更新替換 `.app` 後引擎仍可執行（ad-hoc 簽章、執行權限）、螢幕錄製權限在更新後是否要重新授權（ad-hoc 簽章的程式每版簽章不同，TCC 可能視為新程式）。
 - Linux：Wayland 桌面；deb 更新時 pkexec 的提示；AppImage 自我更新需要對檔案所在目錄的寫入權限。（沒有 libfuse2／fusermount 時 AppImage 的行為已在容器確認，見上方安裝說明。）
-- Windows：SmartScreen 提示、passive 模式更新後自動重開、安裝在使用者目錄（currentUser）時的更新權限。
+- Windows：SmartScreen 提示、passive 模式更新後自動重開、安裝在使用者目錄（currentUser）時的更新權限；真實模型推論中按「下載並安裝」時，`on_before_exit` 關閉引擎的實際耗時（單元測試以 `fake_engine.py` 驗證流程與期限）。

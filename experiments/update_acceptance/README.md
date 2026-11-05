@@ -94,7 +94,9 @@ uv run python experiments/update_acceptance/update_acceptance.py --steps manifes
   **約 50 ms** 結束——閒置與假模式下 session 執行中都一樣，兩次更新都成功。NSIS 只用 Restart Manager
   檢查主程式；引擎的檔案若在覆寫時仍被佔用，安裝可能失敗（未實測）。真實模型推論中
   （大型 Whisper 在 CPU 上）引擎結束可能較慢，本機沒有驗證；若實機遇到，可在
-  `tauri_plugin_updater::Builder::on_before_exit` 先關引擎。
+  `tauri_plugin_updater::Builder::on_before_exit` 先關引擎。（之後已改為在更新器的
+  `on_before_exit` 先送 `engine.shutdown`、3 秒後強制結束，見 `docs/specs/ui.md`「自動更新」；
+  這次的結果是改動之前量的。）
 - 安裝後的主程式叫 `kikitori-app.exe`（Cargo 的 bin 名稱；開始功能表捷徑叫 kikitori）。工作管理員裡
   看到的是 `kikitori-app`。規格沒有規定，只是記錄。
 - 引擎版本來自 `pyproject.toml`，這裡只覆寫了 app 的版本，所以兩版的引擎都是 0.1.0；正式發布時

@@ -23,6 +23,8 @@ fn main() {
             "overlay_set_style",
             "overlay_set_click_through",
             "overlay_set_visible",
+            "update_check",
+            "update_install",
         ]),
     ))
     .expect("failed to run tauri-build");
