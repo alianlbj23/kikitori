@@ -181,6 +181,25 @@ class OpenSourceTest(unittest.TestCase):
         self.assertEqual(default.microphone.id, "sink.monitor")
         self.assertEqual(named.microphone.id, "mic")
 
+    def test_linux_sources_watch_for_device_removal(self) -> None:
+        # PulseAudio 會把被移除裝置上的串流搬走而不報錯，來源必須自己確認裝置還在。
+        fake = FakeSoundcard()
+        with mock.patch.object(soundcard, "load_soundcard", return_value=fake):
+            sources = [
+                devices.open_source(None, "loopback", platform="linux"),
+                devices.open_source(
+                    "soundcard:microphone:mic", "microphone", platform="linux"
+                ),
+            ]
+        for src in sources:
+            assert isinstance(src, soundcard.SoundcardSource)
+            assert src.is_present is not None
+            self.assertTrue(src.is_present())
+        fake.mics.clear()
+        for src in sources:
+            assert src.is_present is not None
+            self.assertFalse(src.is_present())
+
     def test_macos_loopback(self) -> None:
         with mock.patch.object(sck, "is_supported", return_value=True):
             self.assertIsInstance(

@@ -285,6 +285,84 @@ class LoadSoundcardTest(unittest.TestCase):
         with self.assertRaises(BackendUnavailableError):
             backend.load_soundcard(importer=failing_import)
 
+    def test_no_pulseaudio_server_becomes_backend_unavailable(self) -> None:
+        # soundcard 0.4.6 匯入時就連線；沒有伺服器時 context 不是 READY，它用 assert
+        # 檢查，所以拋的是 AssertionError（容器實測：PULSE_SERVER 指到不存在的 socket）。
+        def no_server_import(name: str) -> Any:
+            raise AssertionError()
+
+        with self.assertRaises(BackendUnavailableError):
+            backend.load_soundcard(importer=no_server_import)
+
+
+class OpenMicrophoneTest(unittest.TestCase):
+    """PulseAudio／PipeWire 在裝置移除時會把錄音串流搬到預設 source（容器實測：
+    拔掉輸出裝置後，monitor 的串流被搬到預設麥克風、繼續送資料、沒有任何錯誤）。
+    `open_microphone()` 的來源要定期確認裝置還在，不在就拋 `DeviceLostError`。"""
+
+    def endless_blocks(self, mic: FakeMic) -> None:
+        # 讓假裝置一直有資料（模擬串流被搬到別的裝置後繼續送）。
+        mic.next_block = lambda channels: (  # type: ignore[method-assign]
+            time.sleep(0.005) or np.full((240, channels), 0.1, np.float32)
+        )
+
+    def test_resolves_default_and_explicit_devices(self) -> None:
+        sc = linux_fake()
+        default = backend.open_microphone(sc, "linux", "loopback", None)
+        named = backend.open_microphone(sc, "linux", "microphone", "alsa_input.analog")
+        self.assertIsInstance(default, backend.SoundcardSource)
+        self.assertEqual(default.microphone.id, "alsa_output.analog.monitor")
+        self.assertEqual(named.microphone.id, "alsa_input.analog")
+        with self.assertRaises(DeviceNotFoundError):
+            backend.open_microphone(sc, "linux", "microphone", "gone")
+
+    def test_device_removed_while_capturing_raises_device_lost(self) -> None:
+        sc = linux_fake()
+        mic = sc.mics[0]
+        self.endless_blocks(mic)
+        src = backend.open_microphone(
+            sc, "linux", "loopback", mic.id, presence_interval=0.02
+        )
+        src.start()
+        try:
+            self.assertGreater(len(src.read(timeout=1.0)), 0)
+            sc.mics.remove(mic)  # 裝置從清單消失，但串流仍有資料
+            with (
+                self.assertLogs("kikitori.capture.threaded", "ERROR"),
+                self.assertRaises(DeviceLostError),
+            ):
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    src.read(timeout=0.1)
+        finally:
+            src.stop()
+
+    def test_present_device_keeps_capturing(self) -> None:
+        sc = linux_fake()
+        mic = sc.mics[0]
+        self.endless_blocks(mic)
+        src = backend.open_microphone(
+            sc, "linux", "loopback", None, presence_interval=0.01
+        )
+        src.start()
+        try:
+            total = 0
+            deadline = time.monotonic() + 0.3
+            while time.monotonic() < deadline:
+                total += len(src.read(timeout=0.1))
+        finally:
+            src.stop()
+        self.assertGreater(total, 0)
+        # 有確認過裝置還在（不只是建立時列舉一次）。
+        self.assertGreater(len(sc.include_loopback_calls), 3)
+
+    def test_invalid_presence_interval(self) -> None:
+        for value in (0.0, -1.0, float("nan")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                backend.open_microphone(
+                    linux_fake(), "linux", "loopback", None, presence_interval=value
+                )
+
 
 def wait_until(pred: Callable[[], bool], timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout

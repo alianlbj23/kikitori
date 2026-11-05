@@ -80,7 +80,9 @@ def open_source(device_id: str | None, kind: DeviceKind) -> AudioSource: ...
 - 以 `blocksize` 設定 fragsize（20 ms），否則 PulseAudio 預設的 fragment 會造成秒級延遲。
 - monitor source 在靜音時仍持續送出（全零的）資料，不需補零。
 - 裝置比對只做原生 id 完全比對；soundcard 自己的 `get_microphone` 會做名稱模糊比對，可能開錯裝置，所以不用。
-- 沒有 PulseAudio 伺服器或沒有 `libpulse` → 匯入 soundcard 失敗 → `BackendUnavailableError`。
+- 沒有 PulseAudio 伺服器或沒有 `libpulse` → 匯入 soundcard 失敗 → `BackendUnavailableError`。soundcard 匯入時就連線，連不上伺服器時以 `assert` 檢查 context 狀態，所以 `AssertionError` 也歸為此類（容器實測）。
+- **裝置移除**：PulseAudio（16.1 實測）在裝置移除時不會讓串流失敗，而是把它搬到預設 source 繼續送資料——拔掉 USB 耳機時，錄它 monitor 的串流會被搬到麥克風。所以 `open_microphone()` 建立的來源在擷取中每 0.25 秒以 `all_microphones()` 確認原生 id 還在，不在就拋 `DeviceLostError`（最多混進一個讀取區塊的他處音訊）。不用 `PA_STREAM_DONT_MOVE`：soundcard 沒有開放串流旗標，而且它會讓使用者無法在 pavucontrol 手動改來源。
+- 開始錄 null sink 的 monitor 時，約 1.9 s 後才收到第一筆資料（容器內 null sink 實測；真實音效卡待實機確認），之後連續交付。
 
 ### macOS：ScreenCaptureKit（系統聲音）＋ CoreAudio（麥克風）
 
@@ -120,7 +122,7 @@ def open_source(device_id: str | None, kind: DeviceKind) -> AudioSource: ...
 | `BackendUnavailableError` | 平台不支援、匯入 soundcard／PyObjC 失敗（例如沒有 libpulse）、macOS < 13 要求系統聲音 |
 | `DeviceNotFoundError` | 指定的 id 不存在、沒有預設裝置、沒有任何 loopback 裝置 |
 | `PermissionDeniedError` | 螢幕錄製權限被拒（macOS `SCStreamErrorUserDeclined` −3801，含開始時與執行中被撤銷）。Windows 麥克風權限被拒只能從 PortAudio 得到 `Unanticipated host error`，歸為 `CaptureError` 並附提示 |
-| `DeviceLostError` | 擷取中裝置消失：WASAPI 串流讀取（`get_read_available`／`read`）拋 `OSError`、PulseAudio stream FAILED、ScreenCaptureKit `didStopWithError` |
+| `DeviceLostError` | 擷取中裝置消失：WASAPI 串流讀取（`get_read_available`／`read`）拋 `OSError`、PulseAudio stream FAILED（伺服器結束）或裝置從清單消失（串流被搬走）、ScreenCaptureKit `didStopWithError` |
 | `CaptureError` | 其他擷取錯誤、使用狀態錯誤（未 start 就 read 等） |
 
 - 輸入驗證：`kind` 必須是兩者之一；`device_id` 必須是 `None` 或非空字串；`timeout`、緩衝秒數等必須是有限正數；`ArraySource` 只接受一維 int16；`FileSource` 只接受 PCM WAV（8/16/24/32 位元整數）。

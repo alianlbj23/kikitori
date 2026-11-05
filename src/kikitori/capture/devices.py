@@ -72,8 +72,7 @@ def _open_default(current: str, kind: DeviceKind) -> AudioSource:
                 "virtual device such as BlackHole and select it as the source instead"
             )
         return sck.ScreenCaptureKitSource()
-    sc = soundcard.load_soundcard()
-    return soundcard.SoundcardSource(soundcard.find_microphone(sc, current, kind, None))
+    return soundcard.open_microphone(soundcard.load_soundcard(), current, kind, None)
 
 
 def open_source(
@@ -95,9 +94,8 @@ def open_source(
     if backend == wasapi.BACKEND and current == "win32":
         return wasapi.WasapiSource(id_kind, native_id)
     if backend == soundcard.BACKEND and current in ("linux", "darwin"):
-        sc = soundcard.load_soundcard()
-        return soundcard.SoundcardSource(
-            soundcard.find_microphone(sc, current, id_kind, native_id)
+        return soundcard.open_microphone(
+            soundcard.load_soundcard(), current, id_kind, native_id
         )
     if device_id == sck.DEVICE_ID and current == "darwin":
         return _open_default(current, "loopback")
