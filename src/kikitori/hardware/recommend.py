@@ -61,8 +61,9 @@ SHARED_WORKER_EXTRA_MB = 512
 工作記憶體（解碼暫存、cuBLAS workspace）。CTranslate2 文件：同一裝置的 worker 共用權重；
 暫存量沒有官方數字，registry 的量測也只含一步解碼的暖機，所以保守抓 0.5 GiB（未實測）。"""
 MIN_TRANSLATION_BUDGET_GB = 4.0
-"""翻譯至少要能放 qwen3.5:4b 的等級（`RECOMMENDATION_TIERS` 的 4 GB 門檻）。低於這個只剩
-HY-MT1.5 1.8B：translate_eval 中它在每個資料集都顯著較差，短句還會幻覺。"""
+"""翻譯至少要能放 qwen3.5:4b 的等級（`RECOMMENDATION_TIERS` 的 4 GB 門檻）。低於這個仍推薦
+4B（HY-MT1.5 1.8B 在 translate_eval 每個資料集都顯著較差、短句還會幻覺，只給使用者自選），
+但 Ollama 放不下時部分層在 CPU、翻譯變慢，所以挑 ASR 組合時盡量讓預算到這個門檻。"""
 MIN_DRIVER_MAJOR = 525
 """CUDA 12.x minor version compatibility 的最低驅動（NVIDIA CUDA Compatibility 文件）。"""
 CPU_HIGH_RAM_MIN_BYTES = 15 * GIB
@@ -625,8 +626,9 @@ def recommend(
 
     Args:
         info: `detect()` 的結果。
-        allow_restricted: False 時不推薦有地區限制授權的翻譯模型（例如使用者在
-            歐盟、英國、南韓時排除 HY-MT）。非商用授權的模型一律不推薦。
+        allow_restricted: False 時不推薦有地區限制授權的翻譯模型。目前每個等級都只
+            推薦 Qwen3.5（沒有地區限制；HY-MT 只給使用者自選），所以實際上不改變結果。
+            非商用授權的模型一律不推薦。
         languages: 收聽／字幕語言（影片翻譯）或兩個方向（口譯）。None 時不看語言
             （ASR 只用多語言模型、翻譯模型不檢查語言組合）。
 

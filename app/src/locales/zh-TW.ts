@@ -484,7 +484,7 @@ export const zhTW = {
   "settings.regionLegend": "翻譯模型的授權地區",
   "settings.regionLede": "部分翻譯模型（例如騰訊 HY-MT）的授權不適用於歐盟、英國與南韓。kikitori 無法得知你身在何處，所以預設不推薦這些模型。",
   "settings.regionConsent": "我確認我不在歐盟、英國或南韓使用 kikitori，並同意遵守這些翻譯模型的授權條款。",
-  "settings.regionHelp": "勾選後，建議組合才會考慮有地區限制的模型。不勾選時仍可在「自訂組合」手動選用，但會顯示警告。",
+  "settings.regionHelp": "建議組合只會用沒有地區限制的 Qwen3.5。勾選後，在「自訂組合」手動選用有地區限制的模型時不再顯示警告。",
   "settings.languageLegend": "語言",
   "settings.languageLede": "選擇要聽的語言與字幕的語言，下方會列出這組語言推薦的模型。選擇時不會下載；第一次按「開始」時才下載缺少的模型。",
   "settings.languageModeMedia": "以下是「影片翻譯」模式的語言。",
@@ -537,7 +537,7 @@ export const zhTW = {
   "settings.linesOption": { other: "{count} 句" } satisfies PluralMessage,
   "settings.save": "儲存設定",
   "settings.saved": "已儲存設定。",
-  "settings.savedRegion": "已儲存設定。建議組合會依新的授權地區重新計算（到「模型」頁查看）。",
+  "settings.savedRegion": "已儲存設定。授權地區的確認只影響在「自訂組合」手動選用模型時的警告。",
 
   // ------------------------------------------------------------ 表單驗證（lib/settings.ts）
   "validation.urlScheme": "網址要以 http:// 或 https:// 開頭。",

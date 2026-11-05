@@ -186,8 +186,9 @@ class Transcriber(Protocol):
 - `WhisperTranscriber.close(timeout=2.0)`：之後的 `transcribe()`／`warmup()`／`with_options()` 丟 `RuntimeError`；先等進行中的推論結束
   （不能在推論途中卸載），再 `unload_model()` 並放回池中。逾時（推論卡住）時記 warning、不放回，物件交給參照計數（漏一次 8 MiB）。可重複呼叫。
 - 即時與完整共用一個物件（`workers=2` + `with_options()`）時以借用計數（`_ModelLease`）處理：兩個實例都關閉才歸還一次。
-- 上限 `MAX_IDLE_MODELS = 4` 個閒置物件（每個約 8 MiB 顯示記憶體與一條 CTranslate2 工作執行緒），超過時丟掉最久沒用的（LRU）——那個組合
-  之後再用到時建立新物件，代價與沒有池時相同。卸載失敗的物件記錄後丟掉；`unload_model()` 返回後 `model_is_loaded` 仍為 True 的物件也丟掉
+- 上限 `MAX_IDLE_MODELS = 10` 個閒置物件（每個約 8 MiB 顯示記憶體與一條 CTranslate2 工作執行緒），超過時丟掉最久沒用的（LRU）——那個組合
+  之後再用到時建立新物件，代價與沒有池時相同。丟掉的物件在 CTranslate2 中本來就漏掉它佔的量，所以保留不比丟掉貴；原本的 4 在 v0.2.0 驗收的
+  memory_soak 情境 2（4 組語言／模型輪流＝6 個鍵）造成每個 session 仍多約 11 MiB 顯示記憶體，2026-11-06 改為 10。卸載失敗的物件記錄後丟掉；`unload_model()` 返回後 `model_is_loaded` 仍為 True 的物件也丟掉
   （見下方 CTranslate2 語意：模型忙碌時它直接返回、不丟例外）。
 - 誰呼叫 `close()`：引擎在 session 結束（停止、讀完、錯誤、載入中被停止、開裝置失敗）時以 `pipeline.types.release_components()` 關閉兩個
   transcriber；`factory.build_components()` 在完整模型載入失敗時關閉已載入的即時模型。`models.delete` 先以 `MODEL_POOL.evict_under(模型資料夾)`
@@ -244,9 +245,9 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 | NVIDIA ≥ 8 GB VRAM（Milestone 16） | 偵測到 NVIDIA GPU、VRAM ≥ 8 GB、cuBLAS 可載入 | `large-v3-turbo` CUDA float16 或 int8_float16 | `large-v3` CUDA float16 或 int8_float16 | 延遲中位約 0.16 s（turbo greedy，GPU 共用下）＋0.27–0.41 s（large-v3 f16／int8 單獨執行）；VRAM 2.9–6.0 GB | `experiments/vtuber_eval`：YODAS 口語 CER turbo 比 small 低 5.6 點；BGM 10／5 dB 時 large-v3 完整路徑比 turbo 好 4.1／5.3 點；int8_float16 品質不變。精度依與本機翻譯 LLM 共用時的 VRAM 預算決定，連 4B 都放不下時即時改 `small`（見 `hardware.md`「8 GB 以上等級的組合」）。th／ar／hi 即時也用 `large-v3`（turbo 是 C 級），共用一份權重。large-v3 的 no_speech 可用 |
 | NVIDIA 4–8 GB VRAM | 同上，4 GB ≤ VRAM < 8 GB | `base` CUDA int8_float16 | `large-v3-turbo` CUDA int8_float16 | 0.07–0.19 s＋0.17 s；VRAM 約 0.45＋1.25 GB | 留空間給翻譯 LLM；int8_float16 比 float16 慢 5–50% 但省一半 VRAM |
 | NVIDIA < 4 GB VRAM | VRAM < 4 GB | `base` CUDA int8_float16 | `small` CUDA int8_float16 | 0.07–0.19 s＋0.18 s；VRAM 約 0.45＋0.65 GB | 若翻譯 LLM 也在 GPU，VRAM 可能仍不足，改用 CPU 等級 |
-| CPU、RAM ≥ 16 GB | 沒有可用 NVIDIA GPU（或 cuBLAS 不可載入），RAM ≥ 16 GB | `base` CPU int8 | `small` CPU int8 | 0.45 s＋1.3 s；RAM 約 0.35＋0.95 GB | 8 核以上 CPU 實測。`medium`（3.6 s、RTF 0.9）與 `large-v3-turbo`（5.1 s、RTF 1.2）在 CPU 上太慢，不建議 |
-| CPU、RAM < 16 GB 或 ≤ 4 核 | 同上，RAM < 16 GB 或實體核心 ≤ 4 | `tiny` CPU int8 | `base` CPU int8 | 0.23 s＋0.47 s；RAM 約 0.23＋0.35 GB | 品質明顯下降（tiny 在 VTuber 片段錯字多）；核心少時延遲會高於本機數值（未量測） |
-| Apple Silicon | macOS arm64 | `base` CPU int8 | `small` CPU int8 | **未量測**（CTranslate2 在 macOS 只有 CPU：Accelerate + Ruy） | 暫比照「CPU ≥ 16 GB」；需在 M 系列實機跑 `experiments/asr_benchmark` 後修正 |
+| CPU、RAM ≥ 15 GiB 且實體核心 > 4（`cpu`） | 沒有可用 NVIDIA GPU（或 cuBLAS 不可載入），RAM ≥ 15 GiB（標稱 16 GB 扣掉內顯共用後常為 15.x GiB）且實體核心 > 4 | `base` CPU int8 | `small` CPU int8 | 0.45 s＋1.3 s；RAM 約 0.35＋0.95 GB | 8 核以上 CPU 實測。`medium`（3.6 s、RTF 0.9）與 `large-v3-turbo`（5.1 s、RTF 1.2）在 CPU 上太慢，不建議 |
+| CPU、RAM < 15 GiB 或實體核心 ≤ 4（`cpu_low`） | 同上，RAM < 15 GiB、實體核心 ≤ 4，或 RAM 偵測不到 | `tiny` CPU int8 | `base` CPU int8 | 0.23 s＋0.47 s；RAM 約 0.23＋0.35 GB | 品質明顯下降（tiny 在 VTuber 片段錯字多）；核心少時延遲會高於本機數值（未量測） |
+| Apple Silicon | macOS arm64 | `base` CPU int8 | `small` CPU int8 | **未量測**（CTranslate2 在 macOS 只有 CPU：Accelerate + Ruy） | 暫比照 `cpu` 等級（RAM ≥ 15 GiB 且實體核心 > 4）；需在 M 系列實機跑 `experiments/asr_benchmark` 後修正 |
 
 - `cpu_threads`：小模型用預設值即可；small 以上設為實體核心數（上限 8）約快 8%。即時與完整模型同時在 CPU 執行時，建議兩者合計不超過實體核心數（例如 4＋4）。
 - 語言：所有建議模型都是多語模型，語言清單的 20 種語言共用；影片翻譯指定收聽語言時以 `DecodeOptions(forced_language=...)` 固定，`auto` 時以 `candidate_languages` 限在語言清單的 Whisper 語言；口譯模式限在（我的語言, 對方語言），例如 `("zh", "ja")`。

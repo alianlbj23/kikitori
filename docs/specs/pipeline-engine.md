@@ -272,7 +272,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `subtitle` | 任意 JSON 物件，引擎不解讀、原樣保存給 UI（字型、位置、顏色…）；巢狀 ≤ 5 層、序列化後 ≤ 16 KiB、不得有 NaN／Infinity |
 | `ui` | UI 自己的狀態，限制與 `subtitle` 相同、引擎不解讀。目前只有 `dismissed_recommendations`（「不要再提醒」過的推薦指紋，最多 10 個，見 `settings.preview_recommendation`）。schema 2 之後新增、有預設值 `{}`，**不升 schema**（與 `keep_warm_secs` 相同） |
 
-- ASR 預設為「沒有 GPU 也跑得動」的組合（`asr.md` 的 CPU ≥ 16 GB 等級：即時 `base`、完整 `small`），hardware 偵測之後推薦覆寫。
+- ASR 預設為「沒有 GPU 也跑得動」的組合（`asr.md` 的 `cpu` 等級——RAM ≥ 15 GiB 且實體核心 > 4：即時 `base`、完整 `small`），hardware 偵測之後推薦覆寫。
 - 數字欄位不接受布林；整數欄位不接受小數。未知欄位一律報錯（打錯字要讓使用者知道）。缺少的欄位用預設值（舊檔案加新欄位時不必遷移；例如 `translation.keep_warm_secs` 是 schema 2 之後新增、沒有升版的欄位。代價是舊版程式讀到新版寫的檔案會報「unknown setting」，`SettingsStore` 會保留原檔並用預設值）。
 - 錯誤訊息帶欄位路徑：`SettingsError("media.pause_secs: expected a number in [0.1, 5.0], got 'abc'")`。
 - 不存 API key 本身，只存環境變數名稱。

@@ -88,7 +88,7 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 | 8 GB 等級門檻 | 7680 MiB | 標稱 8 GB 的卡回報約 8188 MiB，容許 0.5 GiB 誤差 |
 | 4 GB 等級門檻 | 3584 MiB | 同上 |
 | 共用權重的第二個 worker | 512 MiB（`SHARED_WORKER_EXTRA_MB`） | 兩條路徑同模型同精度時只載入一份權重（見下），第二個 CTranslate2 worker 的解碼暫存保守估計；未實測 |
-| 翻譯最低等級 | 4.0 GB（`MIN_TRANSLATION_BUDGET_GB`） | qwen3.5:4b 的等級（`RECOMMENDATION_TIERS`）；更低只剩 HY-MT 1.8B，translate_eval 中每個資料集都顯著較差且會幻覺 |
+| 翻譯最低等級 | 4.0 GB（`MIN_TRANSLATION_BUDGET_GB`） | qwen3.5:4b 的等級（`RECOMMENDATION_TIERS`）；更低仍推薦 4B（Ollama 部分放到 CPU、較慢），不推薦 HY-MT 1.8B（translate_eval 中每個資料集都顯著較差且會幻覺，只給使用者自選） |
 | 最低驅動 | 525 | NVIDIA CUDA minor version compatibility：CUDA 12.x 需要 ≥ 525 |
 | CPU 高 RAM 門檻 | 15 GiB | 標稱 16 GB 扣掉內顯共用後常為 15.x GiB |
 | CPU 低核心 | 實體核心 ≤ 4 | asr.md |
@@ -162,7 +162,7 @@ BGM 10／5 dB 時 large-v3 比 turbo 好 4.1／5.3 點，乾淨語音打平；la
 - **翻譯不在這張卡上**（遠端伺服器，或收聽與字幕語言是同一個 Whisper 語言、不需要翻譯模型）：第一個放得下的（VRAM − 1024 ≥ ASR）。
   8 GB 等級一律是 turbo f16 ／ v3 f16。
 - **與本機翻譯 LLM 共用**：翻譯預算 = VRAM − 1024 − ASR（GB，取到小數 2 位），等級依 `RECOMMENDATION_TIERS`（≥ 7.5 GB 9B、
-  ≥ 4.0 GB 4B、其他 HY-MT 1.8B）。依組的順序：組內放得下的候選中，「翻譯等級最高」的就是組內最省 VRAM 的那個能到的等級；
+  其他 4B；每個等級都只推薦 Qwen3.5，不論 `allow_restricted`，HY-MT 只給使用者自選）。依組的順序：組內放得下的候選中，「翻譯等級最高」的就是組內最省 VRAM 的那個能到的等級；
   若該等級 ≥ 4.0 GB，挑組內**第一個**達到該等級的（精度最高、延遲最低）。否則看下一組。都不到 4.0 GB 時用最省 VRAM 的候選。
   int8_float16 品質相同，所以「翻譯模型升一級」永遠優先於「ASR 用 float16」；但不會為了升級翻譯而把即時模型換成 small
   （第 2 組只在第 1 組連 4B 都放不下時才用）。
@@ -183,12 +183,12 @@ BGM 10／5 dB 時 large-v3 比 turbo 好 4.1／5.3 點，乾淨語音打平；la
 | 8188（8 GB） | 是 | turbo int8 ／ v3 int8 | 2880 | 4.18 GB | qwen3.5:4b |
 | 7680（8 GB 等級下限） | 是 | **small** int8 ／ v3 int8（turbo int8 只剩 3.69 GB） | 2290 | 4.26 GB | qwen3.5:4b |
 | 7680–24564 | 否（遠端或不需翻譯） | turbo f16 ／ v3 f16 | 5970 | — | — |
-| 6144（6 GB） | 是／否 | base int8 ／ turbo int8（沿用） | 1190 | 3.84 GB | hy-mt1.5-1.8b |
-| 4096（4 GB） | 是／否 | base int8 ／ turbo int8（沿用） | 1190 | 1.84 GB | hy-mt1.5-1.8b（超過預算警告） |
-| 2048 | 是／否 | base int8 ／ small int8（沿用） | 600 | 0.41 GB | hy-mt1.5-1.8b |
+| 6144（6 GB） | 是／否 | base int8 ／ turbo int8（沿用） | 1190 | 3.84 GB | qwen3.5:4b |
+| 4096（4 GB） | 是／否 | base int8 ／ turbo int8（沿用） | 1190 | 1.84 GB | qwen3.5:4b（超過預算警告） |
+| 2048 | 是／否 | base int8 ／ small int8（沿用） | 600 | 0.41 GB | qwen3.5:4b（超過預算警告） |
 | 12227，收聽 th／ar／hi | 是 | v3 int8 ／ v3 int8（共用權重） | 2652 | 8.35 GB | qwen3.5:9b |
 | 16303，收聽 th／ar／hi | 是 | v3 f16 ／ v3 f16（共用權重） | 4682 | 10.35 GB | qwen3.5:9b |
-| 7680，收聽 th／ar／hi | 是 | v3 int8 ／ v3 int8（共用權重） | 2652 | 3.91 GB | hy-mt1.5-1.8b |
+| 7680，收聽 th／ar／hi | 是 | v3 int8 ／ v3 int8（共用權重） | 2652 | 3.91 GB | qwen3.5:4b |
 
 （int8 ＝ int8_float16；Pascal 6.1 一律 int8：8192 MiB 時 turbo int8 ／ v3 int8、qwen3.5:4b。）LLM 的 VRAM 用預設組的
 `approx_vram_gb`（權重，9B 6.6 GB、4B 3.3 GB），門檻 7.5／4.0 GB 已含 KV cache 的餘裕；`tests/test_hardware_recommend.py`

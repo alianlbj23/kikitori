@@ -36,6 +36,15 @@ export function replace(parent: Node, ...children: Child[]): void {
   append(parent, ...children);
 }
 
+/**
+ * Assigns `target[key] = value` only when it differs. Writing the same `textContent`
+ * still replaces the text node (garbage for the renderer to collect), so redraws that
+ * touch every row on every event must skip unchanged values.
+ */
+export function setIfChanged<T extends object, K extends keyof T>(target: T, key: K, value: T[K]): void {
+  if (target[key] !== value) target[key] = value;
+}
+
 /** `document.getElementById` that fails loudly when the page and code disagree. */
 export function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const el = document.getElementById(id);

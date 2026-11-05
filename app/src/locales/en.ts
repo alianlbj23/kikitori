@@ -523,7 +523,7 @@ export const en: Messages = {
   "settings.regionConsent":
     "I confirm that I don't use kikitori in the EU, the UK or South Korea, and I agree to these translation models' license terms.",
   "settings.regionHelp":
-    "When checked, the recommended setup also considers region-restricted models. When unchecked, you can still pick them in the custom setup, with a warning.",
+    "The recommended setup only uses Qwen3.5, which has no region restriction. When checked, picking a region-restricted model yourself in the custom setup no longer shows a warning.",
   "settings.languageLegend": "Languages",
   "settings.languageLede": "Choose the language you listen to and the subtitle language; the models recommended for them are listed below. Nothing is downloaded now: missing models are downloaded the first time you press Start.",
   "settings.languageModeMedia": "These are the languages for video translation.",
@@ -577,7 +577,7 @@ export const en: Messages = {
   "settings.linesOption": { one: "{count} sentence", other: "{count} sentences" },
   "settings.save": "Save settings",
   "settings.saved": "Settings saved.",
-  "settings.savedRegion": "Settings saved. The recommended setup will be recalculated for the new license region (see the Models page).",
+  "settings.savedRegion": "Settings saved. The license region confirmation only affects the warning when you pick a model yourself in the custom setup.",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "The URL must start with http:// or https://.",

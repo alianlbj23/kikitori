@@ -560,7 +560,7 @@ export const es: Messages = {
   "settings.regionConsent":
     "Confirmo que no uso kikitori en la UE, el Reino Unido ni Corea del Sur, y acepto los términos de licencia de estos modelos de traducción.",
   "settings.regionHelp":
-    "Si está marcado, la configuración recomendada también tiene en cuenta los modelos con restricciones regionales. Si no está marcado, puedes elegirlos igualmente en la configuración personalizada, con una advertencia.",
+    "La configuración recomendada solo usa Qwen3.5, que no tiene restricciones regionales. Si está marcado, elegir tú mismo un modelo con restricciones regionales en la configuración personalizada ya no muestra una advertencia.",
   "settings.languageLegend": "Idiomas",
   "settings.languageLede":
     "Elige el idioma que escuchas y el idioma de los subtítulos; abajo se indican los modelos recomendados para ellos. Ahora no se descarga nada: los modelos que falten se descargan la primera vez que pulses Iniciar.",
@@ -623,7 +623,7 @@ export const es: Messages = {
   "settings.save": "Guardar configuración",
   "settings.saved": "Configuración guardada.",
   "settings.savedRegion":
-    "Configuración guardada. La configuración recomendada se volverá a calcular para la nueva región de licencia (consulta la página Modelos).",
+    "Configuración guardada. La confirmación de la región de licencia solo afecta a la advertencia al elegir tú mismo un modelo en la configuración personalizada.",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "La URL debe empezar por http:// o https://.",

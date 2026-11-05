@@ -155,10 +155,13 @@ def _default_storage(array: npt.NDArray[np.float32]) -> Any:
 
 CLOSE_TIMEOUT = 2.0
 """`close()` 等進行中的推論結束的上限（秒）；逾時就不放回模型池（不能在推論途中卸載）。"""
-MAX_IDLE_MODELS = 4
+MAX_IDLE_MODELS = 10
 """模型池最多保留幾個卸載後的空殼物件（每個約 8 MiB 顯示記憶體與一條 CTranslate2 工作
 執行緒）。實務上用過的不同組合（模型 × 裝置 × 精度 × 執行緒數）不到 10 個；超過時丟掉最久
-沒用的那個——那一個之後再用到時會建立新物件，漏一次 8 MiB，與沒有池時相同。"""
+沒用的那個——那一個之後再用到時會建立新物件，漏一次 8 MiB，與沒有池時相同。
+丟掉的物件在 CTranslate2 中本來就會漏掉它佔的那 8 MiB，所以保留不比丟掉貴；上限只是防止
+無限成長。原本是 4：v0.2.0 驗收的 memory_soak 情境 2（4 組語言／模型輪流、6 個不同的鍵）
+因此每個 session 仍多 10.7 MiB 顯示記憶體與 13 MiB 主記憶體。"""
 
 
 @dataclass(frozen=True)

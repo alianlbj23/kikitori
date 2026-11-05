@@ -527,7 +527,7 @@ export const vi: Messages = {
   "settings.regionConsent":
     "Tôi xác nhận rằng tôi không sử dụng kikitori tại EU, Vương quốc Anh hoặc Hàn Quốc, và tôi đồng ý với điều khoản giấy phép của các mô hình dịch này.",
   "settings.regionHelp":
-    "Khi đánh dấu, cấu hình đề xuất cũng xét đến các mô hình bị giới hạn khu vực. Khi bỏ đánh dấu, bạn vẫn có thể chọn chúng trong cấu hình tùy chỉnh, kèm cảnh báo.",
+    "Cấu hình đề xuất chỉ dùng Qwen3.5, mô hình không bị giới hạn khu vực. Khi đánh dấu, việc tự chọn mô hình bị giới hạn khu vực trong cấu hình tùy chỉnh sẽ không còn hiện cảnh báo.",
   "settings.languageLegend": "Ngôn ngữ",
   "settings.languageLede":
     "Chọn ngôn ngữ bạn nghe và ngôn ngữ phụ đề; các mô hình được đề xuất cho chúng được liệt kê bên dưới. Lúc này chưa tải gì: các mô hình còn thiếu sẽ được tải vào lần đầu bạn nhấn Bắt đầu.",
@@ -589,7 +589,7 @@ export const vi: Messages = {
   "settings.save": "Lưu cài đặt",
   "settings.saved": "Đã lưu cài đặt.",
   "settings.savedRegion":
-    "Đã lưu cài đặt. Cấu hình đề xuất sẽ được tính lại theo khu vực giấy phép mới (xem trang Mô hình).",
+    "Đã lưu cài đặt. Xác nhận khu vực giấy phép chỉ ảnh hưởng đến cảnh báo khi bạn tự chọn mô hình trong cấu hình tùy chỉnh.",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "URL phải bắt đầu bằng http:// hoặc https://.",

@@ -540,7 +540,7 @@ export const id: Messages = {
   "settings.regionConsent":
     "Saya menyatakan bahwa saya tidak menggunakan kikitori di Uni Eropa, Inggris, atau Korea Selatan, dan saya menyetujui ketentuan lisensi model terjemahan tersebut.",
   "settings.regionHelp":
-    "Jika dicentang, konfigurasi yang disarankan juga mempertimbangkan model dengan batasan wilayah. Jika tidak dicentang, Anda tetap dapat memilihnya di konfigurasi kustom, disertai peringatan.",
+    "Konfigurasi yang disarankan hanya memakai Qwen3.5, yang tidak memiliki batasan wilayah. Jika dicentang, memilih sendiri model dengan batasan wilayah di konfigurasi kustom tidak lagi menampilkan peringatan.",
   "settings.languageLegend": "Bahasa",
   "settings.languageLede":
     "Pilih bahasa yang Anda dengarkan dan bahasa subtitle; model yang disarankan untuk keduanya tercantum di bawah. Tidak ada yang diunduh sekarang: model yang kurang diunduh saat Anda pertama kali menekan Mulai.",
@@ -602,7 +602,7 @@ export const id: Messages = {
   "settings.save": "Simpan pengaturan",
   "settings.saved": "Pengaturan disimpan.",
   "settings.savedRegion":
-    "Pengaturan disimpan. Konfigurasi yang disarankan akan dihitung ulang untuk wilayah lisensi yang baru (lihat halaman Model).",
+    "Pengaturan disimpan. Konfirmasi wilayah lisensi hanya memengaruhi peringatan saat Anda memilih model sendiri di konfigurasi kustom.",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "URL harus diawali http:// atau https://.",

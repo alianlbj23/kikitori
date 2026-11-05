@@ -230,6 +230,20 @@ class ModelPoolTest(PoolCase):
         self.load("m0").close()
         self.assertEqual(len(FakeCt2Whisper.created), 4)
 
+    def test_default_pool_keeps_every_model_of_a_language_switching_user(self) -> None:
+        # memory_soak 情境 2（v0.2.0 驗收）：4 組語言／模型輪流＝6 個不同的鍵
+        # （tiny、base、small、medium、large-v3、large-v3-turbo）。上限 4 時每輪都把最舊的
+        # 丟掉再重建，CTranslate2 每建一個物件就漏約 8 MiB 顯示記憶體（+10.7 MiB／session）。
+        # 丟掉的物件本來就漏掉它佔的量，所以保留不比丟掉貴：上限要涵蓋實務上會用到的組合。
+        pool = ModelPool()
+        names = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
+        with mock.patch.object(whisper_module, "MODEL_POOL", pool):
+            for _ in range(3):
+                for name in names:
+                    self.load(name).close()
+        self.assertEqual(len(FakeCt2Whisper.created), len(names))
+        self.assertEqual(pool.idle_count(), len(names))
+
     def test_evict_under_and_clear(self) -> None:
         self.load("a").close()
         self.load("b").close()

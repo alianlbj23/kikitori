@@ -501,7 +501,7 @@ export const ko: Messages = {
   "settings.regionConsent":
     "EU, 영국 또는 한국에서 kikitori를 사용하지 않음을 확인하며, 이러한 번역 모델의 라이선스 조항을 준수하는 데 동의합니다.",
   "settings.regionHelp":
-    "체크하면 권장 구성에서 지역 제한이 있는 모델도 고려합니다. 체크하지 않아도 '사용자 지정 구성'에서 직접 선택할 수 있지만 경고가 표시됩니다.",
+    "권장 구성은 지역 제한이 없는 Qwen3.5만 사용합니다. 체크하면 '사용자 지정 구성'에서 지역 제한이 있는 모델을 직접 선택해도 경고가 표시되지 않습니다.",
   "settings.languageLegend": "언어",
   "settings.languageLede":
     "들을 언어와 자막 언어를 선택하면 해당 언어 조합에 권장되는 모델이 아래에 표시됩니다. 선택할 때는 다운로드하지 않으며, 처음 '시작'을 누를 때 누락된 모델을 다운로드합니다.",
@@ -558,7 +558,7 @@ export const ko: Messages = {
   "settings.linesOption": { other: "{count}문장" },
   "settings.save": "설정 저장",
   "settings.saved": "설정을 저장했습니다.",
-  "settings.savedRegion": "설정을 저장했습니다. 권장 구성은 새 라이선스 지역에 맞춰 다시 계산됩니다('모델' 페이지에서 확인).",
+  "settings.savedRegion": "설정을 저장했습니다. 라이선스 지역 확인은 '사용자 지정 구성'에서 모델을 직접 선택할 때의 경고에만 영향을 줍니다.",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "URL은 http:// 또는 https://로 시작해야 합니다.",

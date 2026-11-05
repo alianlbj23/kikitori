@@ -1,6 +1,6 @@
 # Spec: 日語直播（VTuber）特化
 
-> 狀態：**已實作**（2026-11-06，Milestone 16；端到端 VRAM 驗收待記憶體壓力測試）。規格寫於同日。依據：`reports/VTuber 直播模型選型調查.md`（文獻）、
+> 狀態：**已實作**（2026-11-06，Milestone 16；端到端 VRAM 與記憶體壓力測試已在 v0.2.0 驗收完成，見「驗證」）。規格寫於同日。依據：`reports/VTuber 直播模型選型調查.md`（文獻）、
 > `experiments/vtuber_eval/`（ASR 實測）、`experiments/translate_eval/`（翻譯實測）、
 > `experiments/hallucination_lexicon/`（幻覺片語）。使用者已授權依建議實作，最後驗收。
 > 修改：`hardware.md`（推薦組合）、`translate.md`（預設組參數、術語表、後處理）、`asr.md`（片語）。
@@ -65,5 +65,8 @@ kikitori 的主要情境是看日語 VTuber 直播（雜談、遊戲、連動，
     統計上偵測得到但只有前文效果的 1/30，來自改變的 5 句中兩三句的措辭（例如「4000 日圓」→「四千元」）。判斷：維持術語表預設開啟。
     新程式（溫度 0 預設組、前文保險、後處理）在術語表關閉時與舊的 `q9-t0-ctx` 逐句相同。細節見 `experiments/translate_eval/README.md`
     「Milestone 16：術語表開／關」。
-- 端到端：本機 12 GB 顯卡上實際以新推薦組合跑 session，量 VRAM 是否在預算內（記憶體壓力測試一併檢查）。**尚未執行**：
-  共用權重第二個 worker 的 512 MiB 也是估計值，由這項驗收確認。
+- 端到端：本機 12 GB 顯示卡上實際以新推薦組合跑 session，量 VRAM 是否在預算內（記憶體壓力測試一併檢查）。
+  - **結果（2026-11-06，v0.2.0 驗收，`tasks/acceptance-report-v0.2.0.md`）**：turbo int8_float16 ／ large-v3 int8_float16 ＋ qwen3.5:9b，影片翻譯 session 中
+    引擎 3.2–3.6 GB、Ollama 7.07 GB、整張卡最高 10.8／12.2 GB；`/api/ps` 的 `size` ＝ `size_vram`（沒有放到 CPU）。完整字幕 `latency_ms` 中位數 578 ms、
+    即時字幕延遲 0.31 s；但 int8_float16 在載入時量化，按「開始」到聆聽 10.6–13.3 s（v0.1.0 約 3 s）。
+  - 共用權重第二個 worker 的 512 MiB 仍是估計值（th／ar／hi 的組合沒有在這次端到端量測）。

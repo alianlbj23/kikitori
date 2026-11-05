@@ -498,7 +498,7 @@ export const ja: Messages = {
   "settings.regionConsent":
     "EU、英国、韓国で kikitori を使用しないことを確認し、これらの翻訳モデルのライセンス条項を遵守することに同意します。",
   "settings.regionHelp":
-    "チェックを入れると、推奨構成で地域制限のあるモデルも考慮します。チェックを外していても「カスタム構成」で手動で選べますが、警告が表示されます。",
+    "推奨構成には地域制限のない Qwen3.5 だけを使います。チェックを入れると、「カスタム構成」で地域制限のあるモデルを手動で選んだときに警告が表示されなくなります。",
   "settings.languageLegend": "言語",
   "settings.languageLede":
     "聞き取る言語と字幕の言語を選ぶと、その組み合わせに推奨されるモデルが下に表示されます。選んだ時点ではダウンロードしません。初めて「開始」を押したときに不足しているモデルをダウンロードします。",
@@ -555,7 +555,7 @@ export const ja: Messages = {
   "settings.linesOption": { other: "{count} 文" },
   "settings.save": "設定を保存",
   "settings.saved": "設定を保存しました。",
-  "settings.savedRegion": "設定を保存しました。推奨構成は新しいライセンス地域に基づいて再計算されます（「モデル」ページで確認できます）。",
+  "settings.savedRegion": "設定を保存しました。ライセンス地域の確認は、「カスタム構成」でモデルを手動で選んだときの警告にだけ影響します。",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "URL は http:// または https:// で始めてください。",

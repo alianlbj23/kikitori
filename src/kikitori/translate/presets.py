@@ -242,27 +242,16 @@ class RecommendationTier:
 
 # 由高到低；第一個符合 min_vram_gb 的等級生效。0 GB 等級也涵蓋沒有 GPU 的情況。
 # 依 experiments/translate_benchmark（RTX 5070）：GPU 上每個模型的總延遲都在 0.3 秒內，
-# 所以即時與完整路徑用同一個模型，只載入一份、省 VRAM；品質 Qwen3.5 9B > 4B >
-# HY-MT 7B > HY-MT 1.8B（日文口語），Qwen3.5 也沒有地區限制。門檻含 KV cache 的餘裕。
-# CPU 沒有實測，先選最小的 HY-MT 1.8B。
-_ALL_BY_QUALITY = (
-    "qwen3.5:9b",
-    "qwen3.5:4b",
-    "hy-mt1.5-7b:latest",
-    "hy-mt1.5-1.8b:latest",
-)
+# 所以即時與完整路徑用同一個模型，只載入一份、省 VRAM。門檻含 KV cache 的餘裕。
+# 每個等級都只推薦 Qwen3.5（不論 allow_restricted）：experiments/translate_eval 中 Qwen 9B
+# 與 HY-MT 7B COMET 同級但直播用語明顯較好；HY-MT 1.8B 每個資料集都顯著較差且會幻覺，
+# 所以預算不到 4 GB（含 CPU）也推薦 4B——Ollama 放不下時部分層在 CPU，慢但譯文可用。
+# HY-MT 只給使用者在自訂組合自選（授權地區說明照舊）。docs/specs/vtuber-profile.md。
+_QWEN_BY_QUALITY = ("qwen3.5:9b", "qwen3.5:4b")
 RECOMMENDATION_TIERS: tuple[RecommendationTier, ...] = (
-    RecommendationTier(min_vram_gb=7.5, fast=_ALL_BY_QUALITY, final=_ALL_BY_QUALITY),
-    RecommendationTier(
-        min_vram_gb=4.0,
-        fast=("qwen3.5:4b", "hy-mt1.5-1.8b:latest"),
-        final=("qwen3.5:4b", "hy-mt1.5-1.8b:latest"),
-    ),
-    RecommendationTier(
-        min_vram_gb=0.0,
-        fast=("hy-mt1.5-1.8b:latest", "qwen3.5:4b"),
-        final=("hy-mt1.5-1.8b:latest", "qwen3.5:4b"),
-    ),
+    RecommendationTier(min_vram_gb=7.5, fast=_QWEN_BY_QUALITY, final=_QWEN_BY_QUALITY),
+    RecommendationTier(min_vram_gb=4.0, fast=("qwen3.5:4b",), final=("qwen3.5:4b",)),
+    RecommendationTier(min_vram_gb=0.0, fast=("qwen3.5:4b",), final=("qwen3.5:4b",)),
 )
 
 

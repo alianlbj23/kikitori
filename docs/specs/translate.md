@@ -305,11 +305,11 @@ COMET 也顯著提高（9B +0.0094、4B +0.0117），ja→en 沒有變差；HY-M
 
 | 等級（可給翻譯的 VRAM） | 即時路徑（fast）順序 | 完整路徑（final）順序 |
 |---|---|---|
-| ≥ 7.5 GB | qwen3.5:9b → qwen3.5:4b → hy-mt1.5-7b → hy-mt1.5-1.8b | 同左 |
-| 4–7.5 GB | qwen3.5:4b → hy-mt1.5-1.8b | 同左 |
-| < 4 GB／沒有 GPU | hy-mt1.5-1.8b → qwen3.5:4b | 同左 |
+| ≥ 7.5 GB | qwen3.5:9b → qwen3.5:4b | 同左 |
+| 4–7.5 GB | qwen3.5:4b | 同左 |
+| < 4 GB／沒有 GPU | qwen3.5:4b（Ollama 放不下時部分層在 CPU，較慢） | 同左 |
 
-依據（RTX 5070 實測）：GPU 上每個模型的總延遲 P90 都在 0.3 秒內，遠低於字幕需求，所以即時與完整路徑**用同一個模型**，只載入一份；Ollama 換模型要 1.5–18 秒（第一次載入，見 experiments/translate_benchmark/README.md），兩個模型輪流用反而更慢。品質（日文口語）Qwen3.5 9B > 4B > HY-MT 7B > HY-MT 1.8B。CPU 推論沒有實測，先選最小的 HY-MT 1.8B。實際順序以 `presets.py` 的 `RECOMMENDATION_TIERS` 為準。
+依據（RTX 5070 實測）：GPU 上每個模型的總延遲 P90 都在 0.3 秒內，遠低於字幕需求，所以即時與完整路徑**用同一個模型**，只載入一份；Ollama 換模型要 1.5–18 秒（第一次載入，見 experiments/translate_benchmark/README.md），兩個模型輪流用反而更慢。品質（日文口語）Qwen3.5 9B > 4B > HY-MT 7B > HY-MT 1.8B。**每個等級都只推薦 Qwen3.5，不論 `allow_restricted`**（2026-11-06，依 `experiments/translate_eval`：Qwen 9B 與 HY-MT 7B COMET 同級但直播用語明顯較好；HY-MT 1.8B 每個資料集 COMET 都顯著較低且會幻覺，所以預算不到 4 GB 或沒有 GPU 也推薦 4B）。HY-MT 仍可在自訂組合手動選用（授權地區說明不變）。實際順序以 `presets.py` 的 `RECOMMENDATION_TIERS` 為準。
 
 ## Tech Stack
 

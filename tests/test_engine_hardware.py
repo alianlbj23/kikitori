@@ -251,7 +251,7 @@ class HardwareServiceTest(unittest.TestCase):
         self.assertEqual(self.provider.calls, 2)
 
     def test_recommendation_respects_allow_restricted(self) -> None:
-        # 只裝了 HY-MT 時，預設（不允許地區限制）不推薦它
+        # 只裝了 HY-MT 時不推薦它：預設不允許地區限制；允許了也一樣（HY-MT 只給使用者自選）
         info = self.provider.detect(Settings())
         restricted = dataclasses.replace(
             info,
@@ -265,7 +265,7 @@ class HardwareServiceTest(unittest.TestCase):
         _, rec = self.service.recommendation(
             Settings().merged({"translation": {"allow_restricted": True}}), fresh=True
         )
-        self.assertEqual(rec.translation_fast, "hy-mt1.5-1.8b:latest")
+        self.assertEqual(rec.translation_fast, "qwen3.5:4b")
 
 
 class MappingTest(unittest.TestCase):

@@ -466,7 +466,7 @@ export const zhCN: Messages = {
   "settings.regionLegend": "翻译模型的许可地区",
   "settings.regionLede": "部分翻译模型（例如腾讯 HY-MT）的许可不适用于欧盟、英国和韩国。kikitori 无法得知你所在的位置，因此默认不推荐这些模型。",
   "settings.regionConsent": "我确认我不在欧盟、英国或韩国使用 kikitori，并同意遵守这些翻译模型的许可条款。",
-  "settings.regionHelp": "勾选后，推荐组合才会考虑有地区限制的模型。不勾选时仍可在“自定义组合”中手动选用，但会显示警告。",
+  "settings.regionHelp": "推荐组合只会使用没有地区限制的 Qwen3.5。勾选后，在“自定义组合”中手动选用有地区限制的模型时不再显示警告。",
   "settings.languageLegend": "语言",
   "settings.languageLede": "选择要收听的语言和字幕语言，下方会列出这组语言推荐的模型。选择时不会下载；第一次点击“开始”时才下载缺少的模型。",
   "settings.languageModeMedia": "以下是“视频翻译”模式的语言。",
@@ -519,7 +519,7 @@ export const zhCN: Messages = {
   "settings.linesOption": { other: "{count} 句" },
   "settings.save": "保存设置",
   "settings.saved": "已保存设置。",
-  "settings.savedRegion": "已保存设置。推荐组合将按新的许可地区重新计算（到“模型”页查看）。",
+  "settings.savedRegion": "已保存设置。许可地区的确认只影响在“自定义组合”中手动选用模型时的警告。",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "网址必须以 http:// 或 https:// 开头。",

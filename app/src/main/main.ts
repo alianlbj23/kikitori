@@ -27,7 +27,7 @@ import {
   type CheckView,
 } from "../lib/combination";
 import { RecentLog, buildDiagnostics } from "../lib/diagnostics";
-import { byId, h, replace } from "../lib/dom";
+import { byId, h, replace, setIfChanged } from "../lib/dom";
 import {
   EXPORT_CONTENTS,
   EXPORT_FORMATS,
@@ -822,27 +822,35 @@ function showsTranslation(): boolean {
   return state.settings?.translation.enabled ?? true;
 }
 
+// Called for every row on every subtitle event (several per second): only values that
+// changed are written, or each redraw would replace hundreds of text nodes (renderer memory
+// grew ~8 MiB/min in the v0.2.0 GUI soak).
 function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
   const shown = lineDisplay(line, showsTranslation());
   li.classList.toggle("is-partial", !line.isFinal);
   li.classList.toggle("is-original-only", shown.originalOnly);
   const [time, lang, text] = li.children as unknown as [HTMLElement, HTMLElement, HTMLElement];
-  time.textContent = formatTimecode(line.startSample);
-  lang.textContent = languageShort(line.sourceLanguage);
-  lang.title = t("transcript.langTitle", {
-    source: languageName(line.sourceLanguage),
-    target: languageName(line.targetLanguage),
-  });
+  setIfChanged(time, "textContent", formatTimecode(line.startSample));
+  setIfChanged(lang, "textContent", languageShort(line.sourceLanguage));
+  setIfChanged(
+    lang,
+    "title",
+    t("transcript.langTitle", {
+      source: languageName(line.sourceLanguage),
+      target: languageName(line.targetLanguage),
+    }),
+  );
   const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
   // Settled prefix at normal emphasis, the tail that may still change faded (F2).
   const [stable, unstable] = orig.children as unknown as [HTMLElement, HTMLElement];
-  stable.textContent = shown.originalParts.stable;
-  unstable.textContent = shown.originalParts.unstable;
-  orig.lang = htmlLang(line.sourceLanguage);
-  tr.textContent = shown.translation;
-  tr.lang = htmlLang(line.targetLanguage);
+  setIfChanged(stable, "textContent", shown.originalParts.stable);
+  setIfChanged(unstable, "textContent", shown.originalParts.unstable);
+  setIfChanged(orig, "lang", htmlLang(line.sourceLanguage));
+  setIfChanged(tr, "textContent", shown.translation);
+  setIfChanged(tr, "lang", htmlLang(line.targetLanguage));
   // Shown by CSS when the translation is empty (not translated yet, or failed).
-  tr.dataset.empty = line.isFinal ? t("transcript.noTranslation") : t("transcript.translating");
+  const empty = line.isFinal ? t("transcript.noTranslation") : t("transcript.translating");
+  if (tr.dataset.empty !== empty) tr.dataset.empty = empty;
 }
 
 function newLineElement(): HTMLLIElement {

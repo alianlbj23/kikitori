@@ -173,8 +173,8 @@ class RecommendTierTest(unittest.TestCase):
         self.assertEqual(rec.translation_final, "qwen3.5:4b")
 
     def test_smallest_8gb_tier_card_falls_back_to_small_live_model(self) -> None:
-        # 7680 − 1024 − 2880 = 3776 MiB < 4 GB：翻譯只剩 HY-MT 1.8B（translate_eval：每個
-        # 資料集都顯著較差且會幻覺），所以改用 small 即時（2290 MiB）讓 4B 放得下。
+        # 7680 − 1024 − 2880 = 3776 MiB < 4 GB：4B 放不進預算（會部分放到 CPU），所以改用
+        # small 即時（2290 MiB）讓 4B 整個放在顯示卡上。
         rec = recommend(make_info(gpus=(gpu(7680, "8.6", name="Edge 8GB"),)))
         self.assertEqual(rec.fast_asr, AsrChoice("small", "cuda", "int8_float16"))
         self.assertEqual(rec.final_asr, AsrChoice("large-v3", "cuda", "int8_float16"))
@@ -210,13 +210,14 @@ class RecommendTierTest(unittest.TestCase):
         self.assertEqual(
             rec.final_asr, AsrChoice("large-v3-turbo", "cuda", "int8_float16")
         )
-        # 6144 − 1024 − (450 + 1240 − 500) = 3930 MiB ≈ 3.84 GB < 4 GB 門檻
-        self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
+        # 6144 − 1024 − (450 + 1240 − 500) = 3930 MiB ≈ 3.84 GB < 4 GB 門檻：仍推薦 4B
+        # （HY-MT 1.8B 品質顯著較差且會幻覺，只給使用者自選）
+        self.assertEqual(rec.translation_final, "qwen3.5:4b")
 
     def test_nvidia_4gb_gets_small_translation_with_offload_warning(self) -> None:
         rec = recommend(make_info(gpus=(gpu(4096, "8.6", name="RTX 3050"),)))
         self.assertEqual(rec.tier, "nvidia_4gb")
-        self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
+        self.assertEqual(rec.translation_final, "qwen3.5:4b")
         self.assertIn("translation_model_exceeds_budget", codes(rec.warnings))
 
     def test_nvidia_under_4gb_uses_base_and_small(self) -> None:
@@ -237,7 +238,7 @@ class RecommendTierTest(unittest.TestCase):
         self.assertEqual(rec.fast_asr, AsrChoice("base", "cpu", "int8", 4))
         self.assertEqual(rec.final_asr, AsrChoice("small", "cpu", "int8", 4))
         self.assertIsNone(rec.translation_budget_gb)
-        self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
+        self.assertEqual(rec.translation_final, "qwen3.5:4b")
 
     def test_16gb_reported_as_15_6_is_still_high(self) -> None:
         self.assertEqual(recommend(make_info(ram_gb=15.6, physical=6)).tier, "cpu")
@@ -285,7 +286,7 @@ class RecommendTierTest(unittest.TestCase):
                 os="macos", machine="arm64", apple=True, ram_gb=8, supported=False
             )
         )
-        self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
+        self.assertEqual(rec.translation_final, "qwen3.5:4b")
 
     def test_gpu_without_cublas_uses_cpu_and_flags_runtime(self) -> None:
         rec = recommend(make_info(gpus=(gpu(),), cublas=False))
@@ -437,10 +438,17 @@ class RecommendTranslationTest(unittest.TestCase):
         rec = recommend(make_info(ram_gb=32), allow_restricted=False)
         self.assertEqual(rec.translation_final, "qwen3.5:4b")
 
-    def test_tag_less_installed_name_matches(self) -> None:
-        rec = recommend(make_info(ram_gb=32, models=("hy-mt1.5-1.8b",)))
-        self.assertEqual(rec.translation_final, "hy-mt1.5-1.8b:latest")
-        self.assertNotIn("translation_model_not_installed", codes(rec.warnings))
+    def test_installed_hy_mt_is_not_recommended_even_when_allowed(self) -> None:
+        # HY-MT 只給使用者自選（translate_eval）；只裝了它（名稱不帶標籤）時仍推薦 Qwen，
+        # 並提示 Qwen 還沒安裝。
+        for allow in (False, True):
+            with self.subTest(allow_restricted=allow):
+                rec = recommend(
+                    make_info(ram_gb=32, models=("hy-mt1.5-1.8b",)),
+                    allow_restricted=allow,
+                )
+                self.assertEqual(rec.translation_final, "qwen3.5:4b")
+                self.assertIn("translation_model_not_installed", codes(rec.warnings))
 
     def test_server_error_without_model_list(self) -> None:
         info = make_info(gpus=(gpu(),))

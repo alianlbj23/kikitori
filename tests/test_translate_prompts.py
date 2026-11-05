@@ -625,9 +625,25 @@ class RecommendTest(unittest.TestCase):
         choice = recommend_translation_models(24.0, installed=["qwen3.5:4b"])
         self.assertEqual(choice, TranslationModelChoice("qwen3.5:4b", "qwen3.5:4b"))
 
-    def test_installed_names_without_tag_match(self) -> None:
-        choice = recommend_translation_models(2.0, installed=["hy-mt1.5-1.8b"])
-        self.assertEqual(choice.fast, "hy-mt1.5-1.8b:latest")
+    def test_installed_hy_mt_is_not_recommended(self) -> None:
+        # translate_eval：HY-MT 1.8B 每個資料集 COMET 都顯著較低且會幻覺，7B 的直播用語也
+        # 明顯比 Qwen 差，所以 HY-MT 只給使用者自選；裝了（名稱不帶標籤也一樣）也不推薦。
+        for installed in (["hy-mt1.5-1.8b"], ["hy-mt1.5-7b:latest", "hy-mt1.5-1.8b"]):
+            for vram in [None, 2.0, 4.0, 8.0]:
+                with self.subTest(installed=installed, vram=vram):
+                    choice = recommend_translation_models(
+                        vram, installed=installed, allow_restricted=True
+                    )
+                    self.assertTrue(choice.final.startswith("qwen3.5:"), choice)
+                    self.assertTrue(choice.fast.startswith("qwen3.5:"), choice)
+
+    def test_hy_mt_is_never_recommended_regardless_of_allow_restricted(self) -> None:
+        for vram in [None, 0.0, 1.0, 2.0, 3.9, 4.0, 7.4, 7.5, 24.0]:
+            for allow in (True, False):
+                with self.subTest(vram=vram, allow_restricted=allow):
+                    choice = recommend_translation_models(vram, allow_restricted=allow)
+                    for model in (choice.fast, choice.final):
+                        self.assertNotIn("hy-mt", model)
 
     def test_restricted_models_can_be_excluded(self) -> None:
         for vram in [None, 2.0, 4.0, 8.0, 24.0]:
@@ -652,9 +668,14 @@ class RecommendTest(unittest.TestCase):
             recommend_translation_models(4.0),
             TranslationModelChoice("qwen3.5:4b", "qwen3.5:4b"),
         )
+        # 預算不到 4 GB（含沒有 GPU）也推薦 4B：比 HY-MT 1.8B 好得多，Ollama 會部分放到 CPU
         self.assertEqual(
             recommend_translation_models(None),
-            TranslationModelChoice("hy-mt1.5-1.8b:latest", "hy-mt1.5-1.8b:latest"),
+            TranslationModelChoice("qwen3.5:4b", "qwen3.5:4b"),
+        )
+        self.assertEqual(
+            recommend_translation_models(2.0, allow_restricted=True),
+            TranslationModelChoice("qwen3.5:4b", "qwen3.5:4b"),
         )
         self.assertEqual(
             recommend_translation_models(None, allow_restricted=False),
@@ -691,10 +712,13 @@ class RecommendTest(unittest.TestCase):
             PRESETS["qwen3.5:4b"], pairs=frozenset({("ja", "zh-TW")})
         )
         with mock.patch.dict(PRESETS, {"qwen3.5:4b": one_way}):
-            choice = recommend_translation_models(
-                4.0, pairs=[("ja", "zh-TW"), ("zh", "ja")]
+            self.assertEqual(
+                recommend_translation_models(4.0, pairs=[("ja", "zh-TW")]).final,
+                "qwen3.5:4b",
             )
-        self.assertEqual(choice.final, "hy-mt1.5-1.8b:latest")
+            # 4 GB 等級只推薦 4B；它只支援單向時這個等級沒有可推薦的模型
+            with self.assertRaises(NoSupportingModelError):
+                recommend_translation_models(4.0, pairs=[("ja", "zh-TW"), ("zh", "ja")])
 
     def test_no_supporting_model_raises(self) -> None:
         narrow = {

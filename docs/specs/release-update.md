@@ -200,7 +200,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 
 ## 給使用者的安裝說明（未簽章程式）
 
-Release 頁面的說明由 `release.py notes --tag v<版本> --out <檔案>` 產生：下載表（檔名取自 `ASSETS`，與實際附件一致）加上「安裝提示」——下面每一點的精簡版。說明不放在 `release-files` 裡（那個資料夾的每個檔案都會成為附件），另存成 `release-notes` artifact；試建置也會產生，可在該次 run 的 job summary 或 artifact 先看到。`tests/test_release.py` 檢查說明含各平台的提示，且關鍵事實（「其他資訊 → 仍要執行」、「強制打開」、`xattr` 指令、`fuse3`、`--appimage-extract-and-run`、不需要 libfuse2、`fonts-noto-cjk`、`apt install` 指令）在本節與說明裡都出現；改其中一邊時兩邊一起改。
+Release 頁面的說明由 `release.py notes --tag v<版本> --out <檔案>` 產生：若 `docs/release-notes/v<版本>.md` 存在（必須 commit），它的內容放在最前面（去掉含版本號的開頭 H1；檔案不是 UTF-8、含 NUL、空白或超過 100 KB 時 assemble 失敗，不會悄悄略過），接著是 `## 下載`、下載表（檔名取自 `ASSETS`，與實際附件一致）加上「安裝提示」——下面每一點的精簡版。App 內更新視窗顯示的是 `latest.json` 的 `notes`，目前由 workflow 固定為 `kikitori v<版本>`，不含這份說明（要改需動 `release.yml`）。說明不放在 `release-files` 裡（那個資料夾的每個檔案都會成為附件），另存成 `release-notes` artifact；試建置也會產生，可在該次 run 的 job summary 或 artifact 先看到。`tests/test_release.py` 檢查說明含各平台的提示，且關鍵事實（「其他資訊 → 仍要執行」、「強制打開」、`xattr` 指令、`fuse3`、`--appimage-extract-and-run`、不需要 libfuse2、`fonts-noto-cjk`、`apt install` 指令）在本節與說明裡都出現；改其中一邊時兩邊一起改。
 
 - **macOS**：沒有 Apple 開發者簽章與公證（只有 ad-hoc 簽章），從瀏覽器下載的 DMG 第一次開啟會被 Gatekeeper 擋下。把 kikitori 拖到「應用程式」後開啟一次，再到「系統設定 → 隱私權與安全性」，在下方找到 kikitori 按「強制打開」（macOS 15 起不能再用右鍵「打開」略過）。進階使用者也可以執行 `xattr -dr com.apple.quarantine /Applications/kikitori.app`。之後的自動更新不會再出現這個警告。若出現「已損毀，無法打開」而不是「無法驗證開發者」，代表簽章有問題，請回報。
 - **Windows**：安裝檔沒有 Authenticode 簽章，SmartScreen 會顯示「Windows 已保護您的電腦」，選「其他資訊 → 仍要執行」。

@@ -558,7 +558,7 @@ export const ptBR: Messages = {
   "settings.regionConsent":
     "Confirmo que não uso o kikitori na União Europeia, no Reino Unido nem na Coreia do Sul e concordo com os termos de licença desses modelos de tradução.",
   "settings.regionHelp":
-    "Quando marcado, a configuração recomendada também considera modelos com restrição de região. Quando desmarcado, você ainda pode escolhê-los na configuração personalizada, com um aviso.",
+    "A configuração recomendada usa apenas o Qwen3.5, que não tem restrição de região. Quando marcado, escolher você mesmo um modelo com restrição de região na configuração personalizada não mostra mais um aviso.",
   "settings.languageLegend": "Idiomas",
   "settings.languageLede":
     "Escolha o idioma que você ouve e o idioma das legendas; os modelos recomendados para eles aparecem abaixo. Nada é baixado agora: os modelos que faltam são baixados na primeira vez que você clicar em Iniciar.",
@@ -621,7 +621,7 @@ export const ptBR: Messages = {
   "settings.save": "Salvar configurações",
   "settings.saved": "Configurações salvas.",
   "settings.savedRegion":
-    "Configurações salvas. A configuração recomendada será recalculada para a nova região de licença (veja a página Modelos).",
+    "Configurações salvas. A confirmação da região de licença só afeta o aviso ao escolher você mesmo um modelo na configuração personalizada.",
 
   // ------------------------------------------------------------ validation
   "validation.urlScheme": "A URL deve começar com http:// ou https://.",
