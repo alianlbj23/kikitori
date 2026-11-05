@@ -5,11 +5,17 @@
 
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
 from kikitori.config import Settings
 from kikitori.pipeline import factory
+from kikitori.translate import (
+    TranslationRequest,
+    TranslationTimeoutError,
+    TranslatorConfig,
+)
 
 
 class FactoryTest(unittest.TestCase):
@@ -187,6 +193,113 @@ class BuildComponentsAsrTest(unittest.TestCase):
         with self.assertLogs("kikitori.pipeline.factory", "WARNING"):
             calls = self._calls(Settings())
         self.assertEqual(calls["fast"]["cuda_library_dirs"], [])
+
+
+class _RecordingTranslator:
+    def __init__(self, config: TranslatorConfig, log: list, fail: bool) -> None:
+        self.config = config
+        self._log = log
+        self._fail = fail
+
+    def translate(self, request: TranslationRequest) -> str:
+        self._log.append((self.config.model, request))
+        if self._fail:
+            raise TranslationTimeoutError("no response within 60.0s")
+        return "好"
+
+    def stream(self, request: TranslationRequest) -> Iterator[str]:
+        raise AssertionError("warm-up must not stream")
+
+
+class WarmUpTranslationTest(unittest.TestCase):
+    """session 載入時先讓本機翻譯伺服器載入模型（Ollama 閒置 5 分鐘就會卸載模型，
+    冷啟動要 4–10 秒：沒有預熱時第一句的即時翻譯逾時、前幾句的完整字幕晚 8–16 秒）。"""
+
+    def _warm(self, settings: Settings, mode: str, fail: bool = False) -> list:
+        self.configs: list[TranslatorConfig] = []
+        log: list = []
+
+        def make(config: TranslatorConfig) -> _RecordingTranslator:
+            self.configs.append(config)
+            return _RecordingTranslator(config, log, fail)
+
+        factory.warm_up_translation(settings, mode, make_translator=make)
+        return log
+
+    def test_media_warms_the_shared_model_once(self) -> None:
+        log = self._warm(Settings(), "media")
+        self.assertEqual(len(log), 1)
+        model, request = log[0]
+        self.assertEqual(model, Settings().translation.final_model)
+        self.assertEqual(
+            (request.source_language, request.target_language), ("ja", "zh-TW")
+        )
+        self.assertTrue(request.text.strip())
+        self.assertEqual(self.configs[0].max_retries, 0)
+        self.assertEqual(self.configs[0].read_timeout, factory.WARM_UP_READ_TIMEOUT)
+
+    def test_interpret_uses_partner_language_and_both_models(self) -> None:
+        settings = Settings().merged(
+            {
+                "partner_language": "en",
+                "translation": {
+                    "fast_model": "qwen3.5:4b",
+                    "final_model": "qwen3.5:9b",
+                },
+            }
+        )
+        log = self._warm(settings, "interpret")
+        self.assertEqual([m for m, _ in log], ["qwen3.5:9b", "qwen3.5:4b"])
+        self.assertEqual(log[0][1].source_language, "en")
+        self.assertEqual(log[0][1].target_language, "zh-TW")
+
+    def test_remote_server_is_not_warmed(self) -> None:
+        settings = Settings().merged(
+            {"translation": {"base_url": "https://api.example.com/v1"}}
+        )
+        self.assertEqual(self._warm(settings, "media"), [])
+
+    def test_failure_is_a_warning_and_stops(self) -> None:
+        settings = Settings().merged(
+            {"translation": {"fast_model": "a", "final_model": "b"}}
+        )
+        with self.assertLogs("kikitori.pipeline.factory", "WARNING") as logs:
+            log = self._warm(settings, "media", fail=True)
+        self.assertEqual(len(log), 1)
+        self.assertIn("no response", logs.output[0])
+
+    def test_build_session_components_warms_while_loading(self) -> None:
+        components = object()
+        with (
+            mock.patch.object(
+                factory, "build_components", return_value=components
+            ) as build,
+            mock.patch.object(factory, "warm_up_translation") as warm,
+        ):
+            result = factory.build_session_components(Settings(), "interpret")
+        self.assertIs(result, components)
+        build.assert_called_once_with(Settings(), "interpret")
+        warm.assert_called_once_with(Settings(), "interpret")
+
+    def test_build_errors_propagate(self) -> None:
+        with (
+            mock.patch.object(
+                factory, "build_components", side_effect=FileNotFoundError("x")
+            ),
+            mock.patch.object(factory, "warm_up_translation"),
+            self.assertRaises(FileNotFoundError),
+        ):
+            factory.build_session_components(Settings(), "media")
+
+    def test_engine_uses_the_warming_builder(self) -> None:
+        from kikitori.engine.services import default_services
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict("os.environ", {"KIKITORI_CONFIG_DIR": tmp}),
+        ):
+            services = default_services()
+        self.assertIs(services.build_components, factory.build_session_components)
 
 
 if __name__ == "__main__":

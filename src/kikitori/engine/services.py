@@ -158,13 +158,13 @@ class DefaultModelCatalog:
 def default_services() -> EngineServices:
     """正式使用的服務：真實 capture、設定檔、factory 與 hardware 模組。"""
     from kikitori.capture import list_devices, open_source
-    from kikitori.pipeline.factory import build_components
+    from kikitori.pipeline.factory import build_session_components
 
     return EngineServices(
         settings_store=SettingsStore(default_settings_path()),
         list_devices=list_devices,
         open_source=open_source,
-        build_components=build_components,
+        build_components=build_session_components,
         hardware=DefaultHardwareProvider(),
         models=DefaultModelCatalog(),
     )

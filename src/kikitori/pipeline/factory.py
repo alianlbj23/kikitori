@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from kikitori.asr.types import Transcriber, Transcript
 from kikitori.config import Settings
@@ -22,7 +23,13 @@ from kikitori.pipeline.types import (
     PipelineConfig,
     TranscriptFilter,
 )
-from kikitori.translate import OpenAICompatibleTranslator, TranslatorConfig
+from kikitori.translate import (
+    OpenAICompatibleTranslator,
+    TranslationError,
+    TranslationRequest,
+    Translator,
+    TranslatorConfig,
+)
 
 TranscriberRole = Literal["fast", "final"]
 
@@ -31,6 +38,10 @@ logger = logging.getLogger(__name__)
 # 即時字幕重試只會更晚，逾時也要比完整路徑短；完整路徑用翻譯模組的預設值。
 FAST_TRANSLATE_READ_TIMEOUT = 10.0
 FAST_TRANSLATE_RETRIES = 0
+# 預熱時翻譯伺服器可能要從磁碟載入模型（實測 qwen3.5:9b 冷啟動 4–10 秒）；不重試，
+# 失敗只記 warning，字幕照樣開始。
+WARM_UP_READ_TIMEOUT = 60.0
+_WARM_UP_TEXT = {"ja": "はい。", "en": "Okay."}
 
 
 class UnknownModelError(ValueError):
@@ -283,3 +294,72 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
         ),
         final_no_speech_reliable=no_speech_reliable(asr.final_model),
     )
+
+
+def warm_up_translation(
+    settings: Settings,
+    mode: Mode,
+    *,
+    make_translator: Callable[[TranslatorConfig], Translator] = (
+        OpenAICompatibleTranslator
+    ),
+) -> None:
+    """讓本機翻譯伺服器先載入這個 session 要用的模型（完整路徑的先，再即時路徑）。
+
+    Ollama 閒置 5 分鐘就卸載模型，下一次請求才從磁碟載入。不預熱的話，第一句的即時翻譯
+    會逾時（即時路徑只等 10 秒），完整字幕也會整批延後。遠端服務不需要載入，也不該為此
+    多花一次請求，所以只預熱 loopback 位址。失敗只記 warning，不中斷 session。
+    """
+    t = settings.translation
+    host = urlsplit(t.base_url).hostname or ""
+    from kikitori.hardware.translation_server import is_loopback_host
+
+    if not is_loopback_host(host):
+        return
+    source = settings.partner_language if mode == "interpret" else "ja"
+    request = TranslationRequest(
+        text=_WARM_UP_TEXT.get(source, _WARM_UP_TEXT["ja"]),
+        source_language=source if source in _WARM_UP_TEXT else "ja",
+        target_language=settings.target_language,
+    )
+    for model in dict.fromkeys((t.final_model, t.fast_model)):
+        translator = make_translator(
+            TranslatorConfig(
+                model=model,
+                base_url=t.base_url,
+                api_key_env=t.api_key_env,
+                read_timeout=WARM_UP_READ_TIMEOUT,
+                max_retries=0,
+                max_tokens=32,
+            )
+        )
+        try:
+            translator.translate(request)
+        except TranslationError as exc:
+            # 伺服器沒開或模型不在：之後每句翻譯也會失敗並由 pipeline 回報，不必再試下一個。
+            logger.warning("cannot warm up translation model %s: %s", model, exc)
+            return
+
+
+def build_session_components(settings: Settings, mode: Mode) -> PipelineComponents:
+    """engine 用的元件建立：載入 ASR 的同時預熱翻譯模型，兩者都完成才回傳。
+
+    兩件事互不相干（GPU 上的 ASR 與翻譯伺服器），並行可以少等數秒；session 在這段期間
+    維持 `loading`，`running` 時第一句就能即時翻譯。
+
+    Raises:
+        同 `build_components()`。
+    """
+    warm = threading.Thread(
+        target=warm_up_translation,
+        args=(settings, mode),
+        name="translation-warm-up",
+        daemon=True,
+    )
+    warm.start()
+    try:
+        return build_components(settings, mode)
+    finally:
+        warm.join(WARM_UP_READ_TIMEOUT + 10)
+        if warm.is_alive():
+            logger.warning("translation warm-up still running; starting anyway")
