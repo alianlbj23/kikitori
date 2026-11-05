@@ -218,7 +218,7 @@ system 訊息寫規則、user 訊息放前文與待翻句子，**指示一律用
 | 4–7.5 GB | qwen3.5:4b → hy-mt1.5-1.8b | 同左 |
 | < 4 GB／沒有 GPU | hy-mt1.5-1.8b → qwen3.5:4b | 同左 |
 
-依據（RTX 5070 實測）：GPU 上每個模型的總延遲 P90 都在 0.3 秒內，遠低於字幕需求，所以即時與完整路徑**用同一個模型**，只載入一份；Ollama 換模型要 6–18 秒，兩個模型輪流用反而更慢。品質（日文口語）Qwen3.5 9B > 4B > HY-MT 7B > HY-MT 1.8B。CPU 推論沒有實測，先選最小的 HY-MT 1.8B。實際順序以 `presets.py` 的 `RECOMMENDATION_TIERS` 為準。
+依據（RTX 5070 實測）：GPU 上每個模型的總延遲 P90 都在 0.3 秒內，遠低於字幕需求，所以即時與完整路徑**用同一個模型**，只載入一份；Ollama 換模型要 1.5–18 秒（第一次載入，見 experiments/translate_benchmark/README.md），兩個模型輪流用反而更慢。品質（日文口語）Qwen3.5 9B > 4B > HY-MT 7B > HY-MT 1.8B。CPU 推論沒有實測，先選最小的 HY-MT 1.8B。實際順序以 `presets.py` 的 `RECOMMENDATION_TIERS` 為準。
 
 ## Tech Stack
 

@@ -459,7 +459,7 @@ class ValidateCombinationTest(unittest.TestCase):
         self.assertIn("禁止商業用途", joined)
         self.assertIn("不適用於 EU、UK、KR", joined)
         self.assertIn("翻譯伺服器上沒有", joined)
-        self.assertIn("6–18 秒", joined)
+        self.assertIn("1.5–18 秒", joined)
 
     def test_unknown_translation_model_has_no_license_warning(self) -> None:
         info = make_info(gpus=(gpu(),), models=("my-model",))

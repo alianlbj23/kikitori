@@ -302,7 +302,7 @@ def _recommend_translation(
             f"扣掉 ASR 與 {DESKTOP_VRAM_RESERVE_MB / 1024:.0f} GB 保留後，約 {budget_gb:.1f} GB {where} 可給翻譯模型"
         )
     reasons.append(
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 6–18 s"
+        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
         if choice.fast == choice.final
         else "即時與完整翻譯使用不同模型"
     )
@@ -580,7 +580,7 @@ def validate_combination(
         and normalize_model_name(fast_t) != normalize_model_name(final_t)
         and server.is_local
     ):
-        warnings.append("即時與完整翻譯用不同模型：本機 Ollama 換模型每次要 6–18 秒")
+        warnings.append("即時與完整翻譯用不同模型：本機 Ollama 換模型每次要 1.5–18 秒")
 
     gpu = primary_gpu(info)
     if gpu is not None and chosen:

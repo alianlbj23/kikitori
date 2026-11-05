@@ -67,7 +67,7 @@
         "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
         "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
         "扣掉 ASR 與 1 GB 保留後，約 7.0 GB VRAM 可給翻譯模型",
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 6–18 s"
+        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
       ],
       "warnings": [
         "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
@@ -376,7 +376,7 @@
         "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
         "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
         "扣掉 ASR 與 1 GB 保留後，約 7.0 GB VRAM 可給翻譯模型",
-        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 6–18 s"
+        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
       ],
       "warnings": [
         "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"

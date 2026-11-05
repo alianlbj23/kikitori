@@ -38,7 +38,7 @@ class PipelineConfig:
     partner_language: str = "ja"      # interpret 模式的對方語言（ja | en）
     partial_interval_ms: int = 700
     context_lines: int = 3            # 完整路徑帶幾句前文（翻譯 context 與 ASR prompt）
-    asr_prompt_context: bool = True   # 完整路徑是否以前文原文當 ASR prompt
+    asr_prompt_context: bool = True   # 完整路徑是否以前文原文當 ASR prompt（只在 media 模式生效）
     final_queue_size: int = 64
     read_timeout: float = 0.1         # AudioSource.read 的等待上限（秒）
 
@@ -106,7 +106,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 前文
 
-- 完整路徑保存最近 `context_lines` 句**已送出的完整原文**（含語言）。翻譯的 `context` 只放與本句同語言的前文（口譯模式兩種語言交錯時，另一種語言的句子會干擾提示詞）；`asr_prompt_context=True` 時同一批前文以空白串接當 ASR prompt。
+- 完整路徑保存最近 `context_lines` 句**已送出的完整原文**（含語言）。翻譯的 `context` 只放與本句同語言的前文（口譯模式兩種語言交錯時，另一種語言的句子會干擾提示詞）；`asr_prompt_context=True` 且為 `media` 模式時，同一批前文以空白串接當 ASR prompt；`interpret` 模式一律不帶（兩種語言交錯，前文會把語言偵測拉向上一位說話者）。
 - 即時路徑不帶 ASR prompt（`asr.md`：即時路徑不帶 prompt），翻譯 context 與完整路徑相同。
 
 ### 非語音過濾

@@ -114,7 +114,7 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 | 類別 | 檢查 |
 |---|---|
 | errors | 不是物件；未知的 ASR id；`device` 不是 auto／cpu／cuda；`compute_type` 不是 CTranslate2 認得的值；`cpu_threads` 不是 0–256 整數；選 cuda 但沒有 NVIDIA GPU、GPU 不支援（平台、驅動、compute capability）或缺 cuBLAS；翻譯模型名稱不是 1–200 字的可列印字串 |
-| warnings | `auto` 時 GPU 不可用而會用 CPU；CPU 上用 float16 等 CPU 不支援的精度（CTranslate2 會自動轉型）；compute capability < 7.0 用 float16／int8_float16；CPU 上用 medium 以上；ASR 模型未下載；即時模型比完整模型大；兩條路徑都是 no_speech 不可用的模型；ASR + 翻譯合計超過「VRAM − 1024」；CPU 上 ASR 超過一半 RAM；翻譯模型不在伺服器上；非商用授權；地區限制（`allow_restricted=False`）；本機伺服器上即時與完整翻譯用不同模型（換模型 6–18 s） |
+| warnings | `auto` 時 GPU 不可用而會用 CPU；CPU 上用 float16 等 CPU 不支援的精度（CTranslate2 會自動轉型）；compute capability < 7.0 用 float16／int8_float16；CPU 上用 medium 以上；ASR 模型未下載；即時模型比完整模型大；兩條路徑都是 no_speech 不可用的模型；ASR + 翻譯合計超過「VRAM − 1024」；CPU 上 ASR 超過一半 RAM；翻譯模型不在伺服器上；非商用授權；地區限制（`allow_restricted=False`）；本機伺服器上即時與完整翻譯用不同模型（換模型 1.5–18 s） |
 
 ## GPU 執行環境（cuBLAS）
 
@@ -217,7 +217,7 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
  "reasons": ["NVIDIA GeForce RTX 5070（11.9 GB VRAM）：即時用 small、完整用 large-v3-turbo（本機實測 0.13 s＋0.15 s）",
              "large-v3-turbo 的 no_speech 不可用，以 small 的 no_speech 與 VAD 輔助過濾",
              "扣掉 ASR 與 1 GB 保留後，約 8.2 GB VRAM 可給翻譯模型",
-             "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 6–18 s"],
+             "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"],
  "warnings": []}
 ```
 
