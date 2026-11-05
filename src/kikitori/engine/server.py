@@ -611,6 +611,12 @@ class EngineServer:
                 session.terminal_sent = True
                 if self._session is session:
                     self._session = None
+                # pipeline 的回呼參照 session，session 又參照 pipeline：不切斷的話這個循環
+                # 要等循環垃圾回收才會釋放，GPU 上的 ASR 模型（每個 session 約 2.6 GB）會
+                # 一直佔著，開幾次 session 就把顯示記憶體用完。結束後 pipeline 只剩自己的
+                # 執行緒參照，執行緒結束時以參照計數立即釋放。不取 session.lock：
+                # `_load_session` 持有它時也可能走到這裡（啟動失敗）。
+                session.pipeline = None
         self._send_status(state, detail, session.id, code)
 
     def _session_stop(self, params: dict[str, Any]) -> Mapping[str, Any]:
