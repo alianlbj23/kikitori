@@ -202,12 +202,12 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 
 - **macOS**：沒有 Apple 開發者簽章與公證（只有 ad-hoc 簽章），從瀏覽器下載的 DMG 第一次開啟會被 Gatekeeper 擋下。把 kikitori 拖到「應用程式」後開啟一次，再到「系統設定 → 隱私權與安全性」，在下方找到 kikitori 按「強制打開」（macOS 15 起不能再用右鍵「打開」略過）。進階使用者也可以執行 `xattr -dr com.apple.quarantine /Applications/kikitori.app`。之後的自動更新不會再出現這個警告。若出現「已損毀，無法打開」而不是「無法驗證開發者」，代表簽章有問題，請回報。
 - **Windows**：安裝檔沒有 Authenticode 簽章，SmartScreen 會顯示「Windows 已保護您的電腦」，選「其他資訊 → 仍要執行」。
-- **Linux**：AppImage 要先 `chmod +x`，執行需要 FUSE 2（Ubuntu 22.04：`libfuse2`，24.04 起：`libfuse2t64`）。deb 以 `sudo apt install ./kikitori_<v>_amd64.deb` 安裝。
+- **Linux**：AppImage 要先 `chmod +x`。它用的是 AppImage type2-runtime（靜態連結 libfuse3），**不需要 libfuse2**，但要有 `/dev/fuse` 與 `fusermount`／`fusermount3`（Debian／Ubuntu 套件 `fuse3`，桌面版通常已安裝）。缺少時會顯示「Cannot mount AppImage, please check your FUSE setup.」，可安裝 `fuse3`，或不掛載直接執行：`./kikitori_<v>_amd64.AppImage --appimage-extract-and-run`（或設環境變數 `APPIMAGE_EXTRACT_AND_RUN=1`，每次啟動會先解壓到 `/tmp`，較慢）。介面與字幕需要中日文字型；沒有 Noto CJK 的精簡系統請安裝 `fonts-noto-cjk`（deb 已列為 Recommends）。deb 以 `sudo apt install ./kikitori_<v>_amd64.deb` 安裝。（2026-11-05 容器實測，見 `experiments/linux_acceptance/README.md`。）
 
 ## 需要實機確認
 
 - 三平台從 Release 下載安裝、啟動、引擎啟動（正式資源目錄路徑）、「關於」頁的兩個授權資料夾按鈕實際在檔案管理員開啟（`licenses/` 與 `kikitori-engine/THIRD_PARTY_LICENSES/`；CI 只檢查檔案在安裝檔內）。
 - 自動更新的完整一輪：裝 `v<n>` → 發布 `v<n+1>` → app 偵測、下載、驗證、安裝、重新啟動後版本正確。第一個 Release 之後才能測（需要兩個版本）。
 - macOS：下載的 DMG 在 Gatekeeper 的實際提示（應是「無法驗證開發者」而非「已損毀」）、強制打開後能正常執行、自動更新替換 `.app` 後引擎仍可執行（ad-hoc 簽章、執行權限）、螢幕錄製權限在更新後是否要重新授權（ad-hoc 簽章的程式每版簽章不同，TCC 可能視為新程式）。
-- Linux：AppImage 在沒有 `libfuse2` 的發行版、Wayland 桌面；deb 更新時 pkexec 的提示；AppImage 自我更新需要對檔案所在目錄的寫入權限。
+- Linux：Wayland 桌面；deb 更新時 pkexec 的提示；AppImage 自我更新需要對檔案所在目錄的寫入權限。（沒有 libfuse2／fusermount 時 AppImage 的行為已在容器確認，見上方安裝說明。）
 - Windows：SmartScreen 提示、passive 模式更新後自動重開、安裝在使用者目錄（currentUser）時的更新權限。

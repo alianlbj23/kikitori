@@ -229,9 +229,10 @@ npm run tauri dev
 
 ## 各平台需要實機確認的地方
 
-- **透明視窗**：Windows（WebView2）已確認。macOS 需要 `macOSPrivateApi: true`（已開，代表不能上架 Mac App Store）。Linux（WebKitGTK）需要合成器（compositor）；部分 Wayland／X11 環境透明可能變黑底。
+- **透明視窗**：Windows（WebView2）已確認。macOS 需要 `macOSPrivateApi: true`（已開，代表不能上架 Mac App Store）。Linux（WebKitGTK）需要合成器（compositor）：X11 容器實測（Xvfb、WebKitGTK 2.52）沒有合成器時字幕視窗是黑底不透明、會蓋住後面的視窗；開了 picom（xrender）就真的透明。Wayland 待實機確認。
 - **置頂**：macOS 全螢幕播放的影片位於獨立 Space，可能蓋過字幕視窗（已設 `visibleOnAllWorkspaces`，仍需實測）；Wayland 不允許應用程式自行置頂，GNOME 上可能無效。
 - **滑鼠穿透**：Windows／macOS 由系統支援；Linux X11 可用，Wayland 依合成器而定。
-- **全域快速鍵**：Wayland 下 `global-hotkey` 可能無法註冊（UI 會改提示用開關）；macOS 可能要求輔助使用權限。
+- **全域快速鍵**：X11 容器實測 Ctrl+Alt+K（xdotool 送出）可切換滑鼠穿透；同一個按鍵已被其他程式（例如另一個 kikitori）佔用時 UI 正確改提示用開關。Wayland 下 `global-hotkey` 可能無法註冊；macOS 可能要求輔助使用權限。
 - **無邊框縮放**：右下角把手用 `startResizeDragging`；Linux 部分視窗管理員不支援。
-- **字型**：macOS／Linux 會改用蘋方、Hiragino、Noto CJK；沒有安裝 Noto CJK 的 Linux 可能退回其他字型。
+- **字型**：macOS／Linux 會改用蘋方、Hiragino、Noto CJK。沒有任何 CJK 字型的 Linux（例如精簡安裝只有 DejaVu）整個介面會變成豆腐方塊（容器實測），所以 deb 以 Recommends 建議 `fonts-noto-cjk`；AppImage 不帶字型，靠系統安裝。
+- **表單控制項**：WebKitGTK 以原生外觀畫 `<select>`、不套用 CSS 背景色；深色底上的選單要設 `color-scheme: dark`（側欄的聲音來源選單就是這樣修的）。
