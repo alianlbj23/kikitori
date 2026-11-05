@@ -163,7 +163,8 @@
   - 結果：CTranslate2（MIT）＋ Whisper 權重（MIT），不用 faster-whisper（PyAV 內附 GPL 編碼器）；RTX 5070 CUDA fp16 可用（需 cuBLAS 12），large-v3-turbo 單句 0.15 s；CPU 只有 tiny／base 跟得上即時字幕；turbo 的 no_speech 恆為 0，改靠幻覺清單與 VAD。
 - [x] 里程碑 3：翻譯
   - 結果：OpenAI 相容客戶端（標準庫）、預設本機 Ollama；qwen3.5:9b 總延遲中位數 0.23 s、輸出 0/33 簡體；HY-MT 有地區限制、Sakura 非商用，皆不預設推薦。
-- [ ] 里程碑 4：協調器（雙路徑）與引擎協定伺服器
+- [x] 里程碑 4：協調器（雙路徑）與引擎協定伺服器
+  - 結果：pipeline（即時最新槽＋完整有界 FIFO、依序送出）、config（嚴格驗證、原子寫入）、stdio NDJSON 引擎（全部方法與事件有子行程測試）、`kikitori` 互動選單；本機 CPU 實測即時字幕延遲中位數 0.85 s、完整字幕 2.85 s（anime.wav，base／small＋qwen3.5:4b）。
 - [x] 里程碑 5：聲音擷取
   - 結果：Windows（PyAudioWPatch）loopback 與麥克風本機實測可錄；Linux（soundcard）、macOS（ScreenCaptureKit）只以假物件測試，待真機驗證。
 - [ ] 里程碑 6：硬體偵測與模型組合

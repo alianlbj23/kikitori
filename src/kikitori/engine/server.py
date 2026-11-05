@@ -1,0 +1,552 @@
+"""stdio NDJSON 引擎伺服器：Tauri 程式與 Python 處理管線之間的唯一入口。
+
+位於整個 Python 套件的最上層：讀 stdin 的請求、分派到各方法、把 pipeline 的字幕
+與狀態轉成事件寫到 stdout。stdin 讀取在主執行緒依序處理；載入模型、下載這類
+耗時工作放在背景執行緒，讓 `session.stop`、`engine.shutdown` 隨時能被處理。
+協定見 `docs/specs/app-architecture.md`，細節見 `docs/specs/pipeline-engine.md`。
+"""
+
+import dataclasses
+import logging
+import platform
+import threading
+import time
+from collections.abc import Callable, Mapping
+from importlib import metadata
+from typing import Any, BinaryIO
+
+from kikitori.capture.errors import (
+    BackendUnavailableError,
+    CaptureError,
+    DeviceLostError,
+    DeviceNotFoundError,
+    PermissionDeniedError,
+)
+from kikitori.capture.types import AudioSource, DeviceKind
+from kikitori.config import SettingsError
+from kikitori.engine import protocol as p
+from kikitori.engine.io import (
+    LINE_TOO_LONG,
+    ChannelClosedError,
+    EventLogHandler,
+    MessageWriter,
+    read_lines,
+)
+from kikitori.engine.services import EngineServices, platform_name
+from kikitori.pipeline import MODES, Mode, Pipeline, PipelineState, SubtitleUpdate
+from kikitori.pipeline.factory import UnknownModelError, pipeline_config
+from kikitori.translate.presets import PRESETS, normalize_model_name
+
+ENGINE_NAME = "kikitori-engine"
+STOP_TIMEOUT = 5.0
+DOWNLOAD_JOIN_TIMEOUT = 2.0
+PROGRESS_INTERVAL = 0.25
+MAX_DEVICE_ID_CHARS = 512
+
+KIND_FOR_MODE: dict[Mode, DeviceKind] = {"media": "loopback", "interpret": "microphone"}
+
+logger = logging.getLogger(__name__)
+
+Handler = Callable[[dict[str, Any]], Mapping[str, Any]]
+
+
+def engine_version() -> str:
+    """已安裝套件的版本（單一來源是 pyproject.toml）。"""
+    try:
+        return metadata.version("kikitori")
+    except metadata.PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+def _capture_code(exc: CaptureError) -> str:
+    if isinstance(exc, DeviceNotFoundError):
+        return "device_not_found"
+    if isinstance(exc, PermissionDeniedError):
+        return "permission_denied"
+    if isinstance(exc, DeviceLostError):
+        return "device_lost"
+    if isinstance(exc, BackendUnavailableError):
+        return "capture_unavailable"
+    return "capture_error"
+
+
+class _Session:
+    """一次 session：背景載入 → 執行 → 結束。`lock` 保護 pipeline 的建立與停止。"""
+
+    def __init__(self, session_id: int, mode: Mode) -> None:
+        self.id = session_id
+        self.mode = mode
+        self.cancelled = threading.Event()
+        self.lock = threading.Lock()
+        self.pipeline: Pipeline | None = None
+        self.terminal_sent = False
+        self.loader: threading.Thread | None = None
+
+
+class _Download:
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.cancel = threading.Event()
+        self.thread: threading.Thread | None = None
+
+
+class EngineServer:
+    """處理協定請求並送出事件。一個行程一個實例。"""
+
+    def __init__(
+        self,
+        services: EngineServices,
+        writer: MessageWriter,
+        *,
+        version: str | None = None,
+    ) -> None:
+        """
+        Args:
+            services: 外部功能（真實或測試用的假實作）。
+            writer: stdout 的訊息寫出器。
+            version: `engine.info` 回報的版本；省略時讀取套件版本。
+        """
+        self._services = services
+        self._writer = writer
+        self._version = version or engine_version()
+        self._shutdown = threading.Event()
+        self._session_lock = threading.Lock()
+        self._session: _Session | None = None
+        self._next_session_id = 1
+        self._downloads: dict[str, _Download] = {}
+        self._downloads_lock = threading.Lock()
+        # 回應寫出後才執行的動作：讓 UI 先拿到 session_id，再收到該 session 的事件。
+        self._after_response: list[Callable[[], None]] = []
+        self._handlers: dict[str, Handler] = {
+            "engine.info": self._engine_info,
+            "hardware.detect": self._hardware_detect,
+            "models.list": self._models_list,
+            "models.download": self._models_download,
+            "devices.list": self._devices_list,
+            "settings.get": self._settings_get,
+            "settings.set": self._settings_set,
+            "session.start": self._session_start,
+            "session.stop": self._session_stop,
+            "engine.shutdown": self._engine_shutdown,
+        }
+
+    # --- 主迴圈 ---------------------------------------------------------------
+
+    def serve(self, stdin: BinaryIO) -> int:
+        """讀 stdin 直到 EOF 或 `engine.shutdown`，清理後回傳結束碼。
+
+        Returns:
+            0 正常結束；1 表示 stdout 已無法寫入。
+        """
+        bridge = EventLogHandler(self._writer)
+        logging.getLogger("kikitori").addHandler(bridge)
+        # 設定檔無效時 store 會記 warning，經 bridge 變成 log 事件。
+        self._services.settings_store.load()
+        try:
+            self._send_status("idle", None, None, None)
+            for line in read_lines(stdin):
+                if line is LINE_TOO_LONG:
+                    self._send(
+                        p.error_response(
+                            None,
+                            p.INVALID_REQUEST,
+                            f"line longer than {p.MAX_LINE_BYTES} bytes",
+                        )
+                    )
+                elif isinstance(line, bytes) and line.strip():
+                    self.handle_line(line)
+                if self._shutdown.is_set():
+                    break
+            else:
+                logger.info("stdin closed; shutting down")
+            return 0
+        except ChannelClosedError:
+            logger.error("protocol output closed; shutting down")
+            return 1
+        finally:
+            self.close()
+            logging.getLogger("kikitori").removeHandler(bridge)
+
+    def handle_line(self, line: bytes) -> None:
+        """處理一行請求並寫出回應；任何錯誤都變成錯誤回應，不會往外拋（寫出失敗除外）。
+
+        Raises:
+            ChannelClosedError: stdout 無法寫入。
+        """
+        try:
+            request = p.parse_request(line)
+        except p.ProtocolError as exc:
+            self._send(p.error_response(exc.request_id, exc.code, exc.message))
+            return
+        handler = self._handlers.get(request.method)
+        if handler is None:
+            self._send(
+                p.error_response(
+                    request.id,
+                    p.UNKNOWN_METHOD,
+                    f"unknown method {request.method[:100]!r}",
+                )
+            )
+            return
+        try:
+            result = handler(request.params)
+        except p.ProtocolError as exc:
+            self._send(p.error_response(request.id, exc.code, exc.message))
+            return
+        except ChannelClosedError:
+            raise
+        except Exception as exc:
+            logger.exception("method %s failed", request.method)
+            self._send(
+                p.error_response(
+                    request.id, p.INTERNAL_ERROR, f"{type(exc).__name__}: {exc}"
+                )
+            )
+            return
+        self._send(p.response(request.id, result))
+        actions, self._after_response = self._after_response, []
+        for action in actions:
+            action()
+
+    def close(self) -> None:
+        """停止 session、取消下載（可重複呼叫）。"""
+        self._stop_session()
+        with self._downloads_lock:
+            downloads = list(self._downloads.values())
+        for download in downloads:
+            download.cancel.set()
+        for download in downloads:
+            # 回應沒寫出去時執行緒不會被啟動（ident 為 None），不能 join。
+            if download.thread is not None and download.thread.ident is not None:
+                download.thread.join(DOWNLOAD_JOIN_TIMEOUT)
+                if download.thread.is_alive():
+                    logger.warning(
+                        "download of %s did not stop in time", download.model
+                    )
+
+    # --- 送出 -----------------------------------------------------------------
+
+    def _send(self, message: Mapping[str, Any]) -> None:
+        self._writer.send(message)
+
+    def _send_event(self, name: str, data: Mapping[str, Any]) -> None:
+        self._send(p.event(name, data))
+
+    def _send_status(
+        self,
+        state: str,
+        detail: str | None,
+        session_id: int | None,
+        code: str | None,
+    ) -> None:
+        self._send_event(
+            "status",
+            {"state": state, "detail": detail, "session_id": session_id, "code": code},
+        )
+
+    # --- engine / hardware / devices / settings --------------------------------
+
+    def _engine_info(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        return {
+            "name": ENGINE_NAME,
+            "version": self._version,
+            "protocol_version": p.PROTOCOL_VERSION,
+            "platform": platform_name(),
+            "machine": platform.machine(),
+            "python_version": platform.python_version(),
+            "fake": self._services.fake,
+        }
+
+    def _hardware_detect(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        return self._services.hardware.detect()
+
+    def _devices_list(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        try:
+            devices = self._services.list_devices()
+        except CaptureError as exc:
+            raise p.ProtocolError(_capture_code(exc), str(exc)) from exc
+        return {"devices": [dataclasses.asdict(d) for d in devices]}
+
+    def _settings_result(self) -> Mapping[str, Any]:
+        store = self._services.settings_store
+        return {"settings": store.get().to_dict(), "path": str(store.path)}
+
+    def _settings_get(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        return self._settings_result()
+
+    def _settings_set(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        try:
+            self._services.settings_store.update(params)
+        except SettingsError as exc:
+            raise p.ProtocolError(p.INVALID_SETTINGS, str(exc)) from exc
+        except OSError as exc:
+            logger.error("cannot save settings: %s", exc)
+            raise p.ProtocolError(
+                p.SETTINGS_IO_ERROR, f"cannot save settings: {exc}"
+            ) from exc
+        return self._settings_result()
+
+    # --- models -----------------------------------------------------------------
+
+    def _models_list(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        settings = self._services.settings_store.get()
+        asr = [dataclasses.asdict(m) for m in self._services.models.asr_models()]
+        installed: list[str] | None
+        error: str | None = None
+        try:
+            installed = self._services.models.installed_translation_models(settings)
+        except (OSError, ValueError) as exc:
+            # 翻譯服務沒開是常態（例如還沒裝 Ollama），不讓整個方法失敗。
+            installed = None
+            error = f"{type(exc).__name__}: {exc}"
+            logger.info("cannot list translation models: %s", error)
+        names = (
+            None if installed is None else {normalize_model_name(m) for m in installed}
+        )
+        presets = [
+            {
+                "model": preset.model,
+                "label": preset.label,
+                "license": preset.license,
+                "license_url": preset.license_url,
+                "commercial_use": preset.commercial_use,
+                "excluded_regions": list(preset.excluded_regions),
+                "installed": None if names is None else preset.model in names,
+            }
+            for preset in PRESETS.values()
+        ]
+        return {
+            "asr": asr,
+            "translation": {
+                "base_url": settings.translation.base_url,
+                "installed": installed,
+                "error": error,
+                "presets": presets,
+            },
+        }
+
+    def _models_download(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params, ("model",))
+        model = params.get("model")
+        if not isinstance(model, str) or not model:
+            raise p.ProtocolError(
+                p.INVALID_PARAMS, f"model must be a non-empty string, got {model!r}"
+            )
+        known = {m.id: m for m in self._services.models.asr_models()}
+        if model not in known:
+            raise p.ProtocolError(
+                p.UNKNOWN_MODEL,
+                f"unknown ASR model {model[:100]!r}; available: {', '.join(known)}",
+            )
+        with self._downloads_lock:
+            if model in self._downloads:
+                raise p.ProtocolError(
+                    p.DOWNLOAD_IN_PROGRESS, f"{model} is already downloading"
+                )
+            download = _Download(model)
+            self._downloads[model] = download
+        download.thread = threading.Thread(
+            target=self._run_download,
+            args=(download, known[model].size_bytes),
+            name=f"download-{model}",
+            daemon=True,
+        )
+        self._after_response.append(download.thread.start)
+        return {"model": model, "started": True}
+
+    def _run_download(self, download: _Download, expected_total: int) -> None:
+        last_sent = 0.0
+        last_fraction = -1.0
+
+        def send(downloaded: int, total: int, state: str, error: str | None) -> None:
+            self._send_event(
+                "download_progress",
+                {
+                    "model": download.model,
+                    "downloaded_bytes": downloaded,
+                    "total_bytes": total,
+                    "state": state,
+                    "error": error,
+                },
+            )
+
+        def progress(downloaded: int, total: int) -> None:
+            nonlocal last_sent, last_fraction
+            now = time.monotonic()
+            fraction = downloaded / total if total > 0 else 0.0
+            # 1 MiB 回報一次，GB 級模型會有上千次；節流避免塞爆 stdout。
+            if now - last_sent < PROGRESS_INTERVAL and fraction - last_fraction < 0.01:
+                return
+            last_sent, last_fraction = now, fraction
+            send(downloaded, total, "downloading", None)
+
+        try:
+            send(0, expected_total, "downloading", None)
+            self._services.models.download(download.model, progress, download.cancel)
+            send(expected_total, expected_total, "done", None)
+            logger.info("model %s downloaded", download.model)
+        except ChannelClosedError:
+            logger.error("download of %s: protocol output closed", download.model)
+        except Exception as exc:
+            logger.exception("download of %s failed", download.model)
+            try:
+                send(0, expected_total, "error", f"{type(exc).__name__}: {exc}")
+            except ChannelClosedError:
+                logger.error("cannot report download failure: protocol output closed")
+        finally:
+            with self._downloads_lock:
+                self._downloads.pop(download.model, None)
+
+    # --- session ----------------------------------------------------------------
+
+    def _session_start(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params, ("mode", "device_id"))
+        mode = params.get("mode")
+        if mode not in MODES:
+            raise p.ProtocolError(
+                p.INVALID_PARAMS, f"mode must be one of {list(MODES)}, got {mode!r}"
+            )
+        settings = self._services.settings_store.get()
+        if "device_id" in params:
+            device_id = params["device_id"]
+            if device_id is not None and (
+                not isinstance(device_id, str)
+                or not device_id.strip()
+                or len(device_id) > MAX_DEVICE_ID_CHARS
+            ):
+                raise p.ProtocolError(
+                    p.INVALID_PARAMS,
+                    f"device_id must be null or a non-empty string, got {device_id!r}",
+                )
+        else:
+            device_id = settings.mode_settings(mode).device_id
+
+        with self._session_lock:
+            if self._session is not None:
+                raise p.ProtocolError(
+                    p.SESSION_ACTIVE,
+                    f"session {self._session.id} is already running; stop it first",
+                )
+            try:
+                source = self._services.open_source(device_id, KIND_FOR_MODE[mode])
+            except CaptureError as exc:
+                raise p.ProtocolError(_capture_code(exc), str(exc)) from exc
+            except ValueError as exc:
+                raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
+            session = _Session(self._next_session_id, mode)
+            self._next_session_id += 1
+            self._session = session
+
+        session.loader = threading.Thread(
+            target=self._load_session,
+            args=(session, settings, source),
+            name=f"session-{session.id}",
+            daemon=True,
+        )
+        self._after_response.append(session.loader.start)
+        return {"session_id": session.id}
+
+    def _load_session(
+        self, session: _Session, settings: Any, source: AudioSource
+    ) -> None:
+        try:
+            self._session_status(session, "loading", None, None)
+            try:
+                components = self._services.build_components(settings, session.mode)
+            except UnknownModelError as exc:
+                self._session_failed(session, "unknown_model", str(exc))
+                return
+            except FileNotFoundError as exc:
+                self._session_failed(
+                    session,
+                    "model_not_downloaded",
+                    f"{exc}; download it with models.download first",
+                )
+                return
+            except Exception as exc:
+                logger.exception("loading session %d failed", session.id)
+                self._session_failed(
+                    session, "load_error", f"{type(exc).__name__}: {exc}"
+                )
+                return
+
+            pipeline = Pipeline(
+                components,
+                pipeline_config(settings, session.mode),
+                on_subtitle=lambda update: self._on_subtitle(session, update),
+                on_status=lambda state, detail: self._on_pipeline_status(
+                    session, state, detail
+                ),
+            )
+            with session.lock:
+                if session.cancelled.is_set():
+                    return
+                session.pipeline = pipeline
+                try:
+                    pipeline.start(source)
+                except CaptureError as exc:
+                    logger.error("cannot start audio capture: %s", exc)
+                    self._session_failed(session, _capture_code(exc), str(exc))
+                except Exception as exc:
+                    logger.exception("starting session %d failed", session.id)
+                    self._session_failed(
+                        session, "load_error", f"{type(exc).__name__}: {exc}"
+                    )
+        except ChannelClosedError:
+            logger.error("session %d: protocol output closed", session.id)
+
+    def _on_subtitle(self, session: _Session, update: SubtitleUpdate) -> None:
+        data = dataclasses.asdict(update)
+        data["session_id"] = session.id
+        self._send_event("subtitle", data)
+
+    def _on_pipeline_status(
+        self, session: _Session, state: PipelineState, detail: str | None
+    ) -> None:
+        code = "pipeline_error" if state == "error" else None
+        self._session_status(session, state, detail, code)
+
+    def _session_failed(self, session: _Session, code: str, message: str) -> None:
+        self._session_status(session, "error", message, code)
+
+    def _session_status(
+        self, session: _Session, state: str, detail: str | None, code: str | None
+    ) -> None:
+        """送出這個 session 的狀態；結束狀態（idle／error）只送一次並釋放 session。"""
+        terminal = state in ("idle", "error")
+        with self._session_lock:
+            if session.terminal_sent:
+                return
+            if terminal:
+                session.terminal_sent = True
+                if self._session is session:
+                    self._session = None
+        self._send_status(state, detail, session.id, code)
+
+    def _session_stop(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        self._stop_session()
+        return {}
+
+    def _stop_session(self) -> None:
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        session.cancelled.set()
+        with session.lock:
+            pipeline = session.pipeline
+        if pipeline is not None:
+            pipeline.stop(STOP_TIMEOUT)
+        # 還在載入模型時 pipeline 尚未建立；載入完會看到 cancelled 而不啟動。
+        self._session_status(session, "idle", None, None)
+
+    def _engine_shutdown(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        self._shutdown.set()
+        return {}
