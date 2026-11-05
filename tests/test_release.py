@@ -391,6 +391,72 @@ class VerifySignaturesTest(unittest.TestCase):
             rel.verify_signatures(self.dir, PUBKEY, run=hang)
 
 
+class ReleaseNotesTest(unittest.TestCase):
+    """Release 頁面的說明：下載表與給未簽章程式的安裝提示。"""
+
+    def setUp(self) -> None:
+        self.notes = rel.release_notes("kikitori", VERSION, "v1.2.3")
+
+    def test_lists_every_installer_by_its_release_name(self) -> None:
+        self.assertTrue(self.notes.startswith("kikitori v1.2.3\n"))
+        for name in (
+            "kikitori_1.2.3_x64-setup.exe",
+            "kikitori_1.2.3_amd64.AppImage",
+            "kikitori_1.2.3_amd64.deb",
+            "kikitori_1.2.3_aarch64.dmg",
+        ):
+            self.assertIn(f"`{name}`", self.notes)
+        # 更新器專用的 tarball 不是給人下載的。
+        self.assertNotIn("app.tar.gz", self.notes)
+        self.assertIn("latest.json", self.notes)
+
+    def test_install_tips_per_platform(self) -> None:
+        tips = self.notes.split("## 安裝提示", 1)[1]
+        for fact in (
+            # Windows：沒有 Authenticode 簽章
+            "SmartScreen",
+            "其他資訊 → 仍要執行",
+            # macOS：ad-hoc 簽章、沒有公證
+            "Gatekeeper",
+            "系統設定 → 隱私權與安全性",
+            "強制打開",
+            "xattr -dr com.apple.quarantine /Applications/kikitori.app",
+            # Linux AppImage：type2-runtime 需要 /dev/fuse 與 fusermount（fuse3），不需要 libfuse2
+            "chmod +x kikitori_1.2.3_amd64.AppImage",
+            "`fuse3`",
+            "`/dev/fuse`",
+            "`fusermount`",
+            "./kikitori_1.2.3_amd64.AppImage --appimage-extract-and-run",
+            "不需要 libfuse2",
+            # 精簡系統的中日文字型、deb 的安裝方式
+            "`fonts-noto-cjk`",
+            "sudo apt install ./kikitori_1.2.3_amd64.deb",
+        ):
+            self.assertIn(fact, tips)
+
+    def test_tips_agree_with_the_spec(self) -> None:
+        # 規格「給使用者的安裝說明」是同一份事實的出處；改了其中一邊就要一起改。
+        spec = (ROOT / "docs" / "specs" / "release-update.md").read_text(
+            encoding="utf-8"
+        )
+        for fact in (
+            "其他資訊 → 仍要執行",
+            "強制打開",
+            "xattr -dr com.apple.quarantine /Applications/kikitori.app",
+            "`fuse3`",
+            "--appimage-extract-and-run",
+            "不需要 libfuse2",
+            "`fonts-noto-cjk`",
+            "sudo apt install ./kikitori_<v>_amd64.deb",
+        ):
+            self.assertIn(fact, spec)
+            self.assertIn(fact.replace("<v>", VERSION), self.notes)
+
+    def test_tag_must_match_the_version(self) -> None:
+        with self.assertRaisesRegex(rel.ReleaseError, "does not match"):
+            rel.release_notes("kikitori", VERSION, "v1.2.4")
+
+
 class RepoConfigTest(unittest.TestCase):
     """repo 實際的設定要能讓更新器使用這裡產生的檔案。"""
 
@@ -523,6 +589,19 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(code, 0, self.err)
         self.assertTrue((self.root / "stage" / "latest.json").is_file())
         self.assertIn("  darwin-aarch64: ", "\n".join(self.out))
+
+    def test_notes_writes_the_release_body(self) -> None:
+        out_file = self.root / "out" / "notes.md"
+        self.assertEqual(
+            self._run("notes", "--tag", "v1.2.3", "--out", str(out_file)), 0, self.err
+        )
+        text = out_file.read_text(encoding="utf-8")
+        self.assertEqual(text, rel.release_notes("kikitori", VERSION, "v1.2.3"))
+        self.assertIn("## 安裝提示", text)
+        self.assertEqual(
+            self._run("notes", "--tag", "v9.9.9", "--out", str(out_file)), 1
+        )
+        self.assertIn("does not match", self.err[-1])
 
     def test_usage_errors(self) -> None:
         with mock.patch("sys.stderr"):

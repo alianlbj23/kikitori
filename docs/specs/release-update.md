@@ -9,7 +9,7 @@
 |---|---|
 | Tauri 程式的檢查（前端、Rust、授權） | `.github/workflows/app.yml` |
 | 發布（gate、測試、三平台打包、簽章驗證、Release） | `.github/workflows/release.yml` |
-| 發布判斷、整理安裝檔、驗證簽章、產生 `latest.json` | `scripts/release.py`（測試：`tests/test_release.py`） |
+| 發布判斷、整理安裝檔、驗證簽章、產生 `latest.json` 與 Release 說明 | `scripts/release.py`（測試：`tests/test_release.py`） |
 | Rust 依賴授權規則 | `app/src-tauri/deny.toml` |
 | app 的第三方授權聲明（Rust、npm、kikitori 的 LICENSE） | `packaging/app/licenses.py`、`app/src-tauri/about.toml`（見 `packaging-ci.md`） |
 | 版本號同步 | `scripts/sync_version.py`（見 `packaging-ci.md`） |
@@ -77,8 +77,8 @@ gate ──┬─ test（重用 test.yml）────────────�
 | `gate` | contents: read | 版本一致性、列出既有 tag、`release.py gate` 輸出 mode／version／tag／prerelease |
 | `test`、`app` | contents: read | 與 push／PR 時相同的測試（skip 時不跑） |
 | `build`（矩陣） | contents: read | 見下表 |
-| `assemble` | contents: read | 下載三平台 artifacts → minisign 驗證每個 `.sig` → `release.py manifest` 產生 `latest.json`、整理發布檔案 → 上傳 `release-files` artifact |
-| `publish` | **contents: write**（唯一） | 下載 `release-files` → 先建 draft Release 並上傳全部檔案 → 改成正式並標為 latest（避免使用者在上傳途中拿到缺檔的 `latest.json`） |
+| `assemble` | contents: read | 下載三平台 artifacts → minisign 驗證每個 `.sig` → `release.py manifest` 產生 `latest.json`、整理發布檔案 → `release.py notes` 產生 Release 說明（也寫進 job summary）→ 上傳 `release-files`、`release-notes` artifact |
+| `publish` | **contents: write**（唯一） | 下載 `release-files` 與 `release-notes` → 先建 draft Release（說明＝`release-notes.md`）並上傳全部檔案 → 改成正式並標為 latest（避免使用者在上傳途中拿到缺檔的 `latest.json`） |
 
 第三方 action 一律釘在完整 commit SHA（都選發布超過兩週的版本）：
 
@@ -199,6 +199,8 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 私鑰與密碼只放在維護者本機與 GitHub Secrets，不進 repo、不印到 log。遺失私鑰就無法再發布已安裝的 app 接受的更新（只能請使用者手動重裝帶新公鑰的版本），請另外備份。密碼錯誤時 `tauri build` 會失敗；私鑰與 app 公鑰不符時 assemble 的驗證會失敗——兩者都發生在建立 Release 之前。
 
 ## 給使用者的安裝說明（未簽章程式）
+
+Release 頁面的說明由 `release.py notes --tag v<版本> --out <檔案>` 產生：下載表（檔名取自 `ASSETS`，與實際附件一致）加上「安裝提示」——下面每一點的精簡版。說明不放在 `release-files` 裡（那個資料夾的每個檔案都會成為附件），另存成 `release-notes` artifact；試建置也會產生，可在該次 run 的 job summary 或 artifact 先看到。`tests/test_release.py` 檢查說明含各平台的提示，且關鍵事實（「其他資訊 → 仍要執行」、「強制打開」、`xattr` 指令、`fuse3`、`--appimage-extract-and-run`、不需要 libfuse2、`fonts-noto-cjk`、`apt install` 指令）在本節與說明裡都出現；改其中一邊時兩邊一起改。
 
 - **macOS**：沒有 Apple 開發者簽章與公證（只有 ad-hoc 簽章），從瀏覽器下載的 DMG 第一次開啟會被 Gatekeeper 擋下。把 kikitori 拖到「應用程式」後開啟一次，再到「系統設定 → 隱私權與安全性」，在下方找到 kikitori 按「強制打開」（macOS 15 起不能再用右鍵「打開」略過）。進階使用者也可以執行 `xattr -dr com.apple.quarantine /Applications/kikitori.app`。之後的自動更新不會再出現這個警告。若出現「已損毀，無法打開」而不是「無法驗證開發者」，代表簽章有問題，請回報。
 - **Windows**：安裝檔沒有 Authenticode 簽章，SmartScreen 會顯示「Windows 已保護您的電腦」，選「其他資訊 → 仍要執行」。

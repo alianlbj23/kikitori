@@ -12,6 +12,7 @@
   collect   把本平台的安裝檔與更新器檔案（含 .sig）以固定名稱複製到輸出目錄
   verify    以 minisign 驗證目錄內每個 .sig（公鑰取自 tauri.conf.json 或指定檔案）
   manifest  從各平台的輸出目錄挑出發布檔案、驗證簽章格式，寫出 `latest.json`
+  notes     寫出 GitHub Release 的說明（下載表與各平台的安裝提示）
 不帶參數是互動選單。
 """
 
@@ -452,6 +453,57 @@ def build_manifest(
     return manifest
 
 
+# ---------------------------------------------------------------- Release 說明
+
+
+def _asset_name_ending(
+    platform: Platform, suffix: str, product: str, version: str
+) -> str:
+    """`ASSETS` 裡某個平台以 `suffix` 結尾的發布檔名（下載表與安裝提示共用，不另寫一份）。"""
+    names = [
+        a.asset_name(product, version)
+        for a in assets_for(platform)
+        if a.name.endswith(suffix)
+    ]
+    if len(names) != 1:
+        raise ReleaseError(f"expected one {platform} asset ending in {suffix!r}")
+    return names[0]
+
+
+def release_notes(product: str, version: str, tag: str) -> str:
+    """GitHub Release 頁面的說明（Markdown）：下載表與安裝提示。
+
+    程式沒有付費簽章，第一次安裝會遇到 SmartScreen／Gatekeeper；Linux 的 AppImage 與字型
+    在精簡系統上也有坑。內容與 `docs/specs/release-update.md`「給使用者的安裝說明」是同一份
+    事實（2026-11-05 容器實測見 `experiments/linux_acceptance/README.md`），改動時兩邊一起改。
+    """
+    parse_semver(version)
+    if tag != f"v{version}":
+        raise ReleaseError(f"tag {tag!r} does not match version {version!r}")
+    setup = _asset_name_ending("windows", "-setup.exe", product, version)
+    appimage = _asset_name_ending("linux", ".AppImage", product, version)
+    deb = _asset_name_ending("linux", ".deb", product, version)
+    dmg = _asset_name_ending("macos", ".dmg", product, version)
+    return f"""{product} {tag}
+
+| 平台 | 下載 |
+|---|---|
+| Windows 10/11 x64 | `{setup}` |
+| Linux x64 | `{appimage}` 或 `{deb}` |
+| macOS Apple Silicon | `{dmg}` |
+
+已安裝的 {product} 會在啟動時自動檢查更新（`latest.json`）。
+
+## 安裝提示
+
+- **Windows**：安裝檔沒有 Authenticode 簽章，SmartScreen 會顯示「Windows 已保護您的電腦」，請選「其他資訊 → 仍要執行」。
+- **macOS**：沒有 Apple 開發者簽章與公證（只有 ad-hoc 簽章），第一次開啟會被 Gatekeeper 擋下。把 {product} 拖到「應用程式」後開啟一次，再到「系統設定 → 隱私權與安全性」，在下方找到 {product} 按「強制打開」（macOS 15 起不能再用右鍵「打開」略過）。進階使用者也可以執行 `xattr -dr com.apple.quarantine /Applications/{product}.app`。之後的自動更新不會再出現這個警告。
+- **Linux AppImage**：先 `chmod +x {appimage}`。不需要 libfuse2，但要有 `/dev/fuse` 與 `fusermount`（Debian／Ubuntu 套件 `fuse3`，桌面版通常已安裝）。出現「Cannot mount AppImage, please check your FUSE setup.」時請安裝 `fuse3`，或不掛載直接執行：`./{appimage} --appimage-extract-and-run`（每次啟動會先解壓，較慢）。
+- **Linux deb**：`sudo apt install ./{deb}`。
+- **Linux 字型**：介面與字幕需要中日文字型；沒有 Noto CJK 的精簡系統請安裝 `fonts-noto-cjk`（deb 已列為建議套件），否則文字會顯示成方塊。
+"""
+
+
 # ---------------------------------------------------------------- 介面
 
 
@@ -515,6 +567,10 @@ def build_parser() -> argparse.ArgumentParser:
     man.add_argument("--repo", required=True, help="owner/name")
     man.add_argument("--tag", required=True)
     man.add_argument("--notes", default="")
+
+    notes = sub.add_parser("notes", help="write the GitHub Release body (Markdown)")
+    notes.add_argument("--tag", required=True)
+    notes.add_argument("--out", type=Path, required=True)
     return parser
 
 
@@ -578,6 +634,11 @@ def run_command(
             out(f"latest.json: version {manifest['version']}, platforms:")
             for key, entry in manifest["platforms"].items():
                 out(f"  {key}: {entry['url']}")
+        elif ns.command == "notes":
+            text = release_notes(product_name(root), project_version(root), ns.tag)
+            ns.out.parent.mkdir(parents=True, exist_ok=True)
+            ns.out.write_text(text, encoding="utf-8", newline="\n")
+            out(f"release notes: {ns.out}")
     except (ReleaseError, OSError) as exc:
         err(f"error: {exc}")
         return 1

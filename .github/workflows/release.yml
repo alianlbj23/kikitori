@@ -383,6 +383,17 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          # 不放進 release/：那個資料夾的每個檔案都會上傳成 Release 的附件。
+          python3 scripts/release.py notes --tag "$TAG" --out "$RUNNER_TEMP/notes/release-notes.md"
+          {
+            echo "### Release notes ($MODE, $TAG)"
+            echo
+            cat "$RUNNER_TEMP/notes/release-notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
@@ -390,6 +401,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
 
   publish:
     # 只在預設分支、版本號是新的、而且測試、三平台建置與簽章驗證都成功時執行。
@@ -412,6 +430,12 @@ jobs:
           name: release-files
           path: ${{ runner.temp }}/release
 
+      # assemble 以 release.py notes 產生（試建置也會產生，可在 artifacts／job summary 先確認）。
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+
       - name: Create the release (draft first, published after every file is uploaded)
         run: |
           set -euo pipefail
@@ -419,19 +443,7 @@ jobs:
             echo "::error::a release for $TAG already exists (maybe a draft from a failed run); remove it before re-running"
             exit 1
           fi
-          notes="$RUNNER_TEMP/notes.md"
-          cat > "$notes" <<EOF
-          kikitori ${TAG}
-
-          | 平台 | 下載 |
-          |---|---|
-          | Windows 10/11 x64 | \`kikitori_${TAG#v}_x64-setup.exe\` |
-          | Linux x64 | \`kikitori_${TAG#v}_amd64.AppImage\` 或 \`kikitori_${TAG#v}_amd64.deb\` |
-          | macOS Apple Silicon | \`kikitori_${TAG#v}_aarch64.dmg\` |
-
-          macOS 版沒有 Apple 開發者簽章與公證：第一次開啟時若被擋下，請到「系統設定 → 隱私權與安全性」選擇「強制開啟」。
-          已安裝的 kikitori 會在啟動時自動檢查更新（\`latest.json\`）。
-          EOF
+          notes="$RUNNER_TEMP/notes/release-notes.md"
           flags=(--draft --target "$GITHUB_SHA" --title "kikitori $TAG" --notes-file "$notes")
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" "$RUNNER_TEMP"/release/*
