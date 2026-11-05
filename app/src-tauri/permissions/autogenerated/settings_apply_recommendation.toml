@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-settings-apply-recommendation"
+description = "Enables the settings_apply_recommendation command without any pre-configured scope."
+commands.allow = ["settings_apply_recommendation"]
+
+[[permission]]
+identifier = "deny-settings-apply-recommendation"
+description = "Denies the settings_apply_recommendation command without any pre-configured scope."
+commands.deny = ["settings_apply_recommendation"]

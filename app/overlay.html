@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kikitori 字幕</title>
+    <link rel="stylesheet" href="/src/styles/overlay.css" />
+    <script type="module" src="/src/overlay/overlay.ts"></script>
+  </head>
+  <body>
+    <div class="frame" id="frame" data-position="bottom">
+      <div class="handle" id="handle">
+        <span class="handle-grip" aria-hidden="true"></span>
+        <span class="handle-label">拖曳移動</span>
+        <button type="button" class="handle-button" id="hide">隱藏</button>
+      </div>
+      <div class="stage" id="stage">
+        <div class="lines" id="lines" aria-live="polite"></div>
+        <p class="hint" id="hint">字幕會顯示在這裡。拖曳視窗可以移動位置，拖曳右下角可以調整大小。</p>
+      </div>
+      <div class="resize" id="resize" aria-hidden="true"></div>
+    </div>
+  </body>
+</html>

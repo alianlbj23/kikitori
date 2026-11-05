@@ -7,7 +7,18 @@ authors = [
     { name = "alianlbj23", email = "alianlbj23@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "ctranslate2==4.8.5",
+    "numpy==2.5.4",
+    "onnxruntime==1.31.1",
+    "opencc==1.4.2",
+    "pyaudiowpatch==0.2.12.9 ; sys_platform == 'win32'",
+    "pyobjc-framework-cocoa==13.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-coremedia==13.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-libdispatch==13.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-screencapturekit==13.0 ; sys_platform == 'darwin'",
+    "soundcard==0.4.6 ; sys_platform != 'win32'",
+]
 
 [project.scripts]
 kikitori = "kikitori:main"
@@ -19,5 +30,9 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pre-commit==4.6.2",
+    "pyinstaller==6.22.3",
     "ruff==0.17.1",
+]
+experiment-vad = [
+    "pipecat-ai==1.14.0",
 ]

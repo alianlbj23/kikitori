@@ -1,0 +1,39 @@
+[package]
+name = "kikitori-app"
+version = "0.1.0"
+description = "kikitori desktop UI: windows, engine bridge and updater"
+authors = ["alianlbj23"]
+license = "MIT"
+edition = "2024"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (cargo#8519 on Windows).
+name = "kikitori_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.5", features = ["macos-private-api"] }
+tauri-plugin-updater = "=2.14.1"
+tauri-plugin-process = "=2.4.0"
+tauri-plugin-opener = "=2.7.2"
+tauri-plugin-global-shortcut = "=2.4.1"
+tauri-plugin-window-state = "=2.5.0"
+tauri-plugin-log = "=2.10.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["process", "io-util", "sync", "time", "macros", "rt"] }
+log = "=0.4.35"
+
+[dev-dependencies]
+tokio = { version = "=1.54.1", features = ["process", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread", "test-util"] }
+
+# https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

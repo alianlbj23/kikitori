@@ -7,3 +7,14 @@ __pycache__/
 .env.*
 
 .claude/settings.local.json
+
+# 評測的本機資料（MUSAN、產生的音軌、結果）不進 repo
+experiments/silero_reset/data/
+
+# 打包輸出（packaging/engine/build.py）：PyInstaller 的工作目錄、建置結果，
+# 以及放給 Tauri 取用的引擎（每次建置重新產生，不進 repo）
+/build/
+/dist/
+/app/src-tauri/binaries/
+# app 的第三方授權聲明（packaging/app/licenses.py 在發布建置時產生，隨安裝檔散布）
+/app/src-tauri/licenses/

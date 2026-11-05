@@ -1,0 +1,53 @@
+# cargo-deny：Rust 依賴的授權檢查（app.yml 的 licenses job；說明見 docs/specs/release-update.md）。
+# 只允許寬鬆授權。遇到不在清單內的授權要逐一確認，用 [[licenses.exceptions]] 針對單一 crate
+# 放行並寫明理由，不可把整個授權加進 allow。
+
+[graph]
+# 只看實際發布的三個平台，避免把 Android／iOS 等用不到的平台依賴算進來。
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+all-features = false
+
+[licenses]
+confidence-threshold = 0.9
+# 只列實際需要的授權（cargo-deny 0.20.2，2026-11-05）；雙授權（如 "MIT OR Unlicense"）以其中
+# 已允許的一項滿足即可，所以 Unlicense、MIT-0、0BSD、CC0-1.0 不必列入。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+
+# MPL-2.0 是「檔案層級」的 copyleft：只有這些 crate 自己的原始檔受約束，不影響 kikitori 其他程式碼
+# 的授權。我們原樣使用（不修改），原始碼在 crates.io 公開可取得；散布執行檔時依 MPL-2.0 §3.2
+# 告知取得原始碼的方式（packaging/app/licenses.py 產生、隨安裝檔散布的
+# licenses/rust/MPL-2.0-SOURCE.txt）。都是 Tauri 本身的依賴，無法移除：
+# - cssparser、cssparser-macros、dtoa-short、selectors：Servo 專案，經 tauri-utils → dom_query
+#   （tauri-codegen 在建置時處理 HTML）。
+# - option-ext：經 tauri → dirs → dirs-sys。
+[[licenses.exceptions]]
+crate = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "cssparser-macros"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "dtoa-short"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "selectors"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]

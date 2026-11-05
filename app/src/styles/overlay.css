@@ -1,0 +1,210 @@
+@import "./tokens.css";
+
+/*
+ * Overlay: must stay legible over any video, bright or dark. Each line sits on
+ * a plate whose opacity the user controls (0 = no plate), and the glyphs carry
+ * an eight-direction outline plus a soft shadow so they survive even with the
+ * plate off. Original on top in near-white, translation below in subtitle
+ * yellow; while a sentence is still being heard both are dimmed and the
+ * translation stays white, then "inks in" yellow when the final arrives.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--font-ui);
+  color-scheme: dark;
+}
+
+.frame {
+  --fs: 32px;
+  --plate: 0.45;
+  --sub-white: #f4f6fb;
+  --sub-yellow: #ffd84a;
+  --outline-color: rgb(6 8 16 / 0.95);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  border-radius: 10px;
+  user-select: none;
+  cursor: default;
+}
+
+/* Interactive mode: a faint frame so the user can find, move and resize it. */
+.frame.is-interactive:hover {
+  background: rgb(16 22 44 / 0.25);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.35);
+}
+
+.frame.is-interactive {
+  cursor: grab;
+}
+
+.handle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px;
+  opacity: 0;
+  transition: opacity 120ms;
+  color: #fff;
+  font-size: 12px;
+}
+
+.frame.is-interactive:hover .handle,
+.frame.is-interactive:focus-within .handle {
+  opacity: 1;
+}
+
+.handle-grip {
+  width: 28px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.6);
+}
+
+.handle-label {
+  flex: 1;
+  text-shadow: 0 1px 2px #000;
+}
+
+.handle-button {
+  font: inherit;
+  color: #fff;
+  background: rgb(16 22 44 / 0.75);
+  border: 1px solid rgb(255 255 255 / 0.35);
+  border-radius: 4px;
+  padding: 1px 10px;
+  cursor: pointer;
+}
+
+.handle-button:focus-visible {
+  outline: 2px solid var(--sub-yellow);
+  outline-offset: 1px;
+}
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 4px 16px 12px;
+}
+
+.frame[data-position="top"] .stage {
+  justify-content: flex-start;
+}
+
+.lines {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--fs) * 0.35);
+}
+
+.line {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: calc(var(--fs) * 0.08);
+}
+
+.orig,
+.tr {
+  max-width: 100%;
+  padding: 0.05em 0.45em;
+  border-radius: 0.18em;
+  background: rgb(8 12 26 / var(--plate));
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-shadow:
+    -0.06em -0.06em 0 var(--outline-color),
+    0 -0.06em 0 var(--outline-color),
+    0.06em -0.06em 0 var(--outline-color),
+    0.06em 0 0 var(--outline-color),
+    0.06em 0.06em 0 var(--outline-color),
+    0 0.06em 0 var(--outline-color),
+    -0.06em 0.06em 0 var(--outline-color),
+    -0.06em 0 0 var(--outline-color),
+    0 0.1em 0.35em rgb(0 0 0 / 0.6);
+  transition:
+    color 220ms ease-out,
+    opacity 220ms ease-out;
+}
+
+.orig {
+  font-size: calc(var(--fs) * 0.62);
+  font-weight: 500;
+  color: var(--sub-white);
+}
+
+.tr {
+  font-size: var(--fs);
+  font-weight: 700;
+  color: var(--sub-yellow);
+}
+
+.tr:empty {
+  display: none;
+}
+
+/* Earlier, already-finished lines step back so the newest one leads. */
+.line:not(:last-child) {
+  opacity: 0.78;
+}
+
+.line.is-partial .orig,
+.line.is-partial .tr {
+  opacity: 0.72;
+}
+
+.line.is-partial .tr {
+  color: var(--sub-white);
+}
+
+.hint {
+  margin: auto;
+  max-width: 34em;
+  padding: 8px 14px;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 14px;
+  color: #fff;
+  background: rgb(16 22 44 / 0.7);
+}
+
+.resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  display: none;
+  background:
+    linear-gradient(135deg, transparent 50%, rgb(255 255 255 / 0.7) 50%, rgb(255 255 255 / 0.7) 58%, transparent 58%, transparent 70%, rgb(255 255 255 / 0.7) 70%, rgb(255 255 255 / 0.7) 78%, transparent 78%);
+}
+
+.frame.is-interactive:hover .resize {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orig,
+  .tr,
+  .handle {
+    transition: none;
+  }
+}

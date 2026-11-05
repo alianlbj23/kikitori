@@ -1,0 +1,81 @@
+/*
+ * Design tokens shared by the main window and the overlay.
+ *
+ * Direction: indigo (藍, aizome) carries the structure; subtitle yellow (黄蘗,
+ * kihada — the colour of classic video subtitles) is reserved for live things:
+ * the start button, the utterance being heard, and the translation line on the
+ * overlay. Everything else stays quiet so those few yellow marks read instantly.
+ */
+
+:root {
+  --ai: #22305c;
+  --ai-deep: #18224a;
+  --ai-soft: #3a4a7f;
+  --usuai: #eef1f6;
+  --paper: #fafbfd;
+  --sumi: #18203a;
+  --nezumi: #646d86;
+  --rule: #d6dce7;
+  --kihada: #f2c230;
+  --kihada-soft: #fbedc0;
+  --kihada-ink: #2e2400;
+  --beni: #b3344a;
+  --beni-soft: #f7e3e7;
+  --focus: #2f6fe0;
+
+  --on-ai: #e8ecf7;
+  --on-ai-dim: #a9b3d1;
+
+  --font-ui: "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC",
+    "Noto Sans TC", system-ui, sans-serif;
+  --font-mincho: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif CJK JP",
+    "Noto Serif JP", "Noto Serif TC", serif;
+  --font-ja: "Yu Gothic UI", "Yu Gothic", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
+  --font-latin: "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", "Cantarell", sans-serif;
+
+  /* Type scale (ratio ~1.25) */
+  --t-xs: 12px;
+  --t-sm: 13px;
+  --t-md: 15px;
+  --t-lg: 18px;
+  --t-xl: 23px;
+  --t-2xl: 29px;
+
+  --radius-s: 4px;
+  --radius-m: 8px;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --usuai: #121829;
+    --paper: #182037;
+    --sumi: #e3e7f2;
+    --nezumi: #949db8;
+    --rule: #2a3452;
+    --ai: #1b2547;
+    --ai-deep: #0f1630;
+    --ai-soft: #4c5d96;
+    --kihada-soft: #4a3d12;
+    --kihada-ink: #241c00;
+    --beni: #e06a7e;
+    --beni-soft: #3d1f27;
+    --focus: #79a4ff;
+    color-scheme: dark;
+  }
+}
+
+/* Language-specific faces so kanji take the right regional glyph forms. */
+:lang(ja) {
+  font-family: var(--font-ja);
+}
+
+:lang(en) {
+  font-family: var(--font-latin);
+}
+
+:lang(zh) {
+  font-family: var(--font-ui);
+}

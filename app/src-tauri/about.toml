@@ -1,0 +1,25 @@
+# cargo-about：產生 Rust 依賴的第三方授權聲明（packaging/app/licenses.py 呼叫，輸出 JSON 後由它
+# 整理成 app/src-tauri/licenses/）。說明見 docs/specs/packaging-ci.md「app 的第三方授權聲明」。
+#
+# 範圍：三個發布平台的 normal 依賴（含 proc-macro 子樹，cargo-about 不分辨它們是否連結進執行檔，
+# 寧可多列）；只在建置時執行的 build-dependencies 與只給測試的 dev-dependencies 不進執行檔，排除。
+# 允許清單與 deny.toml 相同，另加 MPL-2.0（deny.toml 以單一 crate 例外放行的那五個）。
+
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# 雙授權時依此順序挑第一個允許的授權。
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+]

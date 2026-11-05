@@ -1,0 +1,378 @@
+{
+ "model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+ "warmup_s": 7.263196100015193,
+ "items": [
+  {
+   "id": "ja01",
+   "text": "おはようございます！今日も配信始めていきます！",
+   "target": "zh-TW",
+   "ttft": 0.03810950001934543,
+   "total": 0.1144198999973014,
+   "updates": 9,
+   "raw": "大家早！今天也要开台啦！",
+   "converted": "大家早！今天也要開臺啦！",
+   "simplified_raw": [
+    "开"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja02",
+   "text": "今日はみんなと一緒にホラーゲームやっていくよ。",
+   "target": "zh-TW",
+   "ttft": 0.03434250003192574,
+   "total": 0.10982980002881959,
+   "updates": 9,
+   "raw": "今天要和大家一起玩恐怖游戏哦。",
+   "converted": "今天要和大家一起玩恐怖遊戲哦。",
+   "simplified_raw": [
+    "戏"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja03",
+   "text": "怖くないもん…全然怖くないもん！",
+   "target": "zh-TW",
+   "ttft": 0.03428989998064935,
+   "total": 0.11298909998731688,
+   "updates": 9,
+   "raw": "才不害怕呢……我一点都不怕！",
+   "converted": "才不害怕呢……我一點都不怕！",
+   "simplified_raw": [
+    "点"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja04",
+   "text": "えっ、マジで？それはヤバくない？",
+   "target": "zh-TW",
+   "ttft": 0.062139099987689406,
+   "total": 0.15864280000096187,
+   "updates": 12,
+   "raw": "诶，真的假的？那不是很不妙吗？",
+   "converted": "誒，真的假的？那不是很不妙嗎？",
+   "simplified_raw": [
+    "诶",
+    "吗"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja05",
+   "text": "待って待って、今のなし！もう一回やらせて！",
+   "target": "zh-TW",
+   "ttft": 0.037105900002643466,
+   "total": 0.13786670000990853,
+   "updates": 12,
+   "raw": "等等等等，刚才的不算！再让我来一次！",
+   "converted": "等等等等，剛才的不算！再讓我來一次！",
+   "simplified_raw": [
+    "刚",
+    "让",
+    "来"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja06",
+   "text": "スパチャありがとう！めっちゃ嬉しい！",
+   "target": "zh-TW",
+   "ttft": 0.037152000004425645,
+   "total": 0.12840159999905154,
+   "updates": 11,
+   "raw": "谢谢大家的超留！我超开心的！",
+   "converted": "謝謝大家的超留！我超開心的！",
+   "simplified_raw": [
+    "谢",
+    "谢",
+    "开"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja07",
+   "text": "草生えるｗｗｗ",
+   "target": "zh-TW",
+   "ttft": 0.035195999953430146,
+   "total": 0.07402010000078008,
+   "updates": 4,
+   "raw": "长草了www",
+   "converted": "長草了www",
+   "simplified_raw": [
+    "长"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja08",
+   "text": "推しが尊すぎて無理…",
+   "target": "zh-TW",
+   "ttft": 0.04061349999392405,
+   "total": 0.1435018999618478,
+   "updates": 11,
+   "raw": "我的推太尊了，我坚持不住了……",
+   "converted": "我的推太尊了，我堅持不住了……",
+   "simplified_raw": [
+    "坚"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja09",
+   "text": "じゃあ、そろそろ締めていこうかな。",
+   "target": "zh-TW",
+   "ttft": 0.03838510002242401,
+   "total": 0.1127328000147827,
+   "updates": 8,
+   "raw": "那么，差不多该做个总结了。",
+   "converted": "那麼，差不多該做個總結了。",
+   "simplified_raw": [
+    "么",
+    "该",
+    "个",
+    "总",
+    "结"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja10",
+   "text": "チャンネル登録と高評価、よろしくお願いします！",
+   "target": "zh-TW",
+   "ttft": 0.03739549999590963,
+   "total": 0.10826249996898696,
+   "updates": 8,
+   "raw": "还请各位订阅频道并点赞！",
+   "converted": "還請各位訂閱頻道並點贊！",
+   "simplified_raw": [
+    "还",
+    "请",
+    "订",
+    "阅",
+    "频",
+    "点",
+    "赞"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja11",
+   "text": "明日の配信は夜九時からです。お楽しみに！",
+   "target": "zh-TW",
+   "ttft": 0.039740099979098886,
+   "total": 0.14294739998877048,
+   "updates": 12,
+   "raw": "明天的直播是从晚上九点开始。敬请期待！",
+   "converted": "明天的直播是從晚上九點開始。敬請期待！",
+   "simplified_raw": [
+    "从",
+    "点",
+    "开",
+    "请"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja12",
+   "text": "お前、まだそんなこと言ってるのか。",
+   "target": "zh-TW",
+   "ttft": 0.04626460000872612,
+   "total": 0.11098700005095452,
+   "updates": 7,
+   "raw": "你还在说这种话啊。",
+   "converted": "你還在說這種話啊。",
+   "simplified_raw": [
+    "还",
+    "说",
+    "这",
+    "话"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja13",
+   "text": "俺は絶対に諦めない。仲間を守るためなら何でもする。",
+   "target": "zh-TW",
+   "ttft": 0.06416029995307326,
+   "total": 0.1798679999774322,
+   "updates": 13,
+   "raw": "我绝对不会放弃。为了保护同伴，我什么都愿意做。",
+   "converted": "我絕對不會放棄。為了保護同伴，我什麼都願意做。",
+   "simplified_raw": [
+    "绝",
+    "对",
+    "会",
+    "弃",
+    "为",
+    "护",
+    "么"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja14",
+   "text": "まさか、あいつが裏切り者だったなんて…",
+   "target": "zh-TW",
+   "ttft": 0.03787719999672845,
+   "total": 0.11822479998227209,
+   "updates": 9,
+   "raw": "没想到，那家伙居然是叛徒……",
+   "converted": "沒想到，那傢伙居然是叛徒……",
+   "simplified_raw": [
+    "没"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja15",
+   "text": "行くぞ、みんな！この戦い、俺たちの勝ちだ！",
+   "target": "zh-TW",
+   "ttft": 0.03937980002956465,
+   "total": 0.1446033000247553,
+   "updates": 12,
+   "raw": "上吧，各位！这场战斗，是我们赢了！",
+   "converted": "上吧，各位！這場戰鬥，是我們贏了！",
+   "simplified_raw": [
+    "这",
+    "场",
+    "战",
+    "们",
+    "赢"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja16",
+   "text": "先輩、ちょっといいですか？",
+   "target": "zh-TW",
+   "ttft": 0.035544399986974895,
+   "total": 0.10670339997159317,
+   "updates": 8,
+   "raw": "学姐，能打扰一下吗？",
+   "converted": "學姐，能打擾一下嗎？",
+   "simplified_raw": [
+    "学",
+    "扰",
+    "吗"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja17",
+   "text": "なんでそんな顔してるの？何かあった？",
+   "target": "zh-TW",
+   "ttft": 0.03429949999554083,
+   "total": 0.11046479997457936,
+   "updates": 9,
+   "raw": "为什么露出那种表情？发生什么事了？",
+   "converted": "為什麼露出那種表情？發生什麼事了？",
+   "simplified_raw": [
+    "为",
+    "么",
+    "发",
+    "么"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja18",
+   "text": "心配しないで。私がついてるから。",
+   "target": "zh-TW",
+   "ttft": 0.04903459997149184,
+   "total": 0.1119926999672316,
+   "updates": 7,
+   "raw": "别担心，有我在呢。",
+   "converted": "別擔心，有我在呢。",
+   "simplified_raw": [
+    "别",
+    "担"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja19",
+   "text": "べ、別にあんたのためにやったわけじゃないんだからね！",
+   "target": "zh-TW",
+   "ttft": 0.037279499985743314,
+   "total": 0.1290515000000596,
+   "updates": 11,
+   "raw": "我，我可不是为了你才这么做的哦！",
+   "converted": "我，我可不是為了你才這麼做的哦！",
+   "simplified_raw": [
+    "为",
+    "这",
+    "么"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja20",
+   "text": "ごめん、遅れちゃった。電車が止まってて。",
+   "target": "zh-TW",
+   "ttft": 0.05366199999116361,
+   "total": 0.15744660003110766,
+   "updates": 12,
+   "raw": "抱歉，我迟到了。电车停运了。",
+   "converted": "抱歉，我遲到了。電車停運了。",
+   "simplified_raw": [
+    "迟",
+    "电",
+    "车",
+    "运"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja21",
+   "text": "いただきます！うわ、このラーメンうまっ！",
+   "target": "zh-TW",
+   "ttft": 0.03377480001654476,
+   "total": 0.15274370001861826,
+   "updates": 14,
+   "raw": "我开动了！哇，这碗拉面好好吃！",
+   "converted": "我開動了！哇，這碗拉麵好好吃！",
+   "simplified_raw": [
+    "开",
+    "动",
+    "这"
+   ],
+   "simplified_after": []
+  },
+  {
+   "id": "ja22",
+   "text": "この動画のソフトの情報、後でネットで調べてみるね。",
+   "target": "zh-TW",
+   "ttft": 0.05509899999015033,
+   "total": 0.16513330000452697,
+   "updates": 13,
+   "raw": "我之后会去网上查一下这个视频软件的情报。",
+   "converted": "我之後會去網上查一下這個影片軟體的情報。",
+   "simplified_raw": [
+    "会",
+    "网",
+    "这",
+    "个",
+    "视",
+    "频",
+    "软",
+    "报"
+   ],
+   "simplified_after": []
+  }
+ ],
+ "summary": {
+  "model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+  "ok": 22,
+  "errors": 0,
+  "ttft_median": 0.03799335000803694,
+  "ttft_p90": 0.06002706998842768,
+  "total_median": 0.12331319999066181,
+  "total_p90": 0.16318615000345743,
+  "zh_lines": 22,
+  "simplified_raw_lines": 22,
+  "simplified_after_lines": 0
+ },
+ "date": "2026-11-05 11:42"
+}

@@ -1,0 +1,456 @@
+# 發布：push 到 main 且 pyproject 的版本號還沒有 tag 時，三平台打包並建立 GitHub Release
+# （安裝檔、更新器檔案與簽章、latest.json）。設計與操作見 docs/specs/release-update.md。
+#
+# 試建置（dry run）：任何其他分支的 push，只要 head commit 的訊息含 `[release-dry-run]`，就完整跑
+# 一次打包、安裝與冒煙測試、產生 latest.json，結果只上傳成 workflow artifacts，不建立 Release、
+# 不使用 GitHub Secrets（更新器以當場產生的拋棄式金鑰簽章）。workflow_dispatch 只對預設分支上的
+# workflow 有效，所以用 commit 訊息觸發。
+#
+# 第三方 action 一律釘在完整 commit SHA（註解是對應的版本）。
+name: release
+
+on:
+  push:
+    # 只看分支；tag 的 push 不觸發。
+    branches: ["**"]
+
+# 預設只能讀；只有 publish job 拿到 contents: write。
+permissions:
+  contents: read
+
+concurrency:
+  # 不取消進行中的發布，後來的 push 排隊。
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  UV_VERSION: "0.13.4"
+  RUST_TOOLCHAIN: "1.99.1"
+  NODE_VERSION: "24.20.0"
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    # 其他分支沒有標記時整個 workflow 不做事（job 被略過，不佔 runner）。
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+      contains(github.event.head_commit.message, '[release-dry-run]')
+    name: gate (version / mode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.decide.outputs.mode }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      prerelease: ${{ steps.decide.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Version numbers in sync (pyproject = tauri.conf.json / Cargo / package.json / locks)
+        run: python3 scripts/sync_version.py check
+
+      - name: List existing tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --paginate "repos/${GITHUB_REPOSITORY}/tags" --jq '.[].name' > "$RUNNER_TEMP/tags.txt"
+
+      - name: Decide publish / dry-run / skip
+        id: decide
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 scripts/release.py gate --ref "$GITHUB_REF" --default-branch "$DEFAULT_BRANCH" \
+            --tags-file "$RUNNER_TEMP/tags.txt" | tee -a "$GITHUB_OUTPUT"
+
+  # 與 push／PR 時相同的測試。版本沒變（skip）時不重跑：test.yml／app.yml 本身已在這次 push 執行。
+  test:
+    needs: gate
+    if: needs.gate.outputs.mode != 'skip'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+
+  app:
+    needs: gate
+    if: needs.gate.outputs.mode != 'skip'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/app.yml
+
+  build:
+    # 與測試平行執行以縮短時間；Release 只在測試與三平台建置全部成功後才由 publish 建立。
+    needs: gate
+    if: needs.gate.outputs.mode == 'publish' || needs.gate.outputs.mode == 'dry-run'
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            bundles: nsis
+            cargo_about: x86_64-pc-windows-msvc
+            cargo_about_sha256: 1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748
+          # 在較舊的 Ubuntu 建置，AppImage／deb 需要的 glibc 較低，能在較多發行版執行。
+          - platform: linux
+            os: ubuntu-22.04
+            bundles: appimage,deb
+            cargo_about: x86_64-unknown-linux-musl
+            cargo_about_sha256: 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
+          # macos-latest 是 Apple Silicon（arm64）。
+          - platform: macos
+            os: macos-latest
+            bundles: app,dmg
+            cargo_about: aarch64-apple-darwin
+            cargo_about_sha256: ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      MODE: ${{ needs.gate.outputs.mode }}
+      VERSION: ${{ needs.gate.outputs.version }}
+      BUNDLES: ${{ matrix.bundles }}
+      PLATFORM: ${{ matrix.platform }}
+      BUNDLE_DIR: app/src-tauri/target/release/bundle
+      # 與 app.yml 相同的版本；各平台發行檔的 SHA-256 在 matrix。
+      CARGO_ABOUT_VERSION: "0.9.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Linux packages for Tauri (WebKitGTK 4.1 etc.)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc -V
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: app/src-tauri -> target
+          prefix-key: release-build
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Python environment (locked)
+        run: uv sync --locked
+
+      - name: Build kikitori-engine (PyInstaller one-folder) and smoke-test it
+        env:
+          KIKITORI_BUILD_NONINTERACTIVE: "1"
+        # 不加 --no-sidecar：輸出放到 app/src-tauri/binaries/kikitori-engine/，供 tauri.sidecar.conf.json
+        # 的 bundle.resources 帶進安裝檔。
+        run: uv run python packaging/engine/build.py --smoke
+
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+
+      - name: Install cargo-about (pinned, checksum verified)
+        env:
+          TARGET: ${{ matrix.cargo_about }}
+          SHA256: ${{ matrix.cargo_about_sha256 }}
+        run: |
+          set -euo pipefail
+          name="cargo-about-${CARGO_ABOUT_VERSION}-${TARGET}"
+          curl --fail --silent --show-error --location --max-time 120 \
+            -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/${name}.tar.gz"
+          actual="$(uv run --no-project python -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$RUNNER_TEMP/$name.tar.gz")"
+          if [ "$actual" != "$SHA256" ]; then
+            echo "::error::cargo-about checksum mismatch: $actual"
+            exit 1
+          fi
+          # 相對路徑：Windows 上 GNU tar 會把 "D:\..." 的 "D:" 當成遠端主機。
+          (cd "$RUNNER_TEMP" && tar -xzf "$name.tar.gz")
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Third-party notices for the app (Rust crates, npm packages, kikitori LICENSE)
+        # tauri.sidecar.conf.json 的 bundle.resources 把這個目錄放進安裝檔（licenses/）。
+        run: |
+          cargo about --version
+          uv run python packaging/app/licenses.py --out app/src-tauri/licenses
+
+      - name: "Updater signing key (publish: from GitHub Secrets)"
+        if: env.MODE == 'publish'
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::GitHub Secret TAURI_SIGNING_PRIVATE_KEY is not set (see docs/specs/release-update.md)"
+            exit 1
+          fi
+
+      - name: "Updater signing key (dry run: throwaway key, no secrets)"
+        if: env.MODE == 'dry-run'
+        run: |
+          key="$RUNNER_TEMP/dry-run-updater.key"
+          password="$(uv run --no-project python -c 'import secrets; print(secrets.token_hex(24))')"
+          echo "::add-mask::$password"
+          npm --prefix app exec -- tauri signer generate --ci --password "$password" --write-keys "$key"
+          content="$(cat "$key")"
+          echo "::add-mask::$content"
+          {
+            echo "DRY_RUN_SIGNING_KEY=$content"
+            echo "DRY_RUN_SIGNING_PASSWORD=$password"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/release-files"
+          cp "$key.pub" "$RUNNER_TEMP/release-files/updater-pubkey.txt"
+
+      - name: tauri build (engine as bundle resources)
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.MODE == 'publish' && secrets.TAURI_SIGNING_PRIVATE_KEY || env.DRY_RUN_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.MODE == 'publish' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || env.DRY_RUN_SIGNING_PASSWORD }}
+          # linuxdeploy 本身是 AppImage；runner 沒有 FUSE 時以解壓方式執行。
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json --bundles "$BUNDLES"
+
+      - name: Sign the deb for the updater if tauri did not
+        if: runner.os == 'Linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.MODE == 'publish' && secrets.TAURI_SIGNING_PRIVATE_KEY || env.DRY_RUN_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.MODE == 'publish' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || env.DRY_RUN_SIGNING_PASSWORD }}
+        # deb 安裝的使用者由 latest.json 的 linux-x86_64-deb 取得 .deb 更新，需要它的簽章。
+        run: |
+          deb="$GITHUB_WORKSPACE/$BUNDLE_DIR/deb/kikitori_${VERSION}_amd64.deb"
+          if [ -f "$deb.sig" ]; then
+            echo "tauri already signed $(basename "$deb")"
+          else
+            npm --prefix app exec -- tauri signer sign --app-version "$VERSION" "$deb"
+          fi
+
+      - name: "Smoke test (Windows): silent NSIS install, then the installed engine"
+        if: runner.os == 'Windows'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:BUNDLE_DIR "nsis/kikitori_$($env:VERSION)_x64-setup.exe"
+          $dir = Join-Path $env:RUNNER_TEMP 'kikitori-install'
+          $p = Start-Process -FilePath $setup -ArgumentList '/S', "/D=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exited with $($p.ExitCode)" }
+          Get-ChildItem $dir | Format-Table Name, Length
+          $engine = Join-Path $dir 'kikitori-engine/kikitori-engine.exe'
+          if (-not (Test-Path $engine)) { throw "engine not installed at $engine" }
+          uv run python packaging/engine/smoke_test.py --binary $engine --self-check --expect-version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw "smoke test failed ($LASTEXITCODE)" }
+          # 第三方授權：licenses/（app）與 kikitori-engine/THIRD_PARTY_LICENSES/（引擎）。
+          uv run python packaging/app/licenses.py --check-bundle $dir
+          if ($LASTEXITCODE -ne 0) { throw "license folders incomplete ($LASTEXITCODE)" }
+
+      - name: "Smoke test (Linux): installed deb and extracted AppImage"
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          deb="$GITHUB_WORKSPACE/$BUNDLE_DIR/deb/kikitori_${VERSION}_amd64.deb"
+          sudo apt-get install -y "$deb"
+          engine=/usr/lib/kikitori/kikitori-engine/kikitori-engine
+          test -x "$engine" || { echo "::error::$engine is missing or not executable"; exit 1; }
+          uv run python packaging/engine/smoke_test.py --binary "$engine" --self-check --expect-version "$VERSION"
+          uv run python packaging/app/licenses.py --check-bundle /usr/lib/kikitori
+
+          appimage="$GITHUB_WORKSPACE/$BUNDLE_DIR/appimage/kikitori_${VERSION}_amd64.AppImage"
+          test -x "$appimage" || { echo "::error::AppImage is not executable"; exit 1; }
+          (cd "$RUNNER_TEMP" && "$appimage" --appimage-extract > /dev/null)
+          engine="$RUNNER_TEMP/squashfs-root/usr/lib/kikitori/kikitori-engine/kikitori-engine"
+          test -x "$engine" || { echo "::error::$engine is missing or not executable"; exit 1; }
+          uv run python packaging/engine/smoke_test.py --binary "$engine" --self-check --expect-version "$VERSION"
+          uv run python packaging/app/licenses.py --check-bundle "$RUNNER_TEMP/squashfs-root/usr/lib/kikitori"
+
+      - name: "Smoke test (macOS): signatures, .app, DMG and the updater tarball"
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          check() {
+            local app="$1" engine="$1/Contents/Resources/kikitori-engine/kikitori-engine"
+            echo "== $app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign --display --verbose=2 "$app" 2>&1 | grep -E '^(Identifier|Format|Signature|TeamIdentifier)'
+            test -x "$engine" || { echo "::error::$engine is missing or not executable"; exit 1; }
+            codesign --verify --strict --verbose=2 "$engine"
+            uv run python packaging/engine/smoke_test.py --binary "$engine" --self-check --expect-version "$VERSION"
+            uv run python packaging/app/licenses.py --check-bundle "$app/Contents/Resources"
+          }
+          check "$BUNDLE_DIR/macos/kikitori.app"
+
+          mnt="$RUNNER_TEMP/dmg"
+          mkdir -p "$mnt"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$BUNDLE_DIR/dmg/kikitori_${VERSION}_aarch64.dmg"
+          check "$mnt/kikitori.app"
+          hdiutil detach "$mnt"
+
+          # 自動更新安裝的是這個 tarball 解開的 .app。
+          mkdir -p "$RUNNER_TEMP/updater-app"
+          tar -xzf "$BUNDLE_DIR/macos/kikitori.app.tar.gz" -C "$RUNNER_TEMP/updater-app"
+          check "$RUNNER_TEMP/updater-app/kikitori.app"
+
+      - name: Collect release files
+        run: |
+          uv run python scripts/release.py collect --platform "$PLATFORM" \
+            --bundle-dir "$BUNDLE_DIR" --out "$RUNNER_TEMP/release-files"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: ${{ runner.temp }}/release-files/
+          if-no-files-found: error
+          retention-days: 14
+          # 安裝檔本身已壓縮。
+          compression-level: 0
+
+  assemble:
+    # 驗證每個更新器簽章、產生 latest.json；不需要寫入權限。
+    needs: [gate, build]
+    name: assemble (verify signatures, latest.json)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MODE: ${{ needs.gate.outputs.mode }}
+      VERSION: ${{ needs.gate.outputs.version }}
+      TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bundle-*
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Verify updater signatures
+        run: |
+          set -euo pipefail
+          artifacts="$RUNNER_TEMP/artifacts"
+          if [ "$MODE" = publish ]; then
+            if find "$artifacts" -name updater-pubkey.txt | grep -q .; then
+              echo "::error::publish build was signed with a throwaway key"
+              exit 1
+            fi
+            # app 內建的公鑰：確認 GitHub Secrets 的私鑰與它相符。
+            python3 scripts/release.py verify --dir "$artifacts" --pubkey-from-config
+          else
+            # 試建置：每個平台各用自己的拋棄式金鑰。
+            for d in "$artifacts"/bundle-*; do
+              python3 scripts/release.py verify --dir "$d" --pubkey-file "$d/updater-pubkey.txt"
+            done
+          fi
+
+      - name: Stage release files and write latest.json
+        run: |
+          set -euo pipefail
+          python3 scripts/release.py manifest --dir "$RUNNER_TEMP/artifacts" --stage "$RUNNER_TEMP/release" \
+            --repo "$GITHUB_REPOSITORY" --tag "$TAG" --notes "kikitori $TAG"
+          {
+            echo "### Release files ($MODE, $TAG)"
+            echo '```'
+            ls -l "$RUNNER_TEMP/release"
+            echo '```'
+            echo '```json'
+            cat "$RUNNER_TEMP/release/latest.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          # 不放進 release/：那個資料夾的每個檔案都會上傳成 Release 的附件。
+          python3 scripts/release.py notes --tag "$TAG" --out "$RUNNER_TEMP/notes/release-notes.md"
+          {
+            echo "### Release notes ($MODE, $TAG)"
+            echo
+            cat "$RUNNER_TEMP/notes/release-notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    # 只在預設分支、版本號是新的、而且測試、三平台建置與簽章驗證都成功時執行。
+    needs: [gate, test, app, build, assemble]
+    if: >-
+      needs.gate.outputs.mode == 'publish' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+      PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+
+      # assemble 以 release.py notes 產生（試建置也會產生，可在 artifacts／job summary 先確認）。
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+
+      - name: Create the release (draft first, published after every file is uploaded)
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName > /dev/null; then
+            echo "::error::a release for $TAG already exists (maybe a draft from a failed run); remove it before re-running"
+            exit 1
+          fi
+          notes="$RUNNER_TEMP/notes/release-notes.md"
+          flags=(--draft --target "$GITHUB_SHA" --title "kikitori $TAG" --notes-file "$notes")
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" "$RUNNER_TEMP"/release/*
+          if [ "$PRERELEASE" = true ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          else
+            # releases/latest/download/latest.json（更新器的端點）指向這個 Release。
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
