@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kikitori</title>
+    <link rel="stylesheet" href="/src/styles/main.css" />
+    <script type="module" src="/src/main/main.ts"></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="rail">
+        <header class="brand">
+          <span class="brand-mark" lang="ja">聞き取り</span>
+          <span class="brand-name">kikitori</span>
+        </header>
+
+        <section class="rail-block" aria-labelledby="mode-heading">
+          <h2 id="mode-heading" class="rail-heading">模式</h2>
+          <div class="modes" role="radiogroup" aria-labelledby="mode-heading">
+            <button type="button" class="mode" role="radio" data-mode="media" aria-checked="true">
+              <span class="mode-name">影片翻譯</span>
+              <span class="mode-note" data-mode-note="media">日語、英語譯成繁體中文</span>
+            </button>
+            <button type="button" class="mode" role="radio" data-mode="interpret" aria-checked="false">
+              <span class="mode-name">即時口譯</span>
+              <span class="mode-note" data-mode-note="interpret">中文與日語互譯</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="rail-block">
+          <label class="rail-heading" for="device">聲音來源</label>
+          <select id="device" class="rail-select"></select>
+          <p class="rail-hint" id="device-hint">影片翻譯會擷取電腦正在播放的聲音。</p>
+        </section>
+
+        <button type="button" id="start" class="start" data-state="idle">開始</button>
+
+        <nav class="nav" aria-label="頁面">
+          <button type="button" class="nav-item" data-page="transcript" aria-current="page">字幕紀錄</button>
+          <button type="button" class="nav-item" data-page="models">模型</button>
+          <button type="button" class="nav-item" data-page="settings">設定</button>
+        </nav>
+
+        <footer class="engine" aria-live="polite">
+          <p class="engine-status"><span class="dot" id="status-dot" data-tone="busy"></span><span id="status-label">正在啟動引擎</span></p>
+          <p class="engine-detail" id="status-detail" hidden></p>
+          <button type="button" class="link-button" id="restart-engine" hidden>重新啟動引擎</button>
+        </footer>
+      </aside>
+
+      <main class="content">
+        <div class="notices" id="notices" aria-live="assertive"></div>
+
+        <section class="page" id="page-transcript" aria-labelledby="transcript-heading">
+          <header class="page-head">
+            <div>
+              <h1 id="transcript-heading">字幕紀錄</h1>
+              <p class="page-lede">即時字幕會先以淡色出現，整句翻譯完成後換成正式的譯文。</p>
+            </div>
+            <div class="page-tools">
+              <label class="switch"><input type="checkbox" id="overlay-visible" /><span>顯示字幕視窗</span></label>
+              <label class="switch"><input type="checkbox" id="overlay-click-through" /><span>滑鼠穿透</span></label>
+              <button type="button" class="ghost" id="clear-transcript">清除紀錄</button>
+            </div>
+          </header>
+          <p class="shortcut-note" id="shortcut-note"></p>
+          <ol class="transcript" id="transcript" aria-live="off"></ol>
+          <div class="empty" id="transcript-empty">
+            <p class="empty-title">還沒有字幕</p>
+            <p>選好模式和聲音來源後按「開始」，聽到的每一句會依序列在這裡，原文在上、譯文在下。</p>
+          </div>
+        </section>
+
+        <section class="page" id="page-models" aria-labelledby="models-heading" hidden>
+          <header class="page-head">
+            <div>
+              <h1 id="models-heading">模型</h1>
+              <p class="page-lede">語音辨識在這台電腦上執行；翻譯交給設定頁指定的翻譯服務。</p>
+            </div>
+            <div class="page-tools">
+              <button type="button" class="ghost" id="models-refresh">重新偵測</button>
+            </div>
+          </header>
+
+          <section class="block" aria-labelledby="hw-heading">
+            <h2 id="hw-heading">這台電腦</h2>
+            <dl class="facts" id="hardware"></dl>
+          </section>
+
+          <section class="block" aria-labelledby="rec-heading">
+            <h2 id="rec-heading">建議組合</h2>
+            <div id="recommendation"></div>
+          </section>
+
+          <section class="block" aria-labelledby="asr-heading">
+            <h2 id="asr-heading">語音辨識模型</h2>
+            <p class="block-lede">即時字幕需要快，完整翻譯需要準；兩者可以用不同模型。</p>
+            <table class="models">
+              <thead>
+                <tr><th scope="col">模型</th><th scope="col">大小</th><th scope="col">速度</th><th scope="col">授權</th><th scope="col">狀態</th></tr>
+              </thead>
+              <tbody id="asr-models"></tbody>
+            </table>
+            <form class="choice" id="asr-choice">
+              <label>即時字幕用<select name="fast_model" id="asr-fast"></select></label>
+              <label>完整翻譯用<select name="final_model" id="asr-final"></select></label>
+              <label>運算裝置
+                <select name="device" id="asr-device">
+                  <option value="auto">自動</option>
+                  <option value="cpu">CPU</option>
+                  <option value="cuda">NVIDIA GPU（CUDA）</option>
+                </select>
+              </label>
+              <button type="submit" class="primary">套用</button>
+            </form>
+          </section>
+
+          <section class="block" aria-labelledby="gpu-heading">
+            <h2 id="gpu-heading">GPU 加速元件</h2>
+            <p class="block-lede">使用 NVIDIA 顯示卡加速辨識需要額外的執行元件。</p>
+            <button type="button" class="ghost" id="gpu-runtime" disabled>下載 GPU 加速元件</button>
+            <p class="rail-hint" id="gpu-note">之後的版本會提供這個下載。</p>
+          </section>
+
+          <section class="block" aria-labelledby="tr-heading">
+            <h2 id="tr-heading">翻譯模型</h2>
+            <p class="block-lede" id="tr-source"></p>
+            <ul class="presets" id="tr-presets"></ul>
+            <form class="choice" id="tr-choice">
+              <label>即時字幕用<input name="fast_model" id="tr-fast" list="tr-names" autocomplete="off" /></label>
+              <label>完整翻譯用<input name="final_model" id="tr-final" list="tr-names" autocomplete="off" /></label>
+              <datalist id="tr-names"></datalist>
+              <button type="submit" class="primary">套用</button>
+            </form>
+          </section>
+        </section>
+
+        <section class="page" id="page-settings" aria-labelledby="settings-heading" hidden>
+          <header class="page-head">
+            <div>
+              <h1 id="settings-heading">設定</h1>
+              <p class="page-lede" id="settings-path"></p>
+            </div>
+          </header>
+
+          <form id="settings-form" novalidate>
+            <fieldset class="block">
+              <legend>翻譯服務</legend>
+              <p class="block-lede">支援 OpenAI 相容的 API。本機的 Ollama 預設網址是 http://localhost:11434/v1。</p>
+              <div class="field">
+                <label for="f-base-url">服務網址</label>
+                <input id="f-base-url" name="base_url" type="url" autocomplete="off" spellcheck="false" />
+                <p class="field-error" data-error-for="base_url"></p>
+              </div>
+              <div class="field">
+                <label for="f-api-key-env">API 金鑰的環境變數名稱</label>
+                <input id="f-api-key-env" name="api_key_env" autocomplete="off" spellcheck="false" />
+                <p class="field-help">只填變數名稱。金鑰本身請設在系統環境變數裡，kikitori 不會儲存金鑰。本機 Ollama 不需要金鑰。</p>
+                <p class="field-error" data-error-for="api_key_env"></p>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-fast-model">即時字幕用的翻譯模型</label>
+                  <input id="f-fast-model" name="fast_model" list="tr-names" autocomplete="off" spellcheck="false" />
+                  <p class="field-error" data-error-for="fast_model"></p>
+                </div>
+                <div class="field">
+                  <label for="f-final-model">完整翻譯用的翻譯模型</label>
+                  <input id="f-final-model" name="final_model" list="tr-names" autocomplete="off" spellcheck="false" />
+                  <p class="field-error" data-error-for="final_model"></p>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset class="block">
+              <legend>語言</legend>
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-target">譯文語言</label>
+                  <select id="f-target" disabled><option value="zh-TW">繁體中文</option></select>
+                  <p class="field-help">影片翻譯一律譯成繁體中文。</p>
+                </div>
+                <div class="field">
+                  <label for="f-partner">口譯對方的語言</label>
+                  <select id="f-partner" name="partner_language">
+                    <option value="ja">日語</option>
+                    <option value="en">英語</option>
+                  </select>
+                  <p class="field-help">即時口譯時，你說中文會譯成這個語言，對方說的話會譯成中文。</p>
+                  <p class="field-error" data-error-for="partner_language"></p>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset class="block">
+              <legend>字幕外觀</legend>
+              <div class="preview" id="style-preview" aria-hidden="true">
+                <div class="preview-line">
+                  <span class="preview-orig" lang="ja">次の駅で降りましょう。</span>
+                  <span class="preview-tr">我們在下一站下車吧。</span>
+                </div>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-font-size">譯文字級 <output id="o-font-size"></output></label>
+                  <input id="f-font-size" name="font_size" type="range" min="14" max="96" step="1" />
+                  <p class="field-error" data-error-for="font_size"></p>
+                </div>
+                <div class="field">
+                  <label for="f-opacity">背景不透明度 <output id="o-opacity"></output></label>
+                  <input id="f-opacity" name="background_opacity_percent" type="range" min="0" max="100" step="5" />
+                  <p class="field-error" data-error-for="background_opacity_percent"></p>
+                </div>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-position">字幕位置</label>
+                  <select id="f-position" name="position">
+                    <option value="bottom">貼齊視窗下緣</option>
+                    <option value="top">貼齊視窗上緣</option>
+                  </select>
+                  <p class="field-error" data-error-for="position"></p>
+                </div>
+                <div class="field">
+                  <label for="f-lines">同時顯示的句數</label>
+                  <select id="f-lines" name="max_lines">
+                    <option value="1">1 句</option>
+                    <option value="2">2 句</option>
+                    <option value="3">3 句</option>
+                  </select>
+                  <p class="field-error" data-error-for="max_lines"></p>
+                </div>
+              </div>
+            </fieldset>
+
+            <div class="form-actions">
+              <button type="submit" class="primary" id="settings-save">儲存設定</button>
+              <span class="form-status" id="settings-status" role="status"></span>
+            </div>
+          </form>
+
+          <section class="block" aria-labelledby="about-heading">
+            <h2 id="about-heading">版本與更新</h2>
+            <p id="about-version"></p>
+            <p id="about-engine" class="rail-hint"></p>
+            <button type="button" class="ghost" id="check-update">檢查更新</button>
+            <span class="form-status" id="update-status" role="status"></span>
+          </section>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

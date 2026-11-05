@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Main window: engine control, settings, models, overlay control and updates.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:app:allow-version",
+    "updater:default",
+    "process:allow-restart",
+    "allow-engine-info",
+    "allow-hardware-detect",
+    "allow-models-list",
+    "allow-models-download",
+    "allow-devices-list",
+    "allow-settings-get",
+    "allow-settings-set",
+    "allow-session-start",
+    "allow-session-stop",
+    "allow-engine-restart",
+    "allow-bridge-status",
+    "allow-overlay-get-state",
+    "allow-overlay-set-style",
+    "allow-overlay-set-click-through",
+    "allow-overlay-set-visible"
+  ]
+}
