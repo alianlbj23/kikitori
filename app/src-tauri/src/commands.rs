@@ -274,13 +274,29 @@ pub struct AboutInfo {
     pub engine_licenses: Option<String>,
 }
 
+/// `path` as users expect to read and paste it: without the Windows verbatim
+/// prefix (`\\?\C:\…` → `C:\…`, `\\?\UNC\server\share` → `\\server\share`).
+///
+/// Tauri canonicalizes `resource_dir()`, which on Windows adds that prefix; the
+/// about page showed it, and the file manager's address bar rejects it.
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        text.into_owned()
+    }
+}
+
 /// `folder`'s path under `resource_dir`, only when it is an existing directory.
 pub fn license_folder(resource_dir: Option<&Path>, folder: LicenseFolder) -> Option<String> {
     let dir = match folder {
         LicenseFolder::App => app_licenses_dir(resource_dir?),
         LicenseFolder::Engine => third_party_licenses_dir(resource_dir?),
     };
-    dir.is_dir().then(|| dir.to_string_lossy().into_owned())
+    dir.is_dir().then(|| display_path(&dir))
 }
 
 pub fn about_info(resource_dir: Option<&Path>) -> AboutInfo {
@@ -491,6 +507,44 @@ mod tests {
             both.engine_licenses,
             Some(engine_dir.to_string_lossy().into_owned())
         );
+        if let Err(e) = std::fs::remove_dir_all(&resources) {
+            eprintln!("could not remove {}: {e}", resources.display());
+        }
+    }
+
+    #[test]
+    fn license_paths_are_shown_without_the_verbatim_prefix() {
+        // Tauri's resource_dir() is canonicalized, which on Windows yields
+        // `\\?\C:\...`; the about page showed that prefix to users, and the
+        // file manager's address bar does not accept it.
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Program Files\kikitori\licenses")),
+            r"C:\Program Files\kikitori\licenses"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\kikitori")),
+            r"\\server\share\kikitori"
+        );
+        assert_eq!(
+            display_path(Path::new(r"C:\Program Files\kikitori")),
+            r"C:\Program Files\kikitori"
+        );
+        assert_eq!(
+            display_path(Path::new("/usr/lib/kikitori/licenses")),
+            "/usr/lib/kikitori/licenses"
+        );
+
+        let resources =
+            std::env::temp_dir().join(format!("kikitori-verbatim-{}", std::process::id()));
+        let app_dir = app_licenses_dir(&resources);
+        std::fs::create_dir_all(&app_dir).unwrap();
+        if cfg!(windows) {
+            let verbatim = PathBuf::from(format!(r"\\?\{}", resources.display()));
+            assert_eq!(
+                about_info(Some(&verbatim)).app_licenses,
+                Some(app_dir.to_string_lossy().into_owned())
+            );
+        }
         if let Err(e) = std::fs::remove_dir_all(&resources) {
             eprintln!("could not remove {}: {e}", resources.display());
         }
