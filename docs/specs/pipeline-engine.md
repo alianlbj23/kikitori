@@ -180,10 +180,14 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 - 逐步模式：`feed()` 同步處理音訊並排工作；`end_of_stream()` 等同 flush；`run_pending()` 先跑最新槽（若仍有效）再依序跑全部完整工作。錯誤走與執行緒模式相同的路徑。不得與 `start()` 混用。
 - **元件的釋放**（2026-11-06，memory_soak #1／#2）：pipeline 不擁有元件的生命週期；引擎在 session 結束時呼叫 `release_components()`（每個不同的 transcriber
   呼叫一次 `close()`，有的話）。真實的 Whisper transcriber 因此把 CTranslate2 模型卸載並放回模型池（`asr.md`「模型物件池」）。
+  **順序**（2026-11-06 review）：停止 metrics → 釋放元件 → 送出結束狀態（`idle`／`error`）。UI 收到結束狀態就可能 `session.start`，舊模型不能
+  還佔著顯示記憶體（每個 `close()` 最多等進行中的推論 2 秒）。釋放在另一條執行緒（`session-<id>-release`）上進行，最多等
+  `RELEASE_TIMEOUT = 5.0` 秒；逾時記 warning（`session N is still releasing its models …`）並照樣送出結束狀態，釋放在背景繼續，期間
+  `models.delete` 仍回 `model_in_use`（`_Session.releasing`）。
 - **例外不能把元件留在循環裡**（memory_soak #1）：存起來、之後在別的執行緒丟出的擷取錯誤一律丟**新的複本**（`capture.errors.detached_copy()`：同類別、
   同訊息、同 `__cause__`、沒有 traceback）——`ThreadedSource.start()` 的開裝置錯誤與 `ChunkBuffer.get()` 的擷取錯誤；保存前也清掉擷取執行緒的
   traceback。否則丟出處（`Pipeline.start` → 元件 → GPU 上的模型）的 frame 會接到 source 保存的例外上，形成只能靠循環垃圾回收釋放的循環
-  （實測每次「開始」約 3 GB 顯示記憶體留到引擎結束）。引擎的 `_load_session` 在記錄之後也清掉例外鏈的 traceback（`_drop_frames()`），與 `Pipeline._fail()` 一致。
+  （實測每次「開始」約 3 GB 顯示記憶體留到引擎結束）。引擎的 `_load_session` 在記錄之後也清掉例外鏈的 traceback（`_clear_tracebacks()`），與 `Pipeline._fail()` 一致。
 
 ## config
 
@@ -397,9 +401,9 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   - 檢查順序：參數（`model` 必須是 1–100 字元的字串、沒有其他參數，否則 `invalid_params`）→ 不在 ASR registry（含 `"gpu-runtime"`）→ `unknown_model`
     → 使用中 → `model_in_use`（訊息列出使用者，例如 `session 3`、`a download`）→ 沒有下載完成 → `model_not_downloaded`。
     「使用中」= 目前的 session（載入中或執行中）的 `asr.fast_model`／`final_model`、已停止但載入執行緒還在跑的 session（它還在讀模型檔）、
-    元件尚未釋放的 session，或 `models.download` 正在下載同一個 ASR 模型（下載中、尚未完成的模型也回 `model_in_use`，先於 `model_not_downloaded`）。
+    元件尚未釋放完的 session（含已取走元件、`close()` 還在進行的），或 `models.download` 正在下載同一個 ASR 模型（下載中、尚未完成的模型也回 `model_in_use`，先於 `model_not_downloaded`）。
     session 用到的模型以 `session.start` 當時的設定為準。
-  - 刪除（factory 的 `delete_asr_model()` → asr 的 `delete_model()`，見 `asr.md`「磁碟用量與刪除」）：先丟掉模型池中該模型的閒置物件，再刪整個
+  - 刪除（factory 的 `delete_asr_model()` → asr 的 `delete_model()`，見 `asr.md`「磁碟用量與刪除」）：刪除前後都丟掉模型池中該模型的閒置物件，刪整個
     `<快取>/<id>`（所有 revision、`.part` 殘留）；只在模型快取內刪：路徑解析後必須就在快取資料夾正下方，`<快取>/<id>` 或樹裡任何地方是
     symlink／junction 就整個拒絕（什麼都不刪）。路徑不安全或刪除失敗（檔案被開著）→ `internal_error`（訊息為例外類別與說明；沒有另設錯誤碼，
     協定只約定上面三個 code）。刪除中途失敗時先刪掉的是完成標記，模型之後就是「沒下載」，可重新 `models.download`。
@@ -430,7 +434,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 - 引擎啟動完成後先送一筆 `status idle`。
 - `metrics`（F4）：pipeline 建好、`pipeline.start()` 之前啟動一條 daemon 執行緒（`session-<id>-metrics`），每 `METRICS_INTERVAL = 1.0` 秒讀一次
   `Pipeline.metrics()`，pipeline 為 `running` 時送出（欄位意義見「量測」）。session 送出結束狀態（`idle`／`error`，含停止、讀完、執行中錯誤、
-  開裝置失敗、引擎結束）**之前**停止並 join（送出與停止共用一把鎖），所以結束狀態之後不會再有這個 session 的 `metrics`；pipeline 已結束時執行緒也會
+  開裝置失敗、引擎結束）**之前**停止並 join（送出與停止共用一把鎖），所以結束狀態之後不會再有這個 session 的 `metrics`。例外：送出卡住（stdout
+  管線塞滿）超過 `METRICS_JOIN_TIMEOUT = 1.0` 秒時記 warning 後不再等，那一則可能落在結束狀態之後（UI 依 `session_id` 忽略）；pipeline 已結束時執行緒也會
   自己結束（不會遺留）。載入中（`loading`）不送。`latency_ms_median` 為 null 表示還沒有完整字幕。`EngineServer(metrics_interval=…)` 可改間隔（測試用）。
 - `status error` 的 `code`：`model_not_downloaded`、`unknown_model`、`translation_model_missing`（`data: {"models": [...]}`，見 `session.start`）、`device_not_found`、`permission_denied`、`device_lost`、`capture_unavailable`、`capture_error`、`pipeline_error`、`load_error`。session 執行中的錯誤依 `Pipeline.error`：擷取錯誤（`CaptureError` 子類別，例如錄音中拔掉 USB 裝置的 `DeviceLostError`）用與 `session.start` 相同的擷取 code，其他是 `pipeline_error`。明確指定 `asr.device="cuda"` 而同一行程 CUDA 曾失敗時，asr 丟出的 `RuntimeError` 訊息（要求重啟引擎）原樣放在 `load_error` 的 `detail`。
 - `download_progress` 節流：每 0.25 秒或每 1% 最多一筆；開始（0）與結束（`done`／`error`）一定送。`kind`（Milestone 13 新增）分辨同名的 ASR 模型與翻譯模型：`asr`（`models.download` 的 ASR 模型）、`gpu_runtime`（`model` 為 `"gpu-runtime"`）、`translation`（`models.pull_translation`）。
@@ -571,7 +576,7 @@ UI 流程見 `ui.md`「自動推薦」。
 - `no_speech_reliable(model_id)`：registry 的 `no_speech_reliable`，設定 `PipelineComponents.final_no_speech_reliable`。
 - `create_transcript_filter(no_speech_threshold)`：asr 的 `rejection_reason` + `FilterConfig`。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`model_disk_bytes`（`disk_bytes`，同時決定 `downloaded`）、`download_model`、`default_cache_dir`。
-- `delete_asr_model(model_id, cache_dir=None) -> int`（F7）：`MODEL_POOL.evict_under(<快取>/<id>)` 後 `delete_model()`；未知 → `UnknownModelError`、沒下載 → `FileNotFoundError`。
+- `delete_asr_model(model_id, cache_dir=None) -> int`（F7）：`MODEL_POOL.evict_under(<快取>/<id>)` 後 `delete_model()`，刪除後（成功或失敗）再 `evict_under` 一次（刪除期間結束的 session 可能剛把物件放回池中）；未知 → `UnknownModelError`、沒下載 → `FileNotFoundError`。
 - `release_asr_models()`：引擎結束時 `MODEL_POOL.clear()`（`EngineServices.release_models`）。
 - `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`），最後 `attach_keep_warm()`。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
 - `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務時原樣回傳，不包裝也不送請求。設為 0 時翻譯器不包裝、不定期送請求，`keep_warm` 換成 `keep_warm.WarmUpOnEnable`：只在執行中開啟翻譯（從關閉變成開啟）時於背景 daemon 執行緒預熱一次（同時只有一個預熱在進行；失敗只記 warning），因為以「只顯示原文」開始的 session 沒有開場預熱。逐步模式（測試、smoke）不啟動。**只顯示原文**（`translation.enabled=false`，Milestone 14）時保溫是「不動作」的（`KeepWarm(active=False)`）：不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled(True)` → `KeepWarm.set_active(True)`）時才建立執行緒並先在背景預熱一次（以「開啟翻譯後」的設定組請求），之後照常保溫；再關閉就停止送請求。翻譯器在 session 開始時就要包好（活動才記得到），所以不能等開啟時才建立。不需要翻譯的語言組合（影片翻譯、收聽與字幕同一個 Whisper 語言）仍原樣回傳。

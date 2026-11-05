@@ -442,6 +442,19 @@ def _is_link(path: Path) -> bool:
     return path.is_symlink() or path.is_junction()
 
 
+def _check_no_links(path: Path, root: Path) -> None:
+    """`path` 與它到 `root`（含）之間的每一層都不是連結，否則丟 `UnsafeModelPathError`。"""
+    current = path
+    while True:
+        if _is_link(current):
+            raise UnsafeModelPathError(
+                f"{current} became a link while deleting; refusing to follow it"
+            )
+        if current == root or current.parent == current:
+            return
+        current = current.parent
+
+
 def _scan_tree(root: Path, *, strict: bool) -> tuple[int, list[Path], list[Path]]:
     """`root` 底下普通檔案的大小合計、檔案與資料夾（上層在前）；不跟隨連結。
 
@@ -500,12 +513,17 @@ def delete_model(spec: ModelSpec, cache_dir: Path) -> int:
     """刪除已下載的模型（`<cache>/<id>` 整個資料夾），回傳釋放的位元組數。
 
     安全檢查（全部通過才刪任何東西）：id 是單一資料夾名稱；`<cache>/<id>` 不是連結或
-    junction；解析後的位置就在解析後的快取資料夾正下方；整棵樹裡沒有任何連結。先刪完成
-    標記，中途失敗時模型就不會被當成「已下載」。
+    junction；解析後的位置就在解析後的快取資料夾正下方；整棵樹裡沒有任何連結。刪除每個
+    檔案與資料夾之前，再檢查它與到 `<cache>/<id>` 為止的每一層都不是連結：掃描之後才被
+    換成連結的資料夾不會被跟隨。先刪完成標記，中途失敗時模型就不會被當成「已下載」。
+
+    剩下的限制：重新檢查與刪除之間仍有極短的空檔（Windows 的 Python 沒有以資料夾 handle
+    為基準的 unlink／rmdir，無法完全消除）；要利用它，攻擊者必須已經能寫入使用者自己的
+    模型快取資料夾。
 
     Raises:
         FileNotFoundError: 模型沒有下載（只有續傳殘留時也是；殘留留給之後的下載續傳）。
-        UnsafeModelPathError: 上述檢查不通過。
+        UnsafeModelPathError: 上述檢查不通過（刪除途中才發現時，已刪的部分不會復原）。
         OSError: 刪除失敗（例如檔案被其他程式開著）；已刪的部分不會復原。
     """
     root = _model_root(spec, cache_dir)
@@ -523,8 +541,10 @@ def delete_model(spec: ModelSpec, cache_dir: Path) -> int:
     marker = model_dir(spec, cache_dir) / MARKER_NAME
     files.sort(key=lambda path: path != marker)
     for path in files:
+        _check_no_links(path, root)
         path.unlink()
     for directory in reversed(dirs):
+        _check_no_links(directory, root)
         directory.rmdir()
     logger.info("deleted ASR model %s (%d bytes) from %s", spec.id, total, root)
     return total

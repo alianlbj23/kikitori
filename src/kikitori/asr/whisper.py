@@ -9,7 +9,8 @@ beam search／溫度 fallback → 解碼成文字。pipeline 透過 `load_transc
 
 CTranslate2 的模型物件由行程內的 `MODEL_POOL` 重複使用：每建立一個新物件並在 GPU 上推論過，
 `del` 之後仍漏約 8 MiB 顯示記憶體與 8–10 MiB 主記憶體（memory_soak #2，上游行為）；
-session 結束時 `WhisperTranscriber.close()` 把模型卸載（權重離開 GPU）並放回池中，
+session 結束時 `WhisperTranscriber.close()` 把模型卸載（權重離開 GPU；CPU 上也會釋放 RAM，
+實測見 `docs/specs/asr.md`）並放回池中，
 下一個相同設定的 session 以 `load_model()` 重用同一個物件。
 """
 
@@ -207,10 +208,10 @@ class ModelPool:
         """最舊的在前（LRU）。"""
 
     def acquire(self, key: ModelKey, create: Callable[[], Any]) -> Any:
-        """取出 `key` 的閒置物件並 `load_model()`；沒有時呼叫 `create()` 建立新的。
+        """取出 `key` 的閒置物件並 `load_model()`；沒有、或重新載入失敗時呼叫 `create()`。
 
         Raises:
-            RuntimeError、OSError: 載入或建立失敗（重用的物件失敗時不再放回池中）。
+            RuntimeError、OSError: `create()` 建立失敗。
         """
         model = None
         with self._lock:
@@ -220,17 +221,36 @@ class ModelPool:
                     break
         if model is None:
             return create()
-        # 在鎖外載入（可能要數秒）；失敗時物件直接丟掉，狀態不明的物件不再重用
-        model.load_model()
+        # 在鎖外載入（可能要數秒）。失敗時記錄並丟掉這個物件（狀態不明，不再重用），改建立
+        # 新的：結果與池中沒有物件時相同，只是多漏一次建立物件的 8 MiB。若是真的資源不足
+        # （例如 VRAM），create() 會以同樣的原因失敗並往上拋。
+        try:
+            model.load_model()
+        except Exception:
+            logger.exception(
+                "reloading a pooled ASR model object for %s failed; creating a new one",
+                key.path,
+            )
+            del model
+            return create()
         logger.debug("reusing a pooled ASR model object for %s", key.path)
         return model
 
     def release(self, key: ModelKey, model: Any) -> None:
-        """卸載 `model` 並放回池中；卸載失敗時記錄並丟掉它。"""
+        """卸載 `model` 並放回池中；卸載失敗或沒有卸載時記錄並丟掉它。"""
         try:
             model.unload_model()
         except Exception:
             logger.exception("unloading the ASR model failed; dropping it")
+            return
+        # CTranslate2 的 unload_model() 在還有進行中的 batch、或拿不到模型的鎖時直接返回
+        # 而不丟例外（python/cpp/replica_pool.h）；權重仍在記憶體中，留在池裡就等於一直
+        # 佔著。這時不放回池中，交給參照計數釋放。
+        if getattr(model, "model_is_loaded", False) is True:
+            logger.warning(
+                "the ASR model %s is still loaded after unload_model(); dropping it",
+                key.path,
+            )
             return
         with self._lock:
             self._idle.append((key, model))
@@ -359,21 +379,30 @@ class WhisperTranscriber:
             ValueError: 新參數指定的語言模型不支援。
             RuntimeError: 這個實例已經 `close()`。
         """
-        if self._closed:
-            raise RuntimeError(f"transcriber {self.name} is closed")
-        transcriber = WhisperTranscriber(
-            self._model,
-            self._tokenizer,
-            options,
-            storage=self._storage,
-            name=self.name,
-            device=self.device,
-            compute_type=self.compute_type,
-            lease=self._lease,
-        )
-        if self._lease is not None:
-            self._lease.retain()
-        return transcriber
+        # 檢查與 retain() 都在 _close_lock 之內（close() 也在同一把鎖內設定旗標）：否則
+        # 檢查之後、retain() 之前 close() 跑完，模型會在新實例還在用時被放回池中，
+        # 甚至借給下一個 session。
+        with self._close_lock:
+            if self._closed:
+                raise RuntimeError(f"transcriber {self.name} is closed")
+            if self._lease is not None:
+                self._lease.retain()
+        try:
+            return WhisperTranscriber(
+                self._model,
+                self._tokenizer,
+                options,
+                storage=self._storage,
+                name=self.name,
+                device=self.device,
+                compute_type=self.compute_type,
+                lease=self._lease,
+            )
+        except BaseException:
+            # 例如新參數的語言不支援：模型本身沒問題，撤銷上面的 retain()
+            if self._lease is not None:
+                self._lease.release(reusable=True)
+            raise
 
     def close(self, timeout: float = CLOSE_TIMEOUT) -> None:
         """不再使用：之後的呼叫丟 `RuntimeError`，模型卸載並放回模型池（可重複呼叫）。
@@ -396,6 +425,15 @@ class WhisperTranscriber:
             )
         if self._lease is not None:
             self._lease.release(reusable=acquired)
+
+    def _discard(self) -> None:
+        """關閉但不把模型放回池中（例如 GPU 上暖機失敗：物件狀態不明，交給參照計數）。"""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        if self._lease is not None:
+            self._lease.release(reusable=False)
 
     def _check_open(self) -> None:
         # 在 self._lock 之內呼叫：close() 設定旗標之後開始的推論一律拒絕
@@ -689,6 +727,54 @@ def _acquire_model(
     return model, _ModelLease(pool, key, model)
 
 
+def _pooled_transcriber(
+    path: Path,
+    tokenizer: WhisperTokenizer,
+    options: DecodeOptions | None,
+    *,
+    name: str,
+    device: Literal["cpu", "cuda"],
+    compute_type: str,
+    cpu_threads: int,
+    workers: int,
+    warmup: bool,
+) -> WhisperTranscriber:
+    """從模型池取得模型並建立 transcriber；之後任何一步失敗都歸還借用紀錄。
+
+    CPU 與 CUDA 路徑共用，失敗時的處理才會一致：建構時的 `ValueError`（參數不合法，模型
+    本身沒問題）放回池中；暖機失敗（GPU 函式庫或顯示記憶體的問題）不放回池中——物件可能
+    處在壞掉的 CUDA 狀態，交給參照計數釋放。
+
+    Raises:
+        ValueError: 解碼參數指定的語言模型不支援。
+        RuntimeError、OSError: 建立、載入或暖機失敗。
+    """
+    model, lease = _acquire_model(path, device, compute_type, cpu_threads, workers)
+    try:
+        transcriber = WhisperTranscriber(
+            model,
+            tokenizer,
+            options,
+            name=name,
+            device=device,
+            compute_type=compute_type,
+            lease=lease,
+        )
+    except ValueError:
+        lease.release(reusable=True)
+        raise
+    except BaseException:
+        lease.release(reusable=False)
+        raise
+    if warmup:
+        try:
+            transcriber.warmup()
+        except BaseException:
+            transcriber._discard()
+            raise
+    return transcriber
+
+
 def default_compute_type(device: Literal["cpu", "cuda"]) -> str:
     """各裝置的預設精度：CPU int8；CUDA float16。
 
@@ -793,20 +879,17 @@ def load_transcriber(
             else:
                 cuda_type = compute_type or default_compute_type("cuda")
                 try:
-                    model, lease = _acquire_model(
-                        path, "cuda", cuda_type, cpu_threads, workers
-                    )
-                    transcriber = WhisperTranscriber(
-                        model,
+                    return _pooled_transcriber(
+                        path,
                         tokenizer,
                         options,
                         name=name,
                         device="cuda",
                         compute_type=cuda_type,
-                        lease=lease,
+                        cpu_threads=cpu_threads,
+                        workers=workers,
+                        warmup=True,
                     )
-                    transcriber.warmup()
-                    return transcriber
                 except (RuntimeError, OSError) as exc:
                     _record_cuda_failure(str(exc))
                     if device == "cuda":
@@ -816,18 +899,15 @@ def load_transcriber(
                     )
 
     cpu_type = compute_type or default_compute_type("cpu")
-    model, lease = _acquire_model(path, "cpu", cpu_type, cpu_threads, workers)
-    try:
-        return WhisperTranscriber(
-            model,
-            tokenizer,
-            options,
-            name=name,
-            device="cpu",
-            compute_type=cpu_type,
-            lease=lease,
-        )
-    except ValueError:
-        # 解碼參數不合法（例如模型不支援的語言）：模型沒問題，放回池中給之後重用
-        lease.release(reusable=True)
-        raise
+    # CPU 不暖機：沒有要提早發現的 GPU 函式庫問題，也沒有 CUDA kernel 初始化的延遲
+    return _pooled_transcriber(
+        path,
+        tokenizer,
+        options,
+        name=name,
+        device="cpu",
+        compute_type=cpu_type,
+        cpu_threads=cpu_threads,
+        workers=workers,
+        warmup=False,
+    )

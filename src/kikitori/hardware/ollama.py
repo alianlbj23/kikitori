@@ -238,13 +238,18 @@ def ollama_version(
             raise OllamaUnreachableError(
                 f"{root.host}:{root.port} closed the connection before responding"
             )
-        conn.sock = _PollingSocket(  # type: ignore[assignment]
+        polling = _PollingSocket(
             sock,
             threading.Event(),
             timeout,
             deadline=time.monotonic() + timeout,
         )
-        resp = conn.getresponse()
+        conn.sock = polling  # type: ignore[assignment]
+        try:
+            resp = conn.getresponse()
+        except BaseException:
+            polling.abort()  # 沒有回應物件會關閉讀取器（見 `_PollingSocket`）
+            raise
         # 判斷只需要 200 的內容；其他狀態不讀內容，也就不會卡在讀取
         body = resp.read(MAX_ERROR_BODY_BYTES + 1) if resp.status == 200 else b""
     except TimeoutError as exc:
@@ -434,6 +439,10 @@ class _PollingSocket:
     `http.client` 在 `getresponse()` 裡就呼叫連線的 `close()`，之後才讀內容；立刻關掉
     真正的 socket 會讓讀內容失敗（WinError 10038），被誤判成「連不上」。所以 `close()`
     只標記，等最後一個讀取器也關閉時才關閉 socket。
+
+    `getresponse()` 失敗（標頭不合法、中途斷線）時沒有回應物件可以關閉：CPython 3.12 的
+    `getresponse()` 自己會關閉建到一半的回應，但這是實作細節，所以錯誤路徑另外呼叫
+    `abort()`，不靠它也不等垃圾回收。
     """
 
     def __init__(
@@ -449,35 +458,52 @@ class _PollingSocket:
         self._idle_timeout = idle_timeout
         self._deadline = deadline
         self._lock = threading.Lock()
-        self._readers = 0
+        self._readers: list[_PollingReader] = []
+        """還沒關閉的讀取器（`abort()` 要能關閉它們）。"""
         self._closed = False
+        self._sock_closed = False
 
     def makefile(self, mode: str, *args: object, **kwargs: object) -> io.BufferedReader:
-        with self._lock:
-            self._readers += 1
-        return io.BufferedReader(
-            _PollingReader(
-                self._sock,
-                self._cancel,
-                self._idle_timeout,
-                deadline=self._deadline,
-                on_close=self._reader_closed,
-            )
+        reader = _PollingReader(
+            self._sock,
+            self._cancel,
+            self._idle_timeout,
+            deadline=self._deadline,
+            on_close=lambda: self._reader_closed(reader),
         )
-
-    def _reader_closed(self) -> None:
         with self._lock:
-            self._readers -= 1
-            close_now = self._closed and self._readers == 0
+            self._readers.append(reader)
+        return io.BufferedReader(reader)
+
+    def _reader_closed(self, reader: "_PollingReader") -> None:
+        with self._lock:
+            self._readers.remove(reader)
+            close_now = self._closed and not self._readers
         if close_now:
-            self._sock.close()
+            self._close_socket()
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            close_now = self._readers == 0
+            close_now = not self._readers
         if close_now:
-            self._sock.close()
+            self._close_socket()
+
+    def abort(self) -> None:
+        """關閉所有讀取器與 socket（回應沒建成、沒有人會關閉讀取器時；可重複呼叫）。"""
+        with self._lock:
+            self._closed = True
+            readers = list(self._readers)
+        for reader in readers:
+            reader.close()  # 最後一個關閉時經 _reader_closed 關閉 socket
+        self._close_socket()
+
+    def _close_socket(self) -> None:
+        with self._lock:
+            if self._sock_closed:
+                return
+            self._sock_closed = True
+        self._sock.close()
 
 
 def pull_model(
@@ -582,10 +608,15 @@ def _stream_pull(
     if sock is None:
         raise PullError("the connection closed before the response")
     # 請求送出後才換成輪詢的替身：回應的讀取（含標頭）都能被取消
-    conn.sock = _PollingSocket(sock, cancel, idle_timeout)  # type: ignore[assignment]
+    polling = _PollingSocket(sock, cancel, idle_timeout)
+    conn.sock = polling  # type: ignore[assignment]
     resp: http.client.HTTPResponse | None = None
     try:
-        resp = conn.getresponse()
+        try:
+            resp = conn.getresponse()
+        except BaseException:
+            polling.abort()  # 沒有回應物件會關閉讀取器（見 `_PollingSocket`）
+            raise
         if resp.status != 200:
             raise _http_error(resp)
         while True:

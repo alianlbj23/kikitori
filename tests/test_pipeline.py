@@ -592,6 +592,24 @@ class TranslationToggleTest(unittest.TestCase):
         self.assertTrue(h.pipeline.translation_enabled)
 
 
+class PartialStabilityTest(unittest.TestCase):
+    """`PartialStability` 的即時譯文：只能經 `record_translation()` 改變，換句子時清空。"""
+
+    def test_translation_is_recorded_and_reset_per_utterance(self) -> None:
+        from kikitori.pipeline.stability import PartialStability
+
+        stability = PartialStability()
+        stability.observe(1, "こんに")
+        self.assertEqual(stability.translation, "")
+        stability.record_translation("你好")
+        stability.observe(1, "こんにちは")
+        self.assertEqual(stability.translation, "你好")  # 同一句：沿用，不閃爍
+        stability.observe(2, "さようなら")
+        self.assertEqual(stability.translation, "")
+        with self.assertRaises(AttributeError):
+            stability.translation = "x"  # type: ignore[misc]
+
+
 class StablePartialTest(unittest.TestCase):
     """F2：LocalAgreement-2 的穩定前綴（`stable_chars`）與減少即時翻譯請求。"""
 

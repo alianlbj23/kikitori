@@ -154,6 +154,9 @@ class Transcriber(Protocol):
   （沒有分隔符號、`..`、磁碟代號）、`<cache>/<id>` 不是 symlink／junction、解析後就在解析後的快取資料夾正下方、整棵樹裡沒有任何
   連結（違反時 `UnsafeModelPathError`，`ValueError` 的子類別）。沒有下載完成時 `FileNotFoundError`（只有 `.part` 殘留時也是：留給
   之後的下載續傳）。先刪完成標記，中途失敗（`OSError`，例如檔案被其他程式開著）時模型不會被當成已下載。
+  刪除每個檔案與資料夾之前再檢查它到 `<cache>/<id>` 的每一層都不是連結（掃描後才被換成連結的資料夾不跟隨，丟 `UnsafeModelPathError`，
+  已刪的部分不復原）。剩下的限制：重新檢查與刪除之間仍有極短的空檔——Windows 的 Python 沒有以資料夾 handle 為基準的 unlink／rmdir；
+  要利用它必須已經能寫入使用者自己的模型快取。
 
 ## 模型物件池（`whisper.py`）
 
@@ -175,17 +178,29 @@ class Transcriber(Protocol):
 `ModelKey(模型目錄 realpath+normcase, device, device_index, compute_type, intra_threads, inter_threads)`——這些是建立後不能改的參數。
 
 - `load_transcriber()` 先向池子取同鍵的閒置物件並 `load_model()`（權重載回原裝置）；沒有才建立新的。重用的物件 `load_model()` 失敗時
-  丟掉它、例外照常往上（CUDA 路徑仍依既有規則記錄 CUDA 失敗、`auto` 改用 CPU）。
+  記錄（`logger.exception`）並丟掉它，改建立新的物件；建立也失敗時例外照常往上（CUDA 路徑仍依既有規則記錄 CUDA 失敗、`auto` 改用 CPU）。
+- 取得模型之後的失敗（CPU 與 CUDA 路徑相同，`_pooled_transcriber()`）：建構時的 `ValueError`（例如模型不支援 `forced_language`）→
+  模型放回池中再往上拋（不算 CUDA 失敗）；CUDA 暖機失敗（`RuntimeError`／`OSError`）→ 歸還借用紀錄但**不**放回池中（物件可能處在壞掉的
+  CUDA 狀態，交給參照計數），再依既有規則往上拋或改用 CPU。
+- `with_options()` 的「未關閉」檢查與 `retain()` 在 `close()` 設定旗標的同一把鎖（`_close_lock`）內：不會在新實例還在用時把模型放回池中。
 - `WhisperTranscriber.close(timeout=2.0)`：之後的 `transcribe()`／`warmup()`／`with_options()` 丟 `RuntimeError`；先等進行中的推論結束
   （不能在推論途中卸載），再 `unload_model()` 並放回池中。逾時（推論卡住）時記 warning、不放回，物件交給參照計數（漏一次 8 MiB）。可重複呼叫。
 - 即時與完整共用一個物件（`workers=2` + `with_options()`）時以借用計數（`_ModelLease`）處理：兩個實例都關閉才歸還一次。
 - 上限 `MAX_IDLE_MODELS = 4` 個閒置物件（每個約 8 MiB 顯示記憶體與一條 CTranslate2 工作執行緒），超過時丟掉最久沒用的（LRU）——那個組合
-  之後再用到時建立新物件，代價與沒有池時相同。卸載失敗的物件記錄後丟掉。
+  之後再用到時建立新物件，代價與沒有池時相同。卸載失敗的物件記錄後丟掉；`unload_model()` 返回後 `model_is_loaded` 仍為 True 的物件也丟掉
+  （見下方 CTranslate2 語意：模型忙碌時它直接返回、不丟例外）。
 - 誰呼叫 `close()`：引擎在 session 結束（停止、讀完、錯誤、載入中被停止、開裝置失敗）時以 `pipeline.types.release_components()` 關閉兩個
   transcriber；`factory.build_components()` 在完整模型載入失敗時關閉已載入的即時模型。`models.delete` 先以 `MODEL_POOL.evict_under(模型資料夾)`
   丟掉該模型的閒置物件（之後 `load_model()` 會從那個資料夾讀檔）；引擎結束時 `MODEL_POOL.clear()`。
 - 驗證：單元測試以假的 `ctranslate2` 模組計數建立／載入／卸載（`tests/test_asr_model_pool.py`）；實機回歸用 memory_soak 情境 1（`cycles=20`），
   預期顯示記憶體斜率 ≈ 0（尚未在修正後實測）。
+- **CTranslate2 的 `unload_model()`／`load_model()` 語意**（4.8.5 原始碼 `python/cpp/replica_pool.h` 與官方 Python API 文件，2026-11-06 查證）：
+  `unload_model(to_cpu=False)` 把模型從 replica pool 拆下並丟掉 CPU 快取，CUDA 上另外清掉配置器快取；`to_cpu=True` 在 CPU 裝置上是 no-op。
+  **還有進行中的 batch，或拿不到模型的鎖（其他執行緒正在用）時直接返回、不丟例外**——所以池子在卸載後檢查 `model_is_loaded`。
+  `load_model(keep_cache=False)` 沒有 CPU 快取時以原本的 loader 從模型資料夾重新讀檔（所以刪除模型前要先清掉池中的物件）。
+  CPU 實機確認（`tiny` float32、Windows、私有記憶體）：載入後 675 MiB → `unload_model()` 後 527 MiB（權重約 148 MiB 釋放）→ `load_model()`
+  後 677 MiB；再 5 輪卸載／載入／推論後 676 MiB，沒有累積。卸載後呼叫 `encode()` 丟 `RuntimeError: No model replica is available`。
+  所以 CPU 物件也照樣放進池中：卸載確實釋放權重，閒置物件只留執行環境。CPU 上每建立一個新物件是否也會漏記憶體沒有另外量過。
 
 ## 幻覺過濾（`filtering.py`）
 

@@ -22,8 +22,9 @@ from kikitori.asr.types import Transcript
 from kikitori.capture import AudioSource, DeviceKind
 from kikitori.capture.errors import DeviceNotFoundError
 from kikitori.config import Settings
+from kikitori.engine import server as server_module
 from kikitori.engine.io import MessageWriter
-from kikitori.engine.server import EngineServer, subtitle_event
+from kikitori.engine.server import EngineServer, _MetricsReporter, subtitle_event
 from kikitori.engine.services import EngineServices, ProgressCallback
 from kikitori.engine.testing import (
     ENDLESS_DEVICE,
@@ -75,6 +76,7 @@ class _ClosingTranscriber:
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.closed = 0
+        self.on_close: Callable[[], None] | None = None
 
     def transcribe(
         self, audio: np.ndarray, language: str | None = None, prompt: str | None = None
@@ -83,6 +85,8 @@ class _ClosingTranscriber:
         return result
 
     def close(self) -> None:
+        if self.on_close is not None:
+            self.on_close()
         self.closed += 1
 
 
@@ -95,6 +99,8 @@ class _Build:
         self.release = threading.Event()
         self.release.set()
         self.transcribers: list[_ClosingTranscriber] = []
+        self.on_close: Callable[[], None] | None = None
+        """之後建立的 transcriber 在 close() 時呼叫（觀察釋放的時機）。"""
 
     def __call__(self, settings: Settings, mode: Mode) -> PipelineComponents:
         self.entered.set()
@@ -102,6 +108,7 @@ class _Build:
         components = self.inner(settings, mode)
         fast = _ClosingTranscriber(components.fast_transcriber)
         final = _ClosingTranscriber(components.final_transcriber)
+        fast.on_close = final.on_close = self.on_close
         self.transcribers += [fast, final]
         return dataclasses.replace(
             components, fast_transcriber=fast, final_transcriber=final
@@ -338,6 +345,122 @@ class ReleaseComponentsTest(EngineCase):
         self.build.release.set()
         loader.join(WAIT)
         self.assertEqual([t.closed for t in self.build.transcribers], [1, 1])
+
+
+class ReleaseBeforeStatusTest(EngineCase):
+    """結束狀態要在元件釋放之後才送出：UI 收到 idle 就可能開始下一個 session，舊的模型
+    不能還佔著顯示記憶體（close() 最多會等 2 秒）。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # close() 被呼叫時，是否已經送出過結束狀態（每個新的 EngineServer 只開一個 session）
+        self.seen: list[bool] = []
+        self.build.on_close = lambda: self.seen.append(self.terminal_sent())
+
+    def terminal_sent(self) -> bool:
+        return any(
+            m.get("event") == "status" and m["data"]["state"] in ("idle", "error")
+            for m in list(self.sink.messages)
+        )
+
+    def test_stop_releases_before_idle(self) -> None:
+        session_id = self.start()
+        self.status(session_id, "running")
+        self.request("session.stop")
+        self.status(session_id, "idle")
+        self.assertEqual(self.seen, [False, False])
+
+    def test_source_end_releases_before_idle(self) -> None:
+        session_id = self.start(SPEECH_DEVICE, "media")
+        self.status(session_id, "idle")
+        self.assertEqual(self.seen, [False, False])
+
+    def test_load_failure_releases_before_error(self) -> None:
+        def broken(device_id: str | None, kind: DeviceKind) -> AudioSource:
+            class Broken:
+                def start(self) -> None:
+                    raise DeviceNotFoundError("gone")
+
+                def read(self, timeout: float) -> Any:  # pragma: no cover
+                    raise AssertionError
+
+                def stop(self) -> None:
+                    pass
+
+            return Broken()
+
+        self.server._services = dataclasses.replace(
+            self.server._services, open_source=broken
+        )
+        with self.assertLogs("kikitori", "ERROR"):
+            session_id = self.start()
+            self.status(session_id, "error")
+        self.assertEqual(self.seen, [False, False])
+
+    def test_slow_release_is_bounded_and_keeps_the_model_in_use(self) -> None:
+        settings = self.services.settings_store.get()
+        session_id = self.start()
+        self.status(session_id, "running")
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.build.transcribers[0].on_close = lambda: gate.wait(WAIT)
+        with (
+            mock.patch.object(server_module, "RELEASE_TIMEOUT", 0.1),
+            self.assertLogs("kikitori.engine.server", "WARNING") as logs,
+        ):
+            self.request("session.stop")
+        self.status(session_id, "idle")
+        self.assertTrue(any("still releasing" in line for line in logs.output))
+        # 釋放還沒做完：模型仍算使用中，不能刪
+        self.assertError(
+            self.request("models.delete", {"model": settings.asr.fast_model}),
+            "model_in_use",
+        )
+        gate.set()
+        deadline = time.monotonic() + WAIT
+        while [t.closed for t in self.build.transcribers] != [1, 1]:
+            if time.monotonic() > deadline:
+                self.fail("components were never released")
+            time.sleep(0.005)
+        self.assertIn(
+            "result",
+            self.request("models.delete", {"model": settings.asr.fast_model}),
+        )
+
+
+class _StuckPipeline:
+    """metrics 用的 pipeline 替身：一直在執行中。"""
+
+    state = "running"
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return False
+
+    def metrics(self) -> Any:
+        return mock.Mock(level_dbfs=-20.0, backlog=0, latency_ms_median=None)
+
+
+class MetricsReporterStopTest(unittest.TestCase):
+    def test_stop_does_not_hang_on_a_stuck_send(self) -> None:
+        """stdout 管線塞滿時送出會卡住；stop() 不能因此永遠等下去（結束狀態送不出去）。"""
+        entered = threading.Event()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def send(name: str, data: Any) -> None:
+            entered.set()
+            gate.wait(WAIT)
+
+        reporter = _MetricsReporter(1, _StuckPipeline(), send, INTERVAL)  # type: ignore[arg-type]
+        reporter.start()
+        self.assertTrue(entered.wait(WAIT))
+        with (
+            mock.patch.object(server_module, "METRICS_JOIN_TIMEOUT", 0.05),
+            self.assertLogs("kikitori.engine.server", "WARNING"),
+        ):
+            started = time.monotonic()
+            reporter.stop()
+        self.assertLess(time.monotonic() - started, WAIT / 2)
 
 
 class ModelsListDiskBytesTest(EngineCase):

@@ -65,6 +65,12 @@ MAX_MODEL_ID_CHARS = 100
 METRICS_INTERVAL = 1.0
 """`metrics` 事件的間隔（秒）：狀態列的音量表與延遲，每秒一次就夠，不會塞爆 stdout。"""
 METRICS_JOIN_TIMEOUT = 1.0
+RELEASE_TIMEOUT = 5.0
+"""session 結束時等元件釋放（ASR 模型卸載、放回模型池）的上限（秒），之後才送出結束狀態。
+
+每個 transcriber 的 `close()` 最多等進行中的推論 2 秒（`CLOSE_TIMEOUT`），即時與完整路徑
+各一個；再加上卸載。逾時的話記 warning、照樣送出結束狀態（UI 不能一直卡在停止中），釋放
+在背景繼續，期間 `models.delete` 仍把模型當成使用中。"""
 
 KIND_FOR_MODE: dict[Mode, DeviceKind] = {"media": "loopback", "interpret": "microphone"}
 PREVIEW_LANGUAGE_PARAMS = (
@@ -106,7 +112,7 @@ def _capture_code(exc: CaptureError) -> str:
     return "capture_error"
 
 
-def _drop_frames(exc: BaseException) -> None:
+def _clear_tracebacks(exc: BaseException) -> None:
     """記錄之後丟掉例外（與它的 cause／context）的 traceback。
 
     traceback 參照這個載入執行緒的 frame（pipeline、元件、音訊來源）；例外若還被別處保存
@@ -142,9 +148,11 @@ def subtitle_event(update: SubtitleUpdate, session_id: int) -> dict[str, Any]:
 class _MetricsReporter:
     """session 執行中每隔 `interval` 秒送一則 `metrics` 事件（一條 daemon 執行緒）。
 
-    `stop()` 返回之後保證不會再送出（送出與停止共用一把鎖），所以 `status idle／error`
-    之後不會再看到這個 session 的 metrics。pipeline 已結束時自己停止，即使有人忘了呼叫
-    `stop()` 也不會一直留著執行緒。
+    `stop()` 返回之後不會再送出（送出與停止共用一把鎖），所以 `status idle／error`
+    之後不會再看到這個 session 的 metrics。例外：送出卡住（例如 stdout 管線塞滿）超過
+    `METRICS_JOIN_TIMEOUT` 時 `stop()` 記 warning 後照樣返回——結束狀態比保證順序重要，
+    那則卡住的 metrics 之後才寫出的話會落在結束狀態之後。pipeline 已結束時自己停止，即使
+    有人忘了呼叫 `stop()` 也不會一直留著執行緒。
     """
 
     def __init__(
@@ -169,15 +177,23 @@ class _MetricsReporter:
         self._thread.start()
 
     def stop(self) -> None:
-        """停止並等執行緒結束（最多 `METRICS_JOIN_TIMEOUT` 秒；可重複呼叫）。"""
+        """停止並等執行緒結束（合計最多約 `METRICS_JOIN_TIMEOUT` 秒；可重複呼叫）。"""
         self._stop.set()
-        with self._lock:
-            pass  # 等進行中的送出完成：之後不會再有 metrics
+        deadline = time.monotonic() + METRICS_JOIN_TIMEOUT
+        # 等進行中的送出完成：之後不會再有 metrics。不能無限等：送出可能卡在寫 stdout，
+        # 那時結束狀態也送不出去，整個 session 的結束流程跟著卡住。
+        if self._lock.acquire(timeout=METRICS_JOIN_TIMEOUT):
+            self._lock.release()
+        else:
+            logger.warning(
+                "%s is stuck sending; stopping without waiting for it",
+                self._thread.name,
+            )
         if (
             self._thread.ident is not None
             and self._thread is not threading.current_thread()
         ):
-            self._thread.join(METRICS_JOIN_TIMEOUT)
+            self._thread.join(max(0.0, deadline - time.monotonic()))
             if self._thread.is_alive():
                 logger.warning("%s did not stop in time", self._thread.name)
 
@@ -223,8 +239,10 @@ class _Session:
         self.loader: threading.Thread | None = None
         # 載入期間收到的 session.set_translation：pipeline 建好時套用（受 lock 保護）
         self.translation_override: bool | None = None
-        # 以下受伺服器的 _session_lock 保護；結束狀態送出時取走並釋放
+        # 以下受伺服器的 _session_lock 保護；結束狀態送出前取走並釋放
         self.components: PipelineComponents | None = None
+        self.releasing = False
+        """元件已取走、還在釋放中（`models.delete` 仍視為使用中）。"""
         self.metrics: _MetricsReporter | None = None
 
 
@@ -799,12 +817,13 @@ class EngineServer:
         return users
 
     def _prune_live_sessions(self) -> None:
-        """丟掉已結束、元件已釋放、載入執行緒也結束的 session（呼叫端持有 _session_lock）。"""
+        """丟掉已結束、元件已釋放完、載入執行緒也結束的 session（呼叫端持有 _session_lock）。"""
         self._live_sessions = [
             s
             for s in self._live_sessions
             if not s.terminal_sent
             or s.components is not None
+            or s.releasing
             or (s.loader is not None and s.loader.is_alive())
         ]
 
@@ -1001,11 +1020,11 @@ class EngineServer:
             try:
                 components = self._services.build_components(settings, session.mode)
             except UnknownModelError as exc:
-                _drop_frames(exc)
+                _clear_tracebacks(exc)
                 self._session_failed(session, "unknown_model", str(exc))
                 return
             except FileNotFoundError as exc:
-                _drop_frames(exc)
+                _clear_tracebacks(exc)
                 self._session_failed(
                     session,
                     "model_not_downloaded",
@@ -1014,7 +1033,7 @@ class EngineServer:
                 return
             except Exception as exc:
                 logger.exception("loading session %d failed", session.id)
-                _drop_frames(exc)
+                _clear_tracebacks(exc)
                 self._session_failed(
                     session, "load_error", f"{type(exc).__name__}: {exc}"
                 )
@@ -1026,7 +1045,7 @@ class EngineServer:
             if stopped or session.cancelled.is_set():
                 # 載入與預熱期間被停止：釋放元件（ASR 模型放回模型池、權重離開 GPU）
                 logger.info("session %d stopped while loading", session.id)
-                self._release(self._take_components(session))
+                self._release_components(session)
                 return
 
             pipeline = Pipeline(
@@ -1039,7 +1058,7 @@ class EngineServer:
             )
             with session.lock:
                 if session.cancelled.is_set():
-                    self._release(self._take_components(session))
+                    self._release_components(session)
                     return
                 session.pipeline = pipeline
                 if session.translation_override is not None:
@@ -1056,11 +1075,11 @@ class EngineServer:
                     pipeline.start(source)
                 except CaptureError as exc:
                     logger.error("cannot start audio capture: %s", exc)
-                    _drop_frames(exc)
+                    _clear_tracebacks(exc)
                     self._session_failed(session, _capture_code(exc), str(exc))
                 except Exception as exc:
                     logger.exception("starting session %d failed", session.id)
-                    _drop_frames(exc)
+                    _clear_tracebacks(exc)
                     self._session_failed(
                         session, "load_error", f"{type(exc).__name__}: {exc}"
                     )
@@ -1204,8 +1223,9 @@ class EngineServer:
     ) -> None:
         """送出這個 session 的狀態；結束狀態（idle／error）只送一次並釋放 session。
 
-        結束時先停止 metrics（之後不會再有這個 session 的 metrics），送出狀態後再釋放元件
-        （ASR 模型放回模型池）。
+        結束時依序：停止 metrics（之後不會再有這個 session 的 metrics）→ 釋放元件（ASR
+        模型卸載、放回模型池，最多 `RELEASE_TIMEOUT` 秒）→ 送出狀態。為什麼先釋放：UI
+        收到 idle／error 就可能開始下一個 session，舊模型不能還佔著顯示記憶體。
         """
         terminal = state in ("idle", "error")
         reporter: _MetricsReporter | None = None
@@ -1225,20 +1245,42 @@ class EngineServer:
                 session.pipeline = None
         if reporter is not None:
             reporter.stop()
-        self._send_status(state, detail, session.id, code, data)
         if terminal:
-            self._release(self._take_components(session))
+            self._release_components(session)
+        self._send_status(state, detail, session.id, code, data)
 
-    def _take_components(self, session: _Session) -> PipelineComponents | None:
-        """取走 session 的元件（只有一方會拿到，所以不會釋放兩次）。"""
+    def _release_components(self, session: _Session) -> None:
+        """取走並釋放 session 的元件，最多等 `RELEASE_TIMEOUT` 秒（可重複呼叫）。
+
+        只有一方會取到元件，所以不會釋放兩次。釋放在另一條執行緒上進行：`close()` 卡住
+        （例如推論不返回）時，這裡逾時後記 warning 就返回，結束狀態照樣送出；釋放做完
+        之前 `session.releasing` 為 True，`models.delete` 仍視為使用中。
+        """
         with self._session_lock:
             components, session.components = session.components, None
-        return components
+            if components is None:
+                return
+            session.releasing = True
 
-    @staticmethod
-    def _release(components: PipelineComponents | None) -> None:
-        if components is not None:
-            release_components(components)
+        def release() -> None:
+            try:
+                release_components(components)
+            finally:
+                with self._session_lock:
+                    session.releasing = False
+
+        thread = threading.Thread(
+            target=release, name=f"session-{session.id}-release", daemon=True
+        )
+        thread.start()
+        thread.join(RELEASE_TIMEOUT)
+        if thread.is_alive():
+            logger.warning(
+                "session %d is still releasing its models after %.1f s; "
+                "reporting the session as ended anyway",
+                session.id,
+                RELEASE_TIMEOUT,
+            )
 
     def _session_stop(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)

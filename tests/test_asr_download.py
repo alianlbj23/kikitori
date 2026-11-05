@@ -10,9 +10,10 @@ import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest import mock
 
+from kikitori.asr import download as download_module
 from kikitori.asr.download import (
     MARKER_NAME,
     DownloadCancelledError,
@@ -596,6 +597,34 @@ class DeleteModelTest(unittest.TestCase):
         self.assertTrue((outside / "keep.txt").is_file())
         # 拒絕時什麼都沒刪
         self.assertTrue(is_downloaded(self.spec, self.cache))
+
+    def test_folder_swapped_for_a_link_after_the_scan_is_not_followed(self) -> None:
+        """掃描之後、刪除之前資料夾被換成連結（TOCTOU）：每次刪除前重新檢查，不刪到外面。"""
+        directory = _install(self.spec, self.cache)
+        sub = directory / "sub"
+        sub.mkdir()
+        (sub / "inner.bin").write_bytes(b"x")
+        outside = self.root / "precious"
+        outside.mkdir()
+        (outside / "inner.bin").write_bytes(b"keep")
+        original_scan = download_module._scan_tree
+        swapped: list[bool] = []
+
+        def scan_then_swap(root: Path, *, strict: bool) -> Any:
+            result = original_scan(root, strict=strict)
+            (sub / "inner.bin").unlink()
+            sub.rmdir()
+            swapped.append(_link_dir(sub, outside))
+            return result
+
+        with (
+            mock.patch.object(download_module, "_scan_tree", scan_then_swap),
+            self.assertRaises(UnsafeModelPathError),
+        ):
+            delete_model(self.spec, self.cache)
+        if not swapped[0]:
+            self.skipTest("cannot create directory links here")
+        self.assertEqual((outside / "inner.bin").read_bytes(), b"keep")
 
     def test_refuses_ids_that_are_not_a_single_folder_name(self) -> None:
         for bad in ("../escape", "a/b", "a\\b", "..", ".", "", "C:x"):

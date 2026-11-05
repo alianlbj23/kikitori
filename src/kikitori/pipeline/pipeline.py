@@ -522,7 +522,7 @@ class Pipeline:
                 for translation in stream:
                     if self._partial_obsolete(job):
                         return
-                    self._stability.translation = translation
+                    self._stability.record_translation(translation)
                     emitted = (
                         self._emit(
                             job,

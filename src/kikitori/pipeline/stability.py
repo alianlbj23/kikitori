@@ -28,8 +28,16 @@ class PartialStability:
         self._previous: str | None = None
         self._requested_stable: int | None = None
         self._requested_text: str | None = None
-        self.translation = ""
-        """這句最後送出的即時譯文；不重送翻譯時沿用（譯文不清空、不閃爍）。"""
+        self._translation = ""
+
+    @property
+    def translation(self) -> str:
+        """這句最後送出的即時譯文；不重送翻譯時沿用（譯文不清空、不閃爍）。換句子時清空。"""
+        return self._translation
+
+    def record_translation(self, text: str) -> None:
+        """記下這句最新送出的即時譯文（串流中的每一段都要記，下一則不重送時沿用）。"""
+        self._translation = text
 
     def observe(self, utterance_id: int, original: str) -> int:
         """記下這則即時原文，回傳它的 `stable_chars`。
@@ -46,7 +54,7 @@ class PartialStability:
             self._previous = None
             self._requested_stable = None
             self._requested_text = None
-            self.translation = ""
+            self._translation = ""
         stable = (
             0
             if self._previous is None

@@ -329,8 +329,8 @@ def download_asr_model(
 def delete_asr_model(model_id: str, cache_dir: Path | None = None) -> int:
     """刪除已下載的 ASR 模型（含續傳用的 `.part` 與其他版本的殘留），回傳釋放的位元組數。
 
-    先把模型池中這個模型的閒置物件丟掉：它們之後 `load_model()` 會從這個資料夾重新讀檔。
-    呼叫端（引擎）負責確認沒有 session 或下載正在使用它。
+    刪除前後都把模型池中這個模型的閒置物件丟掉：它們之後 `load_model()` 會從這個資料夾
+    重新讀檔。呼叫端（引擎）負責確認沒有 session（含正在釋放元件的）或下載正在使用它。
 
     Raises:
         UnknownModelError: 模型 id 不在清單中。
@@ -346,11 +346,18 @@ def delete_asr_model(model_id: str, cache_dir: Path | None = None) -> int:
         raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
     cache = default_cache_dir() if cache_dir is None else cache_dir
     evicted = MODEL_POOL.evict_under(cache / spec.id)
-    if evicted:
-        logger.info(
-            "dropped %d pooled %s model object(s) before deleting", evicted, model_id
-        )
-    return delete_model(spec, cache)
+    try:
+        return delete_model(spec, cache)
+    finally:
+        # 刪除期間可能有 session 結束、把這個模型的物件放回池中（引擎的「使用中」檢查涵蓋
+        # 釋放中的 session，這裡是保險）。刪除失敗時資料夾也可能只剩一部分，一樣要清掉。
+        evicted += MODEL_POOL.evict_under(cache / spec.id)
+        if evicted:
+            logger.info(
+                "dropped %d pooled %s model object(s) around deleting",
+                evicted,
+                model_id,
+            )
 
 
 def release_asr_models() -> None:

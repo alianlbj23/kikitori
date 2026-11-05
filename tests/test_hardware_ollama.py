@@ -4,6 +4,7 @@
 用來測試讀取逾時與取消；等待一律用 threading.Event，不依賴 sleep。
 """
 
+import gc
 import http.client
 import http.server
 import json
@@ -17,6 +18,7 @@ from kikitori.hardware.ollama import (
     MAX_LAYERS,
     NotOllamaError,
     OllamaAuthError,
+    OllamaError,
     OllamaUnreachableError,
     PullCancelledError,
     PullError,
@@ -508,8 +510,103 @@ class OllamaServerTest(unittest.TestCase):
         )
 
 
+class _RawServer:
+    """送出固定位元組（例如不合法的標頭）後關閉連線的 TCP 伺服器（只綁 127.0.0.1）。"""
+
+    def __init__(self, reply: bytes) -> None:
+        self._reply = reply
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self._listener.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return  # close() 關掉了 listener
+            with conn:
+                conn.settimeout(WAIT)
+                try:
+                    conn.recv(65536)  # 讀掉請求
+                    conn.sendall(self._reply)
+                except OSError:
+                    pass  # 用戶端先關閉：不影響測試
+
+    def close(self) -> None:
+        self._listener.close()
+        self._thread.join(WAIT)
+
+
+class BrokenResponseTest(unittest.TestCase):
+    """回應的標頭不合法或中途斷線：真正的 socket 要在呼叫返回前關閉，不等垃圾回收。"""
+
+    def setUp(self) -> None:
+        gc.collect()
+        gc.disable()
+        self.addCleanup(gc.enable)
+        self.sockets: list[socket.socket] = []
+
+    def connect(
+        self, scheme: str, host: str, port: int, timeout: float
+    ) -> http.client.HTTPConnection:
+        conn = default_connection(scheme, host, port, timeout)
+        original = conn.connect
+
+        def connect_and_record() -> None:
+            original()
+            assert conn.sock is not None
+            self.sockets.append(conn.sock)
+
+        conn.connect = connect_and_record  # type: ignore[method-assign]
+        return conn
+
+    def serve(self, reply: bytes) -> str:
+        server = _RawServer(reply)
+        self.addCleanup(server.close)
+        return f"http://127.0.0.1:{server.port}/v1"
+
+    def assert_sockets_closed(self) -> None:
+        self.assertTrue(self.sockets)
+        for sock in self.sockets:
+            self.assertEqual(sock.fileno(), -1, "socket left open until GC")
+
+    def test_garbage_status_line(self) -> None:
+        for reply in (b"garbage\r\n\r\n", b"HTTP/1.1 200 OK\r\nContent-Le"):
+            with self.subTest(reply=reply):
+                self.sockets.clear()
+                base = self.serve(reply)
+                # 標頭中途斷線時 http.client 當成標頭結束：分類可能是「不是 Ollama」
+                with self.assertRaises(OllamaError):
+                    ollama_version(base, env={}, timeout=2.0, connect=self.connect)
+                self.assert_sockets_closed()
+                with self.assertRaises(PullError):
+                    pull_model(
+                        base,
+                        "qwen3.5:9b",
+                        progress=lambda done, total: None,
+                        cancel=threading.Event(),
+                        env={},
+                        idle_timeout=2.0,
+                        connect=self.connect,
+                    )
+                self.assert_sockets_closed()
+
+
 class PollingSocketTest(unittest.TestCase):
     """`_PollingSocket` 的參照計數：真正的 socket 在連線與讀取器都關閉後才關。"""
+
+    def test_abort_closes_readers_that_were_never_closed(self) -> None:
+        # http.client 建立回應（makefile）之後失敗、沒有關閉回應時，計數會一直是 1
+        sock = mock.Mock()
+        wrapper = _PollingSocket(sock, threading.Event(), 1.0)
+        reader = wrapper.makefile("rb")
+        wrapper.abort()
+        sock.close.assert_called_once_with()
+        self.assertTrue(reader.closed)
+        wrapper.close()  # 之後的關閉不會再關一次
+        sock.close.assert_called_once_with()
 
     def test_socket_closes_after_the_last_reader(self) -> None:
         sock = mock.Mock()

@@ -8,6 +8,7 @@ import threading
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from kikitori.config import Settings
@@ -439,6 +440,31 @@ class ModelManagementTest(unittest.TestCase):
         self.assertGreaterEqual(freed, self.spec.total_bytes)
         self.assertEqual(pool.idle_count(), 0)
         self.assertFalse(model_dir(self.spec, self.cache).exists())
+
+    def test_delete_evicts_objects_returned_while_deleting(self) -> None:
+        """刪除途中結束的 session 把模型放回池中：刪除後再清一次，不留指向已刪檔案的物件。"""
+        import os
+
+        from kikitori.asr import ModelPool, delete_model
+        from kikitori.asr.whisper import ModelKey
+
+        directory = self.install()
+        pool = ModelPool()
+        key = ModelKey(
+            os.path.normcase(os.path.realpath(directory)), "cpu", 0, "int8", 4, 1
+        )
+
+        def delete_while_released(*args: Any) -> int:
+            pool.release(key, mock.Mock())
+            result: int = delete_model(*args)
+            return result
+
+        with (
+            mock.patch("kikitori.asr.MODEL_POOL", pool),
+            mock.patch("kikitori.asr.delete_model", delete_while_released),
+        ):
+            factory.delete_asr_model("tiny", self.cache)
+        self.assertEqual(pool.idle_count(), 0)
 
     def test_delete_errors(self) -> None:
         with self.assertRaises(factory.UnknownModelError):
