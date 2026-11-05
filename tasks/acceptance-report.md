@@ -1,7 +1,37 @@
 # 驗收報告：feat/full-app
 
-> 分支 `feat/full-app`（最後 commit `dde4c88`，未合併到 main）。日期：2026-11-05。
+> 分支 `feat/full-app`（未合併到 main）。日期：2026-11-05。
 > 系統怎麼運作請看 `docs/learning/`；各模組細節看 `docs/specs/`。
+
+## 端到端驗收（2026-11-05，最終程式碼 `e5d3f68`）
+
+| 驗收項目 | 結果 | 證據 |
+|---|---|---|
+| 從 GitHub 乾淨 clone 重建 | PASS | `uv sync --locked`、unittest、ruff、`npm ci`、vitest、build、`cargo test --locked`、clippy 全過 |
+| Windows 引擎：真實擷取＋GPU 辨識＋Ollama 翻譯 | PASS | 影片翻譯 12/12 段、先即時後完整、0 簡體、靜音與純配樂 0 誤觸發；完整字幕在說完後 0.69 s（中位數）；口譯中↔英各 4 句正確 — `experiments/e2e_acceptance/README.md` |
+| Windows 桌面程式（正式版建置，WebDriver 自動操作） | PASS | 啟動、模型頁、設定驗證與儲存、開始→字幕紀錄 8 列即時→完整、字幕視窗透明可讀、滑鼠穿透、停止；截圖逐張檢查 |
+| 「關於」頁授權資料夾 | PASS | 兩個資料夾存在、按鈕開啟檔案總管 |
+| Windows 安裝與自動更新（以 `e5d3f68` 重跑） | PASS | 安裝 0.1.0 → 偵測 0.1.1 → 更新前先關閉引擎（40 ms，結束碼 0）→ 安裝 → 重開為 0.1.1、設定保留；壞簽章被拒；同版本顯示「目前已是最新版本」；解除安裝乾淨 — `experiments/update_acceptance/README.md` |
+| Linux（Docker：Ubuntu 22.04／24.04、Debian 12） | PASS | PulseAudio 與 PipeWire 擷取、引擎端到端（CPU）、deb 安裝、AppImage、Xvfb 下 WebDriver 操作正式版 GUI — `experiments/linux_acceptance/README.md` |
+| CI（`e5d3f68`） | PASS | test 41997011398、app 41997011314、release 演練 41997011477（三平台打包、安裝後自我檢查、簽章驗證）；deb 含 `Recommends: fonts-noto-cjk` |
+
+### 驗收中找到並修正的問題（每項先寫重現測試）
+
+| 問題 | commit |
+|---|---|
+| 每次 session 後顯示記憶體多佔約 2.6 GB，第二個 session 起即時字幕延遲 0.4 → 2 s 以上 | 0aebe58 |
+| 以錯誤結束的 session 不釋放 GPU 上的模型 | d73aa31 |
+| 引擎日誌與 CLI 選單的裝置名稱亂碼；Git Bash 下 `kikitori` 一啟動就當掉（cp932） | c1e8e15、9a4d6a0 |
+| Ollama 冷啟動時前 5 句字幕晚 8–16 s；預熱與 ASR 同時載入造成 llama-server CUDA 錯誤 | 3738325、9a7fe9a |
+| 長時間沒有對白後 Ollama 卸載模型，第一句逾時 → session 中保溫 | e5d3f68 |
+| 口譯時中文原文顯示為簡體 | c052905 |
+| Linux：拔掉 USB 耳機後默默改錄麥克風；無 PulseAudio 時錯誤類型不對 | e36c9c1 |
+| session 中裝置消失只顯示籠統錯誤，改回報 `device_lost` | b8b6254 |
+| Linux：聲音來源選單文字看不見；沒有 CJK 字型時介面全是方塊（deb 建議安裝 Noto CJK） | b3d9a96 |
+| 「關於」路徑顯示 `\\?\` 前綴 | 12695c4 |
+| Windows 更新時沒有先關閉引擎 | 7a6c12b |
+| Release 說明缺各平台安裝提示（SmartScreen、Gatekeeper、Linux fuse3／字型） | 4104cea |
+| 文件：AppImage 需要 `fuse3` 而非 libfuse2 | cd1a7ba |
 
 ## 總結
 
@@ -52,6 +82,8 @@
 | `experiments/silero_reset/data/musan_partial/` | — | 下載未完成時的暫存解壓 |
 | Docker 容器 `kikitori-ci`、`kikitori-u26` 與 volume `kikitori-uv-cache` | — | 修 CI 時的 Linux 測試環境 |
 | `app/src-tauri/target/debug/kikitori-engine/` | 約 163 MB | 建置驗證留下的引擎副本（已被 git 忽略） |
+| Docker 映像 `kikitori-la-audio:local`、`kikitori-la-gui:local`、`ubuntu:22.04`、`ubuntu:24.04`、`debian:12` | — | Linux 驗收用（`experiments/linux_acceptance/run.sh` 會重用） |
+| 暫存目錄的驗收建置（`%TEMP%\claude\…\scratchpad\upd`、`e2e-build`、`clean-clone` 等） | 數 GB | 驗收用的建置與工具（tauri-driver、msedgedriver、minisign），可整個刪除 |
 
 ### 3. 合併到 main
 
@@ -59,7 +91,7 @@
 
 ## 要在 macOS 與 Linux 真機驗證
 
-CI 只驗證了「能建置、能打包、安裝後引擎能啟動」。下面這些項目需要真實桌面與硬體：
+Windows 已在本機完整驗收（見上方）；Linux 已在 Docker 驗證擷取、引擎、安裝檔與 Xvfb 下的 GUI；macOS 只有 CI 的打包、ad-hoc 簽章與引擎自我檢查。下面這些仍需要真實桌面與硬體：
 
 **macOS（Apple Silicon，macOS 13 以上）**
 - [ ] 系統聲音擷取（ScreenCaptureKit）：第一次要允許螢幕錄製權限；播放時 RMS > 0；暫停播放時樣本是否持續送出（`experiments/capture_check/README.md` 有逐步說明）
@@ -75,13 +107,16 @@ CI 只驗證了「能建置、能打包、安裝後引擎能啟動」。下面�
 - [ ] AppImage 在沒有 libfuse2 的發行版能不能執行；deb 安裝
 - [ ] 有 NVIDIA 顯示卡時，下載的 cuBLAS 能否讓 CUDA 正常運作
 
-**Windows（本機已驗證大部分，以下尚未做）**
-- [ ] 實際打開 GUI 確認外觀與操作（子代理人只跑過建置與測試）
-- [ ] 播放中錄 loopback，確認內容正確；錄音中拔掉 USB 耳機；關閉麥克風隱私權後的提示
-- [ ] SmartScreen 警告；「關於」頁的兩個授權資料夾按鈕能開啟
+**Windows**
+- [x] 實際打開 GUI 確認外觀與操作（WebDriver 自動操作正式版建置＋截圖檢查）
+- [x] 播放中錄 loopback，確認內容正確（虛擬喇叭 Steam Streaming Speakers，辨識與翻譯正確）
+- [x] 「關於」頁的兩個授權資料夾按鈕能開啟
+- [x] 完整自動更新流程（本機 HTTP 端點＋拋棄式金鑰）
+- [ ] 錄音中拔掉實體 USB 耳機；關閉麥克風隱私權後的提示
+- [ ] 從 GitHub Release 下載時的 SmartScreen 警告與 https 下載
 
 **三平台共同**
-- [ ] 完整的自動更新流程：安裝 v(n) → 發布 v(n+1) → 偵測、下載、驗簽、安裝、重新啟動後版本正確
+- [ ] macOS、Linux 的自動更新流程，以及正式 Release（GitHub 端點、正式金鑰）下的更新
 - [ ] 即時口譯模式用電腦麥克風實際對話（目前沒有麥克風對話素材，Smart Turn 也還沒測）
 
 ## 已知限制
