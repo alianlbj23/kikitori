@@ -126,7 +126,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 生命週期
 
-- `start(source)`：`source.start()`（失敗直接拋出，不進入 running），建立三條 daemon 執行緒，送 `running`。
+- `start(source)`：`source.start()`（失敗直接拋出，不進入 running），建立三條 daemon 執行緒，送 `running`。兩個 worker 先啟動、capture 最後：capture 讀完時依 worker 是否仍在執行決定要不要等，worker 未啟動就讀完的話會不等完整結果就送 `idle`。
 - 來源讀完（有 `exhausted` 屬性且為 True，例如 `FileSource`／`ArraySource`）：`Segmenter.flush()` 收尾，等完整佇列處理完，送 `idle`。
 - `stop(timeout)`：使用者主動中斷——設停止旗標、`source.stop()`、喚醒等待中的執行緒，丟棄尚未開始的工作，在 `timeout` 內 join；卡在模型呼叫裡的執行緒逾時後記 warning 放手（daemon），停止後它的結果不會送出。之後送 `idle`。可重複呼叫。
 - 逐步模式：`feed()` 同步處理音訊並排工作；`end_of_stream()` 等同 flush；`run_pending()` 先跑最新槽（若仍有效）再依序跑全部完整工作。錯誤走與執行緒模式相同的路徑。不得與 `start()` 混用。

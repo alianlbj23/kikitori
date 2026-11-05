@@ -10,6 +10,7 @@ import threading
 import unittest
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from unittest import mock
 
 import numpy as np
 import numpy.typing as npt
@@ -625,6 +626,46 @@ class ThreadedTest(unittest.TestCase):
         self.assertEqual(h.pipeline.state, "idle")
         self.assertEqual([u.utterance_id for u in h.finals()], [1, 2])
         self.assertEqual(h.statuses, [("running", None), ("idle", None)])
+
+    def test_idle_only_after_workers_finish_even_if_capture_runs_first(self) -> None:
+        # 單核 CI 上曾發生：非即時來源一下就讀完，capture 執行緒在 start() 還沒啟動
+        # 兩個 worker 前就檢查 is_alive()（未啟動 = False），於是不等完整結果就送出 idle。
+        # 這裡讓 worker 一律等 capture 執行完才真正啟動，重現該排程。
+        h = Harness()
+        capture_finished = threading.Event()
+        finals_at_idle: list[int] = []
+        h.pipeline._on_status = lambda state, detail: (
+            finals_at_idle.append(len(h.finals())) if state == "idle" else None
+        )
+        real_thread = threading.Thread
+
+        class CaptureFirstThread(real_thread):
+            def run(self) -> None:
+                try:
+                    super().run()
+                finally:
+                    if self.name == "pipeline-capture":
+                        capture_finished.set()
+
+            def start(self) -> None:
+                capture = next(
+                    (t for t in h.pipeline._threads if t.name == "pipeline-capture"),
+                    None,
+                )
+                capture_started = capture is not None and (
+                    capture.is_alive() or capture_finished.is_set()
+                )
+                if self.name != "pipeline-capture" and capture_started:
+                    capture_finished.wait(WAIT)
+                super().start()
+
+        with mock.patch.object(threading, "Thread", CaptureFirstThread):
+            h.pipeline.start(ArraySource(track(ONE_UTTERANCE, ONE_UTTERANCE)))
+        self.assertTrue(h.pipeline.wait(WAIT))
+        for thread in h.pipeline._threads:
+            thread.join(WAIT)
+        self.assertEqual([u.utterance_id for u in h.finals()], [1, 2])
+        self.assertEqual(finals_at_idle, [2])
 
     def test_final_backpressure_never_drops(self) -> None:
         h = Harness(final_queue_size=1)

@@ -193,7 +193,11 @@ class Pipeline:
                 target=self._final_loop, name="pipeline-final", daemon=True
             ),
         ]
-        for thread in self._threads:
+        # capture 最後啟動：它讀完時以 worker 的 is_alive() 判斷要不要等，未啟動的
+        # 執行緒 is_alive() 為 False。先啟動 capture 的話，非即時來源可能在 worker
+        # 啟動前就讀完，於是不等完整結果就送出 idle（單核 CI 上實際發生過）。
+        # worker 在 _input_done 設定前不會自行結束，所以這個順序下 is_alive() 可靠。
+        for thread in (*self._threads[1:], self._threads[0]):
             thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
