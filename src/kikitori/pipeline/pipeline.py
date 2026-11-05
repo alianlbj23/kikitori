@@ -143,6 +143,7 @@ class Pipeline:
 
         self._state_lock = threading.Lock()
         self._state: PipelineState = "idle"
+        self._error: BaseException | None = None
         self._run_mode: Literal["threaded", "stepped"] | None = None
         self._stop = threading.Event()
         self._input_done = threading.Event()
@@ -164,6 +165,15 @@ class Pipeline:
         """ "idle"（未開始或已結束）、"running" 或 "error"。"""
         with self._state_lock:
             return self._state
+
+    @property
+    def error(self) -> BaseException | None:
+        """讓這次執行以 "error" 結束的例外（`on_status("error", …)` 送出前就已設定）；否則 None。
+
+        engine 用它把擷取錯誤（例如 `DeviceLostError`）對應到 status 的 `code`。
+        """
+        with self._state_lock:
+            return self._error
 
     @property
     def dropped_partials(self) -> int:
@@ -590,11 +600,17 @@ class Pipeline:
             self._state = "running"
         self._notify_status("running", None)
 
-    def _finish(self, state: PipelineState, detail: str | None) -> None:
+    def _finish(
+        self,
+        state: PipelineState,
+        detail: str | None,
+        error: BaseException | None = None,
+    ) -> None:
         with self._state_lock:
             if self._done.is_set():
                 return
             self._state = state
+            self._error = error
             self._done.set()
         self._notify_status(state, detail)
 
@@ -603,7 +619,7 @@ class Pipeline:
         self._stop.set()
         self._slot.close()
         self._stop_source()
-        self._finish("error", f"{type(exc).__name__}: {exc}")
+        self._finish("error", f"{type(exc).__name__}: {exc}", exc)
 
     def _stop_source(self) -> None:
         if self._source is None:

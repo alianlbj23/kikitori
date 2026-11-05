@@ -593,7 +593,17 @@ class EngineServer:
     def _on_pipeline_status(
         self, session: _Session, state: PipelineState, detail: str | None
     ) -> None:
-        code = "pipeline_error" if state == "error" else None
+        code = None
+        if state == "error":
+            # 執行中的擷取錯誤（例如拔掉 USB 裝置的 DeviceLostError）用擷取的 code，
+            # 介面才能說明是裝置的問題；其他錯誤是 pipeline_error。
+            pipeline = session.pipeline
+            error = pipeline.error if pipeline is not None else None
+            code = (
+                _capture_code(error)
+                if isinstance(error, CaptureError)
+                else "pipeline_error"
+            )
         self._session_status(session, state, detail, code)
 
     def _session_failed(self, session: _Session, code: str, message: str) -> None:

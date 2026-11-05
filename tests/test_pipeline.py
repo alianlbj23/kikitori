@@ -574,6 +574,7 @@ class ErrorTest(unittest.TestCase):
             h.pipeline.run_pending()
         self.assertEqual(h.pipeline.state, "error")
         self.assertEqual(h.statuses[-1], ("error", "RuntimeError: CUDA out of memory"))
+        self.assertIs(h.pipeline.error, h.final.error)
         self.assertEqual(h.finals(), [])
         # 錯誤之後不再處理
         h.pipeline.run_pending()
@@ -657,6 +658,7 @@ class ThreadedTest(unittest.TestCase):
         self.assertEqual(h.pipeline.state, "idle")
         self.assertEqual([u.utterance_id for u in h.finals()], [1, 2])
         self.assertEqual(h.statuses, [("running", None), ("idle", None)])
+        self.assertIsNone(h.pipeline.error)
 
     def test_idle_only_after_workers_finish_even_if_capture_runs_first(self) -> None:
         # 單核 CI 上曾發生：非即時來源一下就讀完，capture 執行緒在 start() 還沒啟動
@@ -743,6 +745,8 @@ class ThreadedTest(unittest.TestCase):
             self.assertTrue(h.pipeline.wait(WAIT))
         self.assertEqual(h.pipeline.state, "error")
         self.assertEqual(h.statuses[-1], ("error", "DeviceLostError: device unplugged"))
+        # engine 依例外類型決定 status 的 code（device_lost）。
+        self.assertIsInstance(h.pipeline.error, DeviceLostError)
         self.assertGreaterEqual(source.stop_calls, 1)
 
     def test_worker_error_stops_pipeline(self) -> None:

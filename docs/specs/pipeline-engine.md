@@ -60,13 +60,14 @@ class Pipeline:
     def stop(self, timeout: float = 5.0) -> None
     def wait(self, timeout: float | None = None) -> bool
     state: Literal["idle", "running", "error"]
+    error: BaseException | None   # 讓這次執行以 error 結束的例外
     # 逐步模式（測試、離線處理；不開執行緒）
     def feed(self, audio) -> None
     def end_of_stream(self) -> None
     def run_pending(self) -> None
 ```
 
-- `on_status(state, detail)`：`running`（`start()` 後）、`idle`（正常結束或 `stop()`）、`error`（致命錯誤，detail 為訊息）；每次執行只會送出一個結束狀態。
+- `on_status(state, detail)`：`running`（`start()` 後）、`idle`（正常結束或 `stop()`）、`error`（致命錯誤，detail 為訊息）；每次執行只會送出一個結束狀態。送出 `error` 前 `error` 屬性已設為該例外（`on_status` 的簽名不變；需要例外類型的呼叫端在回呼中讀這個屬性）。
 - `on_log(level, message)`：可恢復的警告（例如翻譯失敗）。
 - 回呼在 pipeline 的執行緒上被呼叫，不得回頭呼叫同一個 `Pipeline` 的方法。
 
@@ -284,7 +285,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `log` | `{"level": "debug"\|"info"\|"warning"\|"error", "message"}` |
 
 - 引擎啟動完成後先送一筆 `status idle`。
-- `status error` 的 `code`：`model_not_downloaded`、`unknown_model`、`device_not_found`、`permission_denied`、`device_lost`、`capture_unavailable`、`capture_error`、`pipeline_error`、`load_error`。明確指定 `asr.device="cuda"` 而同一行程 CUDA 曾失敗時，asr 丟出的 `RuntimeError` 訊息（要求重啟引擎）原樣放在 `load_error` 的 `detail`。
+- `status error` 的 `code`：`model_not_downloaded`、`unknown_model`、`device_not_found`、`permission_denied`、`device_lost`、`capture_unavailable`、`capture_error`、`pipeline_error`、`load_error`。session 執行中的錯誤依 `Pipeline.error`：擷取錯誤（`CaptureError` 子類別，例如錄音中拔掉 USB 裝置的 `DeviceLostError`）用與 `session.start` 相同的擷取 code，其他是 `pipeline_error`。明確指定 `asr.device="cuda"` 而同一行程 CUDA 曾失敗時，asr 丟出的 `RuntimeError` 訊息（要求重啟引擎）原樣放在 `load_error` 的 `detail`。
 - `download_progress` 節流：每 0.25 秒或每 1% 最多一筆；開始（0）與結束（`done`／`error`）一定送。
 - `log`：`kikitori` logger 的 INFO 以上同時寫 stderr 與 `log` 事件（訊息由各模組產生，翻譯模組已遮蔽金鑰；引擎自己不記錄設定中的環境變數值）。
 - `subtitle`／`status` 帶 `session_id`，UI 可丟掉舊 session 的遲到事件。`state`、`code`、`session_id`、`error` 是相對架構規格的**新增欄位**（只增不改）。
