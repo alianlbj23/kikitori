@@ -4,12 +4,23 @@
  * Role: the single list of interface languages (docs/specs/languages-i18n.md
  * 「介面多語系」), their names in their own language, and the dictionary of
  * each. Adding a locale = add `<code>.ts` typed as `Messages` and register it in
- * `DICTIONARIES`; a locale without a dictionary yet falls back to English at
- * runtime (see `lib/i18n.ts`).
+ * `DICTIONARIES` (typed as a complete record, so a locale cannot be listed
+ * without its dictionary).
  */
 
+import { de } from "./de";
 import { en } from "./en";
+import { es } from "./es";
+import { fr } from "./fr";
+import { id } from "./id";
+import { ja } from "./ja";
+import { ko } from "./ko";
+import { ptBR } from "./pt-BR";
+import { ru } from "./ru";
+import { th } from "./th";
 import type { Messages } from "./types";
+import { vi } from "./vi";
+import { zhCN } from "./zh-CN";
 import { zhTW } from "./zh-TW";
 
 export const UI_LOCALES = [
@@ -47,8 +58,19 @@ export const NATIVE_NAMES: Readonly<Record<UiLocale, string>> = {
   id: "Bahasa Indonesia",
 };
 
-/** Dictionaries that exist so far; the rest use the English fallback. */
-export const DICTIONARIES: Readonly<Partial<Record<UiLocale, Messages>>> = {
+/** Every UI locale has a complete dictionary (missing keys are type errors). */
+export const DICTIONARIES: Readonly<Record<UiLocale, Messages>> = {
   "zh-TW": zhTW,
+  "zh-CN": zhCN,
   en,
+  ja,
+  ko,
+  es,
+  fr,
+  de,
+  "pt-BR": ptBR,
+  ru,
+  vi,
+  th,
+  id,
 };

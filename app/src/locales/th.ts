@@ -1,0 +1,649 @@
+/**
+ * Thai UI dictionary.
+ *
+ * Role: the Thai interface texts. Typed as `Messages`, so it must have exactly
+ * the base (zh-TW) keys; a key missing at runtime falls back to English, then
+ * to zh-TW. Thai separates sentences with a space rather than a full stop, so
+ * messages here end without one (except `common.sentenceEnd`, see there).
+ */
+
+import type { Messages } from "./types";
+
+export const th: Messages = {
+  // ------------------------------------------------------------ common
+  "common.unknown": "ไม่ทราบ",
+  "common.unknownReason": "ไม่ทราบเหตุผล",
+  "common.unknownCause": "ไม่ทราบสาเหตุ",
+  "common.auto": "อัตโนมัติ",
+  "common.loading": "กำลังโหลด",
+  "common.saving": "กำลังบันทึก",
+  "common.redownload": "ดาวน์โหลดอีกครั้ง",
+  "common.recommendedFor": "แนะนำสำหรับ: {roles}",
+  "common.parenthetical": "{text} ({note})",
+  "common.withReason": "{context}: {reason}",
+  "common.listSeparator": ", ",
+  "common.clauseSeparator": ", ",
+  "common.strongSeparator": "; ",
+  "common.altSeparator": " / ",
+  // Must not be blank (locales.test.ts); a full stop is the least surprising mark after a mixed Thai/Latin reason.
+  "common.sentenceEnd": ".",
+  "common.approxGb": "ประมาณ {gb} GB",
+
+  // ------------------------------------------------------------ rail
+  "rail.mode": "โหมด",
+  "rail.device": "แหล่งเสียง",
+  "mode.media.name": "แปลวิดีโอ",
+  "mode.media.note": "{source} เป็น {target}",
+  "mode.media.noteAuto": "ทุกภาษาที่ตรวจพบ เป็น {target}",
+  "mode.media.noteOriginal": "{source} (ต้นฉบับเท่านั้น)",
+  "mode.interpret.noteOriginal": "{own} ⇄ {partner} (ต้นฉบับเท่านั้น)",
+  "mode.interpret.name": "ล่ามแบบเรียลไทม์",
+  "mode.interpret.note": "{own} ⇄ {partner}",
+  "device.hint.media": "การแปลวิดีโอจะบันทึกเสียงที่คอมพิวเตอร์กำลังเล่นอยู่",
+  "device.hint.interpret": "การล่ามแบบเรียลไทม์ใช้ไมโครโฟน",
+  "device.hint.missing": "อุปกรณ์ที่คุณเลือกไว้ก่อนหน้านี้ไม่พร้อมใช้งาน จะใช้อุปกรณ์เริ่มต้นของระบบแทน",
+  "device.defaultNamed": "ค่าเริ่มต้น: {name}",
+  "device.systemDefault": "ค่าเริ่มต้นของระบบ",
+  "start.start": "เริ่ม",
+  "start.stop": "หยุด",
+  "nav.label": "หน้า",
+  "nav.transcript": "ข้อความถอดเสียง",
+  "nav.models": "โมเดล",
+  "nav.settings": "การตั้งค่า",
+  "engine.restart": "รีสตาร์ทเอนจิน",
+  "engine.failedNotice": "ไม่สามารถเริ่มเอนจินได้: {reason}",
+  "engine.log": "ข้อความจากเอนจิน: {message}",
+  // ------------------------------------------------------------ engine message codes (hardware.md; params localized in lib/messages.ts)
+  "engine.asr_gpu":
+    "{gpu_name} ({vram_mb} MiB VRAM): {fast_model} สำหรับคำบรรยายสด และ {final_model} สำหรับคำบรรยายฉบับสมบูรณ์ ({compute_type})",
+  "engine.asr_gpu_int8_saves_vram":
+    "int8_float16 ลด VRAM ที่การรู้จำเสียงพูดใช้ลงครึ่งหนึ่ง จึงเหลือให้โมเดลแปลภาษามากขึ้น",
+  "engine.asr_final_no_speech_unreliable":
+    "{final_model} แยกเสียงพูดออกจากความเงียบไม่ได้ (no_speech) จึงใช้ no_speech ของ {fast_model} และตัวตรวจจับเสียงพูดกรองส่วนที่ไม่ใช่เสียงพูดแทน",
+  "engine.asr_large_v3_remote_translation":
+    "การแปลไม่ได้ทำงานบนคอมพิวเตอร์เครื่องนี้ คำบรรยายฉบับสมบูรณ์จึงใช้ {final_model} (คุณภาพใกล้เคียงกัน, no_speech เชื่อถือได้, ประมาณ 0.33 วินาทีต่อประโยค)",
+  "engine.asr_apple_silicon":
+    "Apple Silicon: บน macOS การรู้จำเสียงพูดทำงานบน CPU ใช้ {fast_model} สำหรับคำบรรยายสด และ {final_model} สำหรับคำบรรยายฉบับสมบูรณ์",
+  "engine.asr_apple_silicon_untested":
+    "ยังไม่ได้วัดความหน่วงบน Apple Silicon จึงใช้โมเดลชุดเดียวกับ CPU ที่มี RAM ตั้งแต่ 16 GB ขึ้นไป",
+  "engine.asr_cpu":
+    "การรู้จำเสียงพูดทำงานบน CPU (RAM ตั้งแต่ 16 GB ขึ้นไป): {fast_model} สำหรับคำบรรยายสด และ {final_model} สำหรับคำบรรยายฉบับสมบูรณ์",
+  "engine.asr_cpu_large_models_slow":
+    "โมเดลขนาด medium ขึ้นไปใช้เวลาตั้งแต่ 3.6 วินาทีต่อประโยคบน CPU ซึ่งช้าเกินไปสำหรับคำบรรยายสด",
+  "engine.asr_cpu_low":
+    "โมเดลขนาดเล็กช่วยให้ความหน่วงและการใช้หน่วยความจำต่ำ: {fast_model} สำหรับคำบรรยายสด และ {final_model} สำหรับคำบรรยายฉบับสมบูรณ์",
+  "engine.cpu_low_ram": "RAM {ram_gb} GB น้อยกว่า 16 GB",
+  "engine.cpu_few_cores": "CPU มี {physical_cores} คอร์จริง (สูงสุด {max_cores})",
+  "engine.cpu_info_incomplete": "ข้อมูลฮาร์ดแวร์ไม่ครบถ้วน",
+  "engine.multiple_gpus": "พบ GPU ของ NVIDIA {gpu_count} ตัว จะใช้ {gpu_name} ซึ่งมี VRAM มากที่สุด",
+  "engine.cuda_platform_unsupported":
+    "CTranslate2 ไม่มีรุ่น CUDA สำหรับแพลตฟอร์มนี้ (รองรับเฉพาะ Windows และ Linux x86-64) การรู้จำเสียงพูดจึงใช้ CPU",
+  "engine.cuda_driver_too_old":
+    "ไดรเวอร์ NVIDIA {driver_version} เก่าเกินไป (CUDA 12 ต้องใช้ {min_driver} ขึ้นไป) การรู้จำเสียงพูดจะใช้ CPU จนกว่าจะอัปเดตไดรเวอร์",
+  "engine.cuda_compute_capability_unknown":
+    "อ่าน compute capability ของ GPU ไม่ได้ (ไดรเวอร์อาจเก่าเกินไป) การรู้จำเสียงพูดจึงใช้ CPU",
+  "engine.cuda_compute_capability_unsupported":
+    "{gpu_name} (compute capability {compute_capability}) ไม่รองรับการเร่งความเร็ว float16/int8 ของ CTranslate2 การรู้จำเสียงพูดจึงใช้ CPU",
+  "engine.gpu_runtime_missing":
+    "ยังไม่ได้ติดตั้ง cuBLAS: การเร่งความเร็วด้วย GPU ต้องดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU (ประมาณ 570 MB) ระหว่างนี้การรู้จำเสียงพูดจะใช้ CPU",
+  "engine.asr_vram_insufficient":
+    "VRAM ไม่พอสำหรับโมเดลรู้จำเสียงพูด (ต้องการประมาณ {need_mb} MiB) การรู้จำเสียงพูดจึงใช้ CPU",
+  "engine.memory_unknown": "อ่านขนาดหน่วยความจำไม่ได้ จึงใช้โมเดลรู้จำเสียงพูดที่เบาที่สุด",
+  "engine.asr_low_quality_model": "{model} รู้จำผิดพลาดมากกว่าอย่างเห็นได้ชัด",
+  "engine.asr_language_quality_low": "{model} รู้จำ {language} ได้ไม่ดี (อัตราข้อผิดพลาดเกิน 20% ในชุดทดสอบสาธารณะ)",
+  "engine.translation_remote":
+    "เซิร์ฟเวอร์แปลภาษาไม่ได้อยู่บนคอมพิวเตอร์เครื่องนี้ ({base_url}) โปรดเลือกโมเดลของเซิร์ฟเวอร์นั้นในการกำหนดค่าแบบกำหนดเองที่หน้าโมเดล",
+  "engine.translation_cpu":
+    "ไม่มี GPU ที่ใช้งานได้: โมเดลแปลภาษาทำงานบน CPU จึงเลือกโมเดลที่เล็กที่สุด (ยังไม่ได้วัดความเร็วบน CPU)",
+  "engine.translation_budget_vram":
+    "หลังหักการรู้จำเสียงพูดและส่วนสำรอง 1 GB จะเหลือ VRAM ประมาณ {budget_gb} GB สำหรับโมเดลแปลภาษา",
+  "engine.translation_budget_unified":
+    "หลังหักการรู้จำเสียงพูดและส่วนสำรองของระบบ จะเหลือหน่วยความจำรวม (unified memory) ประมาณ {budget_gb} GB สำหรับโมเดลแปลภาษา",
+  "engine.translation_same_model":
+    "การแปลสดและการแปลฉบับสมบูรณ์ใช้โมเดลเดียวกัน: แต่ละประโยคใช้เวลาไม่ถึง 0.3 วินาทีบน GPU ขณะที่การสลับโมเดลใน Ollama ใช้เวลา 1.5–18 วินาที",
+  "engine.translation_different_models": "การแปลสดและการแปลฉบับสมบูรณ์ใช้โมเดลต่างกัน",
+  "engine.translation_better_model_available":
+    "เลือก {model} จากโมเดลที่ติดตั้งไว้ หากติดตั้ง {better_model} จะได้คุณภาพดีกว่า",
+  "engine.translation_not_needed":
+    "{source_language} และ {target_language} เป็นภาษาพูดเดียวกัน: ไม่ต้องใช้โมเดลแปลภาษา เพียงแปลงระบบตัวอักษรเท่านั้น",
+  "engine.source_language_auto":
+    "ภาษาที่ฟังจะถูกตรวจหาโดยอัตโนมัติ: จึงเลือกโมเดลแปลภาษาที่แปลได้ทุกภาษาเป็น {target_language}",
+  "engine.translation_server_unreachable":
+    "เชื่อมต่อเซิร์ฟเวอร์แปลภาษา {base_url} ไม่ได้ (Ollama ทำงานอยู่หรือไม่) จึงตรวจสอบโมเดลที่ติดตั้งไว้ไม่ได้",
+  "engine.translation_model_list_unavailable": "ไม่สามารถดึงรายการโมเดลของเซิร์ฟเวอร์แปลภาษาได้: {error}",
+  "engine.low_ram_for_translation":
+    "RAM น้อยกว่า 8 GB: อาจไม่พอสำหรับการรันโมเดลแปลภาษาพร้อมกับการรู้จำเสียงพูด",
+  "engine.translation_model_not_installed": "ยังไม่ได้ติดตั้งโมเดลแปลภาษาที่แนะนำ {model}",
+  "engine.translation_model_exceeds_budget":
+    "{model} ต้องใช้ประมาณ {model_gb} GB มากกว่า {budget_gb} GB ที่มีอยู่ Ollama จะรันบางส่วนบน CPU ซึ่งช้ากว่า",
+  "engine.translation_unsupported": "ไม่มีโมเดลแปลภาษาที่แนะนำตัวใดรองรับ {source_language} → {target_language}",
+  "engine.combination_not_object": "ชุดโมเดลต้องเป็นออบเจ็กต์ (object)",
+  "engine.asr_path_not_object": "{path} ต้องเป็นออบเจ็กต์ (object)",
+  "engine.asr_model_unknown": "{path}: ไม่รู้จักโมเดลรู้จำเสียงพูด {model} (ที่มี: {available})",
+  "engine.asr_device_invalid": "{path}: อุปกรณ์ต้องเป็นอัตโนมัติ, CPU หรือ CUDA",
+  "engine.asr_compute_type_not_string": "{path}: ความแม่นยำต้องเป็นข้อความหรือเว้นว่าง",
+  "engine.asr_cpu_threads_invalid": "{path}: จำนวนเธรด CPU ต้องเป็นจำนวนเต็มตั้งแต่ 0 ถึง 256",
+  "engine.asr_cuda_no_gpu": "{path}: เลือก CUDA ไว้แต่ไม่พบ GPU ของ NVIDIA",
+  "engine.asr_cuda_platform_unsupported":
+    "{path}: เลือก CUDA ไว้แต่ CTranslate2 ไม่มีรุ่น CUDA สำหรับแพลตฟอร์มนี้ (รองรับเฉพาะ Windows และ Linux x86-64)",
+  "engine.asr_cuda_driver_too_old":
+    "{path}: เลือก CUDA ไว้แต่ไดรเวอร์ NVIDIA {driver_version} เก่าเกินไป (CUDA 12 ต้องใช้ {min_driver} ขึ้นไป)",
+  "engine.asr_cuda_compute_capability_unknown":
+    "{path}: เลือก CUDA ไว้แต่ไม่ทราบ compute capability ของ GPU (ไดรเวอร์อาจเก่าเกินไป)",
+  "engine.asr_cuda_compute_capability_unsupported":
+    "{path}: เลือก CUDA ไว้แต่ {gpu_name} (compute capability {compute_capability}) ไม่รองรับการเร่งความเร็ว float16/int8 ของ CTranslate2",
+  "engine.asr_cuda_cublas_missing":
+    "{path}: เลือก CUDA ไว้แต่ยังไม่ได้ติดตั้ง cuBLAS โปรดดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU ก่อน",
+  "engine.asr_compute_type_unknown": "{path}: ไม่รู้จักความแม่นยำ {compute_type} (ที่มี: {available})",
+  "engine.translation_model_name_invalid": "{field} ต้องเป็นชื่อโมเดลยาว 1–{max_chars} อักขระ หรือเว้นว่าง",
+  "engine.asr_auto_uses_cpu": "{path}: โหมดอัตโนมัติจะใช้ CPU (ขณะนี้ GPU ไม่สามารถรันการรู้จำเสียงพูดได้)",
+  "engine.asr_compute_type_cpu_fallback":
+    "{path}: CPU ไม่รองรับ {compute_type} CTranslate2 จะใช้ความแม่นยำอื่นแทน (โดยปกติคือ float32 ซึ่งช้ากว่า)",
+  "engine.asr_compute_type_gpu_fallback":
+    "{path}: compute capability {compute_capability} ไม่รองรับ {compute_type} CTranslate2 จะใช้ float32 หรือ int8_float32 แทน (ช้ากว่าและใช้ VRAM มากกว่า)",
+  "engine.asr_model_slow_on_cpu":
+    "{path}: {model} ใช้เวลาตั้งแต่ 3.6 วินาทีต่อประโยคบน CPU คำบรรยายจะล่าช้าอย่างเห็นได้ชัด",
+  "engine.asr_model_not_downloaded":
+    "{path}: ยังไม่ได้ดาวน์โหลดโมเดลรู้จำเสียงพูด {model} ระบบจะดาวน์โหลดก่อนเริ่ม",
+  "engine.asr_model_language_unsupported": "{path}: {model} รู้จำ {language} ไม่ได้",
+  "engine.asr_fast_larger_than_final":
+    "โมเดลสด {fast_model} ใหญ่กว่าโมเดลฉบับสมบูรณ์ {final_model}: คำบรรยายสดอาจช้ากว่าคำบรรยายฉบับสมบูรณ์",
+  "engine.asr_no_speech_unavailable":
+    "ทั้ง {fast_model} และ {final_model} ไม่สามารถกรองส่วนที่ไม่ใช่เสียงพูดด้วย no_speech ได้ เสียงร้องเพลงและเสียงรบกวนจึงมีแนวโน้มถูกถอดเป็นข้อความมากขึ้น",
+  "engine.translation_model_not_on_server": "เซิร์ฟเวอร์แปลภาษาไม่มี {model}",
+  "engine.translation_model_language_unsupported": "{model} ไม่รองรับ {source_language} → {target_language}",
+  "engine.translation_license_non_commercial": "สัญญาอนุญาตของ {model} ({license}) ห้ามใช้เพื่อการค้า",
+  "engine.translation_license_region_restricted":
+    "สัญญาอนุญาตของ {model} ({license}) ไม่ครอบคลุมการใช้งานใน {regions}",
+  "engine.translation_models_differ":
+    "การแปลสดและการแปลฉบับสมบูรณ์ใช้โมเดลต่างกัน: Ollama ในเครื่องใช้เวลา 1.5–18 วินาทีทุกครั้งที่สลับโมเดล",
+  "engine.vram_overflow":
+    "การรู้จำเสียงพูดและการแปลต้องใช้ VRAM ประมาณ {need_mb} MiB มากกว่า {available_mb} MiB ที่มีอยู่บน {gpu_name} อาจทำงานช้าหรือโหลดไม่สำเร็จ",
+  "engine.asr_ram_over_half": "โมเดลรู้จำเสียงพูดบน CPU ใช้ RAM มากกว่าครึ่งหนึ่ง",
+  "engine.translation_disabled": "ปิดการแปลอยู่: แสดงเฉพาะข้อความต้นฉบับและไม่ต้องใช้โมเดลแปลภาษา",
+  "engineParam.fast_asr": "การรู้จำสำหรับคำบรรยายสด",
+  "engineParam.final_asr": "การรู้จำสำหรับคำบรรยายฉบับสมบูรณ์",
+  "engineParam.translation_fast": "โมเดลแปลภาษาแบบสด",
+  "engineParam.translation_final": "โมเดลแปลภาษาฉบับสมบูรณ์",
+
+  // ------------------------------------------------------------ status
+  "status.starting": "กำลังเริ่มเอนจิน",
+  "status.restarting": "เอนจินหยุดทำงานโดยไม่คาดคิด กำลังรีสตาร์ท",
+  "status.failed": "ไม่สามารถเริ่มเอนจินได้",
+  "status.stopped": "เอนจินหยุดแล้ว",
+  "status.loading": "กำลังโหลดโมเดล",
+  "status.running": "กำลังฟัง",
+  "status.error": "หยุดเนื่องจากข้อผิดพลาด",
+  "status.idle": "พร้อม",
+  "status.code.model_not_downloaded": "ยังไม่ได้ดาวน์โหลดโมเดล โปรดดาวน์โหลดที่หน้าโมเดล แล้วเริ่มอีกครั้ง",
+  "status.code.unknown_model": "ไม่มีโมเดลที่ระบุในการตั้งค่า โปรดเลือกโมเดลอื่นที่หน้าโมเดล",
+  "status.code.device_not_found": "ไม่พบอุปกรณ์เสียงที่เลือก โปรดเลือกอุปกรณ์อีกครั้ง",
+  "status.code.permission_denied":
+    "kikitori ไม่ได้รับอนุญาตให้ใช้ไมโครโฟนหรือบันทึกเสียง โปรดอนุญาตในการตั้งค่าระบบ",
+  "status.code.device_lost": "อุปกรณ์เสียงถูกตัดการเชื่อมต่อ โปรดตรวจสอบการเชื่อมต่อแล้วเริ่มอีกครั้ง",
+  "status.code.capture_unavailable": "คอมพิวเตอร์เครื่องนี้ไม่สามารถบันทึกแหล่งเสียงประเภทนี้ได้",
+  "status.code.capture_error": "เกิดข้อผิดพลาดขณะบันทึกเสียง",
+  "status.code.pipeline_error": "เกิดข้อผิดพลาดขณะประมวลผลเสียงพูด",
+  "status.code.load_error": "โหลดโมเดลไม่สำเร็จ",
+  "status.code.translation_model_missing": "เซิร์ฟเวอร์แปลภาษายังไม่มีโมเดลแปลภาษา",
+  "status.code.translation_server_auth_failed": "เซิร์ฟเวอร์แปลภาษาปฏิเสธคำขอ — โปรดตรวจสอบ คีย์ API",
+  "status.errorDetail": "เกิดข้อผิดพลาด: {detail}",
+  "status.errorUnknown": "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
+
+  // ------------------------------------------------------------ notices
+  "notice.close": "ปิด",
+  "notice.closeLabel": "ปิดข้อความนี้",
+  "notice.settingsFieldsUnreadable": {
+    other: "อ่านฟิลด์ในไฟล์การตั้งค่าไม่ได้ {count} รายการ จะใช้ค่าเริ่มต้นไปก่อน: {fields}",
+  },
+  "notice.initFailed": "เริ่มต้นหน้าต่างไม่สำเร็จ: {reason}",
+
+  // ------------------------------------------------------------ failure contexts
+  "error.saveMode": "ไม่สามารถจดจำโหมดได้",
+  "error.saveDevice": "ไม่สามารถจดจำแหล่งเสียงได้",
+  "error.start": "ไม่สามารถเริ่มได้",
+  "error.stop": "ไม่สามารถหยุดได้",
+  "error.showOverlay": "ไม่สามารถแสดงหน้าต่างคำบรรยายได้",
+  "error.hideOverlay": "ไม่สามารถซ่อนหน้าต่างคำบรรยายได้",
+  "error.toggleClickThrough": "ไม่สามารถเปิด/ปิดการคลิกทะลุได้",
+  "error.applyRecommendation": "ไม่สามารถใช้การกำหนดค่าที่แนะนำได้",
+  "error.readSettings": "ไม่สามารถอ่านการตั้งค่าได้",
+  "error.saveDismissal": "ไม่สามารถจดจำ “ไม่ต้องเตือนอีก” ได้",
+  "error.saveUiLocale": "ไม่สามารถจดจำภาษาของอินเทอร์เฟซได้",
+  "error.setOverlayLocale": "ไม่สามารถเปลี่ยนภาษาของหน้าต่างคำบรรยายได้",
+  "error.readModels": "ไม่สามารถอ่านรายการโมเดลได้",
+  "error.detectHardware": "ไม่สามารถตรวจหาฮาร์ดแวร์ได้",
+  "error.downloadModel": "ไม่สามารถดาวน์โหลด {model} ได้",
+  "error.downloadGpuRuntime": "ไม่สามารถดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU ได้",
+  "error.openEula": "ไม่สามารถเปิดข้อกำหนดของสัญญาอนุญาตได้ โปรดคัดลอก URL ไปเปิดในเบราว์เซอร์",
+  "error.applyStyle": "ไม่สามารถใช้รูปแบบคำบรรยายได้",
+  "error.openLicenses": "ไม่สามารถเปิดโฟลเดอร์สัญญาอนุญาตได้ โปรดเปิดจากพาธด้านบน",
+  "error.listDevices": "ไม่สามารถแสดงรายการอุปกรณ์เสียงได้",
+  "error.restartEngine": "ไม่สามารถรีสตาร์ทเอนจินได้",
+  "error.readOverlayState": "ไม่สามารถอ่านสถานะของหน้าต่างคำบรรยายได้",
+  "error.readBridge": "ไม่สามารถอ่านสถานะของเอนจินได้",
+  "error.readLanguages": "ไม่สามารถอ่านรายการภาษาได้",
+  "error.setTranslation": "ไม่สามารถสลับ “แสดงคำแปล” ได้",
+  "error.previewLanguages": "ไม่สามารถดึงชุดโมเดลที่แนะนำได้",
+
+  // ------------------------------------------------------------ engine error codes
+  "error.code.invalid_settings": "การตั้งค่าไม่ถูกต้อง",
+  "error.code.settings_io_error": "ไม่สามารถบันทึกไฟล์การตั้งค่าได้ โปรดตรวจสอบพื้นที่ดิสก์และสิทธิ์การเข้าถึง",
+  "error.code.session_active": "กำลังทำงานอยู่ โปรดหยุดก่อน",
+  "error.code.device_not_found": "ไม่พบอุปกรณ์เสียงที่เลือก โปรดเลือกใหม่",
+  "error.code.capture_unavailable": "คอมพิวเตอร์เครื่องนี้ไม่สามารถบันทึกแหล่งเสียงประเภทนี้ได้",
+  "error.code.capture_error": "เกิดข้อผิดพลาดขณะบันทึกเสียง",
+  "error.code.unknown_model": "เอนจินไม่รู้จักโมเดลนี้",
+  "error.code.download_in_progress": "รายการนี้กำลังดาวน์โหลดอยู่ โปรดรอให้เสร็จ",
+  "error.code.license_not_accepted": "โปรดยอมรับ NVIDIA CUDA EULA ก่อนดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU",
+  "error.code.gpu_runtime_unsupported":
+    "แพลตฟอร์มนี้ไม่รองรับคอมโพเนนต์เร่งความเร็ว GPU (รองรับเฉพาะ Windows และ Linux บน x86-64)",
+  "error.code.pull_unsupported": "เซิร์ฟเวอร์แปลภาษาไม่ใช่ Ollama kikitori จึงดาวน์โหลดโมเดลแปลภาษาให้ไม่ได้",
+  "error.code.translation_server_unreachable": "เชื่อมต่อเซิร์ฟเวอร์แปลภาษาไม่ได้",
+  "error.code.translation_server_auth_failed": "เซิร์ฟเวอร์แปลภาษาปฏิเสธคำขอ — โปรดตรวจสอบ คีย์ API",
+  "error.code.unknown_method": "เวอร์ชันของเอนจินไม่ตรงกับแอป จึงไม่รองรับการดำเนินการนี้",
+  "error.code.invalid_params": "มีการส่งพารามิเตอร์ที่ไม่ถูกต้องไปยังเอนจิน",
+  "error.code.invalid_request": "มีการส่งคำขอที่มีรูปแบบไม่ถูกต้องไปยังเอนจิน",
+  "error.code.internal_error": "เอนจินเกิดข้อผิดพลาดภายใน",
+  "error.code.other": "เอนจินรายงานข้อผิดพลาด ({code})",
+  "error.engineSentence": "{head}",
+  "error.engineDetail": "{head}: {message}",
+  "error.timeout": {
+    other: "เอนจินไม่ตอบสนองภายใน {count} วินาที โปรดลองอีกครั้งในภายหลังหรือรีสตาร์ทเอนจิน",
+  },
+  "error.disconnected": "เอนจินไม่ได้ทำงานอยู่ โปรดรอให้เอนจินรีสตาร์ท หรือกด “รีสตาร์ทเอนจิน” ในพื้นที่สถานะ",
+  "error.invalidInput": "ค่าไม่ถูกต้อง: {message}",
+  "error.generic": "เกิดข้อผิดพลาด: {message}",
+
+  // ------------------------------------------------------------ transcript
+  "transcript.title": "ข้อความถอดเสียง",
+  "transcript.lede": "คำบรรยายสดจะแสดงเป็นสีจางก่อน แล้วเปลี่ยนเป็นคำแปลฉบับสมบูรณ์เมื่อจบประโยค",
+  "transcript.overlayVisible": "แสดงหน้าต่างคำบรรยาย",
+  "transcript.clickThrough": "คลิกทะลุ",
+  "transcript.clear": "ล้าง",
+  "transcript.showTranslation": "แสดงคำแปล",
+  "transcript.noTranslation": "(ไม่มีคำแปล)",
+  "transcript.translating": "กำลังแปล",
+  "transcript.emptyTitle": "ยังไม่มีคำบรรยาย",
+  "transcript.emptyBody":
+    "เลือกโหมดและแหล่งเสียง แล้วกด “เริ่ม” ทุกประโยคที่ได้ยินจะแสดงที่นี่ โดยมีต้นฉบับอยู่ด้านบนและคำแปลอยู่ด้านล่าง",
+  "transcript.langTitle": "{source} เป็น {target}",
+  "transcript.shortcutCtrl": "Ctrl (⌘ บน macOS)",
+  "transcript.shortcutOn": "เมื่อเปิดคลิกทะลุ การคลิกจะทะลุผ่านหน้าต่างคำบรรยาย กด {keys} เพื่อเปิด/ปิดได้ทุกเมื่อ",
+  "transcript.shortcutTaken": "ปุ่มลัด {keys} ถูกใช้โดยแอปอื่นแล้ว โปรดใช้สวิตช์ตรงนี้เพื่อเปิด/ปิดการคลิกทะลุ",
+
+  // ------------------------------------------------------------ models page
+  "models.title": "โมเดล",
+  "models.lede": "การรู้จำเสียงพูดทำงานบนคอมพิวเตอร์เครื่องนี้ ส่วนการแปลจะส่งไปยังบริการที่ตั้งไว้ในหน้าการตั้งค่า",
+  "models.refresh": "ตรวจหาอีกครั้ง",
+
+  "hw.title": "คอมพิวเตอร์เครื่องนี้",
+  "hw.status": "สถานะ",
+  "hw.detecting": "กำลังตรวจหา",
+  "hw.os": "ระบบปฏิบัติการ",
+  "hw.cpu": "โปรเซสเซอร์",
+  "hw.memory": "หน่วยความจำ",
+  "hw.gpu": "การ์ดแสดงผล",
+  "hw.cublas": "cuBLAS (การรู้จำด้วย GPU)",
+  "hw.server": "บริการแปลภาษา",
+  "hw.cpuValue": "{model}, {cores}",
+  "hw.cores": "{physical} คอร์, {logical} เธรด",
+  "hw.threads": { other: "{count} เธรด" },
+  "hw.coresUnknown": "ไม่ทราบจำนวนคอร์",
+  "hw.appleSilicon": "Apple Silicon (หน่วยความจำใช้ร่วมกับโปรเซสเซอร์)",
+  "hw.gpuVram": "หน่วยความจำวิดีโอ {size}",
+  "hw.gpuDriver": "ไดรเวอร์ {version}",
+  "hw.gpuCompute": "compute capability {capability}",
+  "hw.noNvidia": "ไม่พบการ์ดแสดงผล NVIDIA",
+  "hw.cublasNotUsed": "ไม่ได้ใช้บนแพลตฟอร์มนี้",
+  "hw.cublasAvailable": "พร้อมใช้งาน ({source})",
+  "hw.cublasSourceUnknown": "ไม่ทราบแหล่งที่มา",
+  "hw.cublasMissing": "ยังไม่ได้ติดตั้ง",
+  "hw.cublasSource.runtime": "คอมโพเนนต์เร่งความเร็ว GPU ที่ kikitori ดาวน์โหลด",
+  "hw.cublasSource.configured": "โฟลเดอร์ที่ระบุในการกำหนดค่าแบบกำหนดเอง",
+  "hw.cublasSource.system": "CUDA ที่ติดตั้งในระบบ",
+  "hw.serverNotDetected": "ตรวจไม่พบ",
+  "hw.serverLocal": "ในเครื่อง",
+  "hw.serverRemote": "ระยะไกล",
+  "hw.serverModelsUnknown": "ไม่ทราบรายการโมเดล",
+  "hw.serverModelCount": { other: "{count} โมเดล" },
+  "hw.serverReachable": "{url} ({where}, {models})",
+  "hw.serverUnreachable": "{url} (เชื่อมต่อไม่ได้)",
+  "hw.serverUnreachableError": "{url} (เชื่อมต่อไม่ได้: {error})",
+  "hw.memoryAvailable": "{total} (ว่าง {available})",
+  "hw.incomplete": "การตรวจหาไม่สมบูรณ์: {error}",
+
+  "rec.title": "การกำหนดค่าที่แนะนำ",
+  "rec.pending": "คำแนะนำจะแสดงที่นี่เมื่อการตรวจหาเสร็จสิ้น",
+  "rec.tier": "ระดับฮาร์ดแวร์",
+  "rec.fastAsr": "การรู้จำสำหรับคำบรรยายสด",
+  "rec.finalAsr": "การรู้จำสำหรับคำแปลฉบับสมบูรณ์",
+  "rec.fastTranslation": "การแปลคำบรรยายสด",
+  "rec.finalTranslation": "คำแปลฉบับสมบูรณ์",
+  "rec.budget": "หน่วยความจำสำหรับการแปล",
+  "rec.notLocal": "ไม่มีคำแนะนำ (บริการแปลภาษาไม่ได้อยู่ในเครื่องนี้) โปรดเลือกในการกำหนดค่าแบบกำหนดเอง",
+  "rec.gpuRuntimeMissing": "หลังจากดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU ด้านล่าง คำแนะนำจะเปลี่ยนไปใช้การ์ดแสดงผล",
+  "rec.apply": "ใช้การกำหนดค่าที่แนะนำ",
+  "rec.applyNote": "จะบันทึกโมเดลรู้จำเสียงพูด อุปกรณ์ ความแม่นยำ จำนวนเธรด และโมเดลแปลภาษา",
+  "rec.applied": "ใช้การกำหนดค่าที่แนะนำแล้ว: คำบรรยายสด {fast}, คำแปลฉบับสมบูรณ์ {final} ({device})",
+  "rec.appliedWhileRunning":
+    "ใช้การกำหนดค่าที่แนะนำแล้ว: คำบรรยายสด {fast}, คำแปลฉบับสมบูรณ์ {final} ({device}) จะมีผลในครั้งถัดไปที่เริ่ม",
+  "tier.nvidia_8gb": "การ์ดแสดงผล NVIDIA (8 GB ขึ้นไป)",
+  "tier.nvidia_4gb": "การ์ดแสดงผล NVIDIA (4–8 GB)",
+  "tier.nvidia_lt4gb": "การ์ดแสดงผล NVIDIA (ต่ำกว่า 4 GB)",
+  "tier.cpu": "CPU (หน่วยความจำ 16 GB ขึ้นไป)",
+  "tier.cpu_low": "CPU (การกำหนดค่าแบบเบา)",
+  "tier.apple_silicon": "Apple Silicon (CPU)",
+  "threads.auto": "เธรดอัตโนมัติ",
+  "threads.count": { other: "{count} เธรด" },
+  "computeType.auto": "ความแม่นยำอัตโนมัติ",
+
+  "machine.gpu": "{name}, {gb} GB",
+  "machine.ram": "หน่วยความจำ {gb} GB",
+  "machine.named": "{name}, {ram}",
+  "machine.thisCpu": "โปรเซสเซอร์ของคอมพิวเตอร์เครื่องนี้",
+  "machine.thisCpuRam": "โปรเซสเซอร์ของคอมพิวเตอร์เครื่องนี้, {ram}",
+  "summary.asrSameDevice": "สด {fast}, ฉบับสมบูรณ์ {final} ({device})",
+  "summary.asrSplit": "สด {fast} ({fastDevice}), ฉบับสมบูรณ์ {final} ({finalDevice})",
+  "summary.translationKept": "คงโมเดลแปลภาษาเดิมไว้ (บริการแปลภาษาไม่ได้อยู่ในเครื่องนี้)",
+  "summary.translationSame": "แปลด้วย {model}",
+  "summary.translationSplit": "แปลสด {fast}, แปลฉบับสมบูรณ์ {final}",
+  "summary.full": "{asr}; {translation}",
+  "firstRun.applied": "ใช้การกำหนดค่าที่แนะนำสำหรับคอมพิวเตอร์เครื่องนี้ ({machine}) แล้ว: {summary}",
+  "firstRun.appliedGpuMissing":
+    "ใช้การกำหนดค่าที่แนะนำสำหรับคอมพิวเตอร์เครื่องนี้ ({machine}) แล้ว: {summary} การ์ดแสดงผลยังขาดคอมโพเนนต์เร่งความเร็ว GPU จึงใช้ CPU ไปก่อน โปรดดาวน์โหลดคอมโพเนนต์นี้ที่หน้าโมเดลเพื่อใช้การ์ดแสดงผล",
+  "firstRun.applyFailed":
+    "ไม่สามารถใช้การกำหนดค่าที่แนะนำได้: {reason} โปรดตรวจสอบการกำหนดค่าปัจจุบันที่หน้าโมเดล และใช้คำแนะนำจากหน้านั้นหากจำเป็น",
+  "firstRun.detectFailed":
+    "ไม่สามารถตรวจหาฮาร์ดแวร์ของคอมพิวเตอร์เครื่องนี้ได้: {reason} จะใช้การกำหนดค่าเริ่มต้นไปก่อน (สด {fast}, ฉบับสมบูรณ์ {final}) คุณสามารถตรวจหาอีกครั้งและใช้คำแนะนำได้ที่หน้าโมเดล",
+  "firstRun.review": "ตรวจสอบที่หน้าโมเดล",
+  "offer.text": "มีการกำหนดค่าที่ดีกว่าสำหรับคอมพิวเตอร์เครื่องนี้: {summary}",
+  "offer.apply": "ใช้",
+  "offer.dismiss": "ไม่ต้องเตือนอีก",
+  "missing.itemFailed": "ดาวน์โหลด {model} ไม่สำเร็จ: {error}",
+  "missing.downloading": "กำลังดาวน์โหลด {models} เริ่มได้เมื่อดาวน์โหลดเสร็จ",
+  "missing.failed": "{items} ดาวน์โหลดอีกครั้งได้",
+  "missing.offer": "ต้องดาวน์โหลด {models} (รวมประมาณ {size}) ก่อนจึงจะเริ่มได้",
+  "missing.done": "ดาวน์โหลดโมเดลเสร็จแล้ว กด “เริ่ม” ได้เลย",
+  "missing.download": "ดาวน์โหลดโมเดลที่ขาด",
+  "startdl.title": "กำลังดาวน์โหลดโมเดลก่อนเริ่ม",
+  "startdl.itemAsr": "โมเดลรู้จำเสียงพูด {model}",
+  "startdl.itemTranslation": "โมเดลแปลภาษา {model}",
+  "startdl.pending": "กำลังรอ",
+  "startdl.preparing": "กำลังเตรียมดาวน์โหลด",
+  "startdl.progress": "{percent}%, {done} จาก {total}",
+  "startdl.done": "เสร็จสิ้น",
+  "startdl.failed": "ดาวน์โหลดไม่สำเร็จ: {error}",
+  "startdl.stillMissing": "ดาวน์โหลด {model} แล้ว แต่เอนจินยังรายงานว่าขาดอยู่",
+  "startdl.downloading": "คำบรรยายจะเริ่มโดยอัตโนมัติเมื่อดาวน์โหลดเสร็จ",
+  "startdl.starting": "ดาวน์โหลดเสร็จแล้ว กำลังเริ่ม",
+  "startdl.failedHelp": "มีรายการที่ดาวน์โหลดไม่สำเร็จ โปรดกด “ลองอีกครั้ง” หรือเลือกโมเดลอื่นที่หน้าโมเดล",
+  "startdl.pullUnsupported":
+    "เซิร์ฟเวอร์แปลภาษา {url} ไม่ใช่ Ollama kikitori จึงดาวน์โหลดโมเดลแปลภาษาให้ไม่ได้ โปรดติดตั้ง {models} บนเซิร์ฟเวอร์นั้นด้วยตนเอง หรือเลือกโมเดลที่ติดตั้งไว้แล้วที่หน้าโมเดล หรือจะปิด “แสดงคำแปล” เพื่อดูเฉพาะต้นฉบับก็ได้",
+  "startdl.serverUnreachable":
+    "เชื่อมต่อเซิร์ฟเวอร์แปลภาษา {url} ไม่ได้ หากใช้ Ollama โปรดเริ่ม Ollama ก่อน (เปิดแอป Ollama หรือรัน ollama serve ในเทอร์มินัล) แล้วกด “ลองอีกครั้ง” หรือจะปิด “แสดงคำแปล” เพื่อดูเฉพาะต้นฉบับก็ได้",
+  "startdl.authFailed":
+    "เซิร์ฟเวอร์แปลภาษา {url} ปฏิเสธคำขอ — โปรดตรวจสอบ คีย์ API (ตัวแปรสภาพแวดล้อมที่ระบุไว้ในการตั้งค่า) แล้วกด “ลองอีกครั้ง”",
+  "startdl.retry": "ลองอีกครั้ง",
+  "startdl.cancel": "ยกเลิก",
+  "startdl.cancelLabel": "หยุดรอการดาวน์โหลดและไม่เริ่มโดยอัตโนมัติ",
+
+  "gpu.title": "คอมโพเนนต์เร่งความเร็ว GPU",
+  "gpu.lede":
+    "การเร่งความเร็วการรู้จำเสียงพูดด้วยการ์ดแสดงผล NVIDIA ต้องใช้ไลบรารี cuBLAS ของ NVIDIA ซึ่ง kikitori ไม่ได้แจกจ่ายมาด้วย ไลบรารีนี้จะดาวน์โหลดจาก PyPI หลังจากคุณยอมรับสัญญาอนุญาตของไลบรารีแล้ว",
+  "gpu.name": "คอมโพเนนต์เร่งความเร็ว GPU",
+  "gpu.unsupported":
+    "แพลตฟอร์มของคอมพิวเตอร์เครื่องนี้ไม่ใช้คอมโพเนนต์นี้: การเร่งความเร็วด้วย GPU ใช้ได้เฉพาะ Windows และ Linux บน x86-64 ที่มีการ์ดแสดงผล NVIDIA เท่านั้น แพลตฟอร์มอื่นจะรู้จำเสียงพูดบน CPU เสมอ",
+  "gpu.progressLabel": "ความคืบหน้าการดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU",
+  "gpu.finishing": "ดาวน์โหลดแล้ว กำลังตรวจสอบและแตกไฟล์ (ไม่กี่วินาที)",
+  "gpu.progress": "{percent}%, {done} / {total}",
+  "gpu.installed": "ติดตั้ง {what} แล้ว",
+  "gpu.installedAt": "ติดตั้ง {what} ที่ {path} แล้ว",
+  "gpu.noCublas": "ติดตั้งแล้ว แต่ตรวจไม่พบ cuBLAS ที่ใช้งานได้ โปรดรีสตาร์ทเอนจิน แล้วกด “ตรวจหาอีกครั้ง”",
+  "gpu.sizeApprox": "ประมาณ {size}",
+  "gpu.sizeUnknown": "หลายร้อย MB",
+  "gpu.situationMissing":
+    "การ์ดแสดงผล NVIDIA ของคอมพิวเตอร์เครื่องนี้ช่วยเร่งความเร็วการรู้จำได้ แต่ยังขาดคอมโพเนนต์นี้ จึงใช้ CPU ไปก่อน",
+  "gpu.situationNoGpu": "ไม่พบการ์ดแสดงผล NVIDIA หากไม่มีการ์ดดังกล่าวก็ไม่จำเป็นต้องดาวน์โหลด",
+  "gpu.readLicense": "อ่านสัญญาอนุญาต",
+  "gpu.download": "ดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU",
+  "gpu.consentNotice":
+    "การดำเนินการนี้จะดาวน์โหลด NVIDIA cuBLAS ({package}, {size}) จาก PyPI การใช้งานคอมโพเนนต์นี้ถือว่าคุณยอมรับ NVIDIA CUDA EULA ({license})",
+  "gpu.lastFailed": "การดาวน์โหลดครั้งล่าสุดไม่สำเร็จ: {error}",
+  "gpu.agree": "ฉันยอมรับ NVIDIA CUDA EULA",
+  "gpu.installedRestarting": "ติดตั้งคอมโพเนนต์เร่งความเร็ว GPU แล้ว กำลังรีสตาร์ทเอนจินเพื่อใช้ GPU",
+  "gpu.installedBusy":
+    "ติดตั้งคอมโพเนนต์เร่งความเร็ว GPU แล้ว เนื่องจากมีงานที่กำลังดำเนินอยู่ จึงไม่ได้รีสตาร์ทเอนจินโดยอัตโนมัติ โปรดรีสตาร์ทเมื่องานเสร็จเพื่อใช้ GPU",
+
+  "asr.title": "โมเดลรู้จำเสียงพูด",
+  "asr.lede": "คำบรรยายสดต้องการความเร็ว คำแปลฉบับสมบูรณ์ต้องการความถูกต้อง แต่ละส่วนจึงใช้โมเดลต่างกันได้",
+  "asr.colModel": "โมเดล",
+  "asr.colSize": "ขนาด",
+  "asr.colSpeed": "ความเร็ว",
+  "asr.colMemory": "หน่วยความจำ",
+  "asr.colLicense": "สัญญาอนุญาต",
+  "asr.colStatus": "สถานะ",
+  "asr.inUse": "ใช้อยู่: {roles}",
+  "asr.noSpeech": "ไม่กรองส่วนที่ไม่ใช่เสียงพูด",
+  "asr.noSpeechHelp":
+    "โมเดลนี้บอกได้ไม่แม่นยำว่าช่วงใดไม่มีเสียงพูด สำหรับคำแปลฉบับสมบูรณ์ จะใช้การตัดสินของโมเดลคำบรรยายสดเพื่อกรองเสียงรบกวน",
+  "asr.memoryCpu": "CPU {size}",
+  "asr.memoryGpu": "GPU {size}",
+  "asr.progressLabel": "ความคืบหน้าการดาวน์โหลด {model}",
+  "asr.progress": "{percent}%, {done}",
+  "asr.downloaded": "ดาวน์โหลดแล้ว",
+  "asr.download": "ดาวน์โหลด",
+  "asr.downloadFailed": "ดาวน์โหลดไม่สำเร็จ: {error}",
+  "role.fast": "สด",
+  "role.final": "ฉบับสมบูรณ์",
+  "speed.fastest": "เร็วที่สุด",
+  "speed.fast": "เร็ว",
+  "speed.medium": "ปานกลาง",
+  "speed.slow": "ช้า",
+  "speed.slowest": "ช้าที่สุด",
+  "download.done": "ดาวน์โหลด {model} แล้ว",
+  "download.failed": "ดาวน์โหลด {what} ไม่สำเร็จ: {error}",
+
+  "tr.title": "โมเดลแปลภาษา",
+  "tr.unreachable": "เข้าถึงบริการแปลภาษาที่ {url} ไม่ได้ หากใช้ Ollama ในเครื่อง โปรดเริ่ม Ollama ก่อน",
+  "tr.unreachableError":
+    "เข้าถึงบริการแปลภาษาที่ {url} ไม่ได้ ({error}) หากใช้ Ollama ในเครื่อง โปรดเริ่ม Ollama ก่อน",
+  "tr.installedCount": {
+    other: "บริการแปลภาษาที่ {url} ติดตั้งโมเดลไว้ {count} โมเดล",
+  },
+  "tr.installedCountLocal": {
+    other: "บริการแปลภาษาที่ {url} (ในเครื่อง) ติดตั้งโมเดลไว้ {count} โมเดล",
+  },
+  "tr.nonCommercial": "ห้ามใช้เชิงพาณิชย์",
+  "tr.regionExcluded": "สัญญาอนุญาตไม่ครอบคลุม {regions}",
+  "tr.license": "สัญญาอนุญาต {license}",
+  "tr.unlisted": "ไม่อยู่ในรายการของ kikitori โปรดตรวจสอบสัญญาอนุญาตด้วยตนเอง",
+  "tr.stateUnknown": "ไม่ทราบสถานะการติดตั้ง",
+  "tr.stateInstalled": "ติดตั้งแล้ว",
+  "tr.stateMissing": "ยังไม่ได้ติดตั้ง",
+
+  "combo.title": "การกำหนดค่าแบบกำหนดเอง",
+  "combo.lede":
+    "การเปลี่ยนแปลงจะถูกตรวจสอบกับคอมพิวเตอร์เครื่องนี้ทันที การกำหนดค่าที่มีข้อผิดพลาดจะบันทึกไม่ได้ การกำหนดค่าใหม่จะมีผลในครั้งถัดไปที่กด “เริ่ม”",
+  "combo.fastModel": "โมเดลรู้จำสำหรับคำบรรยายสด",
+  "combo.finalModel": "โมเดลรู้จำสำหรับคำแปลฉบับสมบูรณ์",
+  "combo.device": "อุปกรณ์ประมวลผล",
+  "combo.deviceAuto": "อัตโนมัติ (ใช้ GPU ของ NVIDIA หากมี มิฉะนั้นใช้ CPU)",
+  "combo.deviceCpu": "CPU",
+  "combo.deviceCuda": "GPU ของ NVIDIA (CUDA)",
+  "combo.deviceHelp": "ทั้งสองเส้นทางใช้อุปกรณ์เดียวกัน: หาก GPU ล้มเหลวระหว่างการทำงาน จะไม่ลองใช้ GPU อีก",
+  "combo.translationFast": "โมเดลแปลภาษาสำหรับคำบรรยายสด",
+  "combo.translationFinal": "โมเดลแปลภาษาสำหรับคำแปลฉบับสมบูรณ์",
+  "combo.advanced": "ขั้นสูง",
+  "combo.advancedHelp":
+    "โดยปกติความแม่นยำและจำนวนเธรดจะเป็นไปตามการกำหนดค่าที่แนะนำ เมื่อเว้นว่างหรือเลือกอัตโนมัติ เอนจินจะตัดสินใจตามอุปกรณ์ที่ใช้จริง (int8 บน CPU, float16 บน GPU)",
+  "combo.fastComputeType": "ความแม่นยำสำหรับคำบรรยายสด",
+  "combo.finalComputeType": "ความแม่นยำสำหรับคำแปลฉบับสมบูรณ์",
+  "combo.fastThreads": "เธรด CPU สำหรับคำบรรยายสด",
+  "combo.finalThreads": "เธรด CPU สำหรับคำแปลฉบับสมบูรณ์",
+  "combo.cudaDirs": "โฟลเดอร์ cuBLAS 12 ที่ติดตั้งเอง",
+  "combo.cudaDirsPlaceholder":
+    "หนึ่งพาธเต็มต่อหนึ่งบรรทัด เช่น C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin",
+  "combo.cudaDirsHelp":
+    "จำเป็นเฉพาะเมื่อคุณติดตั้ง CUDA Toolkit เอง คอมโพเนนต์เร่งความเร็ว GPU ที่ดาวน์โหลดด้านบนจะถูกใช้โดยอัตโนมัติและไม่ต้องระบุ",
+  "combo.save": "บันทึกการกำหนดค่า",
+  "combo.reset": "คืนค่าเป็นการตั้งค่าปัจจุบัน",
+  "combo.notInList": "{value} (ไม่อยู่ในรายการ)",
+  "combo.notDownloaded": "{id} (ยังไม่ได้ดาวน์โหลด)",
+  "combo.saved": "บันทึกการกำหนดค่าแล้ว",
+  "combo.savedNextStart": "บันทึกแล้ว จะมีผลในครั้งถัดไปที่เริ่ม",
+  "check.fixFirst": "โปรดแก้ไขช่องที่ทำเครื่องหมายไว้ก่อน",
+  "check.checking": "กำลังตรวจสอบการกำหนดค่านี้",
+  "check.okWithWarnings": "คอมพิวเตอร์เครื่องนี้ใช้การกำหนดค่านี้ได้ แต่โปรดทราบ:",
+  "check.ok": "คอมพิวเตอร์เครื่องนี้ใช้การกำหนดค่านี้ได้",
+  "check.notOk": "ขณะนี้ใช้การกำหนดค่านี้ไม่ได้:",
+  "check.rejected": "เอนจินไม่ยอมรับการตั้งค่านี้: {message}",
+  "check.unavailable":
+    "ขณะนี้ตรวจสอบการกำหนดค่าไม่ได้ ({reason}) คุณยังบันทึกได้ เอนจินจะตรวจสอบรูปแบบการตั้งค่าเมื่อบันทึก",
+  "check.engineNotReady": "เอนจินยังไม่พร้อม",
+  "form.fixFields": "โปรดแก้ไขช่องที่ทำเครื่องหมายไว้",
+  "form.engineRejected": "เอนจินปฏิเสธค่านี้: {message}",
+
+  // ------------------------------------------------------------ settings page
+  "settings.title": "การตั้งค่า",
+  "settings.path": "ไฟล์การตั้งค่า: {path}",
+  "settings.uiLocaleLegend": "ภาษาของอินเทอร์เฟซ",
+  "settings.uiLocaleLabel": "ภาษาของอินเทอร์เฟซ",
+  "settings.uiLocaleSystem": "ตามระบบ",
+  "settings.uiLocaleHelp":
+    "มีผลทันทีกับหน้าต่างหลักและหน้าต่างคำบรรยาย “ตามระบบ” จะใช้ภาษาของระบบปฏิบัติการ หรือภาษาอังกฤษหากไม่มีภาษานั้น",
+  "settings.translationLegend": "บริการแปลภาษา",
+  "settings.translationLede":
+    "ใช้ API ที่เข้ากันได้กับ OpenAI ได้ทุกตัว URL เริ่มต้นของ Ollama ในเครื่องคือ http://localhost:11434/v1",
+  "settings.baseUrl": "URL ของบริการ",
+  "settings.apiKeyEnv": "ตัวแปรสภาพแวดล้อมสำหรับ คีย์ API",
+  "settings.apiKeyEnvHelp":
+    "กรอกเฉพาะชื่อตัวแปร ส่วนตัวคีย์ให้ตั้งเป็นตัวแปรสภาพแวดล้อมของระบบ kikitori ไม่เก็บคีย์ไว้เลย Ollama ในเครื่องไม่ต้องใช้คีย์",
+  "settings.translationModelsHelp":
+    "เลือกโมเดลแปลภาษาได้ในการกำหนดค่าแบบกำหนดเองที่หน้าโมเดล ซึ่งจะตรวจสอบสัญญาอนุญาตและภาระงานบนคอมพิวเตอร์เครื่องนี้ด้วย",
+  "settings.regionLegend": "ภูมิภาคตามสัญญาอนุญาตของโมเดลแปลภาษา",
+  "settings.regionLede":
+    "โมเดลแปลภาษาบางตัว (เช่น Tencent HY-MT) ไม่ได้อนุญาตให้ใช้ในสหภาพยุโรป สหราชอาณาจักร หรือเกาหลีใต้ kikitori ไม่สามารถทราบได้ว่าคุณอยู่ที่ใด จึงไม่แนะนำโมเดลเหล่านี้โดยค่าเริ่มต้น",
+  "settings.regionConsent":
+    "ฉันยืนยันว่าไม่ได้ใช้ kikitori ในสหภาพยุโรป สหราชอาณาจักร หรือเกาหลีใต้ และยอมรับข้อกำหนดของสัญญาอนุญาตของโมเดลแปลภาษาเหล่านี้",
+  "settings.regionHelp":
+    "เมื่อเลือกไว้ การกำหนดค่าที่แนะนำจะพิจารณาโมเดลที่จำกัดภูมิภาคด้วย เมื่อไม่ได้เลือก คุณยังเลือกโมเดลเหล่านั้นได้ในการกำหนดค่าแบบกำหนดเอง โดยจะมีคำเตือน",
+  "settings.languageLegend": "ภาษา",
+  "settings.languageLede":
+    "เลือกภาษาที่คุณฟังและภาษาของคำบรรยาย โมเดลที่แนะนำสำหรับภาษาเหล่านั้นจะแสดงอยู่ด้านล่าง ตอนนี้ยังไม่มีการดาวน์โหลดใด ๆ โมเดลที่ขาดจะถูกดาวน์โหลดเมื่อคุณกด “เริ่ม” ครั้งแรก",
+  "settings.languageModeMedia": "นี่คือภาษาสำหรับการแปลวิดีโอ",
+  "settings.languageModeInterpret": "นี่คือภาษาสำหรับการล่ามแบบเรียลไทม์",
+  "settings.source": "ภาษาที่ฟัง",
+  "settings.sourceHelp":
+    "ภาษาที่พูดในวิดีโอ เมื่อเลือก “ตรวจหาอัตโนมัติ” ระบบจะระบุภาษาของแต่ละประโยคก่อน และประโยคที่สั้นมากอาจระบุผิดได้",
+  "settings.own": "ภาษาของฉัน",
+  "settings.ownHelp": "ภาษาที่คุณพูด สิ่งที่อีกฝ่ายพูดจะถูกแปลเป็นภาษานี้",
+  "settings.languageFilter": "พิมพ์เพื่อกรอง",
+  "settings.languageFilterLabel": "กรอง {field}",
+  "settings.applyRecommended": "เปลี่ยนไปใช้โมเดลที่แนะนำด้วย",
+  "settings.applyRecommendedHelp": "จะเปลี่ยนโมเดลรู้จำเสียงพูด อุปกรณ์ และโมเดลแปลภาษา หากไม่เลือก จะเปลี่ยนเฉพาะภาษา",
+  "settings.saveLanguages": "บันทึกภาษา",
+  "settings.languagesSaved": "บันทึกภาษาแล้ว",
+  "settings.languagesSavedWithModels": "บันทึกภาษาแล้ว และกำลังใช้โมเดลที่แนะนำ",
+  "settings.languagesSavedNoPreview": "บันทึกภาษาแล้ว แต่ชุดโมเดลที่แนะนำยังไม่พร้อม จึงไม่ได้เปลี่ยนโมเดล",
+  "settings.languagesSavedNextStart": "บันทึกแล้ว จะมีผลในครั้งถัดไปที่เริ่ม",
+  "settings.languagesUnavailable": "เลือกภาษาได้เมื่อเอนจินพร้อม",
+  "language.auto": "ตรวจหาอัตโนมัติ",
+  "preview.title": "ชุดโมเดลที่แนะนำ",
+  "preview.checking": "กำลังคำนวณชุดโมเดลที่แนะนำสำหรับภาษาเหล่านี้",
+  "preview.unavailable": "ขณะนี้ยังไม่มีชุดโมเดลที่แนะนำ: {reason}",
+  "preview.translation": "โมเดลแปลภาษา",
+  "preview.installed": "ติดตั้งแล้ว",
+  "preview.downloadOnFirstUse": "ดาวน์โหลดเมื่อใช้งานครั้งแรก ประมาณ {size}",
+  "preview.downloadUnknownSize": "ดาวน์โหลดเมื่อใช้งานครั้งแรก (ไม่ทราบขนาด)",
+  "preview.installedUnknown": "ไม่ทราบว่าติดตั้งแล้วหรือไม่ (เซิร์ฟเวอร์แปลภาษาไม่ตอบสนอง)",
+  "preview.notNeeded": "ไม่ต้องแปล",
+  "preview.translationOff": "ปิด “แสดงคำแปล” อยู่ จึงไม่ต้องใช้โมเดลแปลภาษา",
+  "preview.unsupported": "ไม่มีโมเดลแปลภาษาที่รองรับคู่ภาษานี้",
+  "preview.remote":
+    "เซิร์ฟเวอร์แปลภาษาไม่ได้อยู่บนคอมพิวเตอร์เครื่องนี้ โปรดเลือกโมเดลของเซิร์ฟเวอร์นั้นในการกำหนดค่าแบบกำหนดเองที่หน้าโมเดล",
+  "preview.allInstalled": "ติดตั้งโมเดลที่จำเป็นครบแล้ว",
+  "preview.total": "การเริ่มครั้งแรกจะดาวน์โหลดประมาณ {size}",
+  "preview.totalUnknown": "การเริ่มครั้งแรกจะดาวน์โหลดโมเดล ซึ่งบางส่วนไม่ทราบขนาด (ส่วนที่ทราบประมาณ {size})",
+  "settings.target": "ภาษาของคำบรรยาย",
+  "settings.targetHelp":
+    "ภาษาของคำบรรยาย หากเป็นภาษาพูดเดียวกับภาษาที่ฟัง จะไม่มีการแปล สำหรับภาษาจีนจะแปลงระหว่างระบบตัวอักษรเท่านั้น",
+  "settings.partner": "ภาษาของอีกฝ่าย",
+  "settings.partnerHelp":
+    "สิ่งที่คุณพูดจะถูกแปลเป็นภาษานี้ และสิ่งที่อีกฝ่ายพูดจะถูกแปลเป็นภาษาของคุณ ทั้งสองภาษาต้องแยกออกจากกันได้ จึงต้องไม่ใช่ภาษาเดียวกัน (ภาษาจีนตัวเต็มและตัวย่อนับเป็นภาษาเดียวกัน)",
+  "settings.styleLegend": "คำบรรยาย",
+  "settings.showTranslation": "แสดงคำแปล",
+  "settings.showTranslationHelp":
+    "เมื่อปิด จะแสดงเฉพาะต้นฉบับด้วยขนาดและสีของคำบรรยายหลัก เอนจินจะไม่แปลอะไรเลย ไม่ต้องใช้เซิร์ฟเวอร์แปลภาษา และไม่ใช้ GPU การสลับระหว่างทำงานจะมีผลทันที บรรทัดที่แสดงไปแล้วจะไม่ถูกแปลภายหลัง",
+  "settings.previewOriginal": "次の駅で降りましょう。",
+  "settings.previewTranslation": "ลงที่สถานีหน้ากันเถอะ",
+  "settings.fontSize": "ขนาดตัวอักษรคำแปล",
+  "settings.opacity": "ความทึบของพื้นหลัง",
+  "settings.position": "ตำแหน่งคำบรรยาย",
+  "settings.positionBottom": "ด้านล่างของหน้าต่าง",
+  "settings.positionTop": "ด้านบนของหน้าต่าง",
+  "settings.lines": "จำนวนประโยคที่แสดงพร้อมกัน",
+  "settings.linesOption": { other: "{count} ประโยค" },
+  "settings.save": "บันทึกการตั้งค่า",
+  "settings.saved": "บันทึกการตั้งค่าแล้ว",
+  "settings.savedRegion":
+    "บันทึกการตั้งค่าแล้ว การกำหนดค่าที่แนะนำจะถูกคำนวณใหม่ตามภูมิภาคของสัญญาอนุญาตที่เปลี่ยนไป (ดูที่หน้าโมเดล)",
+
+  // ------------------------------------------------------------ validation
+  "validation.urlScheme": "URL ต้องขึ้นต้นด้วย http:// หรือ https://",
+  "validation.urlEmpty": "โปรดกรอก URL ของบริการแปลภาษา",
+  "validation.urlInvalid": "URL นี้ไม่ถูกต้อง",
+  "validation.envPattern": "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษ ตัวเลข และขีดล่าง และต้องไม่ขึ้นต้นด้วยตัวเลข",
+  "validation.envTooLong": "ชื่อยาวเกินไป (ไม่เกิน {max} อักขระ)",
+  "validation.partner": "ภาษาของอีกฝ่ายต้องต่างจากภาษาของคุณ (ภาษาจีนตัวเต็มและตัวย่อนับเป็นภาษาเดียวกัน)",
+  "validation.language": "โปรดเลือกภาษาจากรายการ",
+  "validation.fontSize": "ขนาดตัวอักษรต้องอยู่ระหว่าง {min} ถึง {max}",
+  "validation.opacity": "ความทึบของพื้นหลังต้องอยู่ระหว่าง 0% ถึง 100%",
+  "validation.position": "โปรดเลือกด้านบนหรือด้านล่าง",
+  "validation.lines": "จำนวนประโยคต้องอยู่ระหว่าง {min} ถึง {max}",
+  "validation.asrModel": "โปรดเลือกโมเดลรู้จำเสียงพูด",
+  "validation.device": "โปรดเลือกอุปกรณ์ประมวลผล",
+  "validation.translationEmpty": "โปรดกรอกชื่อโมเดลแปลภาษา",
+  "validation.translationTooLong": "ชื่อโมเดลยาวได้ไม่เกิน {max} อักขระ",
+  "validation.computeType": "โปรดเลือกความแม่นยำ",
+  "validation.threads": "จำนวนเธรดต้องอยู่ระหว่าง {min} ถึง {max} หรือเว้นว่างไว้เพื่อใช้ค่าอัตโนมัติ",
+  "validation.cudaDirsTooMany": "ไม่เกิน {max} โฟลเดอร์",
+  "validation.cudaDirNotAbsolute": "“{path}” ไม่ใช่พาธเต็ม (เช่น C:\\CUDA\\bin)",
+
+  // ------------------------------------------------------------ about
+  "about.title": "เกี่ยวกับ",
+  "about.engine": "เอนจิน {version} เวอร์ชันโปรโตคอล {protocol}",
+  "about.engineFake": "เอนจิน {version} เวอร์ชันโปรโตคอล {protocol} ขณะนี้ใช้เอนจินจำลอง (โหมดพัฒนา)",
+  "about.engineOffline": "เอนจินยังไม่ได้เชื่อมต่อ",
+  "about.license": "kikitori เผยแพร่ภายใต้สัญญาอนุญาต {license}",
+  "about.notice":
+    "คอมโพเนนต์ของบุคคลที่สามในโปรแกรมนี้ เช่น Intel® OpenMP อยู่ภายใต้ข้อกำหนดของสัญญาอนุญาตของแต่ละคอมโพเนนต์ และไม่อนุญาตให้ทำวิศวกรรมย้อนกลับ (reverse engineering) คอมโพเนนต์เหล่านั้น",
+  "about.thirdPartyHead": "ข้อความฉบับเต็มของสัญญาอนุญาตของคอมโพเนนต์บุคคลที่สาม:",
+  "about.thirdPartyApp": "ตัวแอป (Tauri/Rust crate, แพ็กเกจฟรอนต์เอนด์ และ LICENSE ของ kikitori): ",
+  "about.thirdPartyEngine": "เอนจินเสียงพูด (แพ็กเกจ Python): ",
+  "about.thirdPartyDev":
+    "บิลด์สำหรับพัฒนาไม่มีโฟลเดอร์สัญญาอนุญาต ในบิลด์สำหรับเผยแพร่ ข้อความสัญญาอนุญาตอยู่ในโฟลเดอร์ licenses (ตัวแอป) และ kikitori-engine/THIRD_PARTY_LICENSES (เอนจินเสียงพูด) ในไดเรกทอรีที่ติดตั้ง",
+  "about.openAppLicenses": "เปิดโฟลเดอร์สัญญาอนุญาตบุคคลที่สามของแอป",
+  "about.openEngineLicenses": "เปิดโฟลเดอร์สัญญาอนุญาตบุคคลที่สามของเอนจิน",
+  "about.checkUpdate": "ตรวจหาอัปเดต",
+
+  // ------------------------------------------------------------ updates
+  "update.available": "kikitori {version} พร้อมให้ดาวน์โหลดและติดตั้งแล้ว",
+  "update.install": "ดาวน์โหลดและติดตั้ง",
+  "update.downloading": "กำลังดาวน์โหลดอัปเดต",
+  "update.progress": "กำลังดาวน์โหลดอัปเดต: {percent}%",
+  "update.installed": "ติดตั้ง kikitori {version} แล้ว จะมีผลหลังจากรีสตาร์ท",
+  "update.restartNow": "รีสตาร์ทเดี๋ยวนี้",
+  "update.checking": "กำลังตรวจสอบ",
+  "update.found": "มีเวอร์ชันใหม่ {version}",
+  "update.latest": "คุณใช้เวอร์ชันล่าสุดอยู่แล้ว",
+  "update.checkFailed": "ไม่สามารถตรวจหาอัปเดตได้: {reason}",
+  "update.failed": "อัปเดตไม่สำเร็จ: {reason}",
+  "update.relaunchFailed": "ไม่สามารถรีสตาร์ทโดยอัตโนมัติได้ โปรดปิดและเปิด kikitori ใหม่ด้วยตนเอง ({reason})",
+
+  // ------------------------------------------------------------ overlay
+  "overlay.title": "คำบรรยาย kikitori",
+  "overlay.drag": "ลากเพื่อย้าย",
+  "overlay.hide": "ซ่อน",
+  "overlay.hint": "คำบรรยายจะแสดงที่นี่ ลากหน้าต่างเพื่อย้ายตำแหน่ง ลากมุมขวาล่างเพื่อปรับขนาด",
+};

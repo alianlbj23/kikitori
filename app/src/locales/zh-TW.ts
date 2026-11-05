@@ -307,7 +307,7 @@ export const zhTW = {
   "rec.appliedWhileRunning": "已套用建議組合：即時字幕 {fast}、完整翻譯 {final}（{device}）。下一次開始時生效。",
   "tier.nvidia_8gb": "NVIDIA 顯示卡（8 GB 以上）",
   "tier.nvidia_4gb": "NVIDIA 顯示卡（4–8 GB）",
-  "tier.nvidia_lt4gb": "NVIDIA 顯示卡（4 GB 以下）",
+  "tier.nvidia_lt4gb": "NVIDIA 顯示卡（未滿 4 GB）",
   "tier.cpu": "CPU（記憶體 16 GB 以上）",
   "tier.cpu_low": "CPU（輕量組合）",
   "tier.apple_silicon": "Apple Silicon（CPU）",

@@ -1,0 +1,666 @@
+/**
+ * Indonesian UI dictionary.
+ *
+ * Role: the Indonesian (Bahasa Indonesia) interface texts. Typed as `Messages`,
+ * so it must have exactly the base (zh-TW) keys; a key missing at runtime falls
+ * back to English, then to zh-TW.
+ */
+
+import type { Messages } from "./types";
+
+export const id: Messages = {
+  // ------------------------------------------------------------ common
+  "common.unknown": "Tidak diketahui",
+  "common.unknownReason": "alasan tidak diketahui",
+  "common.unknownCause": "penyebab tidak diketahui",
+  "common.auto": "Otomatis",
+  "common.loading": "Memuat",
+  "common.saving": "Menyimpan",
+  "common.redownload": "Unduh ulang",
+  "common.recommendedFor": "Disarankan: {roles}",
+  "common.parenthetical": "{text} ({note})",
+  "common.withReason": "{context}: {reason}",
+  "common.listSeparator": ", ",
+  "common.clauseSeparator": ", ",
+  "common.strongSeparator": "; ",
+  "common.altSeparator": " / ",
+  "common.sentenceEnd": ".",
+  "common.approxGb": "sekitar {gb} GB",
+
+  // ------------------------------------------------------------ rail
+  "rail.mode": "Mode",
+  "rail.device": "Sumber audio",
+  "mode.media.name": "Terjemahan video",
+  "mode.media.note": "{source} ke {target}",
+  "mode.media.noteAuto": "Bahasa apa pun yang terdeteksi ke {target}",
+  "mode.media.noteOriginal": "{source} (teks asli saja)",
+  "mode.interpret.noteOriginal": "{own} ⇄ {partner} (teks asli saja)",
+  "mode.interpret.name": "Penerjemahan lisan langsung",
+  "mode.interpret.note": "{own} ⇄ {partner}",
+  "device.hint.media": "Terjemahan video menangkap suara yang sedang diputar komputer Anda.",
+  "device.hint.interpret": "Penerjemahan lisan langsung menggunakan mikrofon.",
+  "device.hint.missing": "Perangkat yang Anda pilih sebelumnya tidak tersedia; perangkat bawaan sistem akan digunakan.",
+  "device.defaultNamed": "Bawaan: {name}",
+  "device.systemDefault": "Bawaan sistem",
+  "start.start": "Mulai",
+  "start.stop": "Hentikan",
+  "nav.label": "Halaman",
+  "nav.transcript": "Transkrip",
+  "nav.models": "Model",
+  "nav.settings": "Pengaturan",
+  "engine.restart": "Mulai ulang mesin",
+  "engine.failedNotice": "Mesin tidak dapat dimulai: {reason}",
+  "engine.log": "Pemberitahuan mesin: {message}",
+  // ------------------------------------------------------------ engine message codes (hardware.md; params localized in lib/messages.ts)
+  "engine.asr_gpu":
+    "{gpu_name} ({vram_mb} MiB VRAM): {fast_model} untuk subtitle langsung, {final_model} untuk subtitle final ({compute_type})",
+  "engine.asr_gpu_int8_saves_vram":
+    "int8_float16 memangkas separuh VRAM yang dipakai pengenalan ucapan, sehingga lebih banyak tersisa untuk model terjemahan",
+  "engine.asr_final_no_speech_unreliable":
+    "{final_model} tidak dapat membedakan ucapan dari keheningan (no_speech); sebagai gantinya, no_speech dari {fast_model} dan detektor suara menyaring bagian yang bukan ucapan",
+  "engine.asr_large_v3_remote_translation":
+    "Terjemahan tidak berjalan di komputer ini, sehingga subtitle final memakai {final_model} (kualitas serupa, no_speech andal, sekitar 0,33 detik per kalimat)",
+  "engine.asr_apple_silicon":
+    "Apple Silicon: di macOS, pengenalan ucapan berjalan di CPU; {fast_model} untuk subtitle langsung, {final_model} untuk subtitle final",
+  "engine.asr_apple_silicon_untested":
+    "Latensi di Apple Silicon belum diukur; memakai model yang sama dengan CPU yang memiliki RAM 16 GB atau lebih",
+  "engine.asr_cpu":
+    "Pengenalan ucapan berjalan di CPU (RAM 16 GB atau lebih): {fast_model} untuk subtitle langsung, {final_model} untuk subtitle final",
+  "engine.asr_cpu_large_models_slow":
+    "Model medium ke atas memerlukan 3,6 detik atau lebih per kalimat di CPU, terlalu lambat untuk subtitle langsung",
+  "engine.asr_cpu_low":
+    "Model ringan menjaga latensi dan penggunaan memori tetap rendah: {fast_model} untuk subtitle langsung, {final_model} untuk subtitle final",
+  "engine.cpu_low_ram": "RAM {ram_gb} GB, kurang dari 16 GB",
+  "engine.cpu_few_cores": "{physical_cores} inti CPU fisik (maksimal {max_cores})",
+  "engine.cpu_info_incomplete": "Informasi perangkat keras tidak lengkap",
+  "engine.multiple_gpus": "Ditemukan {gpu_count} GPU NVIDIA; menggunakan {gpu_name}, yang memiliki VRAM terbesar",
+  "engine.cuda_platform_unsupported":
+    "CTranslate2 tidak memiliki build CUDA untuk platform ini (hanya Windows dan Linux x86-64); pengenalan ucapan menggunakan CPU",
+  "engine.cuda_driver_too_old":
+    "Driver NVIDIA {driver_version} terlalu lama (CUDA 12 memerlukan {min_driver} atau lebih baru); pengenalan ucapan menggunakan CPU sampai driver diperbarui",
+  "engine.cuda_compute_capability_unknown":
+    "Tidak dapat membaca compute capability GPU (driver mungkin terlalu lama); pengenalan ucapan menggunakan CPU",
+  "engine.cuda_compute_capability_unsupported":
+    "{gpu_name} (compute capability {compute_capability}) tidak mendukung akselerasi float16/int8 CTranslate2; pengenalan ucapan menggunakan CPU",
+  "engine.gpu_runtime_missing":
+    "cuBLAS belum terpasang: akselerasi GPU memerlukan unduhan komponen akselerasi GPU (sekitar 570 MB); sampai saat itu pengenalan ucapan menggunakan CPU",
+  "engine.asr_vram_insufficient":
+    "VRAM tidak cukup untuk model pengenalan ucapan (perlu sekitar {need_mb} MiB); pengenalan ucapan menggunakan CPU",
+  "engine.memory_unknown": "Tidak dapat membaca jumlah memori; menggunakan model pengenalan ucapan yang paling ringan",
+  "engine.asr_low_quality_model": "{model} membuat jauh lebih banyak kesalahan pengenalan",
+  "engine.asr_language_quality_low":
+    "{model} kurang baik mengenali {language} (tingkat kesalahan di atas 20% pada tolok ukur publik)",
+  "engine.translation_remote":
+    "Server terjemahan tidak berada di komputer ini ({base_url}); pilih salah satu modelnya di konfigurasi kustom pada halaman Model",
+  "engine.translation_cpu":
+    "Tidak ada GPU yang dapat digunakan: model terjemahan berjalan di CPU, jadi model terkecil yang dipilih (kecepatan CPU belum diukur)",
+  "engine.translation_budget_vram":
+    "Sekitar {budget_gb} GB VRAM tersisa untuk model terjemahan setelah pengenalan ucapan dan cadangan 1 GB",
+  "engine.translation_budget_unified":
+    "Sekitar {budget_gb} GB memori terpadu tersisa untuk model terjemahan setelah pengenalan ucapan dan cadangan sistem",
+  "engine.translation_same_model":
+    "Terjemahan langsung dan final memakai model yang sama: setiap kalimat butuh kurang dari 0,3 detik di GPU, sedangkan berganti model di Ollama butuh 1,5–18 detik",
+  "engine.translation_different_models": "Terjemahan langsung dan final memakai model yang berbeda",
+  "engine.translation_better_model_available":
+    "Memilih {model} dari model yang terpasang; memasang {better_model} memberikan kualitas lebih baik",
+  "engine.translation_not_needed":
+    "{source_language} dan {target_language} adalah bahasa lisan yang sama: model terjemahan tidak diperlukan, cukup konversi aksara",
+  "engine.source_language_auto":
+    "Bahasa yang didengar dideteksi otomatis: model terjemahan dipilih agar dapat menerjemahkan bahasa apa pun ke {target_language}",
+  "engine.translation_server_unreachable":
+    "Tidak dapat terhubung ke server terjemahan {base_url} (apakah Ollama berjalan?); model yang terpasang tidak dapat diperiksa",
+  "engine.translation_model_list_unavailable": "Tidak dapat mengambil daftar model server terjemahan: {error}",
+  "engine.low_ram_for_translation":
+    "RAM kurang dari 8 GB: menjalankan model terjemahan bersama pengenalan ucapan mungkin tidak muat",
+  "engine.translation_model_not_installed": "Model terjemahan yang disarankan {model} belum terpasang",
+  "engine.translation_model_exceeds_budget":
+    "{model} memerlukan sekitar {model_gb} GB, lebih dari {budget_gb} GB yang tersedia; Ollama akan menjalankan sebagiannya di CPU, yang lebih lambat",
+  "engine.translation_unsupported":
+    "Tidak ada model terjemahan yang disarankan yang mendukung {source_language} → {target_language}",
+  "engine.combination_not_object": "Kombinasi model harus berupa objek",
+  "engine.asr_path_not_object": "{path} harus berupa objek",
+  "engine.asr_model_unknown": "{path}: model pengenalan ucapan {model} tidak dikenal (tersedia: {available})",
+  "engine.asr_device_invalid": "{path}: perangkat harus otomatis, CPU, atau CUDA",
+  "engine.asr_compute_type_not_string": "{path}: presisi harus berupa teks atau kosong",
+  "engine.asr_cpu_threads_invalid": "{path}: thread CPU harus bilangan bulat dari 0 sampai 256",
+  "engine.asr_cuda_no_gpu": "{path}: CUDA dipilih tetapi GPU NVIDIA tidak ditemukan",
+  "engine.asr_cuda_platform_unsupported":
+    "{path}: CUDA dipilih tetapi CTranslate2 tidak memiliki build CUDA untuk platform ini (hanya Windows dan Linux x86-64)",
+  "engine.asr_cuda_driver_too_old":
+    "{path}: CUDA dipilih tetapi driver NVIDIA {driver_version} terlalu lama (CUDA 12 memerlukan {min_driver} atau lebih baru)",
+  "engine.asr_cuda_compute_capability_unknown":
+    "{path}: CUDA dipilih tetapi compute capability GPU tidak diketahui (driver mungkin terlalu lama)",
+  "engine.asr_cuda_compute_capability_unsupported":
+    "{path}: CUDA dipilih tetapi {gpu_name} (compute capability {compute_capability}) tidak mendukung akselerasi float16/int8 CTranslate2",
+  "engine.asr_cuda_cublas_missing":
+    "{path}: CUDA dipilih tetapi cuBLAS belum terpasang; unduh komponen akselerasi GPU terlebih dahulu",
+  "engine.asr_compute_type_unknown": "{path}: presisi {compute_type} tidak dikenal (tersedia: {available})",
+  "engine.translation_model_name_invalid": "{field} harus berupa nama model sepanjang 1–{max_chars} karakter, atau kosong",
+  "engine.asr_auto_uses_cpu":
+    "{path}: mode otomatis akan menggunakan CPU (GPU saat ini tidak dapat menjalankan pengenalan ucapan)",
+  "engine.asr_compute_type_cpu_fallback":
+    "{path}: CPU tidak mendukung {compute_type}; CTranslate2 akan memakai presisi lain (biasanya float32, lebih lambat)",
+  "engine.asr_compute_type_gpu_fallback":
+    "{path}: compute capability {compute_capability} tidak mendukung {compute_type}; CTranslate2 akan memakai float32 atau int8_float32 (lebih lambat, lebih banyak VRAM)",
+  "engine.asr_model_slow_on_cpu":
+    "{path}: {model} memerlukan 3,6 detik atau lebih per kalimat di CPU; subtitle akan tertinggal cukup jauh",
+  "engine.asr_model_not_downloaded":
+    "{path}: model pengenalan ucapan {model} belum diunduh; model akan diunduh sebelum dimulai",
+  "engine.asr_model_language_unsupported": "{path}: {model} tidak dapat mengenali {language}",
+  "engine.asr_fast_larger_than_final":
+    "Model langsung {fast_model} lebih besar daripada model final {final_model}: subtitle langsung mungkin lebih lambat daripada subtitle final",
+  "engine.asr_no_speech_unavailable":
+    "Baik {fast_model} maupun {final_model} tidak dapat menyaring non-ucapan dengan no_speech; nyanyian dan derau lebih mungkin ikut ditranskripsi",
+  "engine.translation_model_not_on_server": "Server terjemahan tidak memiliki {model}",
+  "engine.translation_model_language_unsupported": "{model} tidak mendukung {source_language} → {target_language}",
+  "engine.translation_license_non_commercial": "Lisensi {model} ({license}) melarang penggunaan komersial",
+  "engine.translation_license_region_restricted": "Lisensi {model} ({license}) tidak berlaku di {regions}",
+  "engine.translation_models_differ":
+    "Terjemahan langsung dan final memakai model yang berbeda: Ollama lokal butuh 1,5–18 detik setiap kali berganti model",
+  "engine.vram_overflow":
+    "Pengenalan ucapan dan terjemahan memerlukan sekitar {need_mb} MiB VRAM, lebih dari {available_mb} MiB yang tersedia di {gpu_name}; keduanya mungkin lambat atau gagal dimuat",
+  "engine.asr_ram_over_half": "Model pengenalan ucapan di CPU memakai lebih dari separuh RAM",
+  "engine.translation_disabled":
+    "Terjemahan nonaktif: hanya teks asli yang ditampilkan dan model terjemahan tidak diperlukan",
+  "engineParam.fast_asr": "Pengenalan untuk subtitle langsung",
+  "engineParam.final_asr": "Pengenalan untuk subtitle final",
+  "engineParam.translation_fast": "Model terjemahan langsung",
+  "engineParam.translation_final": "Model terjemahan final",
+
+  // ------------------------------------------------------------ status
+  "status.starting": "Memulai mesin",
+  "status.restarting": "Mesin berhenti secara tak terduga; memulai ulang",
+  "status.failed": "Mesin tidak dapat dimulai",
+  "status.stopped": "Mesin berhenti",
+  "status.loading": "Memuat model",
+  "status.running": "Mendengarkan",
+  "status.error": "Berhenti karena terjadi kesalahan",
+  "status.idle": "Siap",
+  "status.code.model_not_downloaded": "Model belum diunduh. Unduh di halaman Model, lalu mulai lagi.",
+  "status.code.unknown_model": "Model di pengaturan Anda tidak ada. Pilih model lain di halaman Model.",
+  "status.code.device_not_found": "Perangkat audio yang dipilih tidak ditemukan. Pilih perangkat lagi.",
+  "status.code.permission_denied":
+    "kikitori tidak diizinkan menggunakan mikrofon atau merekam audio. Berikan izin di pengaturan sistem.",
+  "status.code.device_lost": "Perangkat audio terputus. Periksa sambungan, lalu mulai lagi.",
+  "status.code.capture_unavailable": "Komputer ini tidak dapat menangkap jenis sumber audio ini.",
+  "status.code.capture_error": "Terjadi kesalahan saat menangkap audio.",
+  "status.code.pipeline_error": "Terjadi kesalahan saat memproses ucapan.",
+  "status.code.load_error": "Gagal memuat model.",
+  "status.code.translation_model_missing": "Server terjemahan belum memiliki model terjemahan.",
+  "status.code.translation_server_auth_failed": "Server terjemahan menolak permintaan — periksa kunci API.",
+  "status.errorDetail": "Terjadi kesalahan: {detail}",
+  "status.errorUnknown": "Terjadi kesalahan yang tidak diketahui.",
+
+  // ------------------------------------------------------------ notices
+  "notice.close": "Tutup",
+  "notice.closeLabel": "Tutup pesan ini",
+  "notice.settingsFieldsUnreadable": {
+    other: "{count} kolom di berkas pengaturan tidak dapat dibaca; untuk sementara memakai nilai bawaan: {fields}",
+  },
+  "notice.initFailed": "Jendela gagal diinisialisasi: {reason}",
+
+  // ------------------------------------------------------------ failure contexts
+  "error.saveMode": "Gagal mengingat mode",
+  "error.saveDevice": "Gagal mengingat sumber audio",
+  "error.start": "Gagal memulai",
+  "error.stop": "Gagal menghentikan",
+  "error.showOverlay": "Gagal menampilkan jendela subtitle",
+  "error.hideOverlay": "Gagal menyembunyikan jendela subtitle",
+  "error.toggleClickThrough": "Gagal mengalihkan klik tembus",
+  "error.applyRecommendation": "Gagal menerapkan konfigurasi yang disarankan",
+  "error.readSettings": "Gagal membaca pengaturan",
+  "error.saveDismissal": "Gagal mengingat “Jangan ingatkan lagi”",
+  "error.saveUiLocale": "Gagal mengingat bahasa antarmuka",
+  "error.setOverlayLocale": "Gagal mengganti bahasa jendela subtitle",
+  "error.readModels": "Gagal membaca daftar model",
+  "error.detectHardware": "Gagal mendeteksi perangkat keras",
+  "error.downloadModel": "Gagal mengunduh {model}",
+  "error.downloadGpuRuntime": "Gagal mengunduh komponen akselerasi GPU",
+  "error.openEula": "Gagal membuka ketentuan lisensi; salin URL ke peramban Anda",
+  "error.applyStyle": "Gagal menerapkan tampilan subtitle",
+  "error.openLicenses": "Gagal membuka folder lisensi; buka dari jalur di atas",
+  "error.listDevices": "Gagal menampilkan daftar perangkat audio",
+  "error.restartEngine": "Gagal memulai ulang mesin",
+  "error.readOverlayState": "Gagal membaca status jendela subtitle",
+  "error.readBridge": "Gagal membaca status mesin",
+  "error.readLanguages": "Gagal membaca daftar bahasa",
+  "error.setTranslation": "Gagal mengalihkan “Tampilkan terjemahan”",
+  "error.previewLanguages": "Gagal mendapatkan kombinasi yang disarankan",
+
+  // ------------------------------------------------------------ engine error codes
+  "error.code.invalid_settings": "Pengaturan tidak valid",
+  "error.code.settings_io_error": "Gagal menyimpan berkas pengaturan; periksa ruang disk dan izin akses",
+  "error.code.session_active": "Sedang berjalan; hentikan terlebih dahulu",
+  "error.code.device_not_found": "Perangkat audio yang dipilih tidak ditemukan; pilih lagi",
+  "error.code.capture_unavailable": "Komputer ini tidak dapat menangkap jenis sumber audio ini",
+  "error.code.capture_error": "Terjadi kesalahan saat menangkap audio",
+  "error.code.unknown_model": "Mesin tidak mengenali model ini",
+  "error.code.download_in_progress": "Item ini sedang diunduh; tunggu hingga selesai",
+  "error.code.license_not_accepted": "Setujui NVIDIA CUDA EULA sebelum mengunduh komponen akselerasi GPU",
+  "error.code.gpu_runtime_unsupported":
+    "Platform ini tidak mendukung komponen akselerasi GPU (hanya Windows dan Linux pada x86-64)",
+  "error.code.pull_unsupported":
+    "Server terjemahan bukan Ollama, jadi kikitori tidak dapat mengunduhkan model terjemahan untuk Anda",
+  "error.code.translation_server_unreachable": "Tidak dapat terhubung ke server terjemahan",
+  "error.code.translation_server_auth_failed": "Server terjemahan menolak permintaan — periksa kunci API",
+  "error.code.unknown_method": "Versi mesin tidak cocok dengan aplikasi; operasi ini tidak didukung",
+  "error.code.invalid_params": "Parameter yang tidak valid dikirim ke mesin",
+  "error.code.invalid_request": "Permintaan dengan format yang salah dikirim ke mesin",
+  "error.code.internal_error": "Kesalahan internal mesin",
+  "error.code.other": "Mesin melaporkan kesalahan ({code})",
+  "error.engineSentence": "{head}.",
+  "error.engineDetail": "{head}: {message}",
+  "error.timeout": {
+    other: "Mesin tidak merespons dalam {count} detik. Coba lagi nanti atau mulai ulang mesin.",
+  },
+  "error.disconnected":
+    "Mesin tidak berjalan. Tunggu hingga mesin dimulai ulang, atau tekan “Mulai ulang mesin” di area status.",
+  "error.invalidInput": "Nilai tidak valid: {message}",
+  "error.generic": "Terjadi kesalahan: {message}",
+
+  // ------------------------------------------------------------ transcript
+  "transcript.title": "Transkrip",
+  "transcript.lede":
+    "Subtitle langsung muncul samar terlebih dahulu, lalu berganti menjadi terjemahan final setelah kalimat selesai.",
+  "transcript.overlayVisible": "Tampilkan jendela subtitle",
+  "transcript.clickThrough": "Klik tembus",
+  "transcript.clear": "Bersihkan",
+  "transcript.showTranslation": "Tampilkan terjemahan",
+  "transcript.noTranslation": "(tanpa terjemahan)",
+  "transcript.translating": "Menerjemahkan",
+  "transcript.emptyTitle": "Belum ada subtitle",
+  "transcript.emptyBody":
+    "Pilih mode dan sumber audio, lalu tekan Mulai. Setiap kalimat yang terdengar dicantumkan di sini, teks asli di atas dan terjemahan di bawah.",
+  "transcript.langTitle": "{source} ke {target}",
+  "transcript.shortcutCtrl": "Ctrl (⌘ di macOS)",
+  "transcript.shortcutOn":
+    "Saat klik tembus aktif, klik akan menembus jendela subtitle. Tekan {keys} untuk mengalihkannya kapan saja.",
+  "transcript.shortcutTaken":
+    "Pintasan {keys} sudah dipakai aplikasi lain; gunakan sakelar di sini untuk mengalihkan klik tembus.",
+
+  // ------------------------------------------------------------ models page
+  "models.title": "Model",
+  "models.lede":
+    "Pengenalan ucapan berjalan di komputer ini; terjemahan dikirim ke layanan yang diatur di halaman Pengaturan.",
+  "models.refresh": "Deteksi ulang",
+
+  "hw.title": "Komputer ini",
+  "hw.status": "Status",
+  "hw.detecting": "Mendeteksi",
+  "hw.os": "Sistem operasi",
+  "hw.cpu": "Prosesor",
+  "hw.memory": "Memori",
+  "hw.gpu": "Kartu grafis",
+  "hw.cublas": "cuBLAS (pengenalan dengan GPU)",
+  "hw.server": "Layanan terjemahan",
+  "hw.cpuValue": "{model}, {cores}",
+  "hw.cores": "{physical} inti, {logical} thread",
+  "hw.threads": { other: "{count} thread" },
+  "hw.coresUnknown": "jumlah inti tidak diketahui",
+  "hw.appleSilicon": "Apple Silicon (memori dipakai bersama dengan prosesor)",
+  "hw.gpuVram": "memori video {size}",
+  "hw.gpuDriver": "driver {version}",
+  "hw.gpuCompute": "compute capability {capability}",
+  "hw.noNvidia": "Tidak ada kartu grafis NVIDIA yang terdeteksi",
+  "hw.cublasNotUsed": "Tidak digunakan di platform ini",
+  "hw.cublasAvailable": "Tersedia ({source})",
+  "hw.cublasSourceUnknown": "sumber tidak diketahui",
+  "hw.cublasMissing": "Belum terpasang",
+  "hw.cublasSource.runtime": "komponen akselerasi GPU yang diunduh kikitori",
+  "hw.cublasSource.configured": "folder yang diatur di konfigurasi kustom",
+  "hw.cublasSource.system": "instalasi CUDA sistem",
+  "hw.serverNotDetected": "Tidak terdeteksi",
+  "hw.serverLocal": "lokal",
+  "hw.serverRemote": "jarak jauh",
+  "hw.serverModelsUnknown": "daftar model tidak diketahui",
+  "hw.serverModelCount": { other: "{count} model" },
+  "hw.serverReachable": "{url} ({where}, {models})",
+  "hw.serverUnreachable": "{url} (tidak dapat dijangkau)",
+  "hw.serverUnreachableError": "{url} (tidak dapat dijangkau: {error})",
+  "hw.memoryAvailable": "{total} ({available} tersedia)",
+  "hw.incomplete": "Deteksi tidak lengkap: {error}",
+
+  "rec.title": "Konfigurasi yang disarankan",
+  "rec.pending": "Saran akan muncul di sini setelah deteksi selesai.",
+  "rec.tier": "Tingkat perangkat keras",
+  "rec.fastAsr": "Pengenalan untuk subtitle langsung",
+  "rec.finalAsr": "Pengenalan untuk terjemahan final",
+  "rec.fastTranslation": "Terjemahan subtitle langsung",
+  "rec.finalTranslation": "Terjemahan final",
+  "rec.budget": "Memori yang tersedia untuk terjemahan",
+  "rec.notLocal": "Tidak ada saran (layanan terjemahan tidak lokal); pilih di konfigurasi kustom",
+  "rec.gpuRuntimeMissing":
+    "Setelah Anda mengunduh komponen akselerasi GPU di bawah, saran akan menggunakan kartu grafis.",
+  "rec.apply": "Terapkan konfigurasi yang disarankan",
+  "rec.applyNote": "Menyimpan model pengenalan, perangkat, presisi, thread, dan model terjemahan.",
+  "rec.applied":
+    "Konfigurasi yang disarankan diterapkan: subtitle langsung {fast}, terjemahan final {final} ({device}).",
+  "rec.appliedWhileRunning":
+    "Konfigurasi yang disarankan diterapkan: subtitle langsung {fast}, terjemahan final {final} ({device}). Berlaku saat Anda memulai berikutnya.",
+  "tier.nvidia_8gb": "Kartu grafis NVIDIA (8 GB atau lebih)",
+  "tier.nvidia_4gb": "Kartu grafis NVIDIA (4–8 GB)",
+  "tier.nvidia_lt4gb": "Kartu grafis NVIDIA (di bawah 4 GB)",
+  "tier.cpu": "CPU (memori 16 GB atau lebih)",
+  "tier.cpu_low": "CPU (konfigurasi ringan)",
+  "tier.apple_silicon": "Apple Silicon (CPU)",
+  "threads.auto": "thread otomatis",
+  "threads.count": { other: "{count} thread" },
+  "computeType.auto": "presisi otomatis",
+
+  "machine.gpu": "{name}, {gb} GB",
+  "machine.ram": "memori {gb} GB",
+  "machine.named": "{name}, {ram}",
+  "machine.thisCpu": "prosesor komputer ini",
+  "machine.thisCpuRam": "prosesor komputer ini, {ram}",
+  "summary.asrSameDevice": "langsung {fast}, final {final} ({device})",
+  "summary.asrSplit": "langsung {fast} ({fastDevice}), final {final} ({finalDevice})",
+  "summary.translationKept": "model terjemahan tidak berubah (layanan terjemahan tidak lokal)",
+  "summary.translationSame": "terjemahan {model}",
+  "summary.translationSplit": "terjemahan langsung {fast}, terjemahan final {final}",
+  "summary.full": "{asr}; {translation}",
+  "firstRun.applied": "Konfigurasi yang disarankan untuk komputer ini ({machine}) telah diterapkan: {summary}.",
+  "firstRun.appliedGpuMissing":
+    "Konfigurasi yang disarankan untuk komputer ini ({machine}) telah diterapkan: {summary}. Kartu grafis belum memiliki komponen akselerasi GPU, jadi CPU digunakan untuk sementara; unduh komponen tersebut di halaman Model untuk menggunakan kartu grafis.",
+  "firstRun.applyFailed":
+    "Gagal menerapkan konfigurasi yang disarankan: {reason} Periksa konfigurasi saat ini di halaman Model dan terapkan saran di sana jika perlu.",
+  "firstRun.detectFailed":
+    "Gagal mendeteksi perangkat keras komputer ini: {reason} Untuk sementara memakai konfigurasi bawaan (langsung {fast}, final {final}); Anda dapat mendeteksi ulang di halaman Model dan menerapkan saran.",
+  "firstRun.review": "Tinjau di halaman Model",
+  "offer.text": "Ada konfigurasi yang lebih baik untuk komputer ini: {summary}.",
+  "offer.apply": "Terapkan",
+  "offer.dismiss": "Jangan ingatkan lagi",
+  "missing.itemFailed": "{model} gagal diunduh: {error}",
+  "missing.downloading": "Mengunduh {models}; Anda dapat memulai setelah selesai.",
+  "missing.failed": "{items}. Anda dapat mengunduh ulang.",
+  "missing.offer": "{models} (total sekitar {size}) harus diunduh sebelum Anda dapat memulai.",
+  "missing.done": "Model sudah diunduh. Anda dapat menekan Mulai sekarang.",
+  "missing.download": "Unduh model yang kurang",
+  "startdl.title": "Mengunduh model sebelum memulai",
+  "startdl.itemAsr": "Model pengenalan ucapan {model}",
+  "startdl.itemTranslation": "Model terjemahan {model}",
+  "startdl.pending": "Menunggu",
+  "startdl.preparing": "Menyiapkan unduhan",
+  "startdl.progress": "{percent}%, {done} dari {total}",
+  "startdl.done": "Selesai",
+  "startdl.failed": "Unduhan gagal: {error}",
+  "startdl.stillMissing": "{model} sudah diunduh, tetapi mesin masih melaporkannya tidak ada.",
+  "startdl.downloading": "Subtitle dimulai otomatis setelah unduhan selesai.",
+  "startdl.starting": "Unduhan selesai; memulai.",
+  "startdl.failedHelp": "Ada unduhan yang gagal. Tekan Coba lagi, atau pilih model lain di halaman Model.",
+  "startdl.pullUnsupported":
+    "Server terjemahan {url} bukan Ollama, jadi kikitori tidak dapat mengunduhkan model terjemahan untuk Anda. Pasang {models} sendiri di server tersebut, atau pilih model yang sudah terpasang di halaman Model. Anda juga dapat menonaktifkan “Tampilkan terjemahan” untuk melihat teks asli saja.",
+  "startdl.serverUnreachable":
+    "Tidak dapat terhubung ke server terjemahan {url}. Jika Anda memakai Ollama, jalankan terlebih dahulu (buka aplikasi Ollama, atau jalankan ollama serve di terminal), lalu tekan Coba lagi. Anda juga dapat menonaktifkan “Tampilkan terjemahan” untuk melihat teks asli saja.",
+  "startdl.authFailed":
+    "Server terjemahan {url} menolak permintaan — periksa kunci API (variabel lingkungan yang disebutkan di Pengaturan), lalu tekan Coba lagi.",
+  "startdl.retry": "Coba lagi",
+  "startdl.cancel": "Batal",
+  "startdl.cancelLabel": "Berhenti menunggu unduhan dan jangan mulai otomatis",
+
+  "gpu.title": "Komponen akselerasi GPU",
+  "gpu.lede":
+    "Akselerasi pengenalan ucapan dengan kartu grafis NVIDIA memerlukan pustaka cuBLAS dari NVIDIA. kikitori tidak menyertakannya; pustaka ini diunduh dari PyPI setelah Anda menyetujui lisensinya.",
+  "gpu.name": "Komponen akselerasi GPU",
+  "gpu.unsupported":
+    "Platform komputer ini tidak menggunakan komponen ini: akselerasi GPU hanya untuk Windows dan Linux pada x86-64 dengan kartu grafis NVIDIA. Platform lain selalu mengenali ucapan di CPU.",
+  "gpu.progressLabel": "Progres unduhan komponen akselerasi GPU",
+  "gpu.finishing": "Sudah diunduh; memverifikasi dan mengekstrak (beberapa detik)",
+  "gpu.progress": "{percent}%, {done} / {total}",
+  "gpu.installed": "{what} terpasang.",
+  "gpu.installedAt": "{what} terpasang di {path}.",
+  "gpu.noCublas":
+    "Sudah terpasang, tetapi tidak terdeteksi cuBLAS yang dapat digunakan. Mulai ulang mesin, lalu tekan “Deteksi ulang”.",
+  "gpu.sizeApprox": "sekitar {size}",
+  "gpu.sizeUnknown": "beberapa ratus MB",
+  "gpu.situationMissing":
+    "Kartu grafis NVIDIA di komputer ini dapat mempercepat pengenalan, tetapi komponen ini belum ada, jadi CPU digunakan untuk sementara.",
+  "gpu.situationNoGpu":
+    "Tidak ada kartu grafis NVIDIA yang terdeteksi; tanpa kartu tersebut, komponen ini tidak perlu diunduh.",
+  "gpu.readLicense": "Baca lisensi",
+  "gpu.download": "Unduh komponen akselerasi GPU",
+  "gpu.consentNotice":
+    "Tindakan ini mengunduh NVIDIA cuBLAS ({package}, {size}) dari PyPI. Dengan menggunakannya, Anda menyetujui NVIDIA CUDA EULA ({license}).",
+  "gpu.lastFailed": "Unduhan terakhir gagal: {error}",
+  "gpu.agree": "Saya menyetujui NVIDIA CUDA EULA",
+  "gpu.installedRestarting": "Komponen akselerasi GPU terpasang. Memulai ulang mesin untuk menggunakan GPU.",
+  "gpu.installedBusy":
+    "Komponen akselerasi GPU terpasang. Karena ada pekerjaan yang sedang berjalan, mesin tidak dimulai ulang otomatis; mulai ulang mesin setelah selesai untuk menggunakan GPU.",
+
+  "asr.title": "Model pengenalan ucapan",
+  "asr.lede":
+    "Subtitle langsung membutuhkan kecepatan, terjemahan final membutuhkan akurasi; masing-masing dapat memakai model yang berbeda.",
+  "asr.colModel": "Model",
+  "asr.colSize": "Ukuran",
+  "asr.colSpeed": "Kecepatan",
+  "asr.colMemory": "Memori",
+  "asr.colLicense": "Lisensi",
+  "asr.colStatus": "Status",
+  "asr.inUse": "Digunakan: {roles}",
+  "asr.noSpeech": "Tanpa deteksi non-ucapan",
+  "asr.noSpeechHelp":
+    "Model ini tidak dapat diandalkan untuk mengetahui kapan tidak ada ucapan; untuk terjemahan final, penilaian model subtitle langsung dipakai untuk menyaring derau.",
+  "asr.memoryCpu": "CPU {size}",
+  "asr.memoryGpu": "GPU {size}",
+  "asr.progressLabel": "Progres unduhan {model}",
+  "asr.progress": "{percent}%, {done}",
+  "asr.downloaded": "Sudah diunduh",
+  "asr.download": "Unduh",
+  "asr.downloadFailed": "Unduhan gagal: {error}",
+  "role.fast": "langsung",
+  "role.final": "final",
+  "speed.fastest": "Paling cepat",
+  "speed.fast": "Cepat",
+  "speed.medium": "Sedang",
+  "speed.slow": "Lambat",
+  "speed.slowest": "Paling lambat",
+  "download.done": "{model} sudah diunduh.",
+  "download.failed": "{what} gagal diunduh: {error}",
+
+  "tr.title": "Model terjemahan",
+  "tr.unreachable":
+    "Tidak dapat menjangkau layanan terjemahan di {url}. Jika Anda memakai Ollama lokal, jalankan terlebih dahulu.",
+  "tr.unreachableError":
+    "Tidak dapat menjangkau layanan terjemahan di {url} ({error}). Jika Anda memakai Ollama lokal, jalankan terlebih dahulu.",
+  "tr.installedCount": {
+    other: "{count} model terpasang di layanan terjemahan {url}.",
+  },
+  "tr.installedCountLocal": {
+    other: "{count} model terpasang di layanan terjemahan {url} (lokal).",
+  },
+  "tr.nonCommercial": "Nonkomersial",
+  "tr.regionExcluded": "Lisensi mengecualikan {regions}",
+  "tr.license": "Lisensi {license}",
+  "tr.unlisted": "Tidak ada di daftar kikitori; periksa lisensinya sendiri",
+  "tr.stateUnknown": "Status pemasangan tidak diketahui",
+  "tr.stateInstalled": "Terpasang",
+  "tr.stateMissing": "Belum terpasang",
+
+  "combo.title": "Konfigurasi kustom",
+  "combo.lede":
+    "Perubahan langsung diperiksa terhadap komputer ini; konfigurasi yang bermasalah tidak dapat disimpan. Konfigurasi baru berlaku saat Anda menekan Mulai berikutnya.",
+  "combo.fastModel": "Model pengenalan untuk subtitle langsung",
+  "combo.finalModel": "Model pengenalan untuk terjemahan final",
+  "combo.device": "Perangkat komputasi",
+  "combo.deviceAuto": "Otomatis (gunakan GPU NVIDIA jika tersedia, jika tidak gunakan CPU)",
+  "combo.deviceCpu": "CPU",
+  "combo.deviceCuda": "GPU NVIDIA (CUDA)",
+  "combo.deviceHelp": "Kedua jalur berbagi satu perangkat: begitu GPU gagal saat berjalan, GPU tidak dicoba lagi.",
+  "combo.translationFast": "Model terjemahan untuk subtitle langsung",
+  "combo.translationFinal": "Model terjemahan untuk terjemahan final",
+  "combo.advanced": "Lanjutan",
+  "combo.advancedHelp":
+    "Presisi dan jumlah thread biasanya diserahkan pada konfigurasi yang disarankan. Jika kosong atau Otomatis, mesin menentukannya dari perangkat yang benar-benar digunakan (int8 di CPU, float16 di GPU).",
+  "combo.fastComputeType": "Presisi untuk subtitle langsung",
+  "combo.finalComputeType": "Presisi untuk terjemahan final",
+  "combo.fastThreads": "Thread CPU untuk subtitle langsung",
+  "combo.finalThreads": "Thread CPU untuk terjemahan final",
+  "combo.cudaDirs": "Folder cuBLAS 12 yang dipasang sendiri",
+  "combo.cudaDirsPlaceholder":
+    "Satu jalur lengkap per baris, misalnya C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin",
+  "combo.cudaDirsHelp":
+    "Hanya diperlukan jika Anda memasang CUDA Toolkit sendiri. Komponen akselerasi GPU yang diunduh di atas digunakan otomatis dan tidak perlu dicantumkan.",
+  "combo.save": "Simpan konfigurasi",
+  "combo.reset": "Kembalikan ke pengaturan saat ini",
+  "combo.notInList": "{value} (tidak ada di daftar)",
+  "combo.notDownloaded": "{id} (belum diunduh)",
+  "combo.saved": "Konfigurasi disimpan.",
+  "combo.savedNextStart": "Disimpan; berlaku saat Anda memulai berikutnya.",
+  "check.fixFirst": "Perbaiki kolom yang ditandai terlebih dahulu.",
+  "check.checking": "Memeriksa konfigurasi ini",
+  "check.okWithWarnings": "Komputer ini dapat memakai konfigurasi ini, tetapi perhatikan:",
+  "check.ok": "Komputer ini dapat memakai konfigurasi ini.",
+  "check.notOk": "Konfigurasi ini tidak dapat dipakai saat ini:",
+  "check.rejected": "Mesin tidak menerima pengaturan ini: {message}",
+  "check.unavailable":
+    "Konfigurasi tidak dapat diperiksa saat ini ({reason}). Anda tetap dapat menyimpan; mesin memeriksa format pengaturan saat menyimpan.",
+  "check.engineNotReady": "Mesin belum siap",
+  "form.fixFields": "Perbaiki kolom yang ditandai.",
+  "form.engineRejected": "Mesin menolak nilai ini: {message}",
+
+  // ------------------------------------------------------------ settings page
+  "settings.title": "Pengaturan",
+  "settings.path": "Berkas pengaturan: {path}",
+  "settings.uiLocaleLegend": "Bahasa antarmuka",
+  "settings.uiLocaleLabel": "Bahasa antarmuka",
+  "settings.uiLocaleSystem": "Ikuti sistem",
+  "settings.uiLocaleHelp":
+    "Langsung berlaku untuk jendela utama dan jendela subtitle. “Ikuti sistem” memakai bahasa sistem operasi Anda, atau bahasa Inggris jika bahasa tersebut tidak tersedia.",
+  "settings.translationLegend": "Layanan terjemahan",
+  "settings.translationLede":
+    "API apa pun yang kompatibel dengan OpenAI dapat digunakan. URL bawaan Ollama lokal adalah http://localhost:11434/v1.",
+  "settings.baseUrl": "URL layanan",
+  "settings.apiKeyEnv": "Variabel lingkungan untuk kunci API",
+  "settings.apiKeyEnvHelp":
+    "Masukkan nama variabelnya saja. Atur kuncinya sebagai variabel lingkungan sistem; kikitori tidak pernah menyimpan kunci. Ollama lokal tidak memerlukan kunci.",
+  "settings.translationModelsHelp":
+    "Model terjemahan dipilih di konfigurasi kustom pada halaman Model, tempat lisensi dan beban pada komputer ini juga diperiksa.",
+  "settings.regionLegend": "Wilayah lisensi model terjemahan",
+  "settings.regionLede":
+    "Beberapa model terjemahan (misalnya Tencent HY-MT) tidak dilisensikan untuk Uni Eropa, Inggris, atau Korea Selatan. kikitori tidak dapat mengetahui lokasi Anda, jadi model tersebut tidak disarankan secara bawaan.",
+  "settings.regionConsent":
+    "Saya menyatakan bahwa saya tidak menggunakan kikitori di Uni Eropa, Inggris, atau Korea Selatan, dan saya menyetujui ketentuan lisensi model terjemahan tersebut.",
+  "settings.regionHelp":
+    "Jika dicentang, konfigurasi yang disarankan juga mempertimbangkan model dengan batasan wilayah. Jika tidak dicentang, Anda tetap dapat memilihnya di konfigurasi kustom, disertai peringatan.",
+  "settings.languageLegend": "Bahasa",
+  "settings.languageLede":
+    "Pilih bahasa yang Anda dengarkan dan bahasa subtitle; model yang disarankan untuk keduanya tercantum di bawah. Tidak ada yang diunduh sekarang: model yang kurang diunduh saat Anda pertama kali menekan Mulai.",
+  "settings.languageModeMedia": "Ini adalah bahasa untuk terjemahan video.",
+  "settings.languageModeInterpret": "Ini adalah bahasa untuk penerjemahan lisan langsung.",
+  "settings.source": "Bahasa yang didengar",
+  "settings.sourceHelp":
+    "Bahasa yang diucapkan dalam video. Dengan “Deteksi otomatis”, bahasa setiap kalimat dikenali terlebih dahulu, dan kalimat yang sangat pendek mungkin salah dikenali.",
+  "settings.own": "Bahasa saya",
+  "settings.ownHelp": "Bahasa yang Anda ucapkan; ucapan lawan bicara diterjemahkan ke bahasa ini.",
+  "settings.languageFilter": "Ketik untuk memfilter",
+  "settings.languageFilterLabel": "Filter {field}",
+  "settings.applyRecommended": "Sekaligus beralih ke model yang disarankan",
+  "settings.applyRecommendedHelp":
+    "Mengubah model pengenalan, perangkat, dan model terjemahan; jika tidak dicentang, hanya bahasa yang berubah.",
+  "settings.saveLanguages": "Simpan bahasa",
+  "settings.languagesSaved": "Bahasa disimpan.",
+  "settings.languagesSavedWithModels": "Bahasa disimpan, dan model yang disarankan kini digunakan.",
+  "settings.languagesSavedNoPreview": "Bahasa disimpan; kombinasi yang disarankan belum siap, jadi model tidak berubah.",
+  "settings.languagesSavedNextStart": "Disimpan; berlaku saat Anda memulai berikutnya.",
+  "settings.languagesUnavailable": "Bahasa dapat dipilih setelah mesin siap.",
+  "language.auto": "Deteksi otomatis",
+  "preview.title": "Kombinasi yang disarankan",
+  "preview.checking": "Menentukan kombinasi yang disarankan untuk bahasa ini",
+  "preview.unavailable": "Kombinasi yang disarankan belum tersedia saat ini: {reason}",
+  "preview.translation": "Model terjemahan",
+  "preview.installed": "Terpasang",
+  "preview.downloadOnFirstUse": "Diunduh saat pertama kali digunakan, sekitar {size}",
+  "preview.downloadUnknownSize": "Diunduh saat pertama kali digunakan (ukuran tidak diketahui)",
+  "preview.installedUnknown": "Tidak dapat dipastikan apakah sudah terpasang (server terjemahan tidak merespons)",
+  "preview.notNeeded": "Tidak perlu terjemahan",
+  "preview.translationOff": "“Tampilkan terjemahan” nonaktif, jadi model terjemahan tidak diperlukan",
+  "preview.unsupported": "Tidak ada model terjemahan yang mendukung kombinasi bahasa ini",
+  "preview.remote":
+    "Server terjemahan tidak berada di komputer ini; pilih modelnya di konfigurasi kustom pada halaman Model",
+  "preview.allInstalled": "Semua model yang diperlukan sudah terpasang.",
+  "preview.total": "Saat pertama kali dimulai, sekitar {size} akan diunduh.",
+  "preview.totalUnknown":
+    "Saat pertama kali dimulai, model akan diunduh, sebagian dengan ukuran yang tidak diketahui (yang diketahui sekitar {size}).",
+  "settings.target": "Bahasa subtitle",
+  "settings.targetHelp":
+    "Bahasa subtitle. Jika sama dengan bahasa lisan yang didengar, tidak ada yang diterjemahkan; bahasa Tionghoa hanya dikonversi antaraksara.",
+  "settings.partner": "Bahasa lawan bicara",
+  "settings.partnerHelp":
+    "Ucapan Anda diterjemahkan ke bahasa ini, dan ucapan lawan bicara ke bahasa Anda. Keduanya harus dapat dibedakan, jadi tidak boleh sama (Tionghoa Tradisional dan Sederhana dihitung sama).",
+  "settings.styleLegend": "Subtitle",
+  "settings.showTranslation": "Tampilkan terjemahan",
+  "settings.showTranslationHelp":
+    "Jika nonaktif, hanya teks asli yang ditampilkan, dengan ukuran dan warna subtitle utama: mesin tidak menerjemahkan apa pun, tidak memerlukan server terjemahan, dan membiarkan GPU bebas. Mengubahnya saat berjalan langsung berlaku; baris yang sudah tampil tidak diterjemahkan kemudian.",
+  "settings.previewOriginal": "次の駅で降りましょう。",
+  "settings.previewTranslation": "Ayo turun di stasiun berikutnya.",
+  "settings.fontSize": "Ukuran huruf terjemahan",
+  "settings.opacity": "Opasitas latar belakang",
+  "settings.position": "Posisi subtitle",
+  "settings.positionBottom": "Bagian bawah jendela",
+  "settings.positionTop": "Bagian atas jendela",
+  "settings.lines": "Kalimat yang ditampilkan sekaligus",
+  "settings.linesOption": { other: "{count} kalimat" },
+  "settings.save": "Simpan pengaturan",
+  "settings.saved": "Pengaturan disimpan.",
+  "settings.savedRegion":
+    "Pengaturan disimpan. Konfigurasi yang disarankan akan dihitung ulang untuk wilayah lisensi yang baru (lihat halaman Model).",
+
+  // ------------------------------------------------------------ validation
+  "validation.urlScheme": "URL harus diawali http:// atau https://.",
+  "validation.urlEmpty": "Masukkan URL layanan terjemahan.",
+  "validation.urlInvalid": "URL ini tidak valid.",
+  "validation.envPattern": "Hanya boleh berisi huruf A–Z, angka, dan garis bawah, serta tidak boleh diawali angka.",
+  "validation.envTooLong": "Nama terlalu panjang (maksimal {max} karakter).",
+  "validation.partner":
+    "Bahasa lawan bicara harus berbeda dari bahasa Anda (Tionghoa Tradisional dan Sederhana dihitung sebagai bahasa yang sama).",
+  "validation.language": "Pilih bahasa dari daftar.",
+  "validation.fontSize": "Ukuran huruf harus antara {min} dan {max}.",
+  "validation.opacity": "Opasitas latar belakang harus antara 0% dan 100%.",
+  "validation.position": "Pilih atas atau bawah.",
+  "validation.lines": "Jumlah kalimat harus antara {min} dan {max}.",
+  "validation.asrModel": "Pilih model pengenalan ucapan.",
+  "validation.device": "Pilih perangkat komputasi.",
+  "validation.translationEmpty": "Masukkan nama model terjemahan.",
+  "validation.translationTooLong": "Nama model maksimal {max} karakter.",
+  "validation.computeType": "Pilih presisi.",
+  "validation.threads": "Jumlah thread harus antara {min} dan {max}; kosongkan untuk otomatis.",
+  "validation.cudaDirsTooMany": "Maksimal {max} folder.",
+  "validation.cudaDirNotAbsolute": "“{path}” bukan jalur lengkap (misalnya C:\\CUDA\\bin).",
+
+  // ------------------------------------------------------------ about
+  "about.title": "Tentang",
+  "about.engine": "Mesin {version}, versi protokol {protocol}.",
+  "about.engineFake": "Mesin {version}, versi protokol {protocol}; saat ini memakai mesin tiruan (mode pengembangan).",
+  "about.engineOffline": "Mesin belum terhubung.",
+  "about.license": "kikitori dirilis di bawah lisensi {license}.",
+  "about.notice":
+    "Komponen pihak ketiga dalam program ini, seperti Intel® OpenMP, disediakan berdasarkan ketentuan lisensinya masing-masing; rekayasa balik (reverse engineering) terhadap komponen tersebut tidak diizinkan.",
+  "about.thirdPartyHead": "Teks lengkap lisensi komponen pihak ketiga:",
+  "about.thirdPartyApp": "Aplikasi itu sendiri (crate Tauri/Rust, paket frontend, dan LICENSE kikitori): ",
+  "about.thirdPartyEngine": "Mesin ucapan (paket Python): ",
+  "about.thirdPartyDev":
+    "Build pengembangan tidak menyertakan folder lisensi. Pada build rilis, teks lisensi ada di folder licenses (aplikasi) dan kikitori-engine/THIRD_PARTY_LICENSES (mesin ucapan) di direktori instalasi.",
+  "about.openAppLicenses": "Buka folder lisensi pihak ketiga aplikasi",
+  "about.openEngineLicenses": "Buka folder lisensi pihak ketiga mesin",
+  "about.checkUpdate": "Periksa pembaruan",
+
+  // ------------------------------------------------------------ updates
+  "update.available": "kikitori {version} tersedia untuk diunduh dan dipasang.",
+  "update.install": "Unduh dan pasang",
+  "update.downloading": "Mengunduh pembaruan.",
+  "update.progress": "Mengunduh pembaruan: {percent}%",
+  "update.installed": "kikitori {version} sudah terpasang dan berlaku setelah dimulai ulang.",
+  "update.restartNow": "Mulai ulang sekarang",
+  "update.checking": "Memeriksa",
+  "update.found": "Versi baru {version} tersedia.",
+  "update.latest": "Anda sudah memakai versi terbaru.",
+  "update.checkFailed": "Gagal memeriksa pembaruan: {reason}",
+  "update.failed": "Pembaruan gagal: {reason}",
+  "update.relaunchFailed": "Gagal memulai ulang otomatis; tutup dan buka kembali kikitori secara manual. ({reason})",
+
+  // ------------------------------------------------------------ overlay
+  "overlay.title": "Subtitle kikitori",
+  "overlay.drag": "Seret untuk memindahkan",
+  "overlay.hide": "Sembunyikan",
+  "overlay.hint":
+    "Subtitle muncul di sini. Seret jendela untuk memindahkannya; seret sudut kanan bawah untuk mengubah ukurannya.",
+};

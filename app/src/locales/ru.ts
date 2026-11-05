@@ -1,0 +1,706 @@
+/**
+ * Russian UI dictionary.
+ *
+ * Role: the ru interface strings. Typed as `Messages`, so it must have exactly
+ * the base (zh-TW) keys; plural messages need every category that
+ * `Intl.PluralRules("ru")` selects (one/few/many/other). Counts outside plural
+ * messages are written as "label: {n}" so no noun has to agree with a number.
+ */
+
+import type { Messages } from "./types";
+
+export const ru: Messages = {
+  // ------------------------------------------------------------ common
+  "common.unknown": "Неизвестно",
+  "common.unknownReason": "неизвестная причина",
+  "common.unknownCause": "причина неизвестна",
+  "common.auto": "Авто",
+  "common.loading": "Загрузка",
+  "common.saving": "Сохранение",
+  "common.redownload": "Скачать заново",
+  "common.recommendedFor": "Рекомендуется: {roles}",
+  "common.parenthetical": "{text} ({note})",
+  "common.withReason": "{context}: {reason}",
+  "common.listSeparator": ", ",
+  "common.clauseSeparator": ", ",
+  "common.strongSeparator": "; ",
+  "common.altSeparator": " / ",
+  "common.sentenceEnd": ".",
+  "common.approxGb": "около {gb} GB",
+
+  // ------------------------------------------------------------ rail
+  "rail.mode": "Режим",
+  "rail.device": "Источник звука",
+  "mode.media.name": "Перевод видео",
+  "mode.media.note": "{source} → {target}",
+  "mode.media.noteAuto": "Любой распознанный язык → {target}",
+  "mode.media.noteOriginal": "{source} (только оригинал)",
+  "mode.interpret.noteOriginal": "{own} ⇄ {partner} (только оригинал)",
+  "mode.interpret.name": "Синхронный перевод",
+  "mode.interpret.note": "{own} ⇄ {partner}",
+  "device.hint.media": "Перевод видео захватывает звук, который воспроизводит компьютер.",
+  "device.hint.interpret": "Синхронный перевод использует микрофон.",
+  "device.hint.missing": "Выбранное ранее устройство недоступно; будет использовано системное по умолчанию.",
+  "device.defaultNamed": "По умолчанию: {name}",
+  "device.systemDefault": "Системное по умолчанию",
+  "start.start": "Запустить",
+  "start.stop": "Остановить",
+  "nav.label": "Страницы",
+  "nav.transcript": "Расшифровка",
+  "nav.models": "Модели",
+  "nav.settings": "Настройки",
+  "engine.restart": "Перезапустить движок",
+  "engine.failedNotice": "Не удалось запустить движок: {reason}",
+  "engine.log": "Сообщение движка: {message}",
+  // ------------------------------------------------------------ engine message codes (hardware.md; params localized in lib/messages.ts)
+  "engine.asr_gpu":
+    "{gpu_name} ({vram_mb} MiB VRAM): {fast_model} для мгновенных субтитров, {final_model} для итоговых субтитров ({compute_type})",
+  "engine.asr_gpu_int8_saves_vram":
+    "int8_float16 вдвое сокращает объём VRAM для распознавания речи, оставляя больше для модели перевода",
+  "engine.asr_final_no_speech_unreliable":
+    "{final_model} не отличает речь от тишины (no_speech); поэтому не-речь отсеивают no_speech модели {fast_model} и детектор голоса",
+  "engine.asr_large_v3_remote_translation":
+    "Перевод выполняется не на этом компьютере, поэтому итоговые субтитры используют {final_model} (сопоставимое качество, надёжный no_speech, около 0,33 с на предложение)",
+  "engine.asr_apple_silicon":
+    "Apple Silicon: в macOS распознавание речи выполняется на CPU; {fast_model} для мгновенных субтитров, {final_model} для итоговых субтитров",
+  "engine.asr_apple_silicon_untested":
+    "Задержка на Apple Silicon ещё не измерялась; используются те же модели, что и для CPU с 16 GB ОЗУ и более",
+  "engine.asr_cpu":
+    "Распознавание речи выполняется на CPU (16 GB ОЗУ и более): {fast_model} для мгновенных субтитров, {final_model} для итоговых субтитров",
+  "engine.asr_cpu_large_models_slow":
+    "Моделям medium и крупнее на CPU нужно от 3,6 с на предложение — слишком медленно для мгновенных субтитров",
+  "engine.asr_cpu_low":
+    "Лёгкие модели снижают задержку и расход памяти: {fast_model} для мгновенных субтитров, {final_model} для итоговых субтитров",
+  "engine.cpu_low_ram": "Объём ОЗУ ({ram_gb} GB) меньше 16 GB",
+  "engine.cpu_few_cores": "Физических ядер CPU: {physical_cores} (не более {max_cores})",
+  "engine.cpu_info_incomplete": "Сведения об оборудовании неполные",
+  "engine.multiple_gpus": "Найдено GPU NVIDIA: {gpu_count}; используется {gpu_name} с наибольшим объёмом VRAM",
+  "engine.cuda_platform_unsupported":
+    "У CTranslate2 нет сборки с CUDA для этой платформы (только Windows и Linux x86-64); распознавание речи выполняется на CPU",
+  "engine.cuda_driver_too_old":
+    "Драйвер NVIDIA {driver_version} устарел (для CUDA 12 нужна версия {min_driver} или новее); распознавание речи выполняется на CPU, пока драйвер не обновлён",
+  "engine.cuda_compute_capability_unknown":
+    "Не удалось определить compute capability GPU (возможно, драйвер устарел); распознавание речи выполняется на CPU",
+  "engine.cuda_compute_capability_unsupported":
+    "{gpu_name} (compute capability {compute_capability}) не поддерживает ускорение float16/int8 в CTranslate2; распознавание речи выполняется на CPU",
+  "engine.gpu_runtime_missing":
+    "cuBLAS не установлен: для ускорения на GPU нужно скачать компонент ускорения на GPU (около 570 MB); до тех пор распознавание речи выполняется на CPU",
+  "engine.asr_vram_insufficient":
+    "Недостаточно VRAM для моделей распознавания речи (нужно около {need_mb} MiB); распознавание речи выполняется на CPU",
+  "engine.memory_unknown": "Не удалось определить объём памяти; используются самые лёгкие модели распознавания речи",
+  "engine.asr_low_quality_model": "{model} заметно чаще ошибается при распознавании",
+  "engine.asr_language_quality_low":
+    "{model} плохо распознаёт язык «{language}» (доля ошибок выше 20% в открытых тестах)",
+  "engine.translation_remote":
+    "Сервер перевода находится не на этом компьютере ({base_url}); выберите одну из его моделей в ручной настройке на странице «Модели»",
+  "engine.translation_cpu":
+    "Нет подходящего GPU: модель перевода работает на CPU, поэтому выбрана самая маленькая модель (скорость на CPU не измерялась)",
+  "engine.translation_budget_vram":
+    "Для модели перевода остаётся около {budget_gb} GB VRAM после распознавания речи и резерва в 1 GB",
+  "engine.translation_budget_unified":
+    "Для модели перевода остаётся около {budget_gb} GB общей памяти после распознавания речи и системного резерва",
+  "engine.translation_same_model":
+    "Мгновенный и итоговый перевод используют одну модель: на GPU каждое предложение занимает меньше 0,3 с, а смена модели в Ollama — 1,5–18 с",
+  "engine.translation_different_models": "Мгновенный и итоговый перевод используют разные модели",
+  "engine.translation_better_model_available":
+    "Из установленных моделей выбрана {model}; установка {better_model} даст лучшее качество",
+  "engine.translation_not_needed":
+    "{source_language} и {target_language} — один и тот же устный язык: модель перевода не нужна, только преобразование письменности",
+  "engine.source_language_auto":
+    "Язык речи определяется автоматически: модель перевода подбирается для перевода с любого языка (язык перевода: {target_language})",
+  "engine.translation_server_unreachable":
+    "Не удалось подключиться к серверу перевода {base_url} (Ollama запущена?); проверить установленные модели невозможно",
+  "engine.translation_model_list_unavailable": "Не удалось получить список моделей сервера перевода: {error}",
+  "engine.low_ram_for_translation":
+    "Меньше 8 GB ОЗУ: памяти может не хватить для одновременной работы модели перевода и распознавания речи",
+  "engine.translation_model_not_installed": "Рекомендуемая модель перевода {model} ещё не установлена",
+  "engine.translation_model_exceeds_budget":
+    "{model} требует около {model_gb} GB — больше доступных {budget_gb} GB; Ollama выполнит часть модели на CPU, что медленнее",
+  "engine.translation_unsupported":
+    "Ни одна рекомендуемая модель перевода не поддерживает направление {source_language} → {target_language}",
+  "engine.combination_not_object": "Набор моделей должен быть объектом",
+  "engine.asr_path_not_object": "{path}: значение должно быть объектом",
+  "engine.asr_model_unknown": "{path}: неизвестная модель распознавания речи {model} (доступны: {available})",
+  "engine.asr_device_invalid": "{path}: устройство должно быть «авто», CPU или CUDA",
+  "engine.asr_compute_type_not_string": "{path}: точность должна быть текстом или пустой",
+  "engine.asr_cpu_threads_invalid": "{path}: число потоков CPU должно быть целым числом от 0 до 256",
+  "engine.asr_cuda_no_gpu": "{path}: выбран CUDA, но GPU NVIDIA не найден",
+  "engine.asr_cuda_platform_unsupported":
+    "{path}: выбран CUDA, но у CTranslate2 нет сборки с CUDA для этой платформы (только Windows и Linux x86-64)",
+  "engine.asr_cuda_driver_too_old":
+    "{path}: выбран CUDA, но драйвер NVIDIA {driver_version} устарел (для CUDA 12 нужна версия {min_driver} или новее)",
+  "engine.asr_cuda_compute_capability_unknown":
+    "{path}: выбран CUDA, но compute capability GPU неизвестна (возможно, драйвер устарел)",
+  "engine.asr_cuda_compute_capability_unsupported":
+    "{path}: выбран CUDA, но {gpu_name} (compute capability {compute_capability}) не поддерживает ускорение float16/int8 в CTranslate2",
+  "engine.asr_cuda_cublas_missing":
+    "{path}: выбран CUDA, но cuBLAS не установлен; сначала скачайте компонент ускорения на GPU",
+  "engine.asr_compute_type_unknown": "{path}: неизвестная точность {compute_type} (доступны: {available})",
+  "engine.translation_model_name_invalid":
+    "{field}: название модели должно содержать от 1 до {max_chars} символов или быть пустым",
+  "engine.asr_auto_uses_cpu":
+    "{path}: в режиме «авто» будет использован CPU (сейчас GPU не может выполнять распознавание речи)",
+  "engine.asr_compute_type_cpu_fallback":
+    "{path}: CPU не поддерживает {compute_type}; CTranslate2 использует другую точность (обычно float32, медленнее)",
+  "engine.asr_compute_type_gpu_fallback":
+    "{path}: compute capability {compute_capability} не поддерживает {compute_type}; CTranslate2 использует float32 или int8_float32 (медленнее, больше VRAM)",
+  "engine.asr_model_slow_on_cpu":
+    "{path}: модели {model} на CPU нужно от 3,6 с на предложение; субтитры будут заметно отставать",
+  "engine.asr_model_not_downloaded":
+    "{path}: модель распознавания речи {model} ещё не скачана; она будет скачана перед запуском",
+  "engine.asr_model_language_unsupported": "{path}: {model} не распознаёт язык «{language}»",
+  "engine.asr_fast_larger_than_final":
+    "Мгновенная модель {fast_model} крупнее итоговой {final_model}: мгновенные субтитры могут появляться медленнее итоговых",
+  "engine.asr_no_speech_unavailable":
+    "Ни {fast_model}, ни {final_model} не умеют отсеивать не-речь через no_speech; пение и шум чаще попадут в расшифровку",
+  "engine.translation_model_not_on_server": "На сервере перевода нет модели {model}",
+  "engine.translation_model_language_unsupported":
+    "{model} не поддерживает направление {source_language} → {target_language}",
+  "engine.translation_license_non_commercial": "Лицензия {model} ({license}) запрещает коммерческое использование",
+  "engine.translation_license_region_restricted":
+    "Лицензия {model} ({license}) не действует в следующих регионах: {regions}",
+  "engine.translation_models_differ":
+    "Мгновенный и итоговый перевод используют разные модели: локальной Ollama на каждую смену модели нужно 1,5–18 с",
+  "engine.vram_overflow":
+    "Распознаванию речи и переводу нужно около {need_mb} MiB VRAM — больше, чем доступно на {gpu_name} ({available_mb} MiB); возможны замедление или сбой загрузки",
+  "engine.asr_ram_over_half": "Модели распознавания речи на CPU занимают больше половины ОЗУ",
+  "engine.translation_disabled":
+    "Перевод выключен: показывается только оригинал, модель перевода не нужна",
+  "engineParam.fast_asr": "Распознавание для мгновенных субтитров",
+  "engineParam.final_asr": "Распознавание для итоговых субтитров",
+  "engineParam.translation_fast": "Модель мгновенного перевода",
+  "engineParam.translation_final": "Модель итогового перевода",
+
+  // ------------------------------------------------------------ status
+  "status.starting": "Запуск движка",
+  "status.restarting": "Движок неожиданно остановился; перезапуск",
+  "status.failed": "Не удалось запустить движок",
+  "status.stopped": "Движок остановлен",
+  "status.loading": "Загрузка моделей",
+  "status.running": "Слушаю",
+  "status.error": "Остановлено из-за ошибки",
+  "status.idle": "Готово",
+  "status.code.model_not_downloaded":
+    "Модель ещё не скачана. Скачайте её на странице «Модели» и запустите снова.",
+  "status.code.unknown_model": "Модели из ваших настроек не существует. Выберите другую на странице «Модели».",
+  "status.code.device_not_found": "Выбранное аудиоустройство не найдено. Выберите устройство заново.",
+  "status.code.permission_denied":
+    "У kikitori нет разрешения на использование микрофона или запись звука. Разрешите это в настройках системы.",
+  "status.code.device_lost": "Аудиоустройство отключено. Проверьте подключение и запустите снова.",
+  "status.code.capture_unavailable": "Этот компьютер не может захватывать звук из такого источника.",
+  "status.code.capture_error": "При захвате звука произошла ошибка.",
+  "status.code.pipeline_error": "При обработке речи произошла ошибка.",
+  "status.code.load_error": "Не удалось загрузить модель.",
+  "status.code.translation_model_missing": "На сервере перевода ещё нет модели перевода.",
+  "status.code.translation_server_auth_failed": "Сервер перевода отклонил запрос — проверьте API key.",
+  "status.errorDetail": "Произошла ошибка: {detail}",
+  "status.errorUnknown": "Произошла неизвестная ошибка.",
+
+  // ------------------------------------------------------------ notices
+  "notice.close": "Закрыть",
+  "notice.closeLabel": "Закрыть это сообщение",
+  "notice.settingsFieldsUnreadable": {
+    one: "Не удалось прочитать {count} поле в файле настроек; пока используется значение по умолчанию: {fields}",
+    few: "Не удалось прочитать {count} поля в файле настроек; пока используются значения по умолчанию: {fields}",
+    many: "Не удалось прочитать {count} полей в файле настроек; пока используются значения по умолчанию: {fields}",
+    other: "Не удалось прочитать {count} поля в файле настроек; пока используются значения по умолчанию: {fields}",
+  },
+  "notice.initFailed": "Не удалось инициализировать окно: {reason}",
+
+  // ------------------------------------------------------------ failure contexts
+  "error.saveMode": "Не удалось запомнить режим",
+  "error.saveDevice": "Не удалось запомнить источник звука",
+  "error.start": "Не удалось запустить",
+  "error.stop": "Не удалось остановить",
+  "error.showOverlay": "Не удалось показать окно субтитров",
+  "error.hideOverlay": "Не удалось скрыть окно субтитров",
+  "error.toggleClickThrough": "Не удалось переключить сквозные клики",
+  "error.applyRecommendation": "Не удалось применить рекомендуемую настройку",
+  "error.readSettings": "Не удалось прочитать настройки",
+  "error.saveDismissal": "Не удалось запомнить «Больше не напоминать»",
+  "error.saveUiLocale": "Не удалось запомнить язык интерфейса",
+  "error.setOverlayLocale": "Не удалось сменить язык окна субтитров",
+  "error.readModels": "Не удалось прочитать список моделей",
+  "error.detectHardware": "Не удалось определить оборудование",
+  "error.downloadModel": "Не удалось скачать {model}",
+  "error.downloadGpuRuntime": "Не удалось скачать компонент ускорения на GPU",
+  "error.openEula": "Не удалось открыть условия лицензии; скопируйте URL в браузер",
+  "error.applyStyle": "Не удалось применить оформление субтитров",
+  "error.openLicenses": "Не удалось открыть папку с лицензиями; откройте её по пути выше",
+  "error.listDevices": "Не удалось получить список аудиоустройств",
+  "error.restartEngine": "Не удалось перезапустить движок",
+  "error.readOverlayState": "Не удалось прочитать состояние окна субтитров",
+  "error.readBridge": "Не удалось прочитать состояние движка",
+  "error.readLanguages": "Не удалось прочитать список языков",
+  "error.setTranslation": "Не удалось переключить «Показывать перевод»",
+  "error.previewLanguages": "Не удалось получить рекомендуемый набор моделей",
+
+  // ------------------------------------------------------------ engine error codes
+  "error.code.invalid_settings": "Недопустимая настройка",
+  "error.code.settings_io_error": "Не удалось сохранить файл настроек; проверьте свободное место на диске и права доступа",
+  "error.code.session_active": "Уже запущено; сначала остановите",
+  "error.code.device_not_found": "Выбранное аудиоустройство не найдено; выберите его заново",
+  "error.code.capture_unavailable": "Этот компьютер не может захватывать звук из такого источника",
+  "error.code.capture_error": "При захвате звука произошла ошибка",
+  "error.code.unknown_model": "Движку неизвестна эта модель",
+  "error.code.download_in_progress": "Этот элемент уже скачивается; дождитесь завершения",
+  "error.code.license_not_accepted":
+    "Перед скачиванием компонента ускорения на GPU примите условия NVIDIA CUDA EULA",
+  "error.code.gpu_runtime_unsupported":
+    "Эта платформа не поддерживает компонент ускорения на GPU (только Windows и Linux на x86-64)",
+  "error.code.pull_unsupported":
+    "Сервер перевода — не Ollama, поэтому kikitori не может скачать модели перевода за вас",
+  "error.code.translation_server_unreachable": "Не удалось подключиться к серверу перевода",
+  "error.code.translation_server_auth_failed": "Сервер перевода отклонил запрос — проверьте API key",
+  "error.code.unknown_method": "Версия движка не соответствует приложению; эта операция не поддерживается",
+  "error.code.invalid_params": "Движку переданы недопустимые параметры",
+  "error.code.invalid_request": "Движку отправлен некорректный запрос",
+  "error.code.internal_error": "Внутренняя ошибка движка",
+  "error.code.other": "Движок сообщил об ошибке ({code})",
+  "error.engineSentence": "{head}.",
+  "error.engineDetail": "{head}: {message}",
+  "error.timeout": {
+    one: "Движок не ответил за {count} секунду. Повторите попытку позже или перезапустите движок.",
+    few: "Движок не ответил за {count} секунды. Повторите попытку позже или перезапустите движок.",
+    many: "Движок не ответил за {count} секунд. Повторите попытку позже или перезапустите движок.",
+    other: "Движок не ответил за {count} секунды. Повторите попытку позже или перезапустите движок.",
+  },
+  "error.disconnected":
+    "Движок не запущен. Дождитесь его перезапуска или нажмите «Перезапустить движок» в области состояния.",
+  "error.invalidInput": "Недопустимое значение: {message}",
+  "error.generic": "Произошла ошибка: {message}",
+
+  // ------------------------------------------------------------ transcript
+  "transcript.title": "Расшифровка",
+  "transcript.lede":
+    "Мгновенные субтитры сначала показываются бледными, а когда предложение закончено, сменяются итоговым переводом.",
+  "transcript.overlayVisible": "Показывать окно субтитров",
+  "transcript.clickThrough": "Сквозные клики",
+  "transcript.clear": "Очистить",
+  "transcript.showTranslation": "Показывать перевод",
+  "transcript.noTranslation": "(без перевода)",
+  "transcript.translating": "Перевод",
+  "transcript.emptyTitle": "Субтитров пока нет",
+  "transcript.emptyBody":
+    "Выберите режим и источник звука, затем нажмите «Запустить». Здесь появится каждое услышанное предложение: оригинал сверху, перевод снизу.",
+  "transcript.langTitle": "{source} → {target}",
+  "transcript.shortcutCtrl": "Ctrl (⌘ в macOS)",
+  "transcript.shortcutOn":
+    "Когда сквозные клики включены, щелчки проходят сквозь окно субтитров. Нажмите {keys}, чтобы переключить их в любой момент.",
+  "transcript.shortcutTaken":
+    "Сочетание клавиш {keys} занято другим приложением; переключайте сквозные клики этим переключателем.",
+
+  // ------------------------------------------------------------ models page
+  "models.title": "Модели",
+  "models.lede":
+    "Распознавание речи выполняется на этом компьютере; перевод — в сервисе, указанном на странице «Настройки».",
+  "models.refresh": "Определить заново",
+
+  "hw.title": "Этот компьютер",
+  "hw.status": "Состояние",
+  "hw.detecting": "Определение",
+  "hw.os": "Операционная система",
+  "hw.cpu": "Процессор",
+  "hw.memory": "Память",
+  "hw.gpu": "Видеокарта",
+  "hw.cublas": "cuBLAS (распознавание на GPU)",
+  "hw.server": "Сервис перевода",
+  "hw.cpuValue": "{model}, {cores}",
+  "hw.cores": "ядер: {physical}, потоков: {logical}",
+  "hw.threads": {
+    one: "{count} поток",
+    few: "{count} потока",
+    many: "{count} потоков",
+    other: "{count} потока",
+  },
+  "hw.coresUnknown": "число ядер неизвестно",
+  "hw.appleSilicon": "Apple Silicon (память общая с процессором)",
+  "hw.gpuVram": "видеопамять {size}",
+  "hw.gpuDriver": "драйвер {version}",
+  "hw.gpuCompute": "compute capability {capability}",
+  "hw.noNvidia": "Видеокарта NVIDIA не обнаружена",
+  "hw.cublasNotUsed": "Не используется на этой платформе",
+  "hw.cublasAvailable": "Доступен ({source})",
+  "hw.cublasSourceUnknown": "источник неизвестен",
+  "hw.cublasMissing": "Не установлен",
+  "hw.cublasSource.runtime": "компонент ускорения на GPU, скачанный kikitori",
+  "hw.cublasSource.configured": "папка, указанная в ручной настройке",
+  "hw.cublasSource.system": "системная установка CUDA",
+  "hw.serverNotDetected": "Не обнаружен",
+  "hw.serverLocal": "локальный",
+  "hw.serverRemote": "удалённый",
+  "hw.serverModelsUnknown": "список моделей неизвестен",
+  "hw.serverModelCount": {
+    one: "{count} модель",
+    few: "{count} модели",
+    many: "{count} моделей",
+    other: "{count} модели",
+  },
+  "hw.serverReachable": "{url} ({where}, {models})",
+  "hw.serverUnreachable": "{url} (недоступен)",
+  "hw.serverUnreachableError": "{url} (недоступен: {error})",
+  "hw.memoryAvailable": "{total} (доступно {available})",
+  "hw.incomplete": "Определение не завершено: {error}",
+
+  "rec.title": "Рекомендуемая настройка",
+  "rec.pending": "Рекомендации появятся здесь после завершения определения оборудования.",
+  "rec.tier": "Класс оборудования",
+  "rec.fastAsr": "Распознавание для мгновенных субтитров",
+  "rec.finalAsr": "Распознавание для итогового перевода",
+  "rec.fastTranslation": "Перевод мгновенных субтитров",
+  "rec.finalTranslation": "Итоговый перевод",
+  "rec.budget": "Память, доступная для перевода",
+  "rec.notLocal": "Рекомендации нет (сервис перевода не локальный); выберите модель в ручной настройке",
+  "rec.gpuRuntimeMissing":
+    "Когда вы скачаете компонент ускорения на GPU ниже, рекомендация будет использовать видеокарту.",
+  "rec.apply": "Применить рекомендуемую настройку",
+  "rec.applyNote": "Записывает модели распознавания, устройство, точность, число потоков и модели перевода.",
+  "rec.applied":
+    "Рекомендуемая настройка применена: мгновенные субтитры — {fast}, итоговый перевод — {final} ({device}).",
+  "rec.appliedWhileRunning":
+    "Рекомендуемая настройка применена: мгновенные субтитры — {fast}, итоговый перевод — {final} ({device}). Она вступит в силу при следующем запуске.",
+  "tier.nvidia_8gb": "Видеокарта NVIDIA (8 GB и более)",
+  "tier.nvidia_4gb": "Видеокарта NVIDIA (4–8 GB)",
+  "tier.nvidia_lt4gb": "Видеокарта NVIDIA (менее 4 GB)",
+  "tier.cpu": "CPU (16 GB памяти и более)",
+  "tier.cpu_low": "CPU (облегчённая настройка)",
+  "tier.apple_silicon": "Apple Silicon (CPU)",
+  "threads.auto": "потоки: авто",
+  "threads.count": {
+    one: "{count} поток",
+    few: "{count} потока",
+    many: "{count} потоков",
+    other: "{count} потока",
+  },
+  "computeType.auto": "точность: авто",
+
+  "machine.gpu": "{name}, {gb} GB",
+  "machine.ram": "{gb} GB памяти",
+  "machine.named": "{name}, {ram}",
+  "machine.thisCpu": "процессор этого компьютера",
+  "machine.thisCpuRam": "процессор этого компьютера, {ram}",
+  "summary.asrSameDevice": "мгновенные {fast}, итоговые {final} ({device})",
+  "summary.asrSplit": "мгновенные {fast} ({fastDevice}), итоговые {final} ({finalDevice})",
+  "summary.translationKept": "модели перевода не изменены (сервис перевода не локальный)",
+  "summary.translationSame": "перевод {model}",
+  "summary.translationSplit": "мгновенный перевод {fast}, итоговый перевод {final}",
+  "summary.full": "{asr}; {translation}",
+  "firstRun.applied": "Применена рекомендуемая настройка для этого компьютера ({machine}): {summary}.",
+  "firstRun.appliedGpuMissing":
+    "Применена рекомендуемая настройка для этого компьютера ({machine}): {summary}. Для видеокарты не хватает компонента ускорения на GPU, поэтому пока используется CPU; скачайте его на странице «Модели», чтобы задействовать видеокарту.",
+  "firstRun.applyFailed":
+    "Не удалось применить рекомендуемую настройку: {reason} Проверьте текущую настройку на странице «Модели» и при необходимости примените рекомендацию там.",
+  "firstRun.detectFailed":
+    "Не удалось определить оборудование этого компьютера: {reason} Пока используется настройка по умолчанию (мгновенные {fast}, итоговые {final}); вы можете повторить определение на странице «Модели» и применить рекомендацию.",
+  "firstRun.review": "Проверить на странице «Модели»",
+  "offer.text": "Для этого компьютера есть настройка получше: {summary}.",
+  "offer.apply": "Применить",
+  "offer.dismiss": "Больше не напоминать",
+  "missing.itemFailed": "Не удалось скачать {model}: {error}",
+  "missing.downloading": "Идёт скачивание: {models}; запустить можно будет после завершения.",
+  "missing.failed": "{items}. Можно скачать заново.",
+  "missing.offer": "Перед запуском нужно скачать {models} (всего около {size}).",
+  "missing.done": "Модели скачаны. Теперь можно нажать «Запустить».",
+  "missing.download": "Скачать недостающие модели",
+  "startdl.title": "Скачивание моделей перед запуском",
+  "startdl.itemAsr": "Модель распознавания речи {model}",
+  "startdl.itemTranslation": "Модель перевода {model}",
+  "startdl.pending": "Ожидание",
+  "startdl.preparing": "Подготовка к скачиванию",
+  "startdl.progress": "{percent}%, {done} из {total}",
+  "startdl.done": "Готово",
+  "startdl.failed": "Ошибка скачивания: {error}",
+  "startdl.stillMissing": "{model} уже скачана, но движок по-прежнему сообщает, что её нет.",
+  "startdl.downloading": "Субтитры запустятся автоматически после завершения скачивания.",
+  "startdl.starting": "Скачивание завершено; запуск.",
+  "startdl.failedHelp": "Скачивание не удалось. Нажмите «Повторить» или выберите другие модели на странице «Модели».",
+  "startdl.pullUnsupported":
+    "Сервер перевода {url} — не Ollama, поэтому kikitori не может скачать модели перевода за вас. Установите {models} на этот сервер самостоятельно или выберите установленную модель на странице «Модели». Также можно выключить «Показывать перевод», чтобы видеть только оригинал.",
+  "startdl.serverUnreachable":
+    "Не удалось подключиться к серверу перевода {url}. Если вы используете Ollama, сначала запустите её (откройте приложение Ollama или выполните ollama serve в терминале), затем нажмите «Повторить». Также можно выключить «Показывать перевод», чтобы видеть только оригинал.",
+  "startdl.authFailed":
+    "Сервер перевода {url} отклонил запрос — проверьте API key (переменную окружения, указанную в настройках), затем нажмите «Повторить».",
+  "startdl.retry": "Повторить",
+  "startdl.cancel": "Отмена",
+  "startdl.cancelLabel": "Не ждать завершения скачивания и не запускать автоматически",
+
+  "gpu.title": "Компонент ускорения на GPU",
+  "gpu.lede":
+    "Для ускорения распознавания речи на видеокарте NVIDIA нужна библиотека NVIDIA cuBLAS. kikitori не поставляет её в комплекте: она скачивается из PyPI после того, как вы примете её лицензию.",
+  "gpu.name": "Компонент ускорения на GPU",
+  "gpu.unsupported":
+    "Платформа этого компьютера не использует этот компонент: ускорение на GPU доступно только для Windows и Linux на x86-64 с видеокартой NVIDIA. На других платформах речь всегда распознаётся на CPU.",
+  "gpu.progressLabel": "Ход скачивания компонента ускорения на GPU",
+  "gpu.finishing": "Скачано; проверка и распаковка (несколько секунд)",
+  "gpu.progress": "{percent}%, {done} / {total}",
+  "gpu.installed": "Установлено: {what}.",
+  "gpu.installedAt": "Установлено: {what} в {path}.",
+  "gpu.noCublas":
+    "Установлено, но пригодный cuBLAS не обнаружен. Перезапустите движок и нажмите «Определить заново».",
+  "gpu.sizeApprox": "около {size}",
+  "gpu.sizeUnknown": "несколько сотен MB",
+  "gpu.situationMissing":
+    "Видеокарта NVIDIA этого компьютера может ускорить распознавание, но этого компонента нет, поэтому пока используется CPU.",
+  "gpu.situationNoGpu": "Видеокарта NVIDIA не обнаружена; без неё скачивать это не нужно.",
+  "gpu.readLicense": "Прочитать лицензию",
+  "gpu.download": "Скачать компонент ускорения на GPU",
+  "gpu.consentNotice":
+    "Будет скачан NVIDIA cuBLAS ({package}, {size}) из PyPI. Используя его, вы принимаете условия NVIDIA CUDA EULA ({license}).",
+  "gpu.lastFailed": "Последнее скачивание не удалось: {error}",
+  "gpu.agree": "Я принимаю условия NVIDIA CUDA EULA",
+  "gpu.installedRestarting": "Компонент ускорения на GPU установлен. Движок перезапускается, чтобы использовать GPU.",
+  "gpu.installedBusy":
+    "Компонент ускорения на GPU установлен. Идёт работа, поэтому движок не был перезапущен автоматически; перезапустите его после завершения, чтобы использовать GPU.",
+
+  "asr.title": "Модели распознавания речи",
+  "asr.lede":
+    "Мгновенным субтитрам нужна скорость, итоговому переводу — точность; для каждого можно выбрать свою модель.",
+  "asr.colModel": "Модель",
+  "asr.colSize": "Размер",
+  "asr.colSpeed": "Скорость",
+  "asr.colMemory": "Память",
+  "asr.colLicense": "Лицензия",
+  "asr.colStatus": "Состояние",
+  "asr.inUse": "Используется: {roles}",
+  "asr.noSpeech": "Нет проверки на не-речь",
+  "asr.noSpeechHelp":
+    "Эта модель не может надёжно определить отсутствие речи; для итогового перевода шум отсеивается по оценке модели мгновенных субтитров.",
+  "asr.memoryCpu": "CPU {size}",
+  "asr.memoryGpu": "GPU {size}",
+  "asr.progressLabel": "Ход скачивания {model}",
+  "asr.progress": "{percent}%, {done}",
+  "asr.downloaded": "Скачана",
+  "asr.download": "Скачать",
+  "asr.downloadFailed": "Ошибка скачивания: {error}",
+  "role.fast": "мгновенные",
+  "role.final": "итоговые",
+  "speed.fastest": "Самая высокая",
+  "speed.fast": "Высокая",
+  "speed.medium": "Средняя",
+  "speed.slow": "Низкая",
+  "speed.slowest": "Самая низкая",
+  "download.done": "{model}: скачивание завершено.",
+  "download.failed": "Не удалось скачать {what}: {error}",
+
+  "tr.title": "Модели перевода",
+  "tr.unreachable": "Сервис перевода {url} недоступен. Если вы используете локальную Ollama, сначала запустите её.",
+  "tr.unreachableError":
+    "Сервис перевода {url} недоступен ({error}). Если вы используете локальную Ollama, сначала запустите её.",
+  "tr.installedCount": {
+    one: "В сервисе перевода {url} установлена {count} модель.",
+    few: "В сервисе перевода {url} установлены {count} модели.",
+    many: "В сервисе перевода {url} установлено {count} моделей.",
+    other: "В сервисе перевода {url} установлено {count} модели.",
+  },
+  "tr.installedCountLocal": {
+    one: "В локальном сервисе перевода {url} установлена {count} модель.",
+    few: "В локальном сервисе перевода {url} установлены {count} модели.",
+    many: "В локальном сервисе перевода {url} установлено {count} моделей.",
+    other: "В локальном сервисе перевода {url} установлено {count} модели.",
+  },
+  "tr.nonCommercial": "Некоммерческая",
+  "tr.regionExcluded": "Лицензия не действует в регионах: {regions}",
+  "tr.license": "Лицензия {license}",
+  "tr.unlisted": "Нет в списке kikitori; проверьте лицензию самостоятельно",
+  "tr.stateUnknown": "Состояние установки неизвестно",
+  "tr.stateInstalled": "Установлена",
+  "tr.stateMissing": "Не установлена",
+
+  "combo.title": "Ручная настройка",
+  "combo.lede":
+    "Изменения сразу проверяются на совместимость с этим компьютером; настройку с ошибками сохранить нельзя. Новая настройка вступит в силу при следующем нажатии «Запустить».",
+  "combo.fastModel": "Модель распознавания для мгновенных субтитров",
+  "combo.finalModel": "Модель распознавания для итогового перевода",
+  "combo.device": "Вычислительное устройство",
+  "combo.deviceAuto": "Авто (GPU NVIDIA, если есть, иначе CPU)",
+  "combo.deviceCpu": "CPU",
+  "combo.deviceCuda": "GPU NVIDIA (CUDA)",
+  "combo.deviceHelp":
+    "Оба канала используют одно устройство: если GPU дал сбой во время работы, повторно он не используется.",
+  "combo.translationFast": "Модель перевода для мгновенных субтитров",
+  "combo.translationFinal": "Модель перевода для итогового перевода",
+  "combo.advanced": "Дополнительно",
+  "combo.advancedHelp":
+    "Точность и число потоков обычно задаёт рекомендуемая настройка. Если поле пустое или выбрано «Авто», движок решает по фактически используемому устройству (int8 на CPU, float16 на GPU).",
+  "combo.fastComputeType": "Точность для мгновенных субтитров",
+  "combo.finalComputeType": "Точность для итогового перевода",
+  "combo.fastThreads": "Потоки CPU для мгновенных субтитров",
+  "combo.finalThreads": "Потоки CPU для итогового перевода",
+  "combo.cudaDirs": "Папки самостоятельно установленного cuBLAS 12",
+  "combo.cudaDirsPlaceholder":
+    "Один полный путь на строку, например C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin",
+  "combo.cudaDirsHelp":
+    "Нужно, только если вы сами установили CUDA Toolkit. Компонент ускорения на GPU, скачанный выше, используется автоматически, и указывать его не нужно.",
+  "combo.save": "Сохранить настройку",
+  "combo.reset": "Вернуть текущие настройки",
+  "combo.notInList": "{value} (нет в списке)",
+  "combo.notDownloaded": "{id} (не скачана)",
+  "combo.saved": "Настройка сохранена.",
+  "combo.savedNextStart": "Сохранено; вступит в силу при следующем запуске.",
+  "check.fixFirst": "Сначала исправьте отмеченные поля.",
+  "check.checking": "Проверка настройки",
+  "check.okWithWarnings": "Этот компьютер может использовать эту настройку, но обратите внимание:",
+  "check.ok": "Этот компьютер может использовать эту настройку.",
+  "check.notOk": "Эту настройку сейчас нельзя использовать:",
+  "check.rejected": "Движок не принимает эту настройку: {message}",
+  "check.unavailable":
+    "Сейчас проверить настройку нельзя ({reason}). Сохранить всё равно можно: при сохранении движок проверит формат настроек.",
+  "check.engineNotReady": "Движок ещё не готов",
+  "form.fixFields": "Исправьте отмеченные поля.",
+  "form.engineRejected": "Движок отклонил это значение: {message}",
+
+  // ------------------------------------------------------------ settings page
+  "settings.title": "Настройки",
+  "settings.path": "Файл настроек: {path}",
+  "settings.uiLocaleLegend": "Язык интерфейса",
+  "settings.uiLocaleLabel": "Язык интерфейса",
+  "settings.uiLocaleSystem": "Как в системе",
+  "settings.uiLocaleHelp":
+    "Сразу применяется к главному окну и окну субтитров. «Как в системе» использует язык операционной системы, а если он недоступен — английский.",
+  "settings.translationLegend": "Сервис перевода",
+  "settings.translationLede":
+    "Подойдёт любой API, совместимый с OpenAI. URL локальной Ollama по умолчанию: http://localhost:11434/v1.",
+  "settings.baseUrl": "URL сервиса",
+  "settings.apiKeyEnv": "Переменная окружения с API key",
+  "settings.apiKeyEnvHelp":
+    "Введите только имя переменной. Сам ключ задайте как системную переменную окружения; kikitori никогда не хранит ключи. Локальной Ollama ключ не нужен.",
+  "settings.translationModelsHelp":
+    "Модели перевода выбираются в ручной настройке на странице «Модели», где также проверяются лицензия и нагрузка на этот компьютер.",
+  "settings.regionLegend": "Регионы лицензий моделей перевода",
+  "settings.regionLede":
+    "Некоторые модели перевода (например, Tencent HY-MT) не лицензированы для ЕС, Великобритании и Южной Кореи. kikitori не может знать, где вы находитесь, поэтому по умолчанию не рекомендует их.",
+  "settings.regionConsent":
+    "Подтверждаю, что не использую kikitori в ЕС, Великобритании или Южной Корее, и принимаю условия лицензий этих моделей перевода.",
+  "settings.regionHelp":
+    "Если отмечено, рекомендуемая настройка учитывает и модели с региональными ограничениями. Если не отмечено, их всё равно можно выбрать в ручной настройке — с предупреждением.",
+  "settings.languageLegend": "Языки",
+  "settings.languageLede":
+    "Выберите язык, который вы слушаете, и язык субтитров; рекомендуемые для них модели перечислены ниже. Сейчас ничего не скачивается: недостающие модели будут скачаны при первом нажатии «Запустить».",
+  "settings.languageModeMedia": "Это языки для перевода видео.",
+  "settings.languageModeInterpret": "Это языки для синхронного перевода.",
+  "settings.source": "Язык речи",
+  "settings.sourceHelp":
+    "Язык, на котором говорят в видео. При «Определять автоматически» язык каждого предложения сначала распознаётся, и очень короткие предложения могут быть определены неверно.",
+  "settings.own": "Мой язык",
+  "settings.ownHelp": "Язык, на котором вы говорите; на него переводится речь собеседника.",
+  "settings.languageFilter": "Введите для фильтрации",
+  "settings.languageFilterLabel": "Фильтр: {field}",
+  "settings.applyRecommended": "Также переключиться на рекомендуемые модели",
+  "settings.applyRecommendedHelp":
+    "Меняет модели распознавания, устройство и модели перевода; если не отмечено, меняются только языки.",
+  "settings.saveLanguages": "Сохранить языки",
+  "settings.languagesSaved": "Языки сохранены.",
+  "settings.languagesSavedWithModels": "Языки сохранены, рекомендуемые модели теперь используются.",
+  "settings.languagesSavedNoPreview":
+    "Языки сохранены; рекомендуемый набор моделей не был готов, поэтому модели не изменились.",
+  "settings.languagesSavedNextStart": "Сохранено; вступит в силу при следующем запуске.",
+  "settings.languagesUnavailable": "Языки можно будет выбрать, когда движок будет готов.",
+  "language.auto": "Определять автоматически",
+  "preview.title": "Рекомендуемый набор моделей",
+  "preview.checking": "Подбор рекомендуемого набора моделей для этих языков",
+  "preview.unavailable": "Рекомендуемый набор моделей сейчас недоступен: {reason}",
+  "preview.translation": "Модель перевода",
+  "preview.installed": "Установлена",
+  "preview.downloadOnFirstUse": "Будет скачана при первом использовании, около {size}",
+  "preview.downloadUnknownSize": "Будет скачана при первом использовании (размер неизвестен)",
+  "preview.installedUnknown": "Неизвестно, установлена ли модель (сервер перевода не ответил)",
+  "preview.notNeeded": "Перевод не нужен",
+  "preview.translationOff": "«Показывать перевод» выключено, поэтому модель перевода не нужна",
+  "preview.unsupported": "Ни одна модель перевода не поддерживает эту пару языков",
+  "preview.remote":
+    "Сервер перевода находится не на этом компьютере; выберите его модель в ручной настройке на странице «Модели»",
+  "preview.allInstalled": "Все нужные модели установлены.",
+  "preview.total": "При первом запуске будет скачано около {size}.",
+  "preview.totalUnknown":
+    "При первом запуске будут скачаны модели, размер некоторых неизвестен (известно около {size}).",
+  "settings.target": "Язык субтитров",
+  "settings.targetHelp":
+    "Язык субтитров. Если это тот же устный язык, что и язык речи, перевод не выполняется; для китайского выполняется только преобразование письменности.",
+  "settings.partner": "Язык собеседника",
+  "settings.partnerHelp":
+    "Ваша речь переводится на этот язык, а речь собеседника — на ваш. Их нужно различать, поэтому они не могут совпадать (традиционный и упрощённый китайский считаются одним языком).",
+  "settings.styleLegend": "Субтитры",
+  "settings.showTranslation": "Показывать перевод",
+  "settings.showTranslationHelp":
+    "Если выключено, показывается только оригинал — размером и цветом основных субтитров: движок ничего не переводит, сервер перевода не нужен, GPU остаётся свободным. Переключение во время работы применяется сразу; уже показанные строки потом не переводятся.",
+  "settings.previewOriginal": "次の駅で降りましょう。",
+  "settings.previewTranslation": "Давайте выйдем на следующей станции.",
+  "settings.fontSize": "Размер шрифта перевода",
+  "settings.opacity": "Непрозрачность фона",
+  "settings.position": "Положение субтитров",
+  "settings.positionBottom": "Внизу окна",
+  "settings.positionTop": "Вверху окна",
+  "settings.lines": "Предложений на экране одновременно",
+  "settings.linesOption": {
+    one: "{count} предложение",
+    few: "{count} предложения",
+    many: "{count} предложений",
+    other: "{count} предложения",
+  },
+  "settings.save": "Сохранить настройки",
+  "settings.saved": "Настройки сохранены.",
+  "settings.savedRegion":
+    "Настройки сохранены. Рекомендуемая настройка будет пересчитана для нового региона лицензий (см. страницу «Модели»).",
+
+  // ------------------------------------------------------------ validation
+  "validation.urlScheme": "URL должен начинаться с http:// или https://.",
+  "validation.urlEmpty": "Введите URL сервиса перевода.",
+  "validation.urlInvalid": "Это недопустимый URL.",
+  "validation.envPattern": "Используйте только латинские буквы, цифры и подчёркивания; первым символом не может быть цифра.",
+  "validation.envTooLong": "Имя слишком длинное (максимум символов: {max}).",
+  "validation.partner":
+    "Язык собеседника должен отличаться от вашего (традиционный и упрощённый китайский считаются одним языком).",
+  "validation.language": "Выберите язык из списка.",
+  "validation.fontSize": "Размер шрифта должен быть от {min} до {max}.",
+  "validation.opacity": "Непрозрачность фона должна быть от 0% до 100%.",
+  "validation.position": "Выберите «вверху» или «внизу».",
+  "validation.lines": "Число предложений должно быть от {min} до {max}.",
+  "validation.asrModel": "Выберите модель распознавания речи.",
+  "validation.device": "Выберите вычислительное устройство.",
+  "validation.translationEmpty": "Введите название модели перевода.",
+  "validation.translationTooLong": "Название модели слишком длинное (максимум символов: {max}).",
+  "validation.computeType": "Выберите точность.",
+  "validation.threads": "Число потоков должно быть от {min} до {max}; оставьте поле пустым для автоматического выбора.",
+  "validation.cudaDirsTooMany": "Слишком много папок (максимум: {max}).",
+  "validation.cudaDirNotAbsolute": "«{path}» — не полный путь (например, C:\\CUDA\\bin).",
+
+  // ------------------------------------------------------------ about
+  "about.title": "О программе",
+  "about.engine": "Движок {version}, версия протокола {protocol}.",
+  "about.engineFake":
+    "Движок {version}, версия протокола {protocol}; сейчас используется имитация движка (режим разработки).",
+  "about.engineOffline": "Движок ещё не подключён.",
+  "about.license": "kikitori распространяется по лицензии {license}.",
+  "about.notice":
+    "Сторонние компоненты этой программы, например Intel® OpenMP, предоставляются на условиях их собственных лицензий; их обратная разработка (реверс-инжиниринг) запрещена.",
+  "about.thirdPartyHead": "Полные тексты лицензий сторонних компонентов:",
+  "about.thirdPartyApp": "Само приложение (крейты Tauri/Rust, пакеты фронтенда и LICENSE kikitori): ",
+  "about.thirdPartyEngine": "Речевой движок (пакеты Python): ",
+  "about.thirdPartyDev":
+    "В сборках для разработки папок с лицензиями нет. В релизных сборках тексты лицензий находятся в папках licenses (приложение) и kikitori-engine/THIRD_PARTY_LICENSES (речевой движок) каталога установки.",
+  "about.openAppLicenses": "Открыть папку сторонних лицензий приложения",
+  "about.openEngineLicenses": "Открыть папку сторонних лицензий движка",
+  "about.checkUpdate": "Проверить обновления",
+
+  // ------------------------------------------------------------ updates
+  "update.available": "Доступна для скачивания и установки версия kikitori {version}.",
+  "update.install": "Скачать и установить",
+  "update.downloading": "Скачивание обновления.",
+  "update.progress": "Скачивание обновления: {percent}%",
+  "update.installed": "kikitori {version} установлен; изменения вступят в силу после перезапуска.",
+  "update.restartNow": "Перезапустить сейчас",
+  "update.checking": "Проверка",
+  "update.found": "Доступна новая версия {version}.",
+  "update.latest": "У вас последняя версия.",
+  "update.checkFailed": "Не удалось проверить обновления: {reason}",
+  "update.failed": "Не удалось обновить: {reason}",
+  "update.relaunchFailed":
+    "Не удалось перезапустить автоматически; закройте kikitori и откройте снова. ({reason})",
+
+  // ------------------------------------------------------------ overlay
+  "overlay.title": "Субтитры kikitori",
+  "overlay.drag": "Перетащите, чтобы переместить",
+  "overlay.hide": "Скрыть",
+  "overlay.hint":
+    "Здесь появляются субтитры. Перетащите окно, чтобы переместить его; потяните за правый нижний угол, чтобы изменить размер.",
+};

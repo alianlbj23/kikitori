@@ -91,11 +91,12 @@ describe("t and tp", () => {
     expect(tp("threads.count", 1)).toBe("1 個執行緒");
   });
 
-  it("falls back to English for a locale without a dictionary yet, with English plural rules", () => {
+  it("uses each locale's own dictionary and plural rules", () => {
     setLocale("ru");
-    expect(t("start.start")).toBe("Start");
-    // Russian would pick "few" for 3; the English forms only have one/other.
-    expect(tp("threads.count", 3)).toBe("3 threads");
+    expect(t("start.start")).toBe("Запустить");
+    // Russian plural rules pick "few" for 3 and "many" for 5 (English would only have one/other).
+    expect(tp("threads.count", 3)).toBe("3 потока");
+    expect(tp("threads.count", 5)).toBe("5 потоков");
   });
 
   it("looks up runtime keys only when they exist as plain strings", () => {

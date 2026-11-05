@@ -1,0 +1,689 @@
+/**
+ * Spanish UI dictionary (neutral international Spanish, informal "tú").
+ *
+ * Role: one interface locale, typed as `Messages`, so it must have exactly the
+ * base (zh-TW) keys and the plural categories Spanish uses (one/many/other).
+ */
+
+import type { Messages } from "./types";
+
+export const es: Messages = {
+  // ------------------------------------------------------------ common
+  "common.unknown": "Desconocido",
+  "common.unknownReason": "motivo desconocido",
+  "common.unknownCause": "causa desconocida",
+  "common.auto": "Automático",
+  "common.loading": "Cargando",
+  "common.saving": "Guardando",
+  "common.redownload": "Volver a descargar",
+  "common.recommendedFor": "Recomendado: {roles}",
+  "common.parenthetical": "{text} ({note})",
+  "common.withReason": "{context}: {reason}",
+  "common.listSeparator": ", ",
+  "common.clauseSeparator": ", ",
+  "common.strongSeparator": "; ",
+  "common.altSeparator": " / ",
+  "common.sentenceEnd": ".",
+  "common.approxGb": "unos {gb} GB",
+
+  // ------------------------------------------------------------ rail
+  "rail.mode": "Modo",
+  "rail.device": "Fuente de audio",
+  "mode.media.name": "Traducción de video",
+  "mode.media.note": "De {source} a {target}",
+  "mode.media.noteAuto": "Cualquier idioma detectado a {target}",
+  "mode.media.noteOriginal": "{source} (solo original)",
+  "mode.interpret.noteOriginal": "{own} ⇄ {partner} (solo original)",
+  "mode.interpret.name": "Interpretación en tiempo real",
+  "mode.interpret.note": "{own} ⇄ {partner}",
+  "device.hint.media": "La traducción de video captura el sonido que está reproduciendo tu equipo.",
+  "device.hint.interpret": "La interpretación en tiempo real usa el micrófono.",
+  "device.hint.missing": "El dispositivo que elegiste antes no está disponible; se usará el predeterminado del sistema.",
+  "device.defaultNamed": "Predeterminado: {name}",
+  "device.systemDefault": "Predeterminado del sistema",
+  "start.start": "Iniciar",
+  "start.stop": "Detener",
+  "nav.label": "Páginas",
+  "nav.transcript": "Transcripción",
+  "nav.models": "Modelos",
+  "nav.settings": "Configuración",
+  "engine.restart": "Reiniciar el motor",
+  "engine.failedNotice": "No se pudo iniciar el motor: {reason}",
+  "engine.log": "Aviso del motor: {message}",
+  // ------------------------------------------------------------ engine message codes (hardware.md; params localized in lib/messages.ts)
+  "engine.asr_gpu":
+    "{gpu_name} ({vram_mb} MiB de VRAM): {fast_model} para los subtítulos en tiempo real, {final_model} para los subtítulos definitivos ({compute_type})",
+  "engine.asr_gpu_int8_saves_vram":
+    "int8_float16 reduce a la mitad la VRAM que usa el reconocimiento de voz y deja más para el modelo de traducción",
+  "engine.asr_final_no_speech_unreliable":
+    "{final_model} no distingue la voz del silencio (no_speech); en su lugar, el no_speech de {fast_model} y el detector de voz filtran lo que no es voz",
+  "engine.asr_large_v3_remote_translation":
+    "La traducción no se ejecuta en este equipo, así que los subtítulos definitivos usan {final_model} (calidad similar, no_speech fiable, unos 0,33 s por frase)",
+  "engine.asr_apple_silicon":
+    "Apple Silicon: en macOS, el reconocimiento de voz se ejecuta en la CPU; {fast_model} para los subtítulos en tiempo real, {final_model} para los subtítulos definitivos",
+  "engine.asr_apple_silicon_untested":
+    "Aún no se ha medido la latencia en Apple Silicon; se usan los mismos modelos que con una CPU con 16 GB de RAM o más",
+  "engine.asr_cpu":
+    "El reconocimiento de voz se ejecuta en la CPU (16 GB de RAM o más): {fast_model} para los subtítulos en tiempo real, {final_model} para los subtítulos definitivos",
+  "engine.asr_cpu_large_models_slow":
+    "Los modelos medium y mayores necesitan 3,6 s o más por frase en una CPU, demasiado para subtítulos en tiempo real",
+  "engine.asr_cpu_low":
+    "Los modelos ligeros mantienen bajos la latencia y el uso de memoria: {fast_model} para los subtítulos en tiempo real, {final_model} para los subtítulos definitivos",
+  "engine.cpu_low_ram": "{ram_gb} GB de RAM es menos de 16 GB",
+  "engine.cpu_few_cores": "{physical_cores} núcleos físicos de CPU (como máximo {max_cores})",
+  "engine.cpu_info_incomplete": "La información del hardware está incompleta",
+  "engine.multiple_gpus": "Se encontraron {gpu_count} GPU NVIDIA; se usa {gpu_name}, la que tiene más VRAM",
+  "engine.cuda_platform_unsupported":
+    "CTranslate2 no tiene versión con CUDA para esta plataforma (solo Windows y Linux x86-64); el reconocimiento de voz usa la CPU",
+  "engine.cuda_driver_too_old":
+    "El controlador NVIDIA {driver_version} es demasiado antiguo (CUDA 12 necesita {min_driver} o posterior); el reconocimiento de voz usa la CPU hasta que se actualice el controlador",
+  "engine.cuda_compute_capability_unknown":
+    "No se puede leer la capacidad de cómputo de la GPU (puede que el controlador sea demasiado antiguo); el reconocimiento de voz usa la CPU",
+  "engine.cuda_compute_capability_unsupported":
+    "{gpu_name} (capacidad de cómputo {compute_capability}) no admite la aceleración float16/int8 de CTranslate2; el reconocimiento de voz usa la CPU",
+  "engine.gpu_runtime_missing":
+    "cuBLAS no está instalado: la aceleración por GPU necesita descargar el entorno de ejecución de GPU (unos 570 MB); hasta entonces, el reconocimiento de voz usa la CPU",
+  "engine.asr_vram_insufficient":
+    "No hay suficiente VRAM para los modelos de reconocimiento de voz (se necesitan unos {need_mb} MiB); el reconocimiento de voz usa la CPU",
+  "engine.memory_unknown":
+    "No se puede leer la cantidad de memoria; se usan los modelos de reconocimiento de voz más ligeros",
+  "engine.asr_low_quality_model": "{model} comete bastantes más errores de reconocimiento",
+  "engine.asr_language_quality_low":
+    "{model} reconoce mal el idioma {language} (tasa de error superior al 20 % en pruebas de referencia públicas)",
+  "engine.translation_remote":
+    "El servidor de traducción no está en este equipo ({base_url}); elige uno de sus modelos en la combinación personalizada de la página Modelos",
+  "engine.translation_cpu":
+    "No hay ninguna GPU utilizable: el modelo de traducción se ejecuta en la CPU, así que se elige el modelo más pequeño (velocidad en CPU sin medir)",
+  "engine.translation_budget_vram":
+    "Quedan unos {budget_gb} GB de VRAM para el modelo de traducción después del reconocimiento de voz y una reserva de 1 GB",
+  "engine.translation_budget_unified":
+    "Quedan unos {budget_gb} GB de memoria unificada para el modelo de traducción después del reconocimiento de voz y la reserva del sistema",
+  "engine.translation_same_model":
+    "La traducción en tiempo real y la definitiva usan el mismo modelo: cada frase tarda menos de 0,3 s en una GPU, mientras que cambiar de modelo en Ollama tarda entre 1,5 y 18 s",
+  "engine.translation_different_models": "La traducción en tiempo real y la definitiva usan modelos distintos",
+  "engine.translation_better_model_available":
+    "Se eligió {model} entre los modelos instalados; si instalas {better_model}, obtendrás mejor calidad",
+  "engine.translation_not_needed":
+    "{source_language} y {target_language} son el mismo idioma hablado: no se necesita modelo de traducción, solo conversión de escritura",
+  "engine.source_language_auto":
+    "El idioma que se escucha se detecta automáticamente: se elige un modelo de traducción capaz de traducir cualquier idioma a {target_language}",
+  "engine.translation_server_unreachable":
+    "No se puede conectar con el servidor de traducción {base_url} (¿se está ejecutando Ollama?); no se pueden comprobar los modelos instalados",
+  "engine.translation_model_list_unavailable":
+    "No se puede obtener la lista de modelos del servidor de traducción: {error}",
+  "engine.low_ram_for_translation":
+    "Menos de 8 GB de RAM: puede que el modelo de traducción y el reconocimiento de voz no quepan a la vez",
+  "engine.translation_model_not_installed": "El modelo de traducción recomendado {model} aún no está instalado",
+  "engine.translation_model_exceeds_budget":
+    "{model} necesita unos {model_gb} GB, más que los {budget_gb} GB disponibles; Ollama ejecutará una parte en la CPU, lo que es más lento",
+  "engine.translation_unsupported":
+    "Ningún modelo de traducción recomendado admite {source_language} → {target_language}",
+  "engine.combination_not_object": "La combinación de modelos debe ser un objeto",
+  "engine.asr_path_not_object": "{path} debe ser un objeto",
+  "engine.asr_model_unknown":
+    "{path}: modelo de reconocimiento de voz desconocido {model} (disponibles: {available})",
+  "engine.asr_device_invalid": "{path}: el dispositivo debe ser automático, CPU o CUDA",
+  "engine.asr_compute_type_not_string": "{path}: la precisión debe ser texto o estar vacía",
+  "engine.asr_cpu_threads_invalid": "{path}: los hilos de CPU deben ser un número entero de 0 a 256",
+  "engine.asr_cuda_no_gpu": "{path}: se seleccionó CUDA, pero no se encontró ninguna GPU NVIDIA",
+  "engine.asr_cuda_platform_unsupported":
+    "{path}: se seleccionó CUDA, pero CTranslate2 no tiene versión con CUDA para esta plataforma (solo Windows y Linux x86-64)",
+  "engine.asr_cuda_driver_too_old":
+    "{path}: se seleccionó CUDA, pero el controlador NVIDIA {driver_version} es demasiado antiguo (CUDA 12 necesita {min_driver} o posterior)",
+  "engine.asr_cuda_compute_capability_unknown":
+    "{path}: se seleccionó CUDA, pero se desconoce la capacidad de cómputo de la GPU (puede que el controlador sea demasiado antiguo)",
+  "engine.asr_cuda_compute_capability_unsupported":
+    "{path}: se seleccionó CUDA, pero {gpu_name} (capacidad de cómputo {compute_capability}) no admite la aceleración float16/int8 de CTranslate2",
+  "engine.asr_cuda_cublas_missing":
+    "{path}: se seleccionó CUDA, pero cuBLAS no está instalado; descarga primero el entorno de ejecución de GPU",
+  "engine.asr_compute_type_unknown": "{path}: precisión desconocida {compute_type} (disponibles: {available})",
+  "engine.translation_model_name_invalid":
+    "{field} debe ser un nombre de modelo de 1 a {max_chars} caracteres, o estar vacío",
+  "engine.asr_auto_uses_cpu":
+    "{path}: el modo automático usará la CPU (ahora la GPU no puede ejecutar el reconocimiento de voz)",
+  "engine.asr_compute_type_cpu_fallback":
+    "{path}: la CPU no admite {compute_type}; CTranslate2 usará otra precisión (normalmente float32, más lenta)",
+  "engine.asr_compute_type_gpu_fallback":
+    "{path}: la capacidad de cómputo {compute_capability} no admite {compute_type}; CTranslate2 usará float32 o int8_float32 (más lento y con más VRAM)",
+  "engine.asr_model_slow_on_cpu":
+    "{path}: {model} necesita 3,6 s o más por frase en una CPU; los subtítulos irán con un retraso notable",
+  "engine.asr_model_not_downloaded":
+    "{path}: el modelo de reconocimiento de voz {model} aún no se ha descargado; se descargará antes de iniciar",
+  "engine.asr_model_language_unsupported": "{path}: {model} no puede reconocer el idioma {language}",
+  "engine.asr_fast_larger_than_final":
+    "El modelo en tiempo real {fast_model} es más grande que el modelo definitivo {final_model}: puede que los subtítulos en tiempo real sean más lentos que los definitivos",
+  "engine.asr_no_speech_unavailable":
+    "Ni {fast_model} ni {final_model} pueden filtrar lo que no es voz con no_speech; es más probable que se transcriban canciones y ruido",
+  "engine.translation_model_not_on_server": "El servidor de traducción no tiene {model}",
+  "engine.translation_model_language_unsupported": "{model} no admite {source_language} → {target_language}",
+  "engine.translation_license_non_commercial": "La licencia de {model} ({license}) prohíbe el uso comercial",
+  "engine.translation_license_region_restricted": "La licencia de {model} ({license}) no es válida en {regions}",
+  "engine.translation_models_differ":
+    "La traducción en tiempo real y la definitiva usan modelos distintos: el Ollama local tarda entre 1,5 y 18 s cada vez que cambia de modelo",
+  "engine.vram_overflow":
+    "El reconocimiento de voz y la traducción necesitan unos {need_mb} MiB de VRAM, más que los {available_mb} MiB disponibles en {gpu_name}; pueden ir lentos o no llegar a cargarse",
+  "engine.asr_ram_over_half": "Los modelos de reconocimiento de voz en la CPU usan más de la mitad de la RAM",
+  "engine.translation_disabled":
+    "La traducción está desactivada: solo se muestra el texto original y no se necesita modelo de traducción",
+  "engineParam.fast_asr": "Reconocimiento para subtítulos en tiempo real",
+  "engineParam.final_asr": "Reconocimiento para subtítulos definitivos",
+  "engineParam.translation_fast": "El modelo de traducción en tiempo real",
+  "engineParam.translation_final": "El modelo de traducción definitiva",
+
+  // ------------------------------------------------------------ status
+  "status.starting": "Iniciando el motor",
+  "status.restarting": "El motor se detuvo inesperadamente; reiniciando",
+  "status.failed": "No se pudo iniciar el motor",
+  "status.stopped": "Motor detenido",
+  "status.loading": "Cargando modelos",
+  "status.running": "Escuchando",
+  "status.error": "Detenido tras un error",
+  "status.idle": "Listo",
+  "status.code.model_not_downloaded":
+    "El modelo aún no se ha descargado. Descárgalo en la página Modelos y vuelve a iniciar.",
+  "status.code.unknown_model": "El modelo de tu configuración no existe. Elige otro en la página Modelos.",
+  "status.code.device_not_found":
+    "No se encontró el dispositivo de audio seleccionado. Vuelve a elegir un dispositivo.",
+  "status.code.permission_denied":
+    "kikitori no tiene permiso para usar el micrófono ni para grabar audio. Permítelo en la configuración del sistema.",
+  "status.code.device_lost": "El dispositivo de audio se desconectó. Revisa la conexión y vuelve a iniciar.",
+  "status.code.capture_unavailable": "Este equipo no puede capturar este tipo de fuente de audio.",
+  "status.code.capture_error": "Se produjo un error al capturar el audio.",
+  "status.code.pipeline_error": "Se produjo un error al procesar la voz.",
+  "status.code.load_error": "No se pudo cargar el modelo.",
+  "status.code.translation_model_missing": "El servidor de traducción aún no tiene el modelo de traducción.",
+  "status.code.translation_server_auth_failed":
+    "El servidor de traducción rechazó la solicitud: revisa la clave de API.",
+  "status.errorDetail": "Se produjo un error: {detail}",
+  "status.errorUnknown": "Se produjo un error desconocido.",
+
+  // ------------------------------------------------------------ notices
+  "notice.close": "Cerrar",
+  "notice.closeLabel": "Cerrar este mensaje",
+  "notice.settingsFieldsUnreadable": {
+    one: "No se pudo leer {count} campo del archivo de configuración; por ahora se usa el valor predeterminado: {fields}",
+    many: "No se pudieron leer {count} campos del archivo de configuración; por ahora se usan los valores predeterminados: {fields}",
+    other:
+      "No se pudieron leer {count} campos del archivo de configuración; por ahora se usan los valores predeterminados: {fields}",
+  },
+  "notice.initFailed": "No se pudo inicializar la ventana: {reason}",
+
+  // ------------------------------------------------------------ failure contexts
+  "error.saveMode": "No se pudo guardar el modo",
+  "error.saveDevice": "No se pudo guardar la fuente de audio",
+  "error.start": "No se pudo iniciar",
+  "error.stop": "No se pudo detener",
+  "error.showOverlay": "No se pudo mostrar la ventana de subtítulos",
+  "error.hideOverlay": "No se pudo ocultar la ventana de subtítulos",
+  "error.toggleClickThrough": "No se pudo cambiar «Dejar pasar clics»",
+  "error.applyRecommendation": "No se pudo aplicar la configuración recomendada",
+  "error.readSettings": "No se pudo leer la configuración",
+  "error.saveDismissal": "No se pudo guardar «No volver a avisar»",
+  "error.saveUiLocale": "No se pudo guardar el idioma de la interfaz",
+  "error.setOverlayLocale": "No se pudo cambiar el idioma de la ventana de subtítulos",
+  "error.readModels": "No se pudo leer la lista de modelos",
+  "error.detectHardware": "No se pudo detectar el hardware",
+  "error.downloadModel": "No se pudo descargar {model}",
+  "error.downloadGpuRuntime": "No se pudo descargar el componente de aceleración por GPU",
+  "error.openEula": "No se pudieron abrir los términos de la licencia; copia la URL en tu navegador",
+  "error.applyStyle": "No se pudo aplicar el aspecto de los subtítulos",
+  "error.openLicenses": "No se pudo abrir la carpeta de licencias; ábrela desde la ruta indicada arriba",
+  "error.listDevices": "No se pudieron enumerar los dispositivos de audio",
+  "error.restartEngine": "No se pudo reiniciar el motor",
+  "error.readOverlayState": "No se pudo leer el estado de la ventana de subtítulos",
+  "error.readBridge": "No se pudo leer el estado del motor",
+  "error.readLanguages": "No se pudo leer la lista de idiomas",
+  "error.setTranslation": "No se pudo cambiar «Mostrar traducción»",
+  "error.previewLanguages": "No se pudo obtener la combinación recomendada",
+
+  // ------------------------------------------------------------ engine error codes
+  "error.code.invalid_settings": "Configuración no válida",
+  "error.code.settings_io_error":
+    "No se pudo guardar el archivo de configuración; revisa el espacio en disco y los permisos",
+  "error.code.session_active": "Ya está en marcha; detenlo primero",
+  "error.code.device_not_found": "No se encontró el dispositivo de audio seleccionado; vuelve a elegirlo",
+  "error.code.capture_unavailable": "Este equipo no puede capturar este tipo de fuente de audio",
+  "error.code.capture_error": "Se produjo un error al capturar el audio",
+  "error.code.unknown_model": "El motor no conoce este modelo",
+  "error.code.download_in_progress": "Este elemento ya se está descargando; espera a que termine",
+  "error.code.license_not_accepted":
+    "Acepta el NVIDIA CUDA EULA antes de descargar el componente de aceleración por GPU",
+  "error.code.gpu_runtime_unsupported":
+    "Esta plataforma no admite el componente de aceleración por GPU (solo Windows y Linux en x86-64)",
+  "error.code.pull_unsupported":
+    "El servidor de traducción no es Ollama, así que kikitori no puede descargar modelos de traducción por ti",
+  "error.code.translation_server_unreachable": "No se puede conectar con el servidor de traducción",
+  "error.code.translation_server_auth_failed": "El servidor de traducción rechazó la solicitud: revisa la clave de API",
+  "error.code.unknown_method":
+    "La versión del motor no coincide con la de la aplicación; esta operación no es compatible",
+  "error.code.invalid_params": "Se enviaron parámetros no válidos al motor",
+  "error.code.invalid_request": "Se envió una solicitud mal formada al motor",
+  "error.code.internal_error": "Error interno del motor",
+  "error.code.other": "El motor informó de un error ({code})",
+  "error.engineSentence": "{head}.",
+  "error.engineDetail": "{head}: {message}",
+  "error.timeout": {
+    one: "El motor no respondió en {count} segundo. Inténtalo más tarde o reinicia el motor.",
+    many: "El motor no respondió en {count} segundos. Inténtalo más tarde o reinicia el motor.",
+    other: "El motor no respondió en {count} segundos. Inténtalo más tarde o reinicia el motor.",
+  },
+  "error.disconnected":
+    "El motor no está en ejecución. Espera a que se reinicie o pulsa «Reiniciar el motor» en el área de estado.",
+  "error.invalidInput": "Valor no válido: {message}",
+  "error.generic": "Se produjo un error: {message}",
+
+  // ------------------------------------------------------------ transcript
+  "transcript.title": "Transcripción",
+  "transcript.lede":
+    "Los subtítulos en tiempo real aparecen primero atenuados y pasan a la traducción definitiva cuando termina la frase.",
+  "transcript.overlayVisible": "Mostrar ventana de subtítulos",
+  "transcript.clickThrough": "Dejar pasar clics",
+  "transcript.clear": "Borrar",
+  "transcript.showTranslation": "Mostrar traducción",
+  "transcript.noTranslation": "(sin traducción)",
+  "transcript.translating": "Traduciendo",
+  "transcript.emptyTitle": "Aún no hay subtítulos",
+  "transcript.emptyBody":
+    "Elige un modo y una fuente de audio y pulsa Iniciar. Cada frase que se oiga aparecerá aquí, con el original arriba y la traducción abajo.",
+  "transcript.langTitle": "De {source} a {target}",
+  "transcript.shortcutCtrl": "Ctrl (⌘ en macOS)",
+  "transcript.shortcutOn":
+    "Con «Dejar pasar clics» activado, los clics atraviesan la ventana de subtítulos. Pulsa {keys} para activarlo o desactivarlo en cualquier momento.",
+  "transcript.shortcutTaken":
+    "Otra aplicación usa el atajo {keys}; usa el interruptor de aquí para activar o desactivar «Dejar pasar clics».",
+
+  // ------------------------------------------------------------ models page
+  "models.title": "Modelos",
+  "models.lede":
+    "El reconocimiento de voz se ejecuta en este equipo; la traducción se envía al servicio configurado en la página Configuración.",
+  "models.refresh": "Volver a detectar",
+
+  "hw.title": "Este equipo",
+  "hw.status": "Estado",
+  "hw.detecting": "Detectando",
+  "hw.os": "Sistema operativo",
+  "hw.cpu": "Procesador",
+  "hw.memory": "Memoria",
+  "hw.gpu": "Tarjeta gráfica",
+  "hw.cublas": "cuBLAS (reconocimiento por GPU)",
+  "hw.server": "Servicio de traducción",
+  "hw.cpuValue": "{model}, {cores}",
+  "hw.cores": "{physical} núcleos, {logical} hilos",
+  "hw.threads": { one: "{count} hilo", many: "{count} hilos", other: "{count} hilos" },
+  "hw.coresUnknown": "número de núcleos desconocido",
+  "hw.appleSilicon": "Apple Silicon (memoria compartida con el procesador)",
+  "hw.gpuVram": "{size} de memoria de video",
+  "hw.gpuDriver": "controlador {version}",
+  "hw.gpuCompute": "capacidad de cómputo {capability}",
+  "hw.noNvidia": "No se detectó ninguna tarjeta gráfica NVIDIA",
+  "hw.cublasNotUsed": "No se usa en esta plataforma",
+  "hw.cublasAvailable": "Disponible ({source})",
+  "hw.cublasSourceUnknown": "origen desconocido",
+  "hw.cublasMissing": "No instalado",
+  "hw.cublasSource.runtime": "componente de aceleración por GPU descargado por kikitori",
+  "hw.cublasSource.configured": "carpeta indicada en la configuración personalizada",
+  "hw.cublasSource.system": "instalación de CUDA del sistema",
+  "hw.serverNotDetected": "No detectado",
+  "hw.serverLocal": "local",
+  "hw.serverRemote": "remoto",
+  "hw.serverModelsUnknown": "lista de modelos desconocida",
+  "hw.serverModelCount": { one: "{count} modelo", many: "{count} modelos", other: "{count} modelos" },
+  "hw.serverReachable": "{url} ({where}, {models})",
+  "hw.serverUnreachable": "{url} (inaccesible)",
+  "hw.serverUnreachableError": "{url} (inaccesible: {error})",
+  "hw.memoryAvailable": "{total} ({available} disponibles)",
+  "hw.incomplete": "Detección incompleta: {error}",
+
+  "rec.title": "Configuración recomendada",
+  "rec.pending": "Las recomendaciones aparecerán aquí cuando termine la detección.",
+  "rec.tier": "Nivel de hardware",
+  "rec.fastAsr": "Reconocimiento para subtítulos en tiempo real",
+  "rec.finalAsr": "Reconocimiento para la traducción definitiva",
+  "rec.fastTranslation": "Traducción de subtítulos en tiempo real",
+  "rec.finalTranslation": "Traducción definitiva",
+  "rec.budget": "Memoria disponible para la traducción",
+  "rec.notLocal":
+    "Sin recomendación (el servicio de traducción no es local); elige uno en la configuración personalizada",
+  "rec.gpuRuntimeMissing":
+    "Cuando descargues abajo el componente de aceleración por GPU, la recomendación usará la tarjeta gráfica.",
+  "rec.apply": "Aplicar la configuración recomendada",
+  "rec.applyNote":
+    "Establece los modelos de reconocimiento, el dispositivo, la precisión, los hilos y los modelos de traducción.",
+  "rec.applied":
+    "Se aplicó la configuración recomendada: subtítulos en tiempo real {fast}, traducción definitiva {final} ({device}).",
+  "rec.appliedWhileRunning":
+    "Se aplicó la configuración recomendada: subtítulos en tiempo real {fast}, traducción definitiva {final} ({device}). Se aplicará la próxima vez que inicies.",
+  "tier.nvidia_8gb": "Tarjeta gráfica NVIDIA (8 GB o más)",
+  "tier.nvidia_4gb": "Tarjeta gráfica NVIDIA (4–8 GB)",
+  "tier.nvidia_lt4gb": "Tarjeta gráfica NVIDIA (menos de 4 GB)",
+  "tier.cpu": "CPU (16 GB de memoria o más)",
+  "tier.cpu_low": "CPU (configuración ligera)",
+  "tier.apple_silicon": "Apple Silicon (CPU)",
+  "threads.auto": "hilos automáticos",
+  "threads.count": { one: "{count} hilo", many: "{count} hilos", other: "{count} hilos" },
+  "computeType.auto": "precisión automática",
+
+  "machine.gpu": "{name}, {gb} GB",
+  "machine.ram": "{gb} GB de memoria",
+  "machine.named": "{name}, {ram}",
+  "machine.thisCpu": "el procesador de este equipo",
+  "machine.thisCpuRam": "el procesador de este equipo, {ram}",
+  "summary.asrSameDevice": "tiempo real {fast}, definitivo {final} ({device})",
+  "summary.asrSplit": "tiempo real {fast} ({fastDevice}), definitivo {final} ({finalDevice})",
+  "summary.translationKept": "modelos de traducción sin cambios (el servicio de traducción no es local)",
+  "summary.translationSame": "traducción {model}",
+  "summary.translationSplit": "traducción en tiempo real {fast}, traducción definitiva {final}",
+  "summary.full": "{asr}; {translation}",
+  "firstRun.applied": "Se aplicó la configuración recomendada para este equipo ({machine}): {summary}.",
+  "firstRun.appliedGpuMissing":
+    "Se aplicó la configuración recomendada para este equipo ({machine}): {summary}. A la tarjeta gráfica le falta el componente de aceleración por GPU, así que por ahora se usa la CPU; descárgalo en la página Modelos para usar la tarjeta gráfica.",
+  "firstRun.applyFailed":
+    "No se pudo aplicar la configuración recomendada: {reason} Revisa la configuración actual en la página Modelos y aplica allí la recomendación si hace falta.",
+  "firstRun.detectFailed":
+    "No se pudo detectar el hardware de este equipo: {reason} Por ahora se usa la configuración predeterminada (tiempo real {fast}, definitivo {final}); puedes volver a detectarlo en la página Modelos y aplicar la recomendación.",
+  "firstRun.review": "Revisar en la página Modelos",
+  "offer.text": "Hay una configuración mejor para este equipo: {summary}.",
+  "offer.apply": "Aplicar",
+  "offer.dismiss": "No volver a avisar",
+  "missing.itemFailed": "No se pudo descargar {model}: {error}",
+  "missing.downloading": "Descargando {models}; podrás iniciar cuando termine.",
+  "missing.failed": "{items}. Puedes volver a descargar.",
+  "missing.offer": "Hay que descargar {models} (unos {size} en total) antes de poder iniciar.",
+  "missing.done": "Los modelos están descargados. Ya puedes pulsar Iniciar.",
+  "missing.download": "Descargar los modelos que faltan",
+  "startdl.title": "Descargando modelos antes de iniciar",
+  "startdl.itemAsr": "Modelo de reconocimiento de voz {model}",
+  "startdl.itemTranslation": "Modelo de traducción {model}",
+  "startdl.pending": "En espera",
+  "startdl.preparing": "Preparando la descarga",
+  "startdl.progress": "{percent} %, {done} de {total}",
+  "startdl.done": "Completado",
+  "startdl.failed": "Error en la descarga: {error}",
+  "startdl.stillMissing": "{model} ya se había descargado, pero el motor sigue indicando que falta.",
+  "startdl.downloading": "Los subtítulos empezarán automáticamente cuando terminen las descargas.",
+  "startdl.starting": "Descargas terminadas; iniciando.",
+  "startdl.failedHelp": "Una descarga falló. Pulsa Reintentar o elige otros modelos en la página Modelos.",
+  "startdl.pullUnsupported":
+    "El servidor de traducción {url} no es Ollama, así que kikitori no puede descargar modelos de traducción por ti. Instala {models} tú mismo en ese servidor o elige un modelo instalado en la página Modelos. También puedes desactivar «Mostrar traducción» para ver solo el original.",
+  "startdl.serverUnreachable":
+    "No se puede conectar con el servidor de traducción {url}. Si usas Ollama, inícialo primero (abre la aplicación Ollama o ejecuta ollama serve en una terminal) y pulsa Reintentar. También puedes desactivar «Mostrar traducción» para ver solo el original.",
+  "startdl.authFailed":
+    "El servidor de traducción {url} rechazó la solicitud: revisa la clave de API (la variable de entorno indicada en Configuración) y pulsa Reintentar.",
+  "startdl.retry": "Reintentar",
+  "startdl.cancel": "Cancelar",
+  "startdl.cancelLabel": "Dejar de esperar las descargas y no iniciar automáticamente",
+
+  "gpu.title": "Componente de aceleración por GPU",
+  "gpu.lede":
+    "Para acelerar el reconocimiento de voz con una tarjeta gráfica NVIDIA se necesita la biblioteca cuBLAS de NVIDIA. kikitori no la incluye; se descarga de PyPI después de que aceptes su licencia.",
+  "gpu.name": "Componente de aceleración por GPU",
+  "gpu.unsupported":
+    "La plataforma de este equipo no usa este componente: la aceleración por GPU solo es para Windows y Linux en x86-64 con una tarjeta gráfica NVIDIA. En las demás plataformas, el reconocimiento de voz siempre se hace en la CPU.",
+  "gpu.progressLabel": "Progreso de la descarga del componente de aceleración por GPU",
+  "gpu.finishing": "Descargado; verificando y extrayendo (unos segundos)",
+  "gpu.progress": "{percent} %, {done} / {total}",
+  "gpu.installed": "Se instaló {what}.",
+  "gpu.installedAt": "Se instaló {what} en {path}.",
+  "gpu.noCublas":
+    "Instalado, pero no se detecta ningún cuBLAS utilizable. Reinicia el motor y pulsa «Volver a detectar».",
+  "gpu.sizeApprox": "unos {size}",
+  "gpu.sizeUnknown": "unos cientos de MB",
+  "gpu.situationMissing":
+    "La tarjeta gráfica NVIDIA de este equipo puede acelerar el reconocimiento, pero falta este componente, así que por ahora se usa la CPU.",
+  "gpu.situationNoGpu": "No se detectó ninguna tarjeta gráfica NVIDIA; sin ella, no hace falta descargar esto.",
+  "gpu.readLicense": "Leer la licencia",
+  "gpu.download": "Descargar el componente de aceleración por GPU",
+  "gpu.consentNotice":
+    "Se descargará NVIDIA cuBLAS ({package}, {size}) de PyPI. Al usarlo, aceptas el NVIDIA CUDA EULA ({license}).",
+  "gpu.lastFailed": "La última descarga falló: {error}",
+  "gpu.agree": "Acepto el NVIDIA CUDA EULA",
+  "gpu.installedRestarting": "Componente de aceleración por GPU instalado. Reiniciando el motor para usar la GPU.",
+  "gpu.installedBusy":
+    "Componente de aceleración por GPU instalado. Hay trabajo en curso, así que el motor no se reinició automáticamente; reinícialo cuando termines para usar la GPU.",
+
+  "asr.title": "Modelos de reconocimiento de voz",
+  "asr.lede":
+    "Los subtítulos en tiempo real necesitan velocidad, y las traducciones definitivas, precisión; cada uno puede usar un modelo distinto.",
+  "asr.colModel": "Modelo",
+  "asr.colSize": "Tamaño",
+  "asr.colSpeed": "Velocidad",
+  "asr.colMemory": "Memoria",
+  "asr.colLicense": "Licencia",
+  "asr.colStatus": "Estado",
+  "asr.inUse": "En uso: {roles}",
+  "asr.noSpeech": "Sin detección de ausencia de voz",
+  "asr.noSpeechHelp":
+    "Este modelo no detecta de forma fiable cuándo no hay voz; para las traducciones definitivas, se usa el criterio del modelo de subtítulos en tiempo real para filtrar el ruido.",
+  "asr.memoryCpu": "CPU {size}",
+  "asr.memoryGpu": "GPU {size}",
+  "asr.progressLabel": "Progreso de la descarga de {model}",
+  "asr.progress": "{percent} %, {done}",
+  "asr.downloaded": "Descargado",
+  "asr.download": "Descargar",
+  "asr.downloadFailed": "Error en la descarga: {error}",
+  "role.fast": "tiempo real",
+  "role.final": "definitivo",
+  "speed.fastest": "Muy rápida",
+  "speed.fast": "Rápida",
+  "speed.medium": "Media",
+  "speed.slow": "Lenta",
+  "speed.slowest": "Muy lenta",
+  "download.done": "{model} descargado.",
+  "download.failed": "No se pudo descargar {what}: {error}",
+
+  "tr.title": "Modelos de traducción",
+  "tr.unreachable":
+    "No se puede acceder al servicio de traducción en {url}. Si usas un Ollama local, inícialo primero.",
+  "tr.unreachableError":
+    "No se puede acceder al servicio de traducción en {url} ({error}). Si usas un Ollama local, inícialo primero.",
+  "tr.installedCount": {
+    one: "{count} modelo instalado en el servicio de traducción en {url}.",
+    many: "{count} modelos instalados en el servicio de traducción en {url}.",
+    other: "{count} modelos instalados en el servicio de traducción en {url}.",
+  },
+  "tr.installedCountLocal": {
+    one: "{count} modelo instalado en el servicio de traducción en {url} (local).",
+    many: "{count} modelos instalados en el servicio de traducción en {url} (local).",
+    other: "{count} modelos instalados en el servicio de traducción en {url} (local).",
+  },
+  "tr.nonCommercial": "No comercial",
+  "tr.regionExcluded": "La licencia excluye {regions}",
+  "tr.license": "Licencia {license}",
+  "tr.unlisted": "No está en la lista de kikitori; revisa la licencia por tu cuenta",
+  "tr.stateUnknown": "Estado de instalación desconocido",
+  "tr.stateInstalled": "Instalado",
+  "tr.stateMissing": "No instalado",
+
+  "combo.title": "Configuración personalizada",
+  "combo.lede":
+    "Los cambios se comprueban al instante con este equipo; una configuración con errores no se puede guardar. Una configuración nueva se aplica la próxima vez que pulses Iniciar.",
+  "combo.fastModel": "Modelo de reconocimiento para subtítulos en tiempo real",
+  "combo.finalModel": "Modelo de reconocimiento para traducciones definitivas",
+  "combo.device": "Dispositivo de cómputo",
+  "combo.deviceAuto": "Automático (usa una GPU NVIDIA si hay una disponible; si no, la CPU)",
+  "combo.deviceCpu": "CPU",
+  "combo.deviceCuda": "GPU NVIDIA (CUDA)",
+  "combo.deviceHelp":
+    "Ambas rutas comparten un mismo dispositivo: si la GPU falla durante una sesión, no se vuelve a intentar.",
+  "combo.translationFast": "Modelo de traducción para subtítulos en tiempo real",
+  "combo.translationFinal": "Modelo de traducción para traducciones definitivas",
+  "combo.advanced": "Opciones avanzadas",
+  "combo.advancedHelp":
+    "La precisión y el número de hilos suelen dejarse a la configuración recomendada. Si están vacíos o en Automático, el motor decide según el dispositivo que se use realmente (int8 en CPU, float16 en GPU).",
+  "combo.fastComputeType": "Precisión para subtítulos en tiempo real",
+  "combo.finalComputeType": "Precisión para traducciones definitivas",
+  "combo.fastThreads": "Hilos de CPU para subtítulos en tiempo real",
+  "combo.finalThreads": "Hilos de CPU para traducciones definitivas",
+  "combo.cudaDirs": "Carpetas de cuBLAS 12 instaladas por ti",
+  "combo.cudaDirsPlaceholder":
+    "Una ruta completa por línea; por ejemplo, C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin",
+  "combo.cudaDirsHelp":
+    "Solo hace falta si instalaste tú mismo el CUDA Toolkit. El componente de aceleración por GPU descargado arriba se usa automáticamente y no hace falta incluirlo.",
+  "combo.save": "Guardar configuración",
+  "combo.reset": "Volver a la configuración actual",
+  "combo.notInList": "{value} (no está en la lista)",
+  "combo.notDownloaded": "{id} (no descargado)",
+  "combo.saved": "Configuración guardada.",
+  "combo.savedNextStart": "Guardado; se aplicará la próxima vez que inicies.",
+  "check.fixFirst": "Corrige primero los campos marcados.",
+  "check.checking": "Comprobando esta configuración",
+  "check.okWithWarnings": "Este equipo puede usar esta configuración, pero ten en cuenta lo siguiente:",
+  "check.ok": "Este equipo puede usar esta configuración.",
+  "check.notOk": "Esta configuración no se puede usar ahora:",
+  "check.rejected": "El motor no acepta esta configuración: {message}",
+  "check.unavailable":
+    "No se puede comprobar la configuración ahora ({reason}). Aun así, puedes guardar; el motor comprueba el formato de la configuración al guardar.",
+  "check.engineNotReady": "El motor aún no está listo",
+  "form.fixFields": "Corrige los campos marcados.",
+  "form.engineRejected": "El motor rechazó este valor: {message}",
+
+  // ------------------------------------------------------------ settings page
+  "settings.title": "Configuración",
+  "settings.path": "Archivo de configuración: {path}",
+  "settings.uiLocaleLegend": "Idioma de la interfaz",
+  "settings.uiLocaleLabel": "Idioma de la interfaz",
+  "settings.uiLocaleSystem": "Igual que el sistema",
+  "settings.uiLocaleHelp":
+    "Se aplica al instante a la ventana principal y a la de subtítulos. «Igual que el sistema» usa el idioma de tu sistema operativo, o inglés si no está disponible.",
+  "settings.translationLegend": "Servicio de traducción",
+  "settings.translationLede":
+    "Sirve cualquier API compatible con OpenAI. La URL predeterminada de un Ollama local es http://localhost:11434/v1.",
+  "settings.baseUrl": "URL del servicio",
+  "settings.apiKeyEnv": "Variable de entorno de la clave de API",
+  "settings.apiKeyEnvHelp":
+    "Escribe solo el nombre de la variable. Define la clave como variable de entorno del sistema; kikitori nunca guarda claves. Un Ollama local no necesita clave.",
+  "settings.translationModelsHelp":
+    "Los modelos de traducción se eligen en la configuración personalizada de la página Modelos, donde también se comprueban la licencia y la carga en este equipo.",
+  "settings.regionLegend": "Regiones de licencia de los modelos de traducción",
+  "settings.regionLede":
+    "Algunos modelos de traducción (por ejemplo, Tencent HY-MT) no tienen licencia para la UE, el Reino Unido ni Corea del Sur. kikitori no puede saber dónde estás, así que no los recomienda de forma predeterminada.",
+  "settings.regionConsent":
+    "Confirmo que no uso kikitori en la UE, el Reino Unido ni Corea del Sur, y acepto los términos de licencia de estos modelos de traducción.",
+  "settings.regionHelp":
+    "Si está marcado, la configuración recomendada también tiene en cuenta los modelos con restricciones regionales. Si no está marcado, puedes elegirlos igualmente en la configuración personalizada, con una advertencia.",
+  "settings.languageLegend": "Idiomas",
+  "settings.languageLede":
+    "Elige el idioma que escuchas y el idioma de los subtítulos; abajo se indican los modelos recomendados para ellos. Ahora no se descarga nada: los modelos que falten se descargan la primera vez que pulses Iniciar.",
+  "settings.languageModeMedia": "Estos son los idiomas para la traducción de video.",
+  "settings.languageModeInterpret": "Estos son los idiomas para la interpretación en tiempo real.",
+  "settings.source": "Idioma que se escucha",
+  "settings.sourceHelp":
+    "El idioma que se habla en el video. Con «Detectar automáticamente», primero se identifica el idioma de cada frase, y las muy cortas pueden identificarse mal.",
+  "settings.own": "Mi idioma",
+  "settings.ownHelp": "El idioma que hablas; lo que dice la otra persona se traduce a él.",
+  "settings.languageFilter": "Escribe para filtrar",
+  "settings.languageFilterLabel": "Filtrar {field}",
+  "settings.applyRecommended": "Cambiar también a los modelos recomendados",
+  "settings.applyRecommendedHelp":
+    "Cambia los modelos de reconocimiento, el dispositivo y los modelos de traducción; si no está marcado, solo cambian los idiomas.",
+  "settings.saveLanguages": "Guardar idiomas",
+  "settings.languagesSaved": "Idiomas guardados.",
+  "settings.languagesSavedWithModels": "Idiomas guardados; ya se usan los modelos recomendados.",
+  "settings.languagesSavedNoPreview":
+    "Idiomas guardados; la combinación recomendada no estaba lista, así que los modelos no cambiaron.",
+  "settings.languagesSavedNextStart": "Guardado; se aplicará la próxima vez que inicies.",
+  "settings.languagesUnavailable": "Podrás elegir los idiomas cuando el motor esté listo.",
+  "language.auto": "Detectar automáticamente",
+  "preview.title": "Combinación recomendada",
+  "preview.checking": "Calculando la combinación recomendada para estos idiomas",
+  "preview.unavailable": "La combinación recomendada no está disponible ahora: {reason}",
+  "preview.translation": "Modelo de traducción",
+  "preview.installed": "Instalado",
+  "preview.downloadOnFirstUse": "Se descarga en el primer uso, unos {size}",
+  "preview.downloadUnknownSize": "Se descarga en el primer uso (tamaño desconocido)",
+  "preview.installedUnknown": "No se sabe si está instalado (el servidor de traducción no respondió)",
+  "preview.notNeeded": "No hace falta traducción",
+  "preview.translationOff": "«Mostrar traducción» está desactivado, así que no hace falta modelo de traducción",
+  "preview.unsupported": "Ningún modelo de traducción admite esta combinación de idiomas",
+  "preview.remote":
+    "El servidor de traducción no está en este equipo; elige su modelo en la combinación personalizada de la página Modelos",
+  "preview.allInstalled": "Todos los modelos necesarios están instalados.",
+  "preview.total": "El primer inicio descarga unos {size}.",
+  "preview.totalUnknown":
+    "El primer inicio descarga modelos, algunos de tamaño desconocido (unos {size} conocidos).",
+  "settings.target": "Idioma de los subtítulos",
+  "settings.targetHelp":
+    "El idioma de los subtítulos. Si es el mismo idioma hablado que el que se escucha, no se traduce nada; en el caso del chino, solo se convierte entre sistemas de escritura.",
+  "settings.partner": "Idioma de la otra persona",
+  "settings.partnerHelp":
+    "Lo que dices se traduce a este idioma, y lo que dice la otra persona, al tuyo. Hay que poder distinguirlos, así que no pueden ser el mismo (el chino tradicional y el simplificado cuentan como el mismo).",
+  "settings.styleLegend": "Subtítulos",
+  "settings.showTranslation": "Mostrar traducción",
+  "settings.showTranslationHelp":
+    "Si está desactivado, solo se muestra el original, con el tamaño y el color de los subtítulos principales: el motor no traduce nada, no necesita servidor de traducción y deja libre la GPU. El cambio durante la ejecución se aplica al instante; las líneas ya mostradas no se traducen después.",
+  "settings.previewOriginal": "次の駅で降りましょう。",
+  "settings.previewTranslation": "Bajémonos en la próxima estación.",
+  "settings.fontSize": "Tamaño de letra de la traducción",
+  "settings.opacity": "Opacidad del fondo",
+  "settings.position": "Posición de los subtítulos",
+  "settings.positionBottom": "Parte inferior de la ventana",
+  "settings.positionTop": "Parte superior de la ventana",
+  "settings.lines": "Frases mostradas a la vez",
+  "settings.linesOption": { one: "{count} frase", many: "{count} frases", other: "{count} frases" },
+  "settings.save": "Guardar configuración",
+  "settings.saved": "Configuración guardada.",
+  "settings.savedRegion":
+    "Configuración guardada. La configuración recomendada se volverá a calcular para la nueva región de licencia (consulta la página Modelos).",
+
+  // ------------------------------------------------------------ validation
+  "validation.urlScheme": "La URL debe empezar por http:// o https://.",
+  "validation.urlEmpty": "Escribe la URL del servicio de traducción.",
+  "validation.urlInvalid": "No es una URL válida.",
+  "validation.envPattern": "Usa solo letras, dígitos y guiones bajos, sin empezar por un dígito.",
+  "validation.envTooLong": "El nombre es demasiado largo (como máximo {max} caracteres).",
+  "validation.partner":
+    "El idioma de la otra persona debe ser distinto del tuyo (el chino tradicional y el simplificado cuentan como el mismo idioma).",
+  "validation.language": "Elige un idioma de la lista.",
+  "validation.fontSize": "El tamaño de letra debe estar entre {min} y {max}.",
+  "validation.opacity": "La opacidad del fondo debe estar entre 0 % y 100 %.",
+  "validation.position": "Elige arriba o abajo.",
+  "validation.lines": "El número de frases debe estar entre {min} y {max}.",
+  "validation.asrModel": "Elige un modelo de reconocimiento de voz.",
+  "validation.device": "Elige un dispositivo de cómputo.",
+  "validation.translationEmpty": "Escribe el nombre de un modelo de traducción.",
+  "validation.translationTooLong": "Los nombres de modelo tienen como máximo {max} caracteres.",
+  "validation.computeType": "Elige una precisión.",
+  "validation.threads": "El número de hilos debe estar entre {min} y {max}; déjalo vacío para que sea automático.",
+  "validation.cudaDirsTooMany": "Como máximo {max} carpetas.",
+  "validation.cudaDirNotAbsolute": "«{path}» no es una ruta completa (por ejemplo, C:\\CUDA\\bin).",
+
+  // ------------------------------------------------------------ about
+  "about.title": "Acerca de",
+  "about.engine": "Motor {version}, versión del protocolo {protocol}.",
+  "about.engineFake":
+    "Motor {version}, versión del protocolo {protocol}; ahora se usa el motor simulado (modo de desarrollo).",
+  "about.engineOffline": "El motor aún no está conectado.",
+  "about.license": "kikitori se publica con la licencia {license}.",
+  "about.notice":
+    "Los componentes de terceros de este programa, como Intel® OpenMP, se ofrecen con sus propios términos de licencia; no se permite aplicarles ingeniería inversa.",
+  "about.thirdPartyHead": "Textos completos de las licencias de los componentes de terceros:",
+  "about.thirdPartyApp":
+    "La aplicación en sí (crates de Tauri/Rust, paquetes del frontend y el LICENSE de kikitori): ",
+  "about.thirdPartyEngine": "Motor de voz (paquetes de Python): ",
+  "about.thirdPartyDev":
+    "Las compilaciones de desarrollo no incluyen carpetas de licencias. En las compilaciones de versión, los textos de las licencias están en las carpetas licenses (la aplicación) y kikitori-engine/THIRD_PARTY_LICENSES (el motor de voz) del directorio de instalación.",
+  "about.openAppLicenses": "Abrir la carpeta de licencias de terceros de la aplicación",
+  "about.openEngineLicenses": "Abrir la carpeta de licencias de terceros del motor",
+  "about.checkUpdate": "Buscar actualizaciones",
+
+  // ------------------------------------------------------------ updates
+  "update.available": "kikitori {version} está disponible para descargar e instalar.",
+  "update.install": "Descargar e instalar",
+  "update.downloading": "Descargando la actualización.",
+  "update.progress": "Descargando la actualización: {percent} %",
+  "update.installed": "kikitori {version} está instalado y se aplicará después de reiniciar.",
+  "update.restartNow": "Reiniciar ahora",
+  "update.checking": "Buscando",
+  "update.found": "Nueva versión {version} disponible.",
+  "update.latest": "Tienes la versión más reciente.",
+  "update.checkFailed": "No se pudo buscar actualizaciones: {reason}",
+  "update.failed": "Error al actualizar: {reason}",
+  "update.relaunchFailed": "No se pudo reiniciar automáticamente; cierra y vuelve a abrir kikitori. ({reason})",
+
+  // ------------------------------------------------------------ overlay
+  "overlay.title": "Subtítulos de kikitori",
+  "overlay.drag": "Arrastra para mover",
+  "overlay.hide": "Ocultar",
+  "overlay.hint":
+    "Los subtítulos aparecen aquí. Arrastra la ventana para moverla; arrastra la esquina inferior derecha para cambiar su tamaño.",
+};

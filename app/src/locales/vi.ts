@@ -1,0 +1,652 @@
+/**
+ * Vietnamese UI dictionary.
+ *
+ * Role: the Vietnamese interface texts. Typed as `Messages`, so it must have
+ * exactly the base (zh-TW) keys; a key missing at runtime falls back to
+ * English, then to zh-TW.
+ */
+
+import type { Messages } from "./types";
+
+export const vi: Messages = {
+  // ------------------------------------------------------------ common
+  "common.unknown": "Không rõ",
+  "common.unknownReason": "lý do không rõ",
+  "common.unknownCause": "nguyên nhân không rõ",
+  "common.auto": "Tự động",
+  "common.loading": "Đang tải",
+  "common.saving": "Đang lưu",
+  "common.redownload": "Tải xuống lại",
+  "common.recommendedFor": "Đề xuất: {roles}",
+  "common.parenthetical": "{text} ({note})",
+  "common.withReason": "{context}: {reason}",
+  "common.listSeparator": ", ",
+  "common.clauseSeparator": ", ",
+  "common.strongSeparator": "; ",
+  "common.altSeparator": " / ",
+  "common.sentenceEnd": ".",
+  "common.approxGb": "khoảng {gb} GB",
+
+  // ------------------------------------------------------------ rail
+  "rail.mode": "Chế độ",
+  "rail.device": "Nguồn âm thanh",
+  "mode.media.name": "Dịch video",
+  "mode.media.note": "{source} sang {target}",
+  "mode.media.noteAuto": "Mọi ngôn ngữ phát hiện được sang {target}",
+  "mode.media.noteOriginal": "{source} (chỉ bản gốc)",
+  "mode.interpret.noteOriginal": "{own} ⇄ {partner} (chỉ bản gốc)",
+  "mode.interpret.name": "Phiên dịch trực tiếp",
+  "mode.interpret.note": "{own} ⇄ {partner}",
+  "device.hint.media": "Dịch video thu âm thanh mà máy tính đang phát.",
+  "device.hint.interpret": "Phiên dịch trực tiếp dùng micrô.",
+  "device.hint.missing": "Thiết bị bạn chọn trước đó không khả dụng; sẽ dùng thiết bị mặc định của hệ thống.",
+  "device.defaultNamed": "Mặc định: {name}",
+  "device.systemDefault": "Mặc định của hệ thống",
+  "start.start": "Bắt đầu",
+  "start.stop": "Dừng",
+  "nav.label": "Trang",
+  "nav.transcript": "Bản ghi",
+  "nav.models": "Mô hình",
+  "nav.settings": "Cài đặt",
+  "engine.restart": "Khởi động lại engine",
+  "engine.failedNotice": "Không thể khởi động engine: {reason}",
+  "engine.log": "Thông báo từ engine: {message}",
+  // ------------------------------------------------------------ engine message codes (hardware.md; params localized in lib/messages.ts)
+  "engine.asr_gpu":
+    "{gpu_name} ({vram_mb} MiB VRAM): {fast_model} cho phụ đề trực tiếp, {final_model} cho phụ đề hoàn chỉnh ({compute_type})",
+  "engine.asr_gpu_int8_saves_vram":
+    "int8_float16 giảm một nửa VRAM mà nhận dạng giọng nói sử dụng, để dành nhiều hơn cho mô hình dịch",
+  "engine.asr_final_no_speech_unreliable":
+    "{final_model} không phân biệt được lời nói với im lặng (no_speech); thay vào đó, no_speech của {fast_model} và bộ phát hiện giọng nói sẽ lọc phần không phải lời nói",
+  "engine.asr_large_v3_remote_translation":
+    "Việc dịch không chạy trên máy tính này nên phụ đề hoàn chỉnh dùng {final_model} (chất lượng tương đương, no_speech đáng tin cậy, khoảng 0,33 giây mỗi câu)",
+  "engine.asr_apple_silicon":
+    "Apple Silicon: trên macOS, nhận dạng giọng nói chạy trên CPU; {fast_model} cho phụ đề trực tiếp, {final_model} cho phụ đề hoàn chỉnh",
+  "engine.asr_apple_silicon_untested":
+    "Độ trễ trên Apple Silicon chưa được đo; dùng cùng các mô hình như CPU có từ 16 GB RAM trở lên",
+  "engine.asr_cpu":
+    "Nhận dạng giọng nói chạy trên CPU (từ 16 GB RAM trở lên): {fast_model} cho phụ đề trực tiếp, {final_model} cho phụ đề hoàn chỉnh",
+  "engine.asr_cpu_large_models_slow":
+    "Các mô hình từ medium trở lên cần từ 3,6 giây mỗi câu trên CPU, quá chậm cho phụ đề trực tiếp",
+  "engine.asr_cpu_low":
+    "Mô hình nhẹ giữ độ trễ và mức dùng bộ nhớ thấp: {fast_model} cho phụ đề trực tiếp, {final_model} cho phụ đề hoàn chỉnh",
+  "engine.cpu_low_ram": "{ram_gb} GB RAM, ít hơn 16 GB",
+  "engine.cpu_few_cores": "{physical_cores} nhân CPU vật lý (tối đa {max_cores})",
+  "engine.cpu_info_incomplete": "Thông tin phần cứng không đầy đủ",
+  "engine.multiple_gpus": "Tìm thấy {gpu_count} GPU NVIDIA; dùng {gpu_name}, GPU có nhiều VRAM nhất",
+  "engine.cuda_platform_unsupported":
+    "CTranslate2 không có bản CUDA cho nền tảng này (chỉ Windows và Linux x86-64); nhận dạng giọng nói dùng CPU",
+  "engine.cuda_driver_too_old":
+    "Driver NVIDIA {driver_version} quá cũ (CUDA 12 cần {min_driver} trở lên); nhận dạng giọng nói dùng CPU cho đến khi cập nhật driver",
+  "engine.cuda_compute_capability_unknown":
+    "Không đọc được compute capability của GPU (có thể driver quá cũ); nhận dạng giọng nói dùng CPU",
+  "engine.cuda_compute_capability_unsupported":
+    "{gpu_name} (compute capability {compute_capability}) không hỗ trợ tăng tốc float16/int8 của CTranslate2; nhận dạng giọng nói dùng CPU",
+  "engine.gpu_runtime_missing":
+    "Chưa cài cuBLAS: tăng tốc GPU cần tải thành phần tăng tốc GPU (khoảng 570 MB); trong lúc chờ, nhận dạng giọng nói dùng CPU",
+  "engine.asr_vram_insufficient":
+    "Không đủ VRAM cho các mô hình nhận dạng giọng nói (cần khoảng {need_mb} MiB); nhận dạng giọng nói dùng CPU",
+  "engine.memory_unknown": "Không đọc được dung lượng bộ nhớ; dùng các mô hình nhận dạng giọng nói nhẹ nhất",
+  "engine.asr_low_quality_model": "{model} nhận dạng sai nhiều hơn đáng kể",
+  "engine.asr_language_quality_low": "{model} nhận dạng {language} kém (tỷ lệ lỗi trên 20% ở các bộ đánh giá công khai)",
+  "engine.translation_remote":
+    "Máy chủ dịch không nằm trên máy tính này ({base_url}); hãy chọn một mô hình của máy chủ đó trong cấu hình tùy chỉnh ở trang Mô hình",
+  "engine.translation_cpu":
+    "Không có GPU dùng được: mô hình dịch chạy trên CPU nên chọn mô hình nhỏ nhất (chưa đo tốc độ trên CPU)",
+  "engine.translation_budget_vram":
+    "Sau nhận dạng giọng nói và 1 GB dự phòng, còn khoảng {budget_gb} GB VRAM cho mô hình dịch",
+  "engine.translation_budget_unified":
+    "Sau nhận dạng giọng nói và phần dự phòng cho hệ thống, còn khoảng {budget_gb} GB bộ nhớ hợp nhất cho mô hình dịch",
+  "engine.translation_same_model":
+    "Dịch trực tiếp và dịch hoàn chỉnh dùng cùng một mô hình: mỗi câu mất dưới 0,3 giây trên GPU, còn chuyển mô hình trong Ollama mất 1,5–18 giây",
+  "engine.translation_different_models": "Dịch trực tiếp và dịch hoàn chỉnh dùng hai mô hình khác nhau",
+  "engine.translation_better_model_available":
+    "Đã chọn {model} trong số các mô hình đã cài; cài {better_model} sẽ cho chất lượng tốt hơn",
+  "engine.translation_not_needed":
+    "{source_language} và {target_language} là cùng một ngôn ngữ nói: không cần mô hình dịch, chỉ cần chuyển đổi chữ viết",
+  "engine.source_language_auto":
+    "Ngôn ngữ nghe được phát hiện tự động: chọn mô hình dịch có thể dịch mọi ngôn ngữ sang {target_language}",
+  "engine.translation_server_unreachable":
+    "Không kết nối được máy chủ dịch {base_url} (Ollama đã chạy chưa?); không thể kiểm tra các mô hình đã cài",
+  "engine.translation_model_list_unavailable": "Không lấy được danh sách mô hình của máy chủ dịch: {error}",
+  "engine.low_ram_for_translation":
+    "RAM dưới 8 GB: có thể không đủ để chạy cùng lúc mô hình dịch và nhận dạng giọng nói",
+  "engine.translation_model_not_installed": "Chưa cài mô hình dịch được đề xuất {model}",
+  "engine.translation_model_exceeds_budget":
+    "{model} cần khoảng {model_gb} GB, nhiều hơn {budget_gb} GB còn trống; Ollama sẽ chạy một phần trên CPU, chậm hơn",
+  "engine.translation_unsupported": "Không có mô hình dịch được đề xuất nào hỗ trợ {source_language} → {target_language}",
+  "engine.combination_not_object": "Tổ hợp mô hình phải là một đối tượng (object)",
+  "engine.asr_path_not_object": "{path} phải là một đối tượng (object)",
+  "engine.asr_model_unknown": "{path}: mô hình nhận dạng giọng nói không xác định {model} (có sẵn: {available})",
+  "engine.asr_device_invalid": "{path}: thiết bị phải là tự động, CPU hoặc CUDA",
+  "engine.asr_compute_type_not_string": "{path}: độ chính xác phải là văn bản hoặc để trống",
+  "engine.asr_cpu_threads_invalid": "{path}: số luồng CPU phải là số nguyên từ 0 đến 256",
+  "engine.asr_cuda_no_gpu": "{path}: đã chọn CUDA nhưng không tìm thấy GPU NVIDIA",
+  "engine.asr_cuda_platform_unsupported":
+    "{path}: đã chọn CUDA nhưng CTranslate2 không có bản CUDA cho nền tảng này (chỉ Windows và Linux x86-64)",
+  "engine.asr_cuda_driver_too_old":
+    "{path}: đã chọn CUDA nhưng driver NVIDIA {driver_version} quá cũ (CUDA 12 cần {min_driver} trở lên)",
+  "engine.asr_cuda_compute_capability_unknown":
+    "{path}: đã chọn CUDA nhưng không rõ compute capability của GPU (có thể driver quá cũ)",
+  "engine.asr_cuda_compute_capability_unsupported":
+    "{path}: đã chọn CUDA nhưng {gpu_name} (compute capability {compute_capability}) không hỗ trợ tăng tốc float16/int8 của CTranslate2",
+  "engine.asr_cuda_cublas_missing": "{path}: đã chọn CUDA nhưng chưa cài cuBLAS; hãy tải thành phần tăng tốc GPU trước",
+  "engine.asr_compute_type_unknown": "{path}: độ chính xác không xác định {compute_type} (có sẵn: {available})",
+  "engine.translation_model_name_invalid": "{field} phải là tên mô hình dài 1–{max_chars} ký tự, hoặc để trống",
+  "engine.asr_auto_uses_cpu": "{path}: chế độ tự động sẽ dùng CPU (hiện GPU không chạy được nhận dạng giọng nói)",
+  "engine.asr_compute_type_cpu_fallback":
+    "{path}: CPU không hỗ trợ {compute_type}; CTranslate2 sẽ dùng độ chính xác khác (thường là float32, chậm hơn)",
+  "engine.asr_compute_type_gpu_fallback":
+    "{path}: compute capability {compute_capability} không hỗ trợ {compute_type}; CTranslate2 sẽ dùng float32 hoặc int8_float32 (chậm hơn, tốn nhiều VRAM hơn)",
+  "engine.asr_model_slow_on_cpu": "{path}: {model} cần từ 3,6 giây mỗi câu trên CPU; phụ đề sẽ trễ rõ rệt",
+  "engine.asr_model_not_downloaded":
+    "{path}: chưa tải mô hình nhận dạng giọng nói {model}; mô hình sẽ được tải trước khi bắt đầu",
+  "engine.asr_model_language_unsupported": "{path}: {model} không nhận dạng được {language}",
+  "engine.asr_fast_larger_than_final":
+    "Mô hình trực tiếp {fast_model} lớn hơn mô hình hoàn chỉnh {final_model}: phụ đề trực tiếp có thể chậm hơn phụ đề hoàn chỉnh",
+  "engine.asr_no_speech_unavailable":
+    "Cả {fast_model} lẫn {final_model} đều không lọc được phần không phải lời nói bằng no_speech; tiếng hát và tiếng ồn dễ bị chép thành chữ hơn",
+  "engine.translation_model_not_on_server": "Máy chủ dịch không có {model}",
+  "engine.translation_model_language_unsupported": "{model} không hỗ trợ {source_language} → {target_language}",
+  "engine.translation_license_non_commercial": "Giấy phép của {model} ({license}) cấm sử dụng cho mục đích thương mại",
+  "engine.translation_license_region_restricted": "Giấy phép của {model} ({license}) không áp dụng tại {regions}",
+  "engine.translation_models_differ":
+    "Dịch trực tiếp và dịch hoàn chỉnh dùng hai mô hình khác nhau: Ollama cục bộ mất 1,5–18 giây mỗi lần chuyển mô hình",
+  "engine.vram_overflow":
+    "Nhận dạng giọng nói và dịch cần khoảng {need_mb} MiB VRAM, nhiều hơn {available_mb} MiB còn trống trên {gpu_name}; có thể chạy chậm hoặc không tải được",
+  "engine.asr_ram_over_half": "Các mô hình nhận dạng giọng nói trên CPU dùng hơn một nửa RAM",
+  "engine.translation_disabled": "Đã tắt dịch: chỉ hiển thị văn bản gốc và không cần mô hình dịch",
+  "engineParam.fast_asr": "Nhận dạng cho phụ đề trực tiếp",
+  "engineParam.final_asr": "Nhận dạng cho phụ đề hoàn chỉnh",
+  "engineParam.translation_fast": "Mô hình dịch trực tiếp",
+  "engineParam.translation_final": "Mô hình dịch hoàn chỉnh",
+
+  // ------------------------------------------------------------ status
+  "status.starting": "Đang khởi động engine",
+  "status.restarting": "Engine dừng đột ngột; đang khởi động lại",
+  "status.failed": "Không thể khởi động engine",
+  "status.stopped": "Engine đã dừng",
+  "status.loading": "Đang tải mô hình",
+  "status.running": "Đang nghe",
+  "status.error": "Đã dừng do lỗi",
+  "status.idle": "Sẵn sàng",
+  "status.code.model_not_downloaded": "Chưa tải mô hình. Hãy tải ở trang Mô hình rồi bắt đầu lại.",
+  "status.code.unknown_model": "Mô hình trong cài đặt không tồn tại. Hãy chọn mô hình khác ở trang Mô hình.",
+  "status.code.device_not_found": "Không tìm thấy thiết bị âm thanh đã chọn. Hãy chọn lại thiết bị.",
+  "status.code.permission_denied":
+    "kikitori không được phép dùng micrô hoặc ghi âm. Hãy cấp quyền trong cài đặt hệ thống.",
+  "status.code.device_lost": "Thiết bị âm thanh đã bị ngắt kết nối. Hãy kiểm tra kết nối rồi bắt đầu lại.",
+  "status.code.capture_unavailable": "Máy tính này không thu được loại nguồn âm thanh này.",
+  "status.code.capture_error": "Đã xảy ra lỗi khi thu âm thanh.",
+  "status.code.pipeline_error": "Đã xảy ra lỗi khi xử lý giọng nói.",
+  "status.code.load_error": "Tải mô hình thất bại.",
+  "status.code.translation_model_missing": "Máy chủ dịch chưa có mô hình dịch.",
+  "status.code.translation_server_auth_failed": "Máy chủ dịch đã từ chối yêu cầu — hãy kiểm tra khóa API.",
+  "status.errorDetail": "Đã xảy ra lỗi: {detail}",
+  "status.errorUnknown": "Đã xảy ra lỗi không xác định.",
+
+  // ------------------------------------------------------------ notices
+  "notice.close": "Đóng",
+  "notice.closeLabel": "Đóng thông báo này",
+  "notice.settingsFieldsUnreadable": {
+    other: "Không đọc được {count} trường trong tệp cài đặt; tạm thời dùng giá trị mặc định: {fields}",
+  },
+  "notice.initFailed": "Khởi tạo cửa sổ thất bại: {reason}",
+
+  // ------------------------------------------------------------ failure contexts
+  "error.saveMode": "Không thể ghi nhớ chế độ",
+  "error.saveDevice": "Không thể ghi nhớ nguồn âm thanh",
+  "error.start": "Không thể bắt đầu",
+  "error.stop": "Không thể dừng",
+  "error.showOverlay": "Không thể hiện cửa sổ phụ đề",
+  "error.hideOverlay": "Không thể ẩn cửa sổ phụ đề",
+  "error.toggleClickThrough": "Không thể bật/tắt nhấp xuyên qua",
+  "error.applyRecommendation": "Không thể áp dụng cấu hình đề xuất",
+  "error.readSettings": "Không thể đọc cài đặt",
+  "error.saveDismissal": "Không thể ghi nhớ “Không nhắc lại”",
+  "error.saveUiLocale": "Không thể ghi nhớ ngôn ngữ giao diện",
+  "error.setOverlayLocale": "Không thể đổi ngôn ngữ của cửa sổ phụ đề",
+  "error.readModels": "Không thể đọc danh sách mô hình",
+  "error.detectHardware": "Không thể phát hiện phần cứng",
+  "error.downloadModel": "Không thể tải {model}",
+  "error.downloadGpuRuntime": "Không thể tải thành phần tăng tốc GPU",
+  "error.openEula": "Không thể mở điều khoản giấy phép; hãy sao chép URL vào trình duyệt",
+  "error.applyStyle": "Không thể áp dụng giao diện phụ đề",
+  "error.openLicenses": "Không thể mở thư mục giấy phép; hãy mở theo đường dẫn ở trên",
+  "error.listDevices": "Không thể liệt kê thiết bị âm thanh",
+  "error.restartEngine": "Không thể khởi động lại engine",
+  "error.readOverlayState": "Không thể đọc trạng thái cửa sổ phụ đề",
+  "error.readBridge": "Không thể đọc trạng thái engine",
+  "error.readLanguages": "Không thể đọc danh sách ngôn ngữ",
+  "error.setTranslation": "Không thể chuyển “Hiển thị bản dịch”",
+  "error.previewLanguages": "Không thể lấy tổ hợp đề xuất",
+
+  // ------------------------------------------------------------ engine error codes
+  "error.code.invalid_settings": "Cài đặt không hợp lệ",
+  "error.code.settings_io_error": "Không thể lưu tệp cài đặt; hãy kiểm tra dung lượng đĩa và quyền truy cập",
+  "error.code.session_active": "Đang chạy; hãy dừng trước",
+  "error.code.device_not_found": "Không tìm thấy thiết bị âm thanh đã chọn; hãy chọn lại",
+  "error.code.capture_unavailable": "Máy tính này không thu được loại nguồn âm thanh này",
+  "error.code.capture_error": "Đã xảy ra lỗi khi thu âm thanh",
+  "error.code.unknown_model": "Engine không nhận ra mô hình này",
+  "error.code.download_in_progress": "Mục này đang được tải; hãy đợi tải xong",
+  "error.code.license_not_accepted": "Hãy đồng ý với NVIDIA CUDA EULA trước khi tải thành phần tăng tốc GPU",
+  "error.code.gpu_runtime_unsupported":
+    "Nền tảng này không hỗ trợ thành phần tăng tốc GPU (chỉ Windows và Linux trên x86-64)",
+  "error.code.pull_unsupported": "Máy chủ dịch không phải Ollama nên kikitori không thể tải mô hình dịch giúp bạn",
+  "error.code.translation_server_unreachable": "Không kết nối được máy chủ dịch",
+  "error.code.translation_server_auth_failed": "Máy chủ dịch đã từ chối yêu cầu — hãy kiểm tra khóa API",
+  "error.code.unknown_method": "Phiên bản engine không khớp với ứng dụng; thao tác này không được hỗ trợ",
+  "error.code.invalid_params": "Đã gửi tham số không hợp lệ đến engine",
+  "error.code.invalid_request": "Đã gửi yêu cầu sai định dạng đến engine",
+  "error.code.internal_error": "Lỗi nội bộ của engine",
+  "error.code.other": "Engine báo lỗi ({code})",
+  "error.engineSentence": "{head}.",
+  "error.engineDetail": "{head}: {message}",
+  "error.timeout": {
+    other: "Engine không phản hồi trong {count} giây. Hãy thử lại sau hoặc khởi động lại engine.",
+  },
+  "error.disconnected":
+    "Engine chưa chạy. Hãy đợi engine khởi động lại, hoặc nhấn “Khởi động lại engine” ở vùng trạng thái.",
+  "error.invalidInput": "Giá trị không hợp lệ: {message}",
+  "error.generic": "Đã xảy ra lỗi: {message}",
+
+  // ------------------------------------------------------------ transcript
+  "transcript.title": "Bản ghi",
+  "transcript.lede": "Phụ đề trực tiếp hiện mờ trước, rồi chuyển sang bản dịch hoàn chỉnh khi câu kết thúc.",
+  "transcript.overlayVisible": "Hiện cửa sổ phụ đề",
+  "transcript.clickThrough": "Nhấp xuyên qua",
+  "transcript.clear": "Xóa",
+  "transcript.showTranslation": "Hiển thị bản dịch",
+  "transcript.noTranslation": "(không có bản dịch)",
+  "transcript.translating": "Đang dịch",
+  "transcript.emptyTitle": "Chưa có phụ đề",
+  "transcript.emptyBody":
+    "Chọn chế độ và nguồn âm thanh, rồi nhấn Bắt đầu. Mọi câu nghe được đều được liệt kê ở đây, bản gốc ở trên và bản dịch ở dưới.",
+  "transcript.langTitle": "{source} sang {target}",
+  "transcript.shortcutCtrl": "Ctrl (⌘ trên macOS)",
+  "transcript.shortcutOn":
+    "Khi bật nhấp xuyên qua, các cú nhấp chuột sẽ xuyên qua cửa sổ phụ đề. Nhấn {keys} để bật/tắt bất cứ lúc nào.",
+  "transcript.shortcutTaken":
+    "Phím tắt {keys} đang được ứng dụng khác sử dụng; hãy dùng công tắc ở đây để bật/tắt nhấp xuyên qua.",
+
+  // ------------------------------------------------------------ models page
+  "models.title": "Mô hình",
+  "models.lede": "Nhận dạng giọng nói chạy trên máy tính này; việc dịch được gửi đến dịch vụ đã đặt ở trang Cài đặt.",
+  "models.refresh": "Phát hiện lại",
+
+  "hw.title": "Máy tính này",
+  "hw.status": "Trạng thái",
+  "hw.detecting": "Đang phát hiện",
+  "hw.os": "Hệ điều hành",
+  "hw.cpu": "Bộ xử lý",
+  "hw.memory": "Bộ nhớ",
+  "hw.gpu": "Card đồ họa",
+  "hw.cublas": "cuBLAS (nhận dạng bằng GPU)",
+  "hw.server": "Dịch vụ dịch",
+  "hw.cpuValue": "{model}, {cores}",
+  "hw.cores": "{physical} nhân, {logical} luồng",
+  "hw.threads": { other: "{count} luồng" },
+  "hw.coresUnknown": "không rõ số nhân",
+  "hw.appleSilicon": "Apple Silicon (bộ nhớ dùng chung với bộ xử lý)",
+  "hw.gpuVram": "{size} bộ nhớ đồ họa",
+  "hw.gpuDriver": "driver {version}",
+  "hw.gpuCompute": "compute capability {capability}",
+  "hw.noNvidia": "Không phát hiện card đồ họa NVIDIA",
+  "hw.cublasNotUsed": "Không dùng trên nền tảng này",
+  "hw.cublasAvailable": "Khả dụng ({source})",
+  "hw.cublasSourceUnknown": "không rõ nguồn",
+  "hw.cublasMissing": "Chưa cài",
+  "hw.cublasSource.runtime": "thành phần tăng tốc GPU do kikitori tải về",
+  "hw.cublasSource.configured": "thư mục đặt trong cấu hình tùy chỉnh",
+  "hw.cublasSource.system": "CUDA cài trên hệ thống",
+  "hw.serverNotDetected": "Không phát hiện",
+  "hw.serverLocal": "cục bộ",
+  "hw.serverRemote": "từ xa",
+  "hw.serverModelsUnknown": "không rõ danh sách mô hình",
+  "hw.serverModelCount": { other: "{count} mô hình" },
+  "hw.serverReachable": "{url} ({where}, {models})",
+  "hw.serverUnreachable": "{url} (không kết nối được)",
+  "hw.serverUnreachableError": "{url} (không kết nối được: {error})",
+  "hw.memoryAvailable": "{total} (còn trống {available})",
+  "hw.incomplete": "Phát hiện chưa hoàn tất: {error}",
+
+  "rec.title": "Cấu hình đề xuất",
+  "rec.pending": "Đề xuất sẽ hiện ở đây sau khi phát hiện xong.",
+  "rec.tier": "Cấp phần cứng",
+  "rec.fastAsr": "Nhận dạng cho phụ đề trực tiếp",
+  "rec.finalAsr": "Nhận dạng cho bản dịch hoàn chỉnh",
+  "rec.fastTranslation": "Dịch phụ đề trực tiếp",
+  "rec.finalTranslation": "Bản dịch hoàn chỉnh",
+  "rec.budget": "Bộ nhớ dành cho dịch",
+  "rec.notLocal": "Không có đề xuất (dịch vụ dịch không ở máy cục bộ); hãy chọn trong cấu hình tùy chỉnh",
+  "rec.gpuRuntimeMissing": "Sau khi bạn tải thành phần tăng tốc GPU bên dưới, đề xuất sẽ dùng card đồ họa.",
+  "rec.apply": "Áp dụng cấu hình đề xuất",
+  "rec.applyNote": "Ghi lại mô hình nhận dạng, thiết bị, độ chính xác, số luồng và mô hình dịch.",
+  "rec.applied": "Đã áp dụng cấu hình đề xuất: phụ đề trực tiếp {fast}, bản dịch hoàn chỉnh {final} ({device}).",
+  "rec.appliedWhileRunning":
+    "Đã áp dụng cấu hình đề xuất: phụ đề trực tiếp {fast}, bản dịch hoàn chỉnh {final} ({device}). Có hiệu lực từ lần bắt đầu tiếp theo.",
+  "tier.nvidia_8gb": "Card đồ họa NVIDIA (từ 8 GB trở lên)",
+  "tier.nvidia_4gb": "Card đồ họa NVIDIA (4–8 GB)",
+  "tier.nvidia_lt4gb": "Card đồ họa NVIDIA (dưới 4 GB)",
+  "tier.cpu": "CPU (bộ nhớ từ 16 GB trở lên)",
+  "tier.cpu_low": "CPU (cấu hình nhẹ)",
+  "tier.apple_silicon": "Apple Silicon (CPU)",
+  "threads.auto": "luồng tự động",
+  "threads.count": { other: "{count} luồng" },
+  "computeType.auto": "độ chính xác tự động",
+
+  "machine.gpu": "{name}, {gb} GB",
+  "machine.ram": "{gb} GB bộ nhớ",
+  "machine.named": "{name}, {ram}",
+  "machine.thisCpu": "bộ xử lý của máy tính này",
+  "machine.thisCpuRam": "bộ xử lý của máy tính này, {ram}",
+  "summary.asrSameDevice": "trực tiếp {fast}, hoàn chỉnh {final} ({device})",
+  "summary.asrSplit": "trực tiếp {fast} ({fastDevice}), hoàn chỉnh {final} ({finalDevice})",
+  "summary.translationKept": "giữ nguyên mô hình dịch (dịch vụ dịch không ở máy cục bộ)",
+  "summary.translationSame": "dịch {model}",
+  "summary.translationSplit": "dịch trực tiếp {fast}, dịch hoàn chỉnh {final}",
+  "summary.full": "{asr}; {translation}",
+  "firstRun.applied": "Đã áp dụng cấu hình đề xuất cho máy tính này ({machine}): {summary}.",
+  "firstRun.appliedGpuMissing":
+    "Đã áp dụng cấu hình đề xuất cho máy tính này ({machine}): {summary}. Card đồ họa thiếu thành phần tăng tốc GPU nên tạm thời dùng CPU; hãy tải thành phần này ở trang Mô hình để dùng card đồ họa.",
+  "firstRun.applyFailed":
+    "Không thể áp dụng cấu hình đề xuất: {reason} Hãy kiểm tra cấu hình hiện tại ở trang Mô hình và áp dụng đề xuất tại đó nếu cần.",
+  "firstRun.detectFailed":
+    "Không thể phát hiện phần cứng của máy tính này: {reason} Tạm thời dùng cấu hình mặc định (trực tiếp {fast}, hoàn chỉnh {final}); bạn có thể phát hiện lại ở trang Mô hình và áp dụng đề xuất.",
+  "firstRun.review": "Xem lại ở trang Mô hình",
+  "offer.text": "Có cấu hình tốt hơn cho máy tính này: {summary}.",
+  "offer.apply": "Áp dụng",
+  "offer.dismiss": "Không nhắc lại",
+  "missing.itemFailed": "Tải {model} thất bại: {error}",
+  "missing.downloading": "Đang tải {models}; bạn có thể bắt đầu khi tải xong.",
+  "missing.failed": "{items}. Bạn có thể tải lại.",
+  "missing.offer": "Cần tải {models} (tổng cộng khoảng {size}) trước khi có thể bắt đầu.",
+  "missing.done": "Đã tải xong các mô hình. Bạn có thể nhấn Bắt đầu ngay.",
+  "missing.download": "Tải các mô hình còn thiếu",
+  "startdl.title": "Đang tải mô hình trước khi bắt đầu",
+  "startdl.itemAsr": "Mô hình nhận dạng giọng nói {model}",
+  "startdl.itemTranslation": "Mô hình dịch {model}",
+  "startdl.pending": "Đang chờ",
+  "startdl.preparing": "Đang chuẩn bị tải",
+  "startdl.progress": "{percent}%, {done} / {total}",
+  "startdl.done": "Xong",
+  "startdl.failed": "Tải thất bại: {error}",
+  "startdl.stillMissing": "{model} đã được tải, nhưng engine vẫn báo thiếu.",
+  "startdl.downloading": "Phụ đề sẽ tự động bắt đầu khi tải xong.",
+  "startdl.starting": "Đã tải xong; đang bắt đầu.",
+  "startdl.failedHelp": "Có mục tải thất bại. Hãy nhấn Thử lại, hoặc chọn mô hình khác ở trang Mô hình.",
+  "startdl.pullUnsupported":
+    "Máy chủ dịch {url} không phải Ollama nên kikitori không thể tải mô hình dịch giúp bạn. Hãy tự cài {models} trên máy chủ đó, hoặc chọn một mô hình đã cài ở trang Mô hình. Bạn cũng có thể tắt “Hiển thị bản dịch” để chỉ xem bản gốc.",
+  "startdl.serverUnreachable":
+    "Không kết nối được máy chủ dịch {url}. Nếu bạn dùng Ollama, hãy khởi động nó trước (mở ứng dụng Ollama, hoặc chạy ollama serve trong terminal), rồi nhấn Thử lại. Bạn cũng có thể tắt “Hiển thị bản dịch” để chỉ xem bản gốc.",
+  "startdl.authFailed":
+    "Máy chủ dịch {url} đã từ chối yêu cầu — hãy kiểm tra khóa API (biến môi trường được đặt trong Cài đặt), rồi nhấn Thử lại.",
+  "startdl.retry": "Thử lại",
+  "startdl.cancel": "Hủy",
+  "startdl.cancelLabel": "Ngừng chờ tải và không tự động bắt đầu",
+
+  "gpu.title": "Thành phần tăng tốc GPU",
+  "gpu.lede":
+    "Để tăng tốc nhận dạng giọng nói bằng card đồ họa NVIDIA cần thư viện cuBLAS của NVIDIA. kikitori không đi kèm thư viện này; nó được tải từ PyPI sau khi bạn chấp nhận giấy phép của nó.",
+  "gpu.name": "Thành phần tăng tốc GPU",
+  "gpu.unsupported":
+    "Nền tảng của máy tính này không dùng thành phần này: tăng tốc GPU chỉ dành cho Windows và Linux trên x86-64 có card đồ họa NVIDIA. Các nền tảng khác luôn nhận dạng giọng nói trên CPU.",
+  "gpu.progressLabel": "Tiến độ tải thành phần tăng tốc GPU",
+  "gpu.finishing": "Đã tải xong; đang xác minh và giải nén (vài giây)",
+  "gpu.progress": "{percent}%, {done} / {total}",
+  "gpu.installed": "Đã cài {what}.",
+  "gpu.installedAt": "Đã cài {what} tại {path}.",
+  "gpu.noCublas": "Đã cài, nhưng không phát hiện cuBLAS dùng được. Hãy khởi động lại engine, rồi nhấn “Phát hiện lại”.",
+  "gpu.sizeApprox": "khoảng {size}",
+  "gpu.sizeUnknown": "vài trăm MB",
+  "gpu.situationMissing":
+    "Card đồ họa NVIDIA của máy tính này có thể tăng tốc nhận dạng, nhưng thiếu thành phần này nên tạm thời dùng CPU.",
+  "gpu.situationNoGpu": "Không phát hiện card đồ họa NVIDIA; không có card này thì không cần tải.",
+  "gpu.readLicense": "Đọc giấy phép",
+  "gpu.download": "Tải thành phần tăng tốc GPU",
+  "gpu.consentNotice":
+    "Thao tác này tải NVIDIA cuBLAS ({package}, {size}) từ PyPI. Khi sử dụng nó, bạn đồng ý với NVIDIA CUDA EULA ({license}).",
+  "gpu.lastFailed": "Lần tải trước thất bại: {error}",
+  "gpu.agree": "Tôi đồng ý với NVIDIA CUDA EULA",
+  "gpu.installedRestarting": "Đã cài thành phần tăng tốc GPU. Đang khởi động lại engine để dùng GPU.",
+  "gpu.installedBusy":
+    "Đã cài thành phần tăng tốc GPU. Vì đang có tác vụ chạy nên engine không được tự động khởi động lại; hãy khởi động lại sau khi xong để dùng GPU.",
+
+  "asr.title": "Mô hình nhận dạng giọng nói",
+  "asr.lede":
+    "Phụ đề trực tiếp cần tốc độ, bản dịch hoàn chỉnh cần độ chuẩn xác; mỗi loại có thể dùng một mô hình khác nhau.",
+  "asr.colModel": "Mô hình",
+  "asr.colSize": "Kích thước",
+  "asr.colSpeed": "Tốc độ",
+  "asr.colMemory": "Bộ nhớ",
+  "asr.colLicense": "Giấy phép",
+  "asr.colStatus": "Trạng thái",
+  "asr.inUse": "Đang dùng: {roles}",
+  "asr.noSpeech": "Không lọc phần không lời",
+  "asr.noSpeechHelp":
+    "Mô hình này không nhận biết đáng tin cậy khi nào không có lời nói; với bản dịch hoàn chỉnh, đánh giá của mô hình phụ đề trực tiếp được dùng để lọc tiếng ồn.",
+  "asr.memoryCpu": "CPU {size}",
+  "asr.memoryGpu": "GPU {size}",
+  "asr.progressLabel": "Tiến độ tải {model}",
+  "asr.progress": "{percent}%, {done}",
+  "asr.downloaded": "Đã tải",
+  "asr.download": "Tải xuống",
+  "asr.downloadFailed": "Tải thất bại: {error}",
+  "role.fast": "trực tiếp",
+  "role.final": "hoàn chỉnh",
+  "speed.fastest": "Nhanh nhất",
+  "speed.fast": "Nhanh",
+  "speed.medium": "Trung bình",
+  "speed.slow": "Chậm",
+  "speed.slowest": "Chậm nhất",
+  "download.done": "Đã tải {model}.",
+  "download.failed": "Tải {what} thất bại: {error}",
+
+  "tr.title": "Mô hình dịch",
+  "tr.unreachable": "Không kết nối được dịch vụ dịch tại {url}. Nếu bạn dùng Ollama cục bộ, hãy khởi động nó trước.",
+  "tr.unreachableError":
+    "Không kết nối được dịch vụ dịch tại {url} ({error}). Nếu bạn dùng Ollama cục bộ, hãy khởi động nó trước.",
+  "tr.installedCount": {
+    other: "Đã cài {count} mô hình trên dịch vụ dịch tại {url}.",
+  },
+  "tr.installedCountLocal": {
+    other: "Đã cài {count} mô hình trên dịch vụ dịch tại {url} (cục bộ).",
+  },
+  "tr.nonCommercial": "Phi thương mại",
+  "tr.regionExcluded": "Giấy phép loại trừ {regions}",
+  "tr.license": "Giấy phép {license}",
+  "tr.unlisted": "Không có trong danh sách của kikitori; hãy tự kiểm tra giấy phép",
+  "tr.stateUnknown": "Không rõ trạng thái cài đặt",
+  "tr.stateInstalled": "Đã cài",
+  "tr.stateMissing": "Chưa cài",
+
+  "combo.title": "Cấu hình tùy chỉnh",
+  "combo.lede":
+    "Thay đổi được kiểm tra ngay với máy tính này; cấu hình có lỗi sẽ không lưu được. Cấu hình mới có hiệu lực từ lần nhấn Bắt đầu tiếp theo.",
+  "combo.fastModel": "Mô hình nhận dạng cho phụ đề trực tiếp",
+  "combo.finalModel": "Mô hình nhận dạng cho bản dịch hoàn chỉnh",
+  "combo.device": "Thiết bị tính toán",
+  "combo.deviceAuto": "Tự động (dùng GPU NVIDIA nếu có, nếu không thì dùng CPU)",
+  "combo.deviceCpu": "CPU",
+  "combo.deviceCuda": "GPU NVIDIA (CUDA)",
+  "combo.deviceHelp":
+    "Cả hai nhánh xử lý dùng chung một thiết bị: một khi GPU gặp lỗi trong lúc chạy, GPU sẽ không được thử lại.",
+  "combo.translationFast": "Mô hình dịch cho phụ đề trực tiếp",
+  "combo.translationFinal": "Mô hình dịch cho bản dịch hoàn chỉnh",
+  "combo.advanced": "Nâng cao",
+  "combo.advancedHelp":
+    "Độ chính xác và số luồng thường để theo cấu hình đề xuất. Khi để trống hoặc Tự động, engine sẽ quyết định theo thiết bị thực tế được dùng (int8 trên CPU, float16 trên GPU).",
+  "combo.fastComputeType": "Độ chính xác cho phụ đề trực tiếp",
+  "combo.finalComputeType": "Độ chính xác cho bản dịch hoàn chỉnh",
+  "combo.fastThreads": "Số luồng CPU cho phụ đề trực tiếp",
+  "combo.finalThreads": "Số luồng CPU cho bản dịch hoàn chỉnh",
+  "combo.cudaDirs": "Thư mục cuBLAS 12 tự cài",
+  "combo.cudaDirsPlaceholder":
+    "Mỗi dòng một đường dẫn đầy đủ, ví dụ C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin",
+  "combo.cudaDirsHelp":
+    "Chỉ cần khi bạn tự cài CUDA Toolkit. Thành phần tăng tốc GPU tải ở trên được dùng tự động và không cần liệt kê.",
+  "combo.save": "Lưu cấu hình",
+  "combo.reset": "Khôi phục cài đặt hiện tại",
+  "combo.notInList": "{value} (không có trong danh sách)",
+  "combo.notDownloaded": "{id} (chưa tải)",
+  "combo.saved": "Đã lưu cấu hình.",
+  "combo.savedNextStart": "Đã lưu; có hiệu lực từ lần bắt đầu tiếp theo.",
+  "check.fixFirst": "Hãy sửa các trường được đánh dấu trước.",
+  "check.checking": "Đang kiểm tra cấu hình này",
+  "check.okWithWarnings": "Máy tính này dùng được cấu hình này, nhưng lưu ý:",
+  "check.ok": "Máy tính này dùng được cấu hình này.",
+  "check.notOk": "Hiện không thể dùng cấu hình này:",
+  "check.rejected": "Engine không chấp nhận cài đặt này: {message}",
+  "check.unavailable":
+    "Hiện không thể kiểm tra cấu hình ({reason}). Bạn vẫn có thể lưu; engine sẽ kiểm tra định dạng cài đặt khi lưu.",
+  "check.engineNotReady": "Engine chưa sẵn sàng",
+  "form.fixFields": "Hãy sửa các trường được đánh dấu.",
+  "form.engineRejected": "Engine đã từ chối giá trị này: {message}",
+
+  // ------------------------------------------------------------ settings page
+  "settings.title": "Cài đặt",
+  "settings.path": "Tệp cài đặt: {path}",
+  "settings.uiLocaleLegend": "Ngôn ngữ giao diện",
+  "settings.uiLocaleLabel": "Ngôn ngữ giao diện",
+  "settings.uiLocaleSystem": "Theo hệ thống",
+  "settings.uiLocaleHelp":
+    "Áp dụng ngay cho cửa sổ chính và cửa sổ phụ đề. “Theo hệ thống” dùng ngôn ngữ của hệ điều hành, hoặc tiếng Anh nếu không có ngôn ngữ đó.",
+  "settings.translationLegend": "Dịch vụ dịch",
+  "settings.translationLede":
+    "Dùng được mọi API tương thích OpenAI. URL mặc định của Ollama cục bộ là http://localhost:11434/v1.",
+  "settings.baseUrl": "URL dịch vụ",
+  "settings.apiKeyEnv": "Biến môi trường chứa khóa API",
+  "settings.apiKeyEnvHelp":
+    "Chỉ nhập tên biến. Hãy đặt chính khóa đó làm biến môi trường hệ thống; kikitori không bao giờ lưu khóa. Ollama cục bộ không cần khóa.",
+  "settings.translationModelsHelp":
+    "Mô hình dịch được chọn trong cấu hình tùy chỉnh ở trang Mô hình, nơi cũng kiểm tra giấy phép và mức tải trên máy tính này.",
+  "settings.regionLegend": "Khu vực giấy phép của mô hình dịch",
+  "settings.regionLede":
+    "Một số mô hình dịch (ví dụ Tencent HY-MT) không được cấp phép tại EU, Vương quốc Anh hoặc Hàn Quốc. kikitori không thể biết bạn đang ở đâu nên mặc định không đề xuất các mô hình này.",
+  "settings.regionConsent":
+    "Tôi xác nhận rằng tôi không sử dụng kikitori tại EU, Vương quốc Anh hoặc Hàn Quốc, và tôi đồng ý với điều khoản giấy phép của các mô hình dịch này.",
+  "settings.regionHelp":
+    "Khi đánh dấu, cấu hình đề xuất cũng xét đến các mô hình bị giới hạn khu vực. Khi bỏ đánh dấu, bạn vẫn có thể chọn chúng trong cấu hình tùy chỉnh, kèm cảnh báo.",
+  "settings.languageLegend": "Ngôn ngữ",
+  "settings.languageLede":
+    "Chọn ngôn ngữ bạn nghe và ngôn ngữ phụ đề; các mô hình được đề xuất cho chúng được liệt kê bên dưới. Lúc này chưa tải gì: các mô hình còn thiếu sẽ được tải vào lần đầu bạn nhấn Bắt đầu.",
+  "settings.languageModeMedia": "Đây là ngôn ngữ cho chế độ dịch video.",
+  "settings.languageModeInterpret": "Đây là ngôn ngữ cho chế độ phiên dịch trực tiếp.",
+  "settings.source": "Ngôn ngữ nghe",
+  "settings.sourceHelp":
+    "Ngôn ngữ được nói trong video. Với “Tự động phát hiện”, ngôn ngữ của từng câu được nhận diện trước, và các câu rất ngắn có thể bị nhận diện sai.",
+  "settings.own": "Ngôn ngữ của tôi",
+  "settings.ownHelp": "Ngôn ngữ bạn nói; lời của người kia được dịch sang ngôn ngữ này.",
+  "settings.languageFilter": "Nhập để lọc",
+  "settings.languageFilterLabel": "Lọc {field}",
+  "settings.applyRecommended": "Đồng thời chuyển sang các mô hình được đề xuất",
+  "settings.applyRecommendedHelp":
+    "Thay đổi mô hình nhận dạng, thiết bị và mô hình dịch; khi bỏ chọn, chỉ ngôn ngữ thay đổi.",
+  "settings.saveLanguages": "Lưu ngôn ngữ",
+  "settings.languagesSaved": "Đã lưu ngôn ngữ.",
+  "settings.languagesSavedWithModels": "Đã lưu ngôn ngữ và đang dùng các mô hình được đề xuất.",
+  "settings.languagesSavedNoPreview": "Đã lưu ngôn ngữ; tổ hợp đề xuất chưa sẵn sàng nên mô hình không thay đổi.",
+  "settings.languagesSavedNextStart": "Đã lưu; có hiệu lực từ lần bắt đầu tiếp theo.",
+  "settings.languagesUnavailable": "Có thể chọn ngôn ngữ khi engine đã sẵn sàng.",
+  "language.auto": "Tự động phát hiện",
+  "preview.title": "Tổ hợp đề xuất",
+  "preview.checking": "Đang tính tổ hợp đề xuất cho các ngôn ngữ này",
+  "preview.unavailable": "Hiện chưa có tổ hợp đề xuất: {reason}",
+  "preview.translation": "Mô hình dịch",
+  "preview.installed": "Đã cài",
+  "preview.downloadOnFirstUse": "Tải khi dùng lần đầu, khoảng {size}",
+  "preview.downloadUnknownSize": "Tải khi dùng lần đầu (không rõ kích thước)",
+  "preview.installedUnknown": "Không xác định được đã cài hay chưa (máy chủ dịch không phản hồi)",
+  "preview.notNeeded": "Không cần dịch",
+  "preview.translationOff": "“Hiển thị bản dịch” đang tắt nên không cần mô hình dịch",
+  "preview.unsupported": "Không có mô hình dịch nào hỗ trợ tổ hợp ngôn ngữ này",
+  "preview.remote":
+    "Máy chủ dịch không nằm trên máy tính này; hãy chọn mô hình của máy chủ đó trong cấu hình tùy chỉnh ở trang Mô hình",
+  "preview.allInstalled": "Đã cài đủ các mô hình cần thiết.",
+  "preview.total": "Lần bắt đầu đầu tiên sẽ tải khoảng {size}.",
+  "preview.totalUnknown":
+    "Lần bắt đầu đầu tiên sẽ tải các mô hình, một số không rõ kích thước (phần đã biết khoảng {size}).",
+  "settings.target": "Ngôn ngữ phụ đề",
+  "settings.targetHelp":
+    "Ngôn ngữ của phụ đề. Khi cùng ngôn ngữ nói với ngôn ngữ nghe thì không dịch gì; tiếng Trung chỉ được chuyển đổi giữa các hệ chữ viết.",
+  "settings.partner": "Ngôn ngữ của người kia",
+  "settings.partnerHelp":
+    "Lời bạn nói được dịch sang ngôn ngữ này, còn lời người kia được dịch sang ngôn ngữ của bạn. Hai ngôn ngữ phải phân biệt được với nhau nên không thể giống nhau (tiếng Trung phồn thể và giản thể được tính là một).",
+  "settings.styleLegend": "Phụ đề",
+  "settings.showTranslation": "Hiển thị bản dịch",
+  "settings.showTranslationHelp":
+    "Khi tắt, chỉ hiển thị bản gốc với cỡ chữ và màu của phụ đề chính: engine không dịch gì, không cần máy chủ dịch và để GPU rảnh. Bật/tắt khi đang chạy có hiệu lực ngay; các dòng đã hiển thị sẽ không được dịch bổ sung sau đó.",
+  "settings.previewOriginal": "次の駅で降りましょう。",
+  "settings.previewTranslation": "Chúng ta xuống ở ga tiếp theo nhé.",
+  "settings.fontSize": "Cỡ chữ bản dịch",
+  "settings.opacity": "Độ đục của nền",
+  "settings.position": "Vị trí phụ đề",
+  "settings.positionBottom": "Phía dưới cửa sổ",
+  "settings.positionTop": "Phía trên cửa sổ",
+  "settings.lines": "Số câu hiển thị cùng lúc",
+  "settings.linesOption": { other: "{count} câu" },
+  "settings.save": "Lưu cài đặt",
+  "settings.saved": "Đã lưu cài đặt.",
+  "settings.savedRegion":
+    "Đã lưu cài đặt. Cấu hình đề xuất sẽ được tính lại theo khu vực giấy phép mới (xem trang Mô hình).",
+
+  // ------------------------------------------------------------ validation
+  "validation.urlScheme": "URL phải bắt đầu bằng http:// hoặc https://.",
+  "validation.urlEmpty": "Hãy nhập URL của dịch vụ dịch.",
+  "validation.urlInvalid": "Đây không phải URL hợp lệ.",
+  "validation.envPattern": "Chỉ dùng chữ cái tiếng Anh, chữ số và dấu gạch dưới, không bắt đầu bằng chữ số.",
+  "validation.envTooLong": "Tên quá dài (tối đa {max} ký tự).",
+  "validation.partner":
+    "Ngôn ngữ của người kia phải khác ngôn ngữ của bạn (tiếng Trung phồn thể và giản thể được tính là cùng một ngôn ngữ).",
+  "validation.language": "Hãy chọn một ngôn ngữ trong danh sách.",
+  "validation.fontSize": "Cỡ chữ phải từ {min} đến {max}.",
+  "validation.opacity": "Độ đục của nền phải từ 0% đến 100%.",
+  "validation.position": "Hãy chọn phía trên hoặc phía dưới.",
+  "validation.lines": "Số câu phải từ {min} đến {max}.",
+  "validation.asrModel": "Hãy chọn một mô hình nhận dạng giọng nói.",
+  "validation.device": "Hãy chọn thiết bị tính toán.",
+  "validation.translationEmpty": "Hãy nhập tên mô hình dịch.",
+  "validation.translationTooLong": "Tên mô hình tối đa {max} ký tự.",
+  "validation.computeType": "Hãy chọn độ chính xác.",
+  "validation.threads": "Số luồng phải từ {min} đến {max}; để trống để tự động.",
+  "validation.cudaDirsTooMany": "Tối đa {max} thư mục.",
+  "validation.cudaDirNotAbsolute": "“{path}” không phải đường dẫn đầy đủ (ví dụ C:\\CUDA\\bin).",
+
+  // ------------------------------------------------------------ about
+  "about.title": "Giới thiệu",
+  "about.engine": "Engine {version}, phiên bản giao thức {protocol}.",
+  "about.engineFake": "Engine {version}, phiên bản giao thức {protocol}; hiện đang dùng engine giả lập (chế độ phát triển).",
+  "about.engineOffline": "Engine chưa kết nối.",
+  "about.license": "kikitori được phát hành theo giấy phép {license}.",
+  "about.notice":
+    "Các thành phần bên thứ ba trong chương trình này, chẳng hạn Intel® OpenMP, được cung cấp theo điều khoản giấy phép riêng; không được phép dịch ngược (reverse engineering) các thành phần đó.",
+  "about.thirdPartyHead": "Toàn văn giấy phép của các thành phần bên thứ ba:",
+  "about.thirdPartyApp": "Bản thân ứng dụng (Tauri/Rust crate, gói frontend và LICENSE của kikitori): ",
+  "about.thirdPartyEngine": "Engine giọng nói (gói Python): ",
+  "about.thirdPartyDev":
+    "Bản dựng phát triển không có thư mục giấy phép. Trong bản phát hành, văn bản giấy phép nằm trong các thư mục licenses (ứng dụng) và kikitori-engine/THIRD_PARTY_LICENSES (engine giọng nói) của thư mục cài đặt.",
+  "about.openAppLicenses": "Mở thư mục giấy phép bên thứ ba của ứng dụng",
+  "about.openEngineLicenses": "Mở thư mục giấy phép bên thứ ba của engine",
+  "about.checkUpdate": "Kiểm tra cập nhật",
+
+  // ------------------------------------------------------------ updates
+  "update.available": "kikitori {version} đã sẵn sàng để tải và cài đặt.",
+  "update.install": "Tải và cài đặt",
+  "update.downloading": "Đang tải bản cập nhật.",
+  "update.progress": "Đang tải bản cập nhật: {percent}%",
+  "update.installed": "Đã cài kikitori {version}, có hiệu lực sau khi khởi động lại.",
+  "update.restartNow": "Khởi động lại ngay",
+  "update.checking": "Đang kiểm tra",
+  "update.found": "Có phiên bản mới {version}.",
+  "update.latest": "Bạn đang dùng phiên bản mới nhất.",
+  "update.checkFailed": "Không thể kiểm tra cập nhật: {reason}",
+  "update.failed": "Cập nhật thất bại: {reason}",
+  "update.relaunchFailed": "Không thể tự động khởi động lại; hãy tự đóng rồi mở lại kikitori. ({reason})",
+
+  // ------------------------------------------------------------ overlay
+  "overlay.title": "Phụ đề kikitori",
+  "overlay.drag": "Kéo để di chuyển",
+  "overlay.hide": "Ẩn",
+  "overlay.hint": "Phụ đề sẽ hiện ở đây. Kéo cửa sổ để di chuyển; kéo góc dưới bên phải để đổi kích thước.",
+};
