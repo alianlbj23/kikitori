@@ -171,7 +171,11 @@ def open_fake_source(device_id: str | None, kind: DeviceKind) -> AudioSource:
 
 
 class FakeModelCatalog:
-    """ASR 模型：`base`、`small`、`large-v3-turbo` 已下載；`fake-missing` 未下載；`fake-broken` 下載會失敗。"""
+    """ASR 模型：`base`、`small`、`large-v3-turbo` 已下載；`fake-missing` 未下載；`fake-broken` 下載會失敗。
+
+    已下載的模型 `disk_bytes` 是 `FAKE_MODEL_SIZE`；`delete()` 把模型標成未下載（不碰磁碟），
+    之後的 `models.list` 與 `session.start`（`model_not_downloaded`）都看得到。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -190,7 +194,14 @@ class FakeModelCatalog:
         """固定的模型清單。"""
         with self._lock:
             return [
-                AsrModelInfo(model, FAKE_MODEL_SIZE, "MIT", "fast", downloaded)
+                AsrModelInfo(
+                    model,
+                    FAKE_MODEL_SIZE,
+                    "MIT",
+                    "fast",
+                    downloaded,
+                    FAKE_MODEL_SIZE if downloaded else None,
+                )
                 for model, downloaded in self._downloaded.items()
             ]
 
@@ -210,6 +221,21 @@ class FakeModelCatalog:
             progress(step * i, FAKE_MODEL_SIZE)
         with self._lock:
             self._downloaded[model_id] = True
+
+    def delete(self, model_id: str) -> int:
+        """把模型標成未下載，回傳 `FAKE_MODEL_SIZE`。
+
+        Raises:
+            UnknownModelError: 不在清單中。
+            FileNotFoundError: 沒有下載。
+        """
+        with self._lock:
+            if model_id not in self._downloaded:
+                raise UnknownModelError(f"unknown ASR model {model_id!r}")
+            if not self._downloaded[model_id]:
+                raise FileNotFoundError(f"ASR model {model_id} is not downloaded")
+            self._downloaded[model_id] = False
+        return FAKE_MODEL_SIZE
 
     def check_loadable(self, model_id: str) -> None:
         """模擬 `create_transcriber()` 的錯誤：未知 → UnknownModelError，未下載 → FileNotFoundError。"""

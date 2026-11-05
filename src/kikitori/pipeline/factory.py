@@ -97,6 +97,8 @@ class AsrModelInfo:
     license: str
     speed_tier: str
     downloaded: bool
+    disk_bytes: int | None = None
+    """下載好的模型資料夾實際佔用的位元組數（`<快取>/<id>` 底下的檔案）；沒下載時 None。"""
 
 
 class AsrLanguages(NamedTuple):
@@ -280,19 +282,23 @@ def create_transcript_filter(no_speech_threshold: float) -> TranscriptFilter:
 
 def asr_model_catalog() -> list[AsrModelInfo]:
     """列出可選的 ASR 模型與是否已下載到使用者快取目錄。"""
-    from kikitori.asr import MODELS, default_cache_dir, is_downloaded
+    from kikitori.asr import MODELS, default_cache_dir, model_disk_bytes
 
     cache = default_cache_dir()
-    return [
-        AsrModelInfo(
-            id=spec.id,
-            size_bytes=spec.total_bytes,
-            license=spec.license,
-            speed_tier=spec.speed_tier,
-            downloaded=is_downloaded(spec, cache),
+    models: list[AsrModelInfo] = []
+    for spec in MODELS.values():
+        disk = model_disk_bytes(spec, cache)
+        models.append(
+            AsrModelInfo(
+                id=spec.id,
+                size_bytes=spec.total_bytes,
+                license=spec.license,
+                speed_tier=spec.speed_tier,
+                downloaded=disk is not None,
+                disk_bytes=disk,
+            )
         )
-        for spec in MODELS.values()
-    ]
+    return models
 
 
 def download_asr_model(
@@ -318,6 +324,40 @@ def download_asr_model(
     except KeyError as exc:
         raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
     download_model(spec, default_cache_dir(), progress=progress, cancel=cancel)
+
+
+def delete_asr_model(model_id: str, cache_dir: Path | None = None) -> int:
+    """刪除已下載的 ASR 模型（含續傳用的 `.part` 與其他版本的殘留），回傳釋放的位元組數。
+
+    先把模型池中這個模型的閒置物件丟掉：它們之後 `load_model()` 會從這個資料夾重新讀檔。
+    呼叫端（引擎）負責確認沒有 session 或下載正在使用它。
+
+    Raises:
+        UnknownModelError: 模型 id 不在清單中。
+        FileNotFoundError: 模型沒有下載。
+        UnsafeModelPathError（ValueError）: 資料夾是連結或不在模型快取內，拒絕刪除。
+        OSError: 刪除失敗（例如檔案被其他程式開著）。
+    """
+    from kikitori.asr import MODEL_POOL, default_cache_dir, delete_model, get_model
+
+    try:
+        spec = get_model(model_id)
+    except KeyError as exc:
+        raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
+    cache = default_cache_dir() if cache_dir is None else cache_dir
+    evicted = MODEL_POOL.evict_under(cache / spec.id)
+    if evicted:
+        logger.info(
+            "dropped %d pooled %s model object(s) before deleting", evicted, model_id
+        )
+    return delete_model(spec, cache)
+
+
+def release_asr_models() -> None:
+    """引擎結束時丟掉模型池中所有閒置的 ASR 模型物件。"""
+    from kikitori.asr import MODEL_POOL
+
+    MODEL_POOL.clear()
 
 
 def create_glossary(settings: Settings) -> Glossary:
@@ -391,33 +431,44 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
         cuda_library_dirs=cuda_dirs,
         workers=2 if shared else 1,
     )
-    final_transcriber: Transcriber
-    if shared:
-        final_transcriber = fast_transcriber.with_options(
-            decode_options("final", candidate_languages, forced_language)
+    final_transcriber: Transcriber | None = None
+    try:
+        if shared:
+            final_transcriber = fast_transcriber.with_options(
+                decode_options("final", candidate_languages, forced_language)
+            )
+        else:
+            final_transcriber = create_transcriber(
+                asr.final_model,
+                device=asr.device,
+                role="final",
+                candidate_languages=candidate_languages,
+                forced_language=forced_language,
+                compute_type=asr.final_compute_type,
+                cpu_threads=final_threads,
+                cuda_library_dirs=cuda_dirs,
+            )
+        return PipelineComponents(
+            voice_model=SileroVad(),
+            fast_transcriber=fast_transcriber,
+            final_transcriber=final_transcriber,
+            fast_translator=fast_translator,
+            final_translator=final_translator,
+            transcript_filter=create_transcript_filter(
+                settings.pipeline.no_speech_threshold
+            ),
+            final_no_speech_reliable=no_speech_reliable(asr.final_model),
         )
-    else:
-        final_transcriber = create_transcriber(
-            asr.final_model,
-            device=asr.device,
-            role="final",
-            candidate_languages=candidate_languages,
-            forced_language=forced_language,
-            compute_type=asr.final_compute_type,
-            cpu_threads=final_threads,
-            cuda_library_dirs=cuda_dirs,
-        )
-    return PipelineComponents(
-        voice_model=SileroVad(),
-        fast_transcriber=fast_transcriber,
-        final_transcriber=final_transcriber,
-        fast_translator=fast_translator,
-        final_translator=final_translator,
-        transcript_filter=create_transcript_filter(
-            settings.pipeline.no_speech_threshold
-        ),
-        final_no_speech_reliable=no_speech_reliable(asr.final_model),
-    )
+    except BaseException:
+        # 已載入的模型放回模型池（不然這個 CTranslate2 物件被丟掉，GPU 上漏約 8 MiB），
+        # 例外照樣往上拋，由引擎回報 unknown_model／model_not_downloaded／load_error
+        for transcriber in dict.fromkeys(
+            t for t in (fast_transcriber, final_transcriber) if t is not None
+        ):
+            close = getattr(transcriber, "close", None)
+            if callable(close):
+                close()
+        raise
 
 
 def _resolved_compute_type(value: str | None, device: AsrDevice) -> str | None:

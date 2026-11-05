@@ -260,6 +260,9 @@ def ollama_version(
             f"no response from {root.host}:{root.port}: {type(exc).__name__}"
         ) from exc
     finally:
+        # `Connection: close` 時回應擁有 socket（見 `_PollingSocket`），要一併關閉
+        if resp is not None:
+            resp.close()
         conn.close()
     assert resp is not None  # 沒拿到回應的路徑都已丟出例外
     if resp.status in AUTH_STATUSES:
@@ -385,9 +388,11 @@ class _PollingReader(io.RawIOBase):
         idle_timeout: float,
         poll: float = _CANCEL_POLL_SECS,
         deadline: float | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._sock = sock
+        self._on_close = on_close
         self._cancel = cancel
         self._idle_timeout = idle_timeout
         self._deadline = deadline
@@ -409,6 +414,13 @@ class _PollingReader(io.RawIOBase):
                 if time.monotonic() >= deadline:
                     raise
 
+    def close(self) -> None:
+        if not self.closed:
+            on_close, self._on_close = self._on_close, None
+            super().close()
+            if on_close is not None:
+                on_close()
+
 
 class _Cancelled(Exception):
     """`_PollingReader` 發現取消；轉成 `PullCancelledError`（帶模型名稱）。"""
@@ -416,7 +428,13 @@ class _Cancelled(Exception):
 
 class _PollingSocket:
     """給 `http.client.HTTPResponse` 用的 socket 替身：它只呼叫 `makefile("rb")`，
-    連線關閉時呼叫 `close()`。"""
+    連線關閉時呼叫 `close()`。
+
+    與 `socket.makefile()` 相同，以參照計數延後關閉：回應帶 `Connection: close` 時
+    `http.client` 在 `getresponse()` 裡就呼叫連線的 `close()`，之後才讀內容；立刻關掉
+    真正的 socket 會讓讀內容失敗（WinError 10038），被誤判成「連不上」。所以 `close()`
+    只標記，等最後一個讀取器也關閉時才關閉 socket。
+    """
 
     def __init__(
         self,
@@ -430,16 +448,36 @@ class _PollingSocket:
         self._cancel = cancel
         self._idle_timeout = idle_timeout
         self._deadline = deadline
+        self._lock = threading.Lock()
+        self._readers = 0
+        self._closed = False
 
     def makefile(self, mode: str, *args: object, **kwargs: object) -> io.BufferedReader:
+        with self._lock:
+            self._readers += 1
         return io.BufferedReader(
             _PollingReader(
-                self._sock, self._cancel, self._idle_timeout, deadline=self._deadline
+                self._sock,
+                self._cancel,
+                self._idle_timeout,
+                deadline=self._deadline,
+                on_close=self._reader_closed,
             )
         )
 
+    def _reader_closed(self) -> None:
+        with self._lock:
+            self._readers -= 1
+            close_now = self._closed and self._readers == 0
+        if close_now:
+            self._sock.close()
+
     def close(self) -> None:
-        self._sock.close()
+        with self._lock:
+            self._closed = True
+            close_now = self._readers == 0
+        if close_now:
+            self._sock.close()
 
 
 def pull_model(
@@ -545,6 +583,7 @@ def _stream_pull(
         raise PullError("the connection closed before the response")
     # 請求送出後才換成輪詢的替身：回應的讀取（含標頭）都能被取消
     conn.sock = _PollingSocket(sock, cancel, idle_timeout)  # type: ignore[assignment]
+    resp: http.client.HTTPResponse | None = None
     try:
         resp = conn.getresponse()
         if resp.status != 200:
@@ -570,3 +609,8 @@ def _stream_pull(
         raise PullError(
             f"connection to {root.host}:{root.port} failed: {type(exc).__name__}"
         ) from exc
+    finally:
+        # `Connection: close` 時連線把 socket 交給回應，`conn.close()` 不再關它；
+        # 在這裡關閉回應，socket 才不會等到垃圾回收（見 `_PollingSocket`）
+        if resp is not None:
+            resp.close()

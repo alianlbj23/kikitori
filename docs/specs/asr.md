@@ -95,7 +95,7 @@ class Transcriber(Protocol):
 | `registry.py` | 可選模型清單（固定 revision 與 SHA-256、資源用量、`no_speech_reliable`） | `ModelSpec`、`MODELS`、`get_model()` |
 | `cache.py` | 使用者快取目錄 | `default_cache_dir()` |
 | `download.py` | 下載、續傳、驗證 | `download_model()`、`download_file()`（單檔，hardware 下載 cuBLAS wheel 用）、`is_downloaded()`、`model_dir()`、`ModelDownloadError` |
-| `whisper.py` | CTranslate2 推論 | `WhisperTranscriber`、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`、`preload_cuda_libraries()` |
+| `whisper.py` | CTranslate2 推論、模型物件池 | `WhisperTranscriber`（含 `close()`）、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`、`preload_cuda_libraries()`、`ModelPool`、`MODEL_POOL` |
 | `filtering.py` | 幻覺過濾 | `FilterConfig`、`rejection_reason()` |
 | `hallucination_lexicon.py` | 依語言的幻覺片語資料（`lexicon.json` 的 Python 版本） | `HALLUCINATION_LEXICON` |
 
@@ -112,6 +112,7 @@ class Transcriber(Protocol):
 - **avg_logprob**：`score × len^length_penalty / (len + 1)`（同 faster-whisper）。
 - **長於 30 s**：特徵切成 3000 frame 視窗，各自辨識後串接；ja／zh 直接相連，其他語言以空白相連。`avg_logprob` 依 token 數加權平均，`no_speech_probability` 取各視窗最小值（任一視窗有語音就算有語音）。
 - **執行緒**：同一個 `WhisperTranscriber` 的呼叫以 lock 串行化；即時與完整路徑各用一個實例才能並行。
+- **關閉與模型物件池**（2026-11-06，memory_soak #2）：見下方「模型物件池」。
 - **錯誤**：模型推論錯誤原樣往上拋（不吞）；不支援的 device／compute_type 由 CTranslate2 丟出 `ValueError`。
 
 ## 模型清單（registry）
@@ -147,6 +148,44 @@ class Transcriber(Protocol):
 - **取消**：可傳入 `threading.Event`，每個區塊之間檢查，被設定就丟 `DownloadCancelledError`。
 - **本機路徑**：`load_transcriber(model_path=...)` 直接使用使用者指定的 CTranslate2 Whisper 目錄（必須有 `model.bin`、`config.json`、`tokenizer.json`），不下載、不驗雜湊。
 - **可替換的 fetcher**：下載透過 `Fetcher` Protocol（預設用 `urllib`），測試注入假 fetcher 或本機 HTTP 伺服器，不連網。
+- **磁碟用量與刪除**（F7，`models.list` 的 `disk_bytes`、`models.delete`）：`model_disk_bytes(spec, cache)` 回傳 `<cache>/<id>`
+  底下普通檔案的大小合計（含其他 revision 與 `.part` 殘留，不跟隨連結），沒有下載完成（`is_downloaded()` 為 False）時 None。
+  `delete_model(spec, cache)` 刪掉整個 `<cache>/<id>`，回傳釋放的位元組數；全部檢查通過才刪任何東西：id 是單一資料夾名稱
+  （沒有分隔符號、`..`、磁碟代號）、`<cache>/<id>` 不是 symlink／junction、解析後就在解析後的快取資料夾正下方、整棵樹裡沒有任何
+  連結（違反時 `UnsafeModelPathError`，`ValueError` 的子類別）。沒有下載完成時 `FileNotFoundError`（只有 `.part` 殘留時也是：留給
+  之後的下載續傳）。先刪完成標記，中途失敗（`OSError`，例如檔案被其他程式開著）時模型不會被當成已下載。
+
+## 模型物件池（`whisper.py`）
+
+**問題**（`experiments/memory_soak/README.md`「發現的問題」#2，2026-11-06，RTX 5070、CTranslate2 4.8.5）：每建立一個
+`ctranslate2.models.Whisper` 並在 GPU 上推論過，`del` 之後仍留下約 8 MiB 顯示記憶體與 8–10 MiB 主記憶體，`unload_model()`
+再 `del` 也一樣；引擎每個 session 建立 2 個模型，情境 1（start/stop × 12）每個 session +16.8 MiB 顯示記憶體／+18–21 MiB 私有記憶體，
+與模型大小無關。隔離測試 `ct2_isolation.py`（各 12 輪，`small` float16）：
+
+| 做法 | 顯示記憶體／輪 | 私有記憶體／輪 |
+|---|---|---|
+| `Whisper(...)` 後直接 `del`（不推論） | 0.0 | +0.02 MiB |
+| `Whisper(...)` + 一次 encode + 一步 generate，再 `del` | +8.0 MiB | +7.8 MiB |
+| 同上，`del` 前先 `unload_model()` | +8.0 MiB | +8.5 MiB |
+| **只建立一次**，每輪 `load_model()` → 推論 → `unload_model()` | **0.0** | **−0.04 MiB** |
+
+推測是第一次推論時在模型工作執行緒上建立的 CUDA 資源（cuBLAS handle／workspace、stream）沒有隨模型銷毀釋放；未直接驗證，屬上游行為。
+
+**做法**：行程內的 `MODEL_POOL`（`ModelPool`，執行緒安全）保存**已卸載**的模型物件，鍵為
+`ModelKey(模型目錄 realpath+normcase, device, device_index, compute_type, intra_threads, inter_threads)`——這些是建立後不能改的參數。
+
+- `load_transcriber()` 先向池子取同鍵的閒置物件並 `load_model()`（權重載回原裝置）；沒有才建立新的。重用的物件 `load_model()` 失敗時
+  丟掉它、例外照常往上（CUDA 路徑仍依既有規則記錄 CUDA 失敗、`auto` 改用 CPU）。
+- `WhisperTranscriber.close(timeout=2.0)`：之後的 `transcribe()`／`warmup()`／`with_options()` 丟 `RuntimeError`；先等進行中的推論結束
+  （不能在推論途中卸載），再 `unload_model()` 並放回池中。逾時（推論卡住）時記 warning、不放回，物件交給參照計數（漏一次 8 MiB）。可重複呼叫。
+- 即時與完整共用一個物件（`workers=2` + `with_options()`）時以借用計數（`_ModelLease`）處理：兩個實例都關閉才歸還一次。
+- 上限 `MAX_IDLE_MODELS = 4` 個閒置物件（每個約 8 MiB 顯示記憶體與一條 CTranslate2 工作執行緒），超過時丟掉最久沒用的（LRU）——那個組合
+  之後再用到時建立新物件，代價與沒有池時相同。卸載失敗的物件記錄後丟掉。
+- 誰呼叫 `close()`：引擎在 session 結束（停止、讀完、錯誤、載入中被停止、開裝置失敗）時以 `pipeline.types.release_components()` 關閉兩個
+  transcriber；`factory.build_components()` 在完整模型載入失敗時關閉已載入的即時模型。`models.delete` 先以 `MODEL_POOL.evict_under(模型資料夾)`
+  丟掉該模型的閒置物件（之後 `load_model()` 會從那個資料夾讀檔）；引擎結束時 `MODEL_POOL.clear()`。
+- 驗證：單元測試以假的 `ctranslate2` 模組計數建立／載入／卸載（`tests/test_asr_model_pool.py`）；實機回歸用 memory_soak 情境 1（`cycles=20`），
+  預期顯示記憶體斜率 ≈ 0（尚未在修正後實測）。
 
 ## 幻覺過濾（`filtering.py`）
 

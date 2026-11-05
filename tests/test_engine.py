@@ -294,6 +294,9 @@ class BasicProtocolTest(EngineTestCase):
         self.assertEqual(asr["small"]["recommended_for"], ["final"])
         self.assertTrue(asr["base"]["no_speech_reliable"])
         self.assertIsNone(asr["fake-missing"]["vram_mb"])
+        # F7：已下載的模型有磁碟用量，沒下載的是 null
+        self.assertEqual(asr["base"]["disk_bytes"], 4 * 1024 * 1024)
+        self.assertIsNone(asr["fake-missing"]["disk_bytes"])
 
         runtime = result["gpu_runtime"]
         self.assertEqual(runtime["id"], "gpu-runtime")
@@ -327,6 +330,35 @@ class BasicProtocolTest(EngineTestCase):
         self.assertTrue(presets["qwen3.5:4b"]["installed"])
         self.assertFalse(presets["qwen3.5:9b"]["installed"])
         self.assertIn("license", presets["qwen3.5:9b"])
+
+    def test_models_delete(self) -> None:
+        result = self.engine.request("models.delete", {"model": "large-v3-turbo"})
+        self.assertEqual(
+            result["result"],
+            {"model": "large-v3-turbo", "freed_bytes": 4 * 1024 * 1024},
+        )
+        asr = {m["id"]: m for m in self.engine.request("models.list")["result"]["asr"]}
+        self.assertFalse(asr["large-v3-turbo"]["downloaded"])
+        self.assertIsNone(asr["large-v3-turbo"]["disk_bytes"])
+        for params, code in (
+            ({"model": "large-v3-turbo"}, "model_not_downloaded"),
+            ({"model": "nope"}, "unknown_model"),
+            ({}, "invalid_params"),
+        ):
+            with self.subTest(params=params):
+                self.assertError(self.engine.request("models.delete", params), code)
+        # 執行中的 session 用到的模型不能刪
+        session_id = self.engine.request("session.start", {"mode": "interpret"})[
+            "result"
+        ]["session_id"]
+        self.engine.wait_event(
+            "status",
+            lambda d: d["state"] == "running" and d["session_id"] == session_id,
+        )
+        self.assertError(
+            self.engine.request("models.delete", {"model": "small"}), "model_in_use"
+        )
+        self.engine.request("session.stop")
 
     def test_hardware_methods_reject_unknown_params(self) -> None:
         for method in (
@@ -934,7 +966,13 @@ class SessionProtocolTest(EngineTestCase):
             "end_sample",
             "session_id",
         }
-        self.assertTrue(all(set(s) == expected_keys for s in subtitles))
+        # F2／F4：即時字幕多 stable_chars、完整字幕多 latency_ms（另一個不出現）
+        for s in subtitles:
+            extra = {"latency_ms"} if s["is_final"] else {"stable_chars"}
+            self.assertEqual(set(s), expected_keys | extra)
+        for s in finals:
+            self.assertIsInstance(s["latency_ms"], int)
+            self.assertGreaterEqual(s["latency_ms"], 0)
         # 同一句的即時字幕都在完整字幕之前
         for final in finals:
             final_index = subtitles.index(final)
@@ -944,6 +982,38 @@ class SessionProtocolTest(EngineTestCase):
                 if s["utterance_id"] == final["utterance_id"]
             ]
             self.assertEqual(later, [])
+
+    def test_metrics_events_while_running(self) -> None:
+        session_id = self.engine.request("session.start", {"mode": "interpret"})[
+            "result"
+        ]["session_id"]
+        metrics = self.engine.wait_event(
+            "metrics", lambda d: d["session_id"] == session_id
+        )
+        # 沒有聲音的假麥克風：音量是下限、沒有排隊、還沒有完整字幕
+        self.assertEqual(
+            metrics,
+            {
+                "session_id": session_id,
+                "level_dbfs": -120.0,
+                "backlog": 0,
+                "latency_ms_median": None,
+            },
+        )
+        self.engine.request("session.stop")
+        self.engine.wait_event(
+            "status", lambda d: d["state"] == "idle" and d["session_id"] == session_id
+        )
+        idle_index = max(
+            i
+            for i, m in enumerate(self.engine.seen)
+            if m.get("event") == "status" and m["data"]["state"] == "idle"
+        )
+        # 結束後不再送 metrics（以下一個請求的回應當作分隔）
+        self.engine.request("engine.info")
+        self.assertFalse(
+            [m for m in self.engine.seen[idle_index:] if m.get("event") == "metrics"]
+        )
 
     def test_interpret_routes_chinese_to_partner(self) -> None:
         self.engine.request("settings.set", {"partner_language": "en"})

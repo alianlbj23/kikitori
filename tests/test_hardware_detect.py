@@ -151,6 +151,8 @@ class OverviewTest(unittest.TestCase):
         self.assertEqual(asr["large-v3"]["recommended_for"], ["final"])
         self.assertEqual(asr["small"]["recommended_for"], [])
         self.assertFalse(asr["small"]["downloaded"])
+        # F7：沒下載的模型沒有磁碟用量（null）
+        self.assertIsNone(asr["small"]["disk_bytes"])
         self.assertFalse(asr["large-v3-turbo"]["no_speech_reliable"])
         self.assertTrue(data["gpu_runtime"]["cublas_available"])
         self.assertEqual(data["gpu_runtime"]["cublas_source"], "runtime")

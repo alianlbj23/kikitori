@@ -5,6 +5,7 @@ factory 依設定組出 `PipelineComponents`。`SubtitleUpdate` 照抄
 `docs/specs/app-architecture.md`；其餘型別見 `docs/specs/pipeline-engine.md`。
 """
 
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from kikitori.asr.types import Transcriber, Transcript
 from kikitori.languages import UnknownLanguageError, get_language
 from kikitori.translate.types import Translator
 from kikitori.vad.model import VoiceModel
+
+logger = logging.getLogger(__name__)
 
 Mode = Literal["media", "interpret"]
 MODES: tuple[Mode, ...] = ("media", "interpret")
@@ -55,6 +58,11 @@ class SubtitleUpdate:
             原文與譯文皆為空的完整結果表示「這句其實不是語音，清掉即時字幕」。
         start_sample: 句子起點（16 kHz 樣本，以串流開頭為 0）。
         end_sample: 句子終點（不含）。
+        stable_chars: 只有即時字幕有（完整字幕為 None）：`original` 開頭有幾個字元
+            （Python 字元數）與同一句上一則即時字幕相同（LocalAgreement-2），之後的
+            即時結果大概不會再改；第一則為 0，不超過 `len(original)`。
+        latency_ms: 只有完整字幕有（即時字幕為 None）：從 VAD 判定句子結束到送出這則
+            完整字幕的毫秒數（含排隊、完整辨識與翻譯；不含判定句尾所需的靜音）。
     """
 
     utterance_id: int
@@ -65,6 +73,9 @@ class SubtitleUpdate:
     is_final: bool
     start_sample: int
     end_sample: int
+    # 架構規格之後新增的欄位都有預設值：只建構原本欄位的呼叫端不受影響
+    stable_chars: int | None = None
+    latency_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -157,3 +168,25 @@ class PipelineComponents:
     """完整模型的 `no_speech_probability` 是否可用；False 時改用即時模型的值過濾。"""
     keep_warm: BackgroundTask | None = None
     """執行緒模式的 session 執行期間讓本機翻譯模型保持載入；None 表示不需要。"""
+
+
+def release_components(components: PipelineComponents) -> None:
+    """session 結束後釋放元件持有的資源：呼叫每個 transcriber 的 `close()`（有的話）。
+
+    真實的 Whisper transcriber 會把 CTranslate2 模型卸載並放回行程內的模型池（每建立一個
+    新的模型物件就漏約 8 MiB 顯示記憶體，重複使用同一個物件則不會；見 `asr.md`）。即時與
+    完整路徑共用同一個實例時只關一次。失敗只記錄：釋放是收尾，不能讓 session 的結束流程
+    中斷（最壞情況是這個模型物件不回到池中，交給參照計數釋放）。
+    """
+    seen: set[int] = set()
+    for transcriber in (components.fast_transcriber, components.final_transcriber):
+        if id(transcriber) in seen:
+            continue
+        seen.add(id(transcriber))
+        close = getattr(transcriber, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception:
+            logger.exception("closing the ASR transcriber failed")

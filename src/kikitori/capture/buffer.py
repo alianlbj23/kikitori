@@ -12,7 +12,7 @@ from collections import deque
 
 import numpy as np
 
-from kikitori.capture.errors import CaptureError
+from kikitori.capture.errors import CaptureError, detached_copy
 from kikitori.capture.types import AudioChunk
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,10 @@ class ChunkBuffer:
                 count = 0
 
     def fail(self, error: BaseException) -> None:
-        """記錄擷取端的錯誤；讀取端讀完剩餘資料後會拋出它。"""
+        """記錄擷取端的錯誤；讀取端讀完剩餘資料後會拋出它（每次一份新的複本）。"""
+        # 錯誤的 traceback 是擷取端（已結束）的 frame，裡面參照 source；buffer 被 source 持有，
+        # 留著會形成循環。訊息與類別已足夠回報，呼叫端要 traceback 應在 fail() 之前記錄。
+        error.with_traceback(None)
         with self._cond:
             if self._error is None:
                 self._error = error
@@ -121,7 +124,9 @@ class ChunkBuffer:
                 self._queued = 0
                 return out
             if self._error is not None:
+                # 不重新丟出保存的同一個物件：丟出處的 frame 會接到它的 traceback 上，
+                # 讀取端（pipeline）就被 buffer 經由例外參照住（見 `detached_copy()`）
                 if isinstance(self._error, CaptureError):
-                    raise self._error
+                    raise detached_copy(self._error)
                 raise CaptureError(f"capture failed: {self._error}") from self._error
             return empty_chunk()

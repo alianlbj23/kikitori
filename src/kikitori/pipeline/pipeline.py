@@ -5,7 +5,8 @@
 （較準的模型、帶前文）送出最終版。設計與保證（順序、不丟完整結果、背壓、錯誤）
 見 `docs/specs/pipeline-engine.md`。
 
-時間一律用樣本計數；pipeline 本身不讀牆鐘時間。除了引擎用的執行緒模式，
+時間一律用樣本計數；pipeline 本身不讀牆鐘時間（注入的時鐘只用來排程即時辨識與量測
+完整字幕的延遲）。除了引擎用的執行緒模式，
 另有不開執行緒的逐步模式（`feed()`／`end_of_stream()`／`run_pending()`），
 讓測試能決定性地重現排程情境。
 """
@@ -30,7 +31,9 @@ from kikitori.pipeline.languages import (
     display_original,
     route,
 )
+from kikitori.pipeline.metrics import LatencyWindow, LevelMeter, PipelineMetrics
 from kikitori.pipeline.scheduler import FinalQueue, Job, LatestSlot
+from kikitori.pipeline.stability import PartialStability
 from kikitori.pipeline.types import (
     LogCallback,
     PipelineComponents,
@@ -106,8 +109,8 @@ class Pipeline:
             on_subtitle: 每則字幕更新；在 worker 執行緒上呼叫，丟出例外視為致命錯誤。
             on_status: 狀態改變（"running"、"idle"、"error" + 說明）。
             on_log: 可恢復的警告（例如翻譯失敗）。
-            clock: 量測即時辨識耗時用的時鐘（秒）；只影響觸發間隔，不影響音訊位置。
-                測試可注入假時鐘。
+            clock: 量測即時辨識耗時（觸發間隔）與完整字幕延遲（`latency_ms`）用的時鐘
+                （秒）；不影響音訊位置。測試可注入假時鐘。
         """
         self._components = components
         self._config = config
@@ -133,6 +136,11 @@ class Pipeline:
 
         self._slot = LatestSlot()
         self._finals = FinalQueue(config.final_queue_size)
+        # 即時路徑的穩定前綴與「要不要重送即時翻譯」（只有即時 worker 使用）
+        self._stability = PartialStability()
+        # metrics：擷取音訊的音量（capture 執行緒寫）與完整字幕延遲（完整 worker 寫）
+        self._level = LevelMeter(SAMPLE_RATE)
+        self._latencies = LatencyWindow()
 
         # 送出字幕與前文都在這把鎖下，保證同一句的即時結果不會晚於完整結果。
         self._emit_lock = threading.Lock()
@@ -211,6 +219,14 @@ class Pipeline:
                 "warning",
                 f"cannot switch the keep-warm task: {type(exc).__name__}: {exc}",
             )
+
+    def metrics(self) -> PipelineMetrics:
+        """目前的音量、待處理的完整句數與延遲中位數（執行緒安全，任何時候都可呼叫）。"""
+        return PipelineMetrics(
+            level_dbfs=self._level.dbfs(),
+            backlog=self._finals.size(),
+            latency_ms_median=self._latencies.median(),
+        )
 
     @property
     def dropped_partials(self) -> int:
@@ -299,6 +315,7 @@ class Pipeline:
             while not self._stop.is_set():
                 chunk = source.read(self._config.read_timeout)
                 if len(chunk):
+                    self._level.add(chunk)
                     self._handle(self._segmenter.process(chunk))
                 elif getattr(source, "exhausted", False) is True:
                     self._handle(self._segmenter.flush())
@@ -341,6 +358,7 @@ class Pipeline:
     def feed(self, audio: npt.NDArray[np.int16]) -> None:
         """逐步模式：同步把音訊送進切句器並排入工作（不執行辨識）。"""
         self._claim("stepped")
+        self._level.add(audio)
         self._guarded(lambda: self._handle(self._segmenter.process(audio)))
 
     def end_of_stream(self) -> None:
@@ -432,7 +450,11 @@ class Pipeline:
             )
             audio = audio[:keep]
         job = Job(
-            current.id, audio, event.start_sample, event.start_sample + len(audio)
+            current.id,
+            audio,
+            event.start_sample,
+            event.start_sample + len(audio),
+            ended_at=self._clock(),
         )
         # 先標記結束，即時 worker 才會丟掉這句剩下的即時工作。
         self._ended_id = current.id
@@ -462,11 +484,34 @@ class Pipeline:
             logger.debug("partial %d filtered: %s", job.utterance_id, reason)
             return
         original = self._original(transcript)
+        stable = self._stability.observe(job.utterance_id, original)
         decision = self._route(transcript.language)
         if decision.action != "translate":
             text = self._copied(transcript, decision)
-            self._emit(job, original, text, transcript.language, decision, final=False)
+            self._emit(
+                job,
+                original,
+                text,
+                transcript.language,
+                decision,
+                final=False,
+                stable_chars=stable,
+            )
             return
+        if not self._stability.should_translate(original, stable):
+            # 穩定部分沒有變長：只是尾巴在閃爍，重新翻譯只會讓譯文跟著閃、佔用翻譯伺服器。
+            # 沿用這句上一次的即時譯文，原文與 stable_chars 照常更新。
+            self._emit(
+                job,
+                original,
+                self._stability.translation,
+                transcript.language,
+                decision,
+                final=False,
+                stable_chars=stable,
+            )
+            return
+        self._stability.mark_requested(original, stable)
         request = TranslationRequest(
             original, decision.source, decision.target, self._context(decision.source)
         )
@@ -477,6 +522,7 @@ class Pipeline:
                 for translation in stream:
                     if self._partial_obsolete(job):
                         return
+                    self._stability.translation = translation
                     emitted = (
                         self._emit(
                             job,
@@ -485,6 +531,7 @@ class Pipeline:
                             transcript.language,
                             decision,
                             final=False,
+                            stable_chars=stable,
                         )
                         or emitted
                     )
@@ -497,7 +544,13 @@ class Pipeline:
             self._warn("translate", f"translation failed: {type(exc).__name__}: {exc}")
             if not emitted:
                 self._emit(
-                    job, original, "", transcript.language, decision, final=False
+                    job,
+                    original,
+                    self._stability.translation,
+                    transcript.language,
+                    decision,
+                    final=False,
+                    stable_chars=stable,
                 )
 
     def _partial_obsolete(self, job: Job) -> bool:
@@ -614,7 +667,9 @@ class Pipeline:
         decision: Route,
         *,
         final: bool,
+        stable_chars: int | None = None,
     ) -> bool:
+        latency = self._latency_ms(job) if final else None
         update = SubtitleUpdate(
             utterance_id=job.utterance_id,
             original=original,
@@ -624,6 +679,8 @@ class Pipeline:
             is_final=final,
             start_sample=job.start_sample,
             end_sample=job.end_sample,
+            stable_chars=None if final else stable_chars,
+            latency_ms=latency,
         )
         with self._emit_lock:
             if final:
@@ -639,7 +696,15 @@ class Pipeline:
             if self._stop.is_set():
                 return False
             self._on_subtitle(update)
+            if final and latency is not None and original:
+                self._latencies.add(latency)
             return True
+
+    def _latency_ms(self, job: Job) -> int | None:
+        """VAD 判定句子結束 → 現在（送出完整字幕）的毫秒數；量不到時 None。"""
+        if job.ended_at is None:
+            return None
+        return max(0, round((self._clock() - job.ended_at) * 1000))
 
     def _emit_cleared(self, job: Job) -> None:
         """完整結果被濾掉：若曾送出即時字幕，送一則空的完整結果讓 UI 清掉它。"""
@@ -659,6 +724,7 @@ class Pipeline:
                     is_final=True,
                     start_sample=job.start_sample,
                     end_sample=job.end_sample,
+                    latency_ms=self._latency_ms(job),
                 )
             )
 

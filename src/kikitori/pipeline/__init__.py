@@ -8,6 +8,7 @@
 
 from kikitori.pipeline.filtering import default_transcript_filter
 from kikitori.pipeline.languages import Route, route
+from kikitori.pipeline.metrics import PipelineMetrics
 from kikitori.pipeline.pipeline import Pipeline
 from kikitori.pipeline.types import (
     MODES,
@@ -25,6 +26,7 @@ __all__ = [
     "Pipeline",
     "PipelineComponents",
     "PipelineConfig",
+    "PipelineMetrics",
     "PipelineState",
     "Route",
     "SubtitleUpdate",

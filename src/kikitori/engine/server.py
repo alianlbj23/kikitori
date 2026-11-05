@@ -8,6 +8,7 @@
 
 import dataclasses
 import logging
+import math
 import platform
 import threading
 import time
@@ -48,6 +49,7 @@ from kikitori.pipeline.factory import (
     pipeline_config,
     translation_needed,
 )
+from kikitori.pipeline.types import PipelineComponents, release_components
 from kikitori.translate import redact_url
 from kikitori.translate.presets import normalize_model_name
 
@@ -59,6 +61,10 @@ LOADER_POLL_SECS = 0.1
 """等前一個 session 載入結束時，每隔多久檢查一次「這個 session 也被停止了」。"""
 PROGRESS_INTERVAL = 0.25
 MAX_DEVICE_ID_CHARS = 512
+MAX_MODEL_ID_CHARS = 100
+METRICS_INTERVAL = 1.0
+"""`metrics` 事件的間隔（秒）：狀態列的音量表與延遲，每秒一次就夠，不會塞爆 stdout。"""
+METRICS_JOIN_TIMEOUT = 1.0
 
 KIND_FOR_MODE: dict[Mode, DeviceKind] = {"media": "loopback", "interpret": "microphone"}
 PREVIEW_LANGUAGE_PARAMS = (
@@ -100,12 +106,116 @@ def _capture_code(exc: CaptureError) -> str:
     return "capture_error"
 
 
+def _drop_frames(exc: BaseException) -> None:
+    """記錄之後丟掉例外（與它的 cause／context）的 traceback。
+
+    traceback 參照這個載入執行緒的 frame（pipeline、元件、音訊來源）；例外若還被別處保存
+    （例如音訊來源、pipeline 的 `error`），那些 frame 就與保存者形成循環，GPU 上的模型要
+    等循環垃圾回收才釋放（memory_soak #1）。與 `Pipeline._fail()` 相同，log 已記錄完整
+    traceback，之後只需要類別與訊息。
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        current.with_traceback(None)
+        current = current.__cause__ or current.__context__
+
+
+def subtitle_event(update: SubtitleUpdate, session_id: int) -> dict[str, Any]:
+    """`subtitle` 事件的 data：`SubtitleUpdate` 的欄位 + `session_id`。
+
+    即時字幕帶 `stable_chars`（沒有 `latency_ms`）；完整字幕帶 `latency_ms`（可能是 null，
+    沒有 `stable_chars`）。只放有意義的那一個，UI 不必猜 null 是「沒有」還是「0」。
+    """
+    data = dataclasses.asdict(update)
+    if update.is_final:
+        data.pop("stable_chars")
+    else:
+        data.pop("latency_ms")
+        if data["stable_chars"] is None:
+            data["stable_chars"] = 0
+    data["session_id"] = session_id
+    return data
+
+
+class _MetricsReporter:
+    """session 執行中每隔 `interval` 秒送一則 `metrics` 事件（一條 daemon 執行緒）。
+
+    `stop()` 返回之後保證不會再送出（送出與停止共用一把鎖），所以 `status idle／error`
+    之後不會再看到這個 session 的 metrics。pipeline 已結束時自己停止，即使有人忘了呼叫
+    `stop()` 也不會一直留著執行緒。
+    """
+
+    def __init__(
+        self,
+        session_id: int,
+        pipeline: Pipeline,
+        send: Callable[[str, Mapping[str, Any]], None],
+        interval: float,
+    ) -> None:
+        self._session_id = session_id
+        self._pipeline = pipeline
+        self._send = send
+        self._interval = interval
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run, name=f"session-{session_id}-metrics", daemon=True
+        )
+
+    def start(self) -> None:
+        """開始回報（`stop()` 之後呼叫也只會讓執行緒立即結束）。"""
+        self._thread.start()
+
+    def stop(self) -> None:
+        """停止並等執行緒結束（最多 `METRICS_JOIN_TIMEOUT` 秒；可重複呼叫）。"""
+        self._stop.set()
+        with self._lock:
+            pass  # 等進行中的送出完成：之後不會再有 metrics
+        if (
+            self._thread.ident is not None
+            and self._thread is not threading.current_thread()
+        ):
+            self._thread.join(METRICS_JOIN_TIMEOUT)
+            if self._thread.is_alive():
+                logger.warning("%s did not stop in time", self._thread.name)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            with self._lock:
+                if self._stop.is_set() or self._pipeline.wait(0):
+                    return
+                if self._pipeline.state != "running":
+                    continue
+                metrics = self._pipeline.metrics()
+                try:
+                    self._send(
+                        "metrics",
+                        {
+                            "session_id": self._session_id,
+                            "level_dbfs": metrics.level_dbfs,
+                            "backlog": metrics.backlog,
+                            "latency_ms_median": metrics.latency_ms_median,
+                        },
+                    )
+                except ChannelClosedError:
+                    logger.error("metrics: protocol output closed")
+                    return
+                except Exception:
+                    # 量測只是輔助顯示：程式錯誤記錄後停止回報，不影響 session
+                    logger.exception("metrics reporting failed; stopping it")
+                    return
+
+
 class _Session:
     """一次 session：背景載入 → 執行 → 結束。`lock` 保護 pipeline 的建立與停止。"""
 
-    def __init__(self, session_id: int, mode: Mode) -> None:
+    def __init__(self, session_id: int, mode: Mode, asr_models: frozenset[str]) -> None:
         self.id = session_id
         self.mode = mode
+        self.asr_models = asr_models
+        """這個 session 載入的 ASR 模型（`models.delete` 的「使用中」判斷）。"""
         self.cancelled = threading.Event()
         self.lock = threading.Lock()
         self.pipeline: Pipeline | None = None
@@ -113,6 +223,9 @@ class _Session:
         self.loader: threading.Thread | None = None
         # 載入期間收到的 session.set_translation：pipeline 建好時套用（受 lock 保護）
         self.translation_override: bool | None = None
+        # 以下受伺服器的 _session_lock 保護；結束狀態送出時取走並釋放
+        self.components: PipelineComponents | None = None
+        self.metrics: _MetricsReporter | None = None
 
 
 class _Download:
@@ -132,13 +245,28 @@ class EngineServer:
         writer: MessageWriter,
         *,
         version: str | None = None,
+        metrics_interval: float = METRICS_INTERVAL,
     ) -> None:
         """
         Args:
             services: 外部功能（真實或測試用的假實作）。
             writer: stdout 的訊息寫出器。
             version: `engine.info` 回報的版本；省略時讀取套件版本。
+            metrics_interval: `metrics` 事件的間隔秒數（測試用較短的值）。
+
+        Raises:
+            ValueError: `metrics_interval` 不是有限的正數。
         """
+        if (
+            isinstance(metrics_interval, bool)
+            or not isinstance(metrics_interval, int | float)
+            or not math.isfinite(metrics_interval)
+            or metrics_interval <= 0
+        ):
+            raise ValueError(
+                f"metrics_interval must be a positive number, got {metrics_interval!r}"
+            )
+        self._metrics_interval = float(metrics_interval)
         self._services = services
         self._writer = writer
         self._version = version or engine_version()
@@ -158,6 +286,9 @@ class EngineServer:
         self._unsent_response: list[Callable[[], None]] = []
         # 最後一個 session 的載入執行緒：下一個 session 先等它結束（見 `_load_session`）
         self._last_loader: threading.Thread | None = None
+        # 可能還在用 ASR 模型的 session（執行中、載入中、或已停止但載入執行緒還沒結束）；
+        # models.delete 據此回 model_in_use。受 _session_lock 保護。
+        self._live_sessions: list[_Session] = []
         self._handlers: dict[str, Handler] = {
             "engine.info": self._engine_info,
             "hardware.detect": self._hardware_detect,
@@ -165,6 +296,7 @@ class EngineServer:
             "models.download": self._models_download,
             "models.validate": self._models_validate,
             "models.pull_translation": self._models_pull_translation,
+            "models.delete": self._models_delete,
             "languages.list": self._languages_list,
             "devices.list": self._devices_list,
             "settings.get": self._settings_get,
@@ -271,7 +403,7 @@ class EngineServer:
             action()
 
     def close(self) -> None:
-        """停止 session、放棄尚未開始的背景請求、取消下載（可重複呼叫）。"""
+        """停止 session、放棄尚未開始的背景請求、取消下載、釋放模型（可重複呼叫）。"""
         self._stop_session()
         self._deferred.close(DEFERRED_JOIN_TIMEOUT)
         with self._downloads_lock:
@@ -286,6 +418,13 @@ class EngineServer:
                     logger.warning(
                         "download of %s did not stop in time", download.model
                     )
+        release = self._services.release_models
+        if release is not None:
+            try:
+                release()
+            except Exception:
+                # 結束流程不能因釋放失敗中斷；行程結束時作業系統仍會收回
+                logger.exception("releasing ASR models failed")
 
     # --- 送出 -----------------------------------------------------------------
 
@@ -606,6 +745,69 @@ class EngineServer:
 
         return Deferred(job, after=start, unsent=unsent)
 
+    def _models_delete(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        """刪除已下載的 ASR 模型（F7）。在主執行緒上同步執行。
+
+        為什麼不放到背景：`session.start`、`models.download` 也都在主執行緒上登記，同步執行
+        時「使用中」的檢查與刪除之間不會有新的 session 或下載開始。刪除只是幾個檔案，很快。
+        """
+        p.reject_unknown_params(params, ("model",))
+        model = params.get("model")
+        if not isinstance(model, str) or not model or len(model) > MAX_MODEL_ID_CHARS:
+            raise p.ProtocolError(
+                p.INVALID_PARAMS,
+                f"model must be a non-empty string of at most {MAX_MODEL_ID_CHARS} "
+                f"characters, got {str(model)[:MAX_MODEL_ID_CHARS]!r}",
+            )
+        catalog = self._services.models
+        known = {m.id: m for m in catalog.asr_models()}
+        if model not in known:
+            raise p.ProtocolError(
+                p.UNKNOWN_MODEL,
+                f"unknown ASR model {model!r}; available: {', '.join(known)}",
+            )
+        users = self._model_users(model)
+        if users:
+            raise p.ProtocolError(
+                p.MODEL_IN_USE,
+                f"ASR model {model} is in use by {', '.join(users)}; stop it first",
+            )
+        if not known[model].downloaded:
+            raise p.ProtocolError(
+                p.MODEL_NOT_DOWNLOADED, f"ASR model {model} is not downloaded"
+            )
+        try:
+            freed = catalog.delete(model)
+        except FileNotFoundError as exc:
+            raise p.ProtocolError(p.MODEL_NOT_DOWNLOADED, str(exc)) from exc
+        except UnknownModelError as exc:
+            raise p.ProtocolError(p.UNKNOWN_MODEL, str(exc)) from exc
+        logger.info("deleted ASR model %s (%d bytes)", model, freed)
+        return {"model": model, "freed_bytes": freed}
+
+    def _model_users(self, model: str) -> list[str]:
+        """正在使用這個 ASR 模型的 session 與下載（給錯誤訊息用）。"""
+        users: list[str] = []
+        with self._session_lock:
+            self._prune_live_sessions()
+            users += [
+                f"session {s.id}" for s in self._live_sessions if model in s.asr_models
+            ]
+        with self._downloads_lock:
+            if ("asr", model) in self._downloads:
+                users.append("a download")
+        return users
+
+    def _prune_live_sessions(self) -> None:
+        """丟掉已結束、元件已釋放、載入執行緒也結束的 session（呼叫端持有 _session_lock）。"""
+        self._live_sessions = [
+            s
+            for s in self._live_sessions
+            if not s.terminal_sent
+            or s.components is not None
+            or (s.loader is not None and s.loader.is_alive())
+        ]
+
     def _register_download(
         self, kind: DownloadKind, model: str, expected_total: int, job: DownloadJob
     ) -> threading.Thread:
@@ -734,9 +936,16 @@ class EngineServer:
                 raise p.ProtocolError(_capture_code(exc), str(exc)) from exc
             except ValueError as exc:
                 raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
-            session = _Session(self._next_session_id, mode)
+            session = _Session(
+                self._next_session_id,
+                mode,
+                frozenset((settings.asr.fast_model, settings.asr.final_model)),
+            )
             self._next_session_id += 1
             self._session = session
+            # 順便清掉舊的紀錄：開關很多次 session 時清單不會一直變長
+            self._prune_live_sessions()
+            self._live_sessions.append(session)
             previous = self._last_loader
             session.loader = threading.Thread(
                 target=self._load_session,
@@ -792,9 +1001,11 @@ class EngineServer:
             try:
                 components = self._services.build_components(settings, session.mode)
             except UnknownModelError as exc:
+                _drop_frames(exc)
                 self._session_failed(session, "unknown_model", str(exc))
                 return
             except FileNotFoundError as exc:
+                _drop_frames(exc)
                 self._session_failed(
                     session,
                     "model_not_downloaded",
@@ -803,13 +1014,19 @@ class EngineServer:
                 return
             except Exception as exc:
                 logger.exception("loading session %d failed", session.id)
+                _drop_frames(exc)
                 self._session_failed(
                     session, "load_error", f"{type(exc).__name__}: {exc}"
                 )
                 return
-            if session.cancelled.is_set():
-                # 載入與預熱期間被停止：丟掉元件（只靠參照計數就會釋放 GPU 上的模型）
+            with self._session_lock:
+                # 之後由送出結束狀態的一方取走並釋放（見 `_session_status`）
+                session.components = components
+                stopped = session.terminal_sent
+            if stopped or session.cancelled.is_set():
+                # 載入與預熱期間被停止：釋放元件（ASR 模型放回模型池、權重離開 GPU）
                 logger.info("session %d stopped while loading", session.id)
+                self._release(self._take_components(session))
                 return
 
             pipeline = Pipeline(
@@ -822,17 +1039,28 @@ class EngineServer:
             )
             with session.lock:
                 if session.cancelled.is_set():
+                    self._release(self._take_components(session))
                     return
                 session.pipeline = pipeline
                 if session.translation_override is not None:
                     pipeline.set_translation_enabled(session.translation_override)
+                reporter = _MetricsReporter(
+                    session.id, pipeline, self._send_event, self._metrics_interval
+                )
+                with self._session_lock:
+                    # 結束狀態送出時取走並停止；已經結束（不會發生，保險）就不啟動
+                    if not session.terminal_sent:
+                        session.metrics = reporter
+                        reporter.start()
                 try:
                     pipeline.start(source)
                 except CaptureError as exc:
                     logger.error("cannot start audio capture: %s", exc)
+                    _drop_frames(exc)
                     self._session_failed(session, _capture_code(exc), str(exc))
                 except Exception as exc:
                     logger.exception("starting session %d failed", session.id)
+                    _drop_frames(exc)
                     self._session_failed(
                         session, "load_error", f"{type(exc).__name__}: {exc}"
                     )
@@ -861,9 +1089,7 @@ class EngineServer:
         return not session.cancelled.is_set()
 
     def _on_subtitle(self, session: _Session, update: SubtitleUpdate) -> None:
-        data = dataclasses.asdict(update)
-        data["session_id"] = session.id
-        self._send_event("subtitle", data)
+        self._send_event("subtitle", subtitle_event(update, session.id))
 
     def _on_pipeline_status(
         self, session: _Session, state: PipelineState, detail: str | None
@@ -976,13 +1202,19 @@ class EngineServer:
         code: str | None,
         data: Mapping[str, Any] | None = None,
     ) -> None:
-        """送出這個 session 的狀態；結束狀態（idle／error）只送一次並釋放 session。"""
+        """送出這個 session 的狀態；結束狀態（idle／error）只送一次並釋放 session。
+
+        結束時先停止 metrics（之後不會再有這個 session 的 metrics），送出狀態後再釋放元件
+        （ASR 模型放回模型池）。
+        """
         terminal = state in ("idle", "error")
+        reporter: _MetricsReporter | None = None
         with self._session_lock:
             if session.terminal_sent:
                 return
             if terminal:
                 session.terminal_sent = True
+                reporter, session.metrics = session.metrics, None
                 if self._session is session:
                     self._session = None
                 # pipeline 的回呼參照 session，session 又參照 pipeline：不切斷的話這個循環
@@ -991,7 +1223,22 @@ class EngineServer:
                 # 執行緒參照，執行緒結束時以參照計數立即釋放。不取 session.lock：
                 # `_load_session` 持有它時也可能走到這裡（啟動失敗）。
                 session.pipeline = None
+        if reporter is not None:
+            reporter.stop()
         self._send_status(state, detail, session.id, code, data)
+        if terminal:
+            self._release(self._take_components(session))
+
+    def _take_components(self, session: _Session) -> PipelineComponents | None:
+        """取走 session 的元件（只有一方會拿到，所以不會釋放兩次）。"""
+        with self._session_lock:
+            components, session.components = session.components, None
+        return components
+
+    @staticmethod
+    def _release(components: PipelineComponents | None) -> None:
+        if components is not None:
+            release_components(components)
 
     def _session_stop(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)

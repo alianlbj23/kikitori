@@ -17,7 +17,7 @@ import numpy as np
 import numpy.typing as npt
 
 from kikitori.capture.buffer import ChunkBuffer, validate_timeout
-from kikitori.capture.errors import CaptureError
+from kikitori.capture.errors import CaptureError, detached_copy
 from kikitori.capture.resample import AudioConverter
 from kikitori.capture.types import SAMPLE_RATE, AudioChunk
 
@@ -123,7 +123,9 @@ class ThreadedSource:
             )
         if self._open_error is not None:
             self._thread.join(self._join_timeout)
-            raise self._open_error
+            # 丟出新的複本而不是保存的物件：否則呼叫端（Pipeline.start → GPU 上的模型）的
+            # frame 會接到 source 保存的例外上，形成只能靠循環垃圾回收釋放的循環。
+            raise detached_copy(self._open_error)
 
     def read(self, timeout: float) -> AudioChunk:
         """等待最多 `timeout` 秒，回傳累積的 16 kHz 單聲道 int16 音訊；逾時回傳空陣列。"""
@@ -164,6 +166,10 @@ class ThreadedSource:
             # 執行緒邊界：任何錯誤都不能讓執行緒默默結束，記錄後交給讀取端拋出。
             error = self._map_error(exc)
             logger.error("audio capture failed (%s): %s", type(error).__name__, error)
+            # 保存的錯誤不留這條執行緒的 frame（self = source）：source → 錯誤 → frame →
+            # source 的循環只能靠循環垃圾回收釋放。
+            exc.with_traceback(None)
+            error.with_traceback(None)
             if not opened:
                 self._open_error = error
             self._buffer.fail(error)

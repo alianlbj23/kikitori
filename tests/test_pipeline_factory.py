@@ -367,6 +367,95 @@ class BuildComponentsAsrTest(unittest.TestCase):
             calls = self._calls(Settings())
         self.assertEqual(calls["fast"]["cuda_library_dirs"], [])
 
+    def test_fast_transcriber_is_closed_when_the_final_one_fails(self) -> None:
+        # 即時模型先載入成功、完整模型失敗（例如未下載）：即時模型要放回模型池，
+        # 否則這個 CTranslate2 物件被丟掉，GPU 上漏約 8 MiB（memory_soak #2）
+        fast = mock.Mock()
+        self.load.side_effect = [fast, FileNotFoundError("not downloaded")]
+        settings = Settings().merged(
+            {"asr": {"fast_model": "base", "final_model": "large-v3-turbo"}}
+        )
+        with self.assertRaises(FileNotFoundError):
+            factory.build_components(settings, "media")
+        fast.close.assert_called_once_with()
+
+
+class ModelManagementTest(unittest.TestCase):
+    """F7：`delete_asr_model()` 與 `asr_model_catalog()` 的 disk_bytes（暫存的模型快取）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cache = Path(self._tmp.name) / "models"
+        self.cache.mkdir()
+        from kikitori.asr import get_model
+
+        self.spec = get_model("tiny")
+
+    def install(self) -> Path:
+        import json
+
+        from kikitori.asr import model_dir
+        from kikitori.asr.download import MARKER_NAME
+
+        directory = model_dir(self.spec, self.cache)
+        directory.mkdir(parents=True)
+        for file in self.spec.files:
+            # 只看大小（is_downloaded 不重算雜湊）：稀疏地寫到正確長度
+            with (directory / file.name).open("wb") as fh:
+                fh.truncate(file.size)
+        marker = {
+            "id": self.spec.id,
+            "repo_id": self.spec.repo_id,
+            "revision": self.spec.revision,
+            "files": {f.name: f.sha256 for f in self.spec.files},
+        }
+        (directory / MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+        return directory
+
+    def test_catalog_reports_disk_bytes(self) -> None:
+        with mock.patch("kikitori.asr.default_cache_dir", return_value=self.cache):
+            before = {m.id: m for m in factory.asr_model_catalog()}
+            self.assertIsNone(before["tiny"].disk_bytes)
+            self.assertFalse(before["tiny"].downloaded)
+            self.install()
+            after = {m.id: m for m in factory.asr_model_catalog()}
+        self.assertTrue(after["tiny"].downloaded)
+        self.assertGreaterEqual(after["tiny"].disk_bytes, self.spec.total_bytes)
+
+    def test_delete_evicts_pooled_objects_then_deletes(self) -> None:
+        import os
+
+        from kikitori.asr import ModelPool, model_dir
+        from kikitori.asr.whisper import ModelKey
+
+        directory = self.install()
+        pool = ModelPool()
+        path = os.path.normcase(os.path.realpath(directory))
+        key = ModelKey(path, "cpu", 0, "int8", 4, 1)
+        pool.release(key, mock.Mock())
+        with mock.patch("kikitori.asr.MODEL_POOL", pool):
+            freed = factory.delete_asr_model("tiny", self.cache)
+        self.assertGreaterEqual(freed, self.spec.total_bytes)
+        self.assertEqual(pool.idle_count(), 0)
+        self.assertFalse(model_dir(self.spec, self.cache).exists())
+
+    def test_delete_errors(self) -> None:
+        with self.assertRaises(factory.UnknownModelError):
+            factory.delete_asr_model("whisper-9000", self.cache)
+        with self.assertRaises(FileNotFoundError):
+            factory.delete_asr_model("tiny", self.cache)
+
+    def test_release_clears_the_pool(self) -> None:
+        from kikitori.asr import ModelPool
+        from kikitori.asr.whisper import ModelKey
+
+        pool = ModelPool()
+        pool.release(ModelKey("x", "cpu", 0, "int8", 1, 1), mock.Mock())
+        with mock.patch("kikitori.asr.MODEL_POOL", pool):
+            factory.release_asr_models()
+        self.assertEqual(pool.idle_count(), 0)
+
 
 class _RecordingTranslator:
     def __init__(self, config: TranslatorConfig, log: list, fail: bool) -> None:

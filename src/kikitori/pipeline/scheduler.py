@@ -22,6 +22,8 @@ class Job:
     audio: npt.NDArray[np.int16] = field(repr=False)
     start_sample: int
     end_sample: int
+    ended_at: float | None = None
+    """完整工作：VAD 判定句子結束時的時鐘值（pipeline 注入的時鐘，秒），算 `latency_ms` 用。"""
 
 
 class LatestSlot:
@@ -113,6 +115,10 @@ class FinalQueue:
     def empty(self) -> bool:
         """佇列是否為空。"""
         return self._queue.empty()
+
+    def size(self) -> int:
+        """目前在佇列中等待的工作數（約略值：其他執行緒可能同時放入或取出）。"""
+        return self._queue.qsize()
 
     def clear(self) -> int:
         """丟棄所有尚未處理的工作（只在停止時使用），回傳丟棄數。"""

@@ -11,6 +11,7 @@ import socket
 import threading
 import unittest
 from typing import Any, ClassVar
+from unittest import mock
 
 from kikitori.hardware.ollama import (
     MAX_LAYERS,
@@ -19,6 +20,7 @@ from kikitori.hardware.ollama import (
     OllamaUnreachableError,
     PullCancelledError,
     PullError,
+    _PollingSocket,
     native_root,
     ollama_version,
     pull_model,
@@ -122,6 +124,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Transfer-Encoding", "chunked")
+        for name, value in srv.extra_headers.items():
+            self.send_header(name, value)
         self.end_headers()
         try:
             for i, line in enumerate(srv.lines):
@@ -218,6 +222,17 @@ class OllamaServerTest(unittest.TestCase):
     def test_version_detects_ollama_at_the_native_root(self) -> None:
         self.assertEqual(ollama_version(self.base, env={}), "0.12.3")
         self.assertEqual(self.server.requests[0][1], "/api/version")
+
+    def test_version_with_connection_close(self) -> None:
+        # 會關連線的反向代理（HTTP/1.0、keepalive_timeout 0）：http.client 在讀內容之前就
+        # 關閉連線物件，真正的 socket 要等內容讀完才能關（memory_soak #3）
+        self.server.extra_headers = {"Connection": "close"}
+        self.assertEqual(ollama_version(self.base, env={}), "0.12.3")
+
+    def test_pull_with_connection_close(self) -> None:
+        self.server.extra_headers = {"Connection": "close"}
+        seen = self.pull()
+        self.assertEqual(seen[-1], (1010, 1010))
 
     def test_other_servers_are_not_ollama(self) -> None:
         for status, body in (
@@ -491,6 +506,34 @@ class OllamaServerTest(unittest.TestCase):
         self.assertEqual(
             str(ctx.exception), "HTTP 400 from /api/pull: invalid model name"
         )
+
+
+class PollingSocketTest(unittest.TestCase):
+    """`_PollingSocket` 的參照計數：真正的 socket 在連線與讀取器都關閉後才關。"""
+
+    def test_socket_closes_after_the_last_reader(self) -> None:
+        sock = mock.Mock()
+        wrapper = _PollingSocket(sock, threading.Event(), 1.0)
+        reader = wrapper.makefile("rb")
+        wrapper.close()  # http.client 看到 Connection: close 時先關連線
+        sock.close.assert_not_called()
+        reader.close()
+        sock.close.assert_called_once_with()
+        reader.close()  # 重複關閉不會再減一次
+        sock.close.assert_called_once_with()
+
+    def test_socket_closes_immediately_without_readers(self) -> None:
+        sock = mock.Mock()
+        _PollingSocket(sock, threading.Event(), 1.0).close()
+        sock.close.assert_called_once_with()
+
+    def test_reader_closed_first_keeps_socket_until_connection_closes(self) -> None:
+        sock = mock.Mock()
+        wrapper = _PollingSocket(sock, threading.Event(), 1.0)
+        wrapper.makefile("rb").close()
+        sock.close.assert_not_called()
+        wrapper.close()
+        sock.close.assert_called_once_with()
 
 
 class HelpersTest(unittest.TestCase):

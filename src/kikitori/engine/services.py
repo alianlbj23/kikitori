@@ -69,6 +69,18 @@ class ModelCatalog(Protocol):
         """下載 ASR 模型；`cancel` 被設定時停止。失敗時丟例外。"""
         ...
 
+    def delete(self, model_id: str) -> int:
+        """刪除已下載的 ASR 模型（含未完成下載的殘留），回傳釋放的位元組數。
+
+        呼叫端（引擎）先確認模型不在使用中。
+
+        Raises:
+            UnknownModelError: 模型 id 不在清單中。
+            FileNotFoundError: 模型沒有下載。
+            OSError、ValueError: 刪除失敗或路徑不安全（不在模型快取內、是連結）。
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class TranslationServerState:
@@ -121,6 +133,7 @@ class EngineServices:
         models: ASR 模型清單與下載。
         translation_models: 翻譯伺服器的狀態與（Ollama）模型下載。
         fake: 是否為測試用的假服務（回報在 `engine.info`）。
+        release_models: 引擎結束時釋放行程內保留的模型（ASR 模型池）；None 表示不需要。
     """
 
     settings_store: SettingsStore
@@ -131,6 +144,7 @@ class EngineServices:
     models: ModelCatalog
     translation_models: TranslationModels
     fake: bool = False
+    release_models: Callable[[], None] | None = None
 
 
 def platform_name() -> str:
@@ -197,6 +211,12 @@ class DefaultModelCatalog:
 
         download_asr_model(model_id, progress, cancel)
 
+    def delete(self, model_id: str) -> int:
+        """見 `factory.delete_asr_model()`。"""
+        from kikitori.pipeline.factory import delete_asr_model
+
+        return delete_asr_model(model_id)
+
 
 class DefaultTranslationModels:
     """真實的實作：`GET {base_url}/models` 判斷可連與已安裝的模型，再以 Ollama 原生的
@@ -256,7 +276,7 @@ class DefaultTranslationModels:
 def default_services() -> EngineServices:
     """正式使用的服務：真實 capture、設定檔、factory 與 hardware 模組。"""
     from kikitori.capture import list_devices, open_source
-    from kikitori.pipeline.factory import build_session_components
+    from kikitori.pipeline.factory import build_session_components, release_asr_models
 
     return EngineServices(
         settings_store=SettingsStore(default_settings_path()),
@@ -266,4 +286,5 @@ def default_services() -> EngineServices:
         hardware=DefaultHardwareProvider(),
         models=DefaultModelCatalog(),
         translation_models=DefaultTranslationModels(),
+        release_models=release_asr_models,
     )
