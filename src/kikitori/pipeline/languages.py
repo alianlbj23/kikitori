@@ -10,6 +10,7 @@ from typing import Literal
 
 from kikitori.pipeline.types import Mode
 from kikitori.translate import SUPPORTED_PAIRS
+from kikitori.translate.postprocess import to_taiwan_traditional
 
 RouteAction = Literal["translate", "copy", "unsupported"]
 
@@ -56,3 +57,14 @@ def route(
     if (source, target) in SUPPORTED_PAIRS:
         return Route(source, target, "translate")
     return Route(source, target, "unsupported")
+
+
+def display_original(text: str, detected: str, target_language: str) -> str:
+    """原文的顯示文字：中文、而且使用者的語言是 zh-TW 時轉成台灣正體。
+
+    Whisper 的中文辨識結果通常是簡體；口譯時這是使用者自己說的話，media 模式聽到中文時
+    它還直接當譯文（"copy"）。只轉中文：日文的新字體（気、駅）不是簡體，不能動。
+    """
+    if base_language(detected) == "zh" and target_language == "zh-TW":
+        return to_taiwan_traditional(text)
+    return text

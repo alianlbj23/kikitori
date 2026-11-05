@@ -100,6 +100,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `interpret` | 其他 | `target_language`（zh-TW） |
 
 - 原文語言與譯文同為中文（例如 media 模式聽到中文）→ 不翻譯，譯文 = 原文。
+- 原文是中文、`target_language` 為 `zh-TW` 時，原文先以 `translate.postprocess.to_taiwan_traditional()` 轉成台灣正體（`languages.display_original()`；即時與完整路徑相同）。Whisper 的中文結果通常是簡體：口譯時那是使用者自己說的話，media 模式聽到中文時它還直接當譯文。只轉中文——日文新字體（気、駅）不是簡體。
 - 組合不在 translate 的 `SUPPORTED_PAIRS` 內（例如偵測到 `ko`）→ 譯文為空字串，送一筆 warning。
 - 語言偵測的候選範圍由 factory 設定（`DecodeOptions.candidate_languages`）：media 為 `("ja", "en")`，interpret 為 `("zh", partner_language)`。
 - `SubtitleUpdate.source_language` 是 ASR 給的 ISO 639-1；`target_language` 是實際譯文語言（`zh-TW`、`ja`、`en`）。

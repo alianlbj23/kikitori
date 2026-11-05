@@ -23,7 +23,12 @@ import numpy.typing as npt
 
 from kikitori.asr.types import Transcript
 from kikitori.capture.types import AudioSource
-from kikitori.pipeline.languages import Route, base_language, route
+from kikitori.pipeline.languages import (
+    Route,
+    base_language,
+    display_original,
+    route,
+)
 from kikitori.pipeline.scheduler import FinalQueue, Job, LatestSlot
 from kikitori.pipeline.types import (
     LogCallback,
@@ -390,7 +395,7 @@ class Pipeline:
         if reason is not None:
             logger.debug("partial %d filtered: %s", job.utterance_id, reason)
             return
-        original = transcript.text.strip()
+        original = self._original(transcript)
         decision = self._route(transcript.language)
         if decision.action != "translate":
             text = original if decision.action == "copy" else ""
@@ -447,7 +452,7 @@ class Pipeline:
             logger.debug("final %d filtered: %s", job.utterance_id, reason)
             self._emit_cleared(job)
             return
-        original = transcript.text.strip()
+        original = self._original(transcript)
         decision = self._route(transcript.language)
         translation = ""
         if decision.action == "copy":
@@ -498,6 +503,11 @@ class Pipeline:
             return ()
         with self._emit_lock:
             return tuple(text for lang, text in self._history if lang == source)
+
+    def _original(self, transcript: Transcript) -> str:
+        return display_original(
+            transcript.text.strip(), transcript.language, self._config.target_language
+        )
 
     def _route(self, detected: str) -> Route:
         decision = route(

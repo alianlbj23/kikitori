@@ -368,6 +368,37 @@ class LanguageRoutingTest(unittest.TestCase):
         h = self.run_final("interpret", "ja")
         self.assertEqual(h.final_tr.requests[0].target_language, "zh-TW")
 
+    def test_chinese_original_is_shown_in_taiwan_traditional(self) -> None:
+        # Whisper 的中文辨識結果通常是簡體（端到端驗收：口譯時使用者說的「請問附近有
+        # 便利商店嗎」顯示成「请问附近有便利商店吗」）；使用者的語言是台灣正體。
+        for mode, partner in (("interpret", "en"), ("media", "ja")):
+            with self.subTest(mode=mode):
+                h = Harness(mode, partner_language=partner)
+                simplified = transcript("请问附近有便利商店吗", "zh")
+                h.fast.script = lambda n, t=simplified: t
+                h.final.script = lambda n, t=simplified: t
+                h.pipeline.feed(ONE_UTTERANCE[: 2 * SR])
+                h.pipeline.run_pending()
+                h.pipeline.feed(ONE_UTTERANCE[2 * SR :])
+                h.pipeline.run_pending()
+                self.assertTrue(h.partials())
+                for update in h.updates:
+                    self.assertEqual(update.original, "請問附近有便利商店嗎")
+                if mode == "media":  # 中文不翻譯：譯文就是原文，也要是正體
+                    self.assertEqual(h.finals()[0].translation, "請問附近有便利商店嗎")
+                else:
+                    self.assertEqual(
+                        h.final_tr.requests[-1].text, "請問附近有便利商店嗎"
+                    )
+
+    def test_japanese_original_is_not_converted(self) -> None:
+        # 日文新字體（気、駅）不是簡體字，不能被中文轉換改掉。
+        h = Harness()
+        h.final.script = lambda n: transcript("駅の天気が気になる", "ja")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(h.finals()[0].original, "駅の天気が気になる")
+
     def test_unsupported_language_shows_original(self) -> None:
         h = self.run_final("media", "ko")
         self.assertEqual(h.final_tr.requests, [])
