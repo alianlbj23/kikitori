@@ -30,6 +30,9 @@ uv run python -I experiments/hallucination_lexicon/menu.py
 3. **彙整**：以**目前的** `rejection_reason()` 重新判定所有原始輸出，再模擬加上 `lexicon.json`，
    產生 `results/summary.md`（各表格）與 `results/candidates.json`（每語言的候選片語）。
    調整過濾規則或片語表後只要重跑這一步。
+4. **把 lexicon.json 匯出成引擎的片語表**：重新產生 `src/kikitori/asr/hallucination_lexicon.py`
+   （引擎實際使用的資料；`tests/test_asr_hallucination_lexicon.py` 檢查兩者逐字一致）。
+   改完 `lexicon.json` 後一定要跑這一步，不要手改 Python 檔。
 
 `results/`（含 MUSAN 衍生音訊與逐句輸出）已被 git 忽略；只有人工整理的 `lexicon.json`
 （只有片語文字，沒有音訊）與本文件進 repo。

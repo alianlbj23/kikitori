@@ -11,6 +11,7 @@ from kikitori.translate.client import (
     DEFAULT_BASE_URL,
     OpenAICompatibleTranslator,
     TranslatorConfig,
+    redact_url,
 )
 from kikitori.translate.errors import (
     InvalidRequestError,
@@ -56,5 +57,6 @@ __all__ = [
     "TranslatorConfig",
     "preset_for_model",
     "recommend_translation_models",
+    "redact_url",
     "supports",
 ]

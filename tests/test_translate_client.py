@@ -667,6 +667,16 @@ class ConfigValidationTest(unittest.TestCase):
             ):
                 TranslatorConfig(**kwargs)
 
+    def test_credentials_in_the_url_are_redacted(self) -> None:
+        for url in ("http://kiki:s3cret@h:99999/v1", "ftp://kiki:s3cret@h/v1"):
+            with self.subTest(url=url[:6]), self.assertRaises(ValueError) as ctx:
+                TranslatorConfig(model="m", base_url=url)
+            self.assertNotIn("s3cret", str(ctx.exception))
+        translator = OpenAICompatibleTranslator(
+            TranslatorConfig(model="m", base_url="http://kiki:s3cret@localhost:1/v1")
+        )
+        self.assertNotIn("s3cret", repr(translator))
+
     def test_accepts_https_and_custom_port(self) -> None:
         cfg = TranslatorConfig(model="m", base_url="https://api.example.com:8443/v1/")
         self.assertEqual(cfg.base_url, "https://api.example.com:8443/v1/")

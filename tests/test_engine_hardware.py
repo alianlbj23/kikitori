@@ -141,6 +141,38 @@ class DeferredRunnerTest(unittest.TestCase):
         self.assertTrue(done.wait(WAIT))
         self.assertEqual(order, ["after:2"])
 
+    def test_unsent_runs_when_the_success_response_cannot_be_written(
+        self,
+    ) -> None:
+        out = _Recorder()
+        runner = DeferredRunner(out.send)
+        self.addCleanup(runner.close, WAIT)
+        undone: list[int] = []
+        with self.assertLogs("kikitori.engine.deferred", "ERROR"):
+            # NaN 無法序列化：成功的結果寫不出去，after 不會執行
+            runner.submit(
+                1,
+                "a",
+                lambda: {"x": float("nan")},
+                lambda: undone.append(-1),
+                lambda: undone.append(1),
+            )
+            # 錯誤回應：job 沒有保留任何東西，不必撤銷
+            runner.submit(
+                2,
+                "b",
+                lambda: (_ for _ in ()).throw(p.ProtocolError(p.INVALID_PARAMS, "x")),
+                None,
+                lambda: undone.append(2),
+            )
+            # 正常寫出：執行 after，不執行 unsent
+            runner.submit(
+                3, "c", dict, lambda: undone.append(3), lambda: undone.append(-3)
+            )
+            out.wait(3)
+        runner.close(WAIT)
+        self.assertEqual(undone, [1, 3])
+
     def test_failing_after_is_logged_and_the_worker_survives(self) -> None:
         out = _Recorder()
         runner = DeferredRunner(out.send)

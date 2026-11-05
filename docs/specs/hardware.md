@@ -28,10 +28,10 @@
 |---|---|---|
 | `types.py` | 凍結 dataclass 與 `to_dict()` | `HardwareInfo`、`CpuInfo`、`MemoryInfo`、`GpuInfo`、`CublasInfo`、`TranslationServerInfo`、`LanguageSelection`、`AsrChoice`、`ModelCombination`、`ValidationResult` |
 | `messages.py` | 結構化訊息與訊息碼表（唯一來源） | `Message`、`message()`、`CATALOG` |
-| `ollama.py` | Ollama 原生 API：判斷是不是 Ollama、`/api/pull` 下載翻譯模型 | `ollama_version()`、`pull_model()`、`native_root()`、`validate_model_name()`、`OllamaUnreachableError`、`NotOllamaError`、`PullError`、`PullCancelledError` |
+| `ollama.py` | Ollama 原生 API：判斷是不是 Ollama、`/api/pull` 下載翻譯模型 | `ollama_version()`、`pull_model()`、`native_root()`、`validate_pull_model_name()`、`OllamaUnreachableError`、`NotOllamaError`、`OllamaAuthError`、`PullError`、`PullCancelledError` |
 | `system.py` | OS、CPU、RAM（各平台） | `detect_cpu()`、`detect_memory()`、`detect_apple_silicon()`、解析器 |
 | `nvidia.py` | `nvidia-smi` 與 cuBLAS 搜尋 | `query_nvidia_gpus()`、`find_cublas()`、`NvidiaSmiError` |
-| `translation_server.py` | `GET {base_url}/models` | `probe_translation_server()` |
+| `translation_server.py` | `GET {base_url}/models` | `probe_translation_server()`、`is_listed_model_name()`（寬鬆：伺服器列出的名稱，只用來顯示與比對） |
 | `detection.py` | 組合上述偵測 | `detect()`、`auto_cpu_threads()`（只偵測 CPU；設定 `asr.*_cpu_threads` 為 null 時用） |
 | `recommend.py` | 推薦與覆寫驗證（純函式） | `recommend()`、`validate_combination()`、`cpu_threads_per_model()` |
 | `gpu_runtime.py` | cuBLAS wheel 下載安裝 | `install_gpu_runtime()`、`gpu_runtime_status()`、`installed_runtime_dir()`、`GpuRuntimeError` |
@@ -330,29 +330,69 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 
 翻譯伺服器是 Ollama 時，引擎可以替使用者下載翻譯模型（`models.pull_translation`）；其他 OpenAI 相容伺服器只能提示使用者
 自行安裝。全部用標準庫 `http.client`（不經 proxy；`localhost` 依序試 127.0.0.1、::1，理由同翻譯伺服器探測）。
+協定以官方文件（docs.ollama.com/api 的 pull、version、errors；2026-11-05 查閱）與本機 Ollama 0.40.14 的實測為準（見下方「實測」）。
 
 - **原生 API 的位置**（`native_root()`）：設定存的是 OpenAI 相容端點，例如 `http://host:11434/v1`；去掉路徑結尾的 `/v1`
-  就是 Ollama 原生 API 的根（反向代理的前綴保留，例如 `http://h/ollama/v1` → `/ollama/api/...`）。
-- **是不是 Ollama**（`ollama_version()`）：`GET {root}/api/version`，timeout 2 s。連不上 → `OllamaUnreachableError`；有回應但
-  狀態碼不是 200、不是 JSON、沒有 1–50 字的可列印 `version` 字串 → `NotOllamaError`（例如 LM Studio、vLLM 回 404）。
+  就是 Ollama 原生 API 的根（反向代理的前綴保留，例如 `http://h/ollama/v1` → `/ollama/api/...`）。連接埠 0 或不合法 → `ValueError`。
+- **網址中的帳密**：`http://user:pass@host/...` 的 userinfo 不使用（金鑰只從環境變數讀），而且在所有錯誤訊息、log 與回應中遮蔽成
+  `***@`（`kikitori.translate.redact_url()`；`probe_translation_server()` 回報的 `base_url`、推薦理由、引擎的錯誤訊息都經過它）。
+- **是不是 Ollama**（`ollama_version()`）：`GET {root}/api/version`，連線、送出請求與讀完整個回應各最多 2 s（回應的讀取是整體時限，
+  不是每次 recv，伺服器一點一點送也不會拖延）。官方回應是 `{"version": "0.5.1"}`。
+  - 連不上，或回應沒在時限內讀完 → `OllamaUnreachableError`（標頭到了、內容讀不完時訊息寫明「response body」）。
+  - **401／403 → `OllamaAuthError`**：要求金鑰的反向代理後面可能就是 Ollama，只是無法確認；不歸類為「不是 Ollama」，
+    UI 才能請使用者檢查 `translation.api_key_env`，而不是叫他自行安裝模型。
+  - **3xx → `NotOllamaError`，訊息寫明轉址與目標**（目標網址也遮蔽帳密）：不跟隨轉址——轉到別的主機會把 `Authorization` 帶過去，
+    而 Ollama 本身從不轉址，出現就是設定錯了（例如 http 被代理轉到 https），請使用者改成最終網址。
+  - 其他狀態碼、不是 JSON、沒有 1–50 字的可列印 `version` 字串 → `NotOllamaError`（例如 LM Studio、vLLM 回 404）。只有 200 才讀內容。
 - **下載**（`pull_model()`）：`POST {root}/api/pull`，body `{"model": <名稱>, "stream": true}`。回應是 NDJSON（chunked），
   每行一個物件：`{"status": "pulling manifest"}`、`{"status": "pulling <digest>", "digest": "sha256:<64 hex>", "total": N,
   "completed": M}`、`{"status": "verifying sha256 digest"}`、`{"status": "writing manifest"}`、`{"status": "success"}`，或
   `{"error": "<訊息>"}`。
-  - 模型名稱（`validate_model_name()`）：1–200 字，只允許英數與 `._:/-`、第一個字元是英數、不得含 `..`。
+  - 模型名稱（`validate_pull_model_name()`）：1–200 字，只允許英數與 `._:/-`、第一個字元是英數、不得含 `..`，整個字串都要符合
+    （`re.fullmatch`：結尾的換行也不行）。比伺服器列出的名稱（`translation_server.is_listed_model_name()`：任何可列印字元，只用來
+    顯示與比對「已安裝」）嚴格，因為這個名稱會轉送給伺服器。
   - 每行最多 64 KiB、必須是 JSON 物件；`status` 必須是 ≤ 200 字的字串；`error` 必須是字串（截斷 300 字、只留可列印字元後
     放進 `PullError`）。進度欄位逐一驗證：`digest` 符合 `sha256:` 格式、`total` 為 0–10¹³ 的整數、`completed` 為非負整數
-    （大於 total 時以 total 計）；不合法的進度行略過（不中斷）。
+    （大於 total 時以 total 計）；不合法的進度行略過（不中斷）。不同的層最多 512 個（實際模型只有數層），超過 → `PullError`。
   - 進度：各層（digest）的 completed／total 加總後回報 `(completed, total)`，只在改變時回報；新的層出現時 total 會變大。
-  - 收到 `success` 才算完成；串流在那之前結束 → `PullError`。HTTP 狀態碼不是 200 → `PullError("HTTP <code> from /api/pull: <error>")`。
-  - **逾時**：連線 5 s；讀取以 0.2 s 的 socket 逾時輪詢，累計 120 s 沒收到任何資料 → `PullError("no data … within 120 s")`
-    （驗證數 GB 的 SHA-256 時 Ollama 會安靜十幾秒）。
-  - **取消**：`cancel`（`threading.Event`）在每次輪詢檢查，最多延遲約 0.2 s 就丟 `PullCancelledError`。不用「另一條執行緒
+  - 收到 `success` 才算完成；串流在那之前結束 → `PullError`。串流開始後狀態碼已是 200，官方文件說明錯誤只會以最後一行
+    `{"error": …}` 出現（實測不存在的模型就是這樣）。HTTP 狀態碼不是 200 → `PullError("HTTP <code> from /api/pull: <error>")`
+    （官方錯誤格式 `{"error": "…"}`，`application/json`）；401／403 → `OllamaAuthError`；3xx → `PullError`（寫明不跟隨轉址）。
+  - **逾時**：連線 5 s、送出請求 5 s（`PullError("timed out sending the request …")`）；之後讀取以 0.2 s 的 socket 逾時輪詢，
+    累計 120 s 沒收到任何資料 → `PullError("no data … within 120 s while waiting for progress")`（驗證數 GB 的 SHA-256 時
+    Ollama 會安靜十幾秒）。兩種逾時的訊息不同，才分得出是哪一步卡住。
+  - **取消**：開始前、連線後、送出請求後都檢查；連線與送出請求本身不能中斷，所以最久延遲是正在進行的那一步的逾時（連線最多
+    5 s，`localhost` 依序試兩個位址時最多 10 s；送出請求最多 5 s）。之後等待回應與讀取進度時，`cancel`（`threading.Event`）
+    在每次輪詢檢查，最多延遲約 0.2 s 就丟 `PullCancelledError`。連線期間被取消就不送出請求。不用「另一條執行緒
     關閉 socket」：Windows 上 `shutdown()` 不會喚醒另一條執行緒中卡在 `recv()` 的讀取（實測），而 `makefile()` 持有參照時
     `close()` 也不會真的關閉；也不能直接對 `makefile()` 用 socket 逾時，它逾時一次之後就不能再讀。所以回應改由一個輪詢的
     讀取器（`_PollingSocket`／`_PollingReader`）提供給 `http.client.HTTPResponse`。
   - 金鑰：`api_key_env` 的環境變數有值才送 `Authorization: Bearer …`（Ollama 不需要），不出現在例外或 log。
   - 已安裝的模型也可以 pull（Ollama 只檢查 manifest，很快回報 success）。
+
+### 實測（Ollama 0.40.14，Windows 11，2026-11-05）
+
+本機已在執行的 Ollama（`GET /api/version` → `{"version":"0.40.14"}`），只 pull 已安裝的模型與不存在的名稱，不下載也不刪除任何模型。
+`tests/test_hardware_ollama.py` 的 `REAL_PULL_*` 原樣重播這些內容（只把 digest 換成假值）。
+
+- `POST /api/pull {"model":"qwen3.5:4b","stream":true}`（已安裝）：`200`、`Content-Type: application/x-ndjson`、chunked，約 1 s：
+  ```text
+  {"status":"pulling manifest"}
+  {"status":"pulling e56a899b1540","digest":"sha256:e56a899b…","total":675569120,"completed":675569120}
+  …（共 6 層：2648593216、13、11343、65、177 bytes，每層 completed = total）
+  {"status":"verifying sha256 digest"}
+  {"status":"writing manifest"}
+  {"status":"removing unused layers"}
+  {"status":"success"}
+  ```
+  `pull_model()` 回報 6 次進度，最後 `(3324173934, 3324173934)`。官方文件的範例寫 `removing any unused layers`，實際是
+  `removing unused layers`；程式不依賴 `status` 的文字（只認 `success`），所以不受影響。
+- 不存在的模型：`200`、NDJSON 兩行，之後串流結束：`{"status":"pulling manifest"}`、`{"error":"pull model manifest: file does not exist"}`
+  → `PullError("Ollama: pull model manifest: file does not exist")`，約 0.7 s。
+- 名稱不合法（`"bad name!!"`）或缺少 `model`：`400`、`application/json`、`{"error":"invalid model name"}`（不是串流）
+  → `PullError("HTTP 400 from /api/pull: invalid model name")`。
+- 請求欄位是 `model`（官方文件；舊版的 `name` 已不用）；`stream` 省略時預設為串流，仍明確送 `true`。`/api/tags` 沒有使用
+  （已安裝的模型由 OpenAI 相容的 `GET /v1/models` 取得）。
 
 ## `models.list` 總覽（`models_overview()`）
 
@@ -389,7 +429,8 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
   模式）；回傳推薦、`patch`、每個模型的安裝狀態與下載大小（ASR 取 `ModelCatalog` 的大小；翻譯模型取預設組 `approx_vram_gb` × 10⁹ 的約略值，
   不認得的模型為 null）、`messages`。不存檔、不下載。協定細節見 `pipeline-engine.md`。
 - `models.pull_translation`（Milestone 13）→ `EngineServices.translation_models.server_state()`（`probe_translation_server()` + `ollama_version()`）
-  確認是可連的 Ollama 後，在背景執行緒呼叫 `pull_model()`；結束（成功或失敗）時清掉偵測快取。
+  確認是可連的 Ollama 後，在背景執行緒呼叫 `pull_model()`；結束（成功或失敗）時清掉偵測快取。`ollama_version()` 丟
+  `OllamaAuthError` 時 `server_state()` 回 `auth_failed=True`，引擎回 `translation_server_auth_failed`。
 - `session.start` 的翻譯模型檢查（Milestone 13）：同一個 `server_state()`，伺服器是可連的 Ollama 而設定的翻譯模型沒裝時，session 以
   `translation_model_missing` 結束（見 `pipeline-engine.md`）。
 - `settings.apply_recommendation` → `recommend(info)` 轉成設定（`engine/hardware_service.py` 的 `recommendation_patch()`）後存檔；`only_if_new` 時只在還沒有設定檔時寫入（第一次執行的自動套用）。
@@ -461,7 +502,10 @@ Lint：uv run ruff check
   單一語言 ASR 模型只在該語言被選、registry 每個模型都有品質資料、驗證的語言檢查。
 - `test_hardware_messages.py`：訊息的參數檢查（缺少、多餘、型別、NaN、bool）、英文範本可套用、本文件「訊息碼」表與 `CATALOG` 逐字一致。
 - `test_hardware_ollama.py`：本機 HTTP 伺服器以 chunked NDJSON 模擬 Ollama：版本偵測、不是 Ollama、連不上、各層進度加總、`error` 行、HTTP 錯誤、沒有 `success`、
-  不合法的行、壞掉的進度欄位被略過、讀取逾時、取消卡住的讀取、取消時不送請求、金鑰只在有值時送、`native_root()`、模型名稱驗證。
+  不合法的行、壞掉的進度欄位被略過、讀取逾時、取消卡住的讀取、取消時不送請求、金鑰只在有值時送、`native_root()`、模型名稱驗證，
+  以及 401／403 是 `OllamaAuthError`（不是「不是 Ollama」）、3xx 不跟隨且訊息寫明轉址、`/api/version` 內容讀不完有整體時限、
+  連線期間取消不送請求、送出請求與等待進度的逾時訊息不同、超過 512 層、網址帳密不出現在任何訊息、實測 NDJSON 的重播（已安裝、
+  不存在、名稱不合法）、`redact_url()`。
 - `test_hardware_gpu_runtime.py`：本機 HTTP 伺服器提供假的小 wheel（zip）：成功、已安裝不重下、雜湊不符、成員大小不符、缺成員、解壓失敗後重試不重下、不是 zip、中斷續傳、取消、拒絕非 https、壞掉的安裝會重裝。
 - `test_hardware_detect.py`：`detect()` 組合與錯誤回報、`hardware_report()` 形狀、`models_overview()`。
 

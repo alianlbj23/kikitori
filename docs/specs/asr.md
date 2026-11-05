@@ -97,6 +97,7 @@ class Transcriber(Protocol):
 | `download.py` | 下載、續傳、驗證 | `download_model()`、`download_file()`（單檔，hardware 下載 cuBLAS wheel 用）、`is_downloaded()`、`model_dir()`、`ModelDownloadError` |
 | `whisper.py` | CTranslate2 推論 | `WhisperTranscriber`、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`、`preload_cuda_libraries()` |
 | `filtering.py` | 幻覺過濾 | `FilterConfig`、`rejection_reason()` |
+| `hallucination_lexicon.py` | 依語言的幻覺片語資料（`lexicon.json` 的 Python 版本） | `HALLUCINATION_LEXICON` |
 
 ### 行為規則
 
@@ -158,12 +159,14 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 | `no_speech_probability > hard_no_speech_threshold`（不看 logprob） | 0.8 | 本機實測：語音片段 no_speech 最高 0.43，非語音最低 0.51；large-v3 在靜音上輸出「Teksting av Nicolai Winther」時為 0.86 |
 | `avg_logprob < min_avg_logprob` | −1.5 | 信心過低（歌聲、BGM 常見） |
 | 壓縮比 > `compression_ratio_threshold` | 2.4 | Whisper 的重複迴圈判斷 |
-| 正規化後完全等於已知幻覺句 | 內建清單（可擴充） | Whisper 在無語音時的常見輸出 |
+| 正規化後完全等於已知幻覺句 | 19 語言實測片語表（可擴充） | Whisper 在無語音時的常見輸出（`experiments/hallucination_lexicon/`） |
 
-- 已知幻覺句清單**依 Whisper 語言碼分表**（`DEFAULT_HALLUCINATIONS`，`{語言碼: {"hard": frozenset, "soft": frozenset}}`，格式與 `experiments/hallucination_lexicon/` 的 `lexicon.json` 相同）。NFKC、去標點、小寫後**整句相等**才算：
+- 已知幻覺句清單**依 Whisper 語言碼分表**（`DEFAULT_HALLUCINATIONS`，`{語言碼: {"hard": frozenset, "soft": frozenset}}`），由 `asr/hallucination_lexicon.py` 的 `HALLUCINATION_LEXICON` 建立。那是 `experiments/hallucination_lexicon/lexicon.json`（Milestone 11：small／large-v3-turbo／large-v3 對強制 19 個語言、確定沒有人聲的 MUSAN 噪音與無人聲音樂、靜音、合成噪音與音效的輸出，人工分類；19 語言 + `"*"` 共 228 個片語）的 Python 版本——用 Python 資料而不是 JSON 資源，PyInstaller 隨匯入自動收進去，`packaging/engine/build.py` 不必另列資料檔。`tests/test_asr_hallucination_lexicon.py` 檢查兩者逐字一致，更新時改 `lexicon.json` 並重新產生該檔案。實測效果（README）：推薦組合的完整路徑（turbo final）在 VAD 通過的非語音上，幻覺率 52.8% → 10.3%（交叉驗證 11.0%）；即時路徑（small fast）12.8% → 5.1%。NFKC、去標點、小寫後**整句相等**才算：
   - **hard**（整句字幕套話，例如日文「ご視聴ありがとうございました」「チャンネル登録よろしくお願いします」、英文「Thanks for watching!」「Please subscribe.」、中文「谢谢观看」「请不吝点赞 订阅 转发 打赏支持明镜与点点栏目」）：**所有語言的 hard 片語不論 `Transcript.language` 都套用**。這些句子幾乎不可能是另一個語言的正常語音，而 Whisper 常把它們標成別的語言（英文套話標成 `nl`、中文套話標成 `ja`）。
   - **soft**（真人也常單獨說的短句，例如「Thank you.」「you」「ありがとうございました」「おやすみなさい」「谢谢」）：只比對 `Transcript.language` 那一張表加上不分語言的 `ANY_LANGUAGE`（`"*"`）表，而且 `no_speech_probability > soft_no_speech_threshold`（0.3）時才過濾，避免把其他語言的正常句子濾掉。
-- `"*"` 表放字幕署名（Amara.org 的英／中文署名、large-v3 在靜音上輸出的挪威語署名「Teksting av Nicolai Winther」，其語言標籤不會是 `no`）。新增語言的資料只要編輯 `DEFAULT_HALLUCINATIONS`；`FilterConfig(hallucinations=...)` 也接受單一集合（視為不分語言的 hard 片語），hard／soft 以外的鍵視為錯誤。
+- `"*"` 表放字幕署名（Amara.org 的英／中文署名、large-v3 在靜音上輸出的挪威語署名「Teksting av Nicolai Winther」，其語言標籤不會是 `no`）。所有 hard 片語正規化後至少 4 字、且不與任何 soft 片語相同（測試檢查）。印地語、泰語沒有找到可確定是套話的句子，全部是 soft；越南語全部是 hard（訂閱宣傳與署名）。新增語言的資料改 `lexicon.json` 並重新產生 `hallucination_lexicon.py`；`FilterConfig(hallucinations=...)` 也接受單一集合（視為不分語言的 hard 片語），hard／soft 以外的鍵視為錯誤。
+- **正規化**（`normalize_for_match()`）：NFKC、casefold，只留 Unicode 字母（L）與數字（N）——**天城文（U+0900–097F）與泰文（U+0E00–0E7F）的組合記號（Mn／Mc）例外保留**。這兩種文字的母音與聲調記號是字的一部分，去掉會讓不同的詞變成同一個片語（「करते हैं」與「करती है」、「कर दो」與「कर दे」都會相同，soft 片語就會誤濾別的句子）。以實測的原始輸出比對：保留後印地語片語的命中由 761 次變 760 次、泰語 386 次不變，幾乎不影響效果。阿拉伯文的母音符號（harakat）可有可無、Whisper 的輸出時有時無，照舊忽略；拉丁字母的重音經 NFKC 已合成成字母，不受影響。
+- 片語表的限制（見實驗 README）：只檢查過日文（`experiments/asr_benchmark` 的 190 個語音辨識結果、`experiments/translate_benchmark` 的台詞）沒有整句相同；其他語言沒有真實語音素材，測試另以每個語言數句一般句子（含與片語相近的句子）確認不會被濾。部分 hard 片語是直播主也可能真的說的結尾句（「チャンネル登録よろしくお願いします」「다음 영상에서 만나요.」「Merci d'avoir regardé cette vidéo !」），整句相等時會被濾掉——沿用既有清單把片尾套話列為 hard 的判斷，未經母語者審閱；繁體中文片語是人工轉寫、未實測。
 - **large-v3-turbo 的 no_speech 不可用**（`ModelSpec.no_speech_reliable = False`）：實測靜音、噪音也是 0.00，前三條規則對它無效。實測在指定語言（`ja`）或候選語言（`("zh", "ja")`）時，turbo 對非語音輸出「ご視聴ありがとうございました」而被清單擋下；只有完全不指定語言時會輸出「you」「Thank you.」漏網。因此：(1) VAD 是第一道防線；(2) pipeline 用 turbo 當完整模型時應指定語言或候選語言；(3) 建議 pipeline 以即時路徑模型（no_speech 可用）對同一句的結果作為輔助判斷。
 - 所有門檻都在 `FilterConfig`，由設定頁覆寫。
 
@@ -208,7 +211,7 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
   - registry：id 唯一、revision 為 40 碼 hex、SHA-256 為 64 碼 hex、必要檔案齊全。
   - 快取目錄：模擬 Windows／macOS／Linux 與環境變數（含不合法值）。
   - 下載：本機 `http.server`（只綁 127.0.0.1）與假 fetcher；進度回報、續傳、HTTP 錯誤、逾時、雜湊不符、取消、非 https 拒絕。
-  - 幻覺過濾：每條規則的正反例。
+  - 幻覺過濾：每條規則的正反例；片語表（`test_asr_hallucination_lexicon.py`）：與 `lexicon.json` 一致、保留既有項目、每個 hard 片語在 19 個語言標籤下都被濾、soft 只在同語言且 no_speech 高於門檻時濾、各語言一般句子與翻譯評測台詞在任何語言標籤下都保留、本機有 `experiments/asr_benchmark/results` 時真實日語辨識結果不被片語濾掉（沒有資料時 skip）、天城文與泰文保留組合記號而阿拉伯文照舊忽略。
 - 真模型檢查放在 `experiments/asr_benchmark/`（含與 HF `tokenizers` 對照分詞結果），不放進單元測試。
 - 指令：`uv run python -m unittest discover -s tests`、`uv run ruff check`。
 

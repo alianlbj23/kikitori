@@ -315,11 +315,13 @@ def _fake_wheel(library_bytes: int) -> tuple[RuntimeWheel, bytes]:
 
 FAKE_TRANSLATION_ENV = "KIKITORI_ENGINE_FAKE_TRANSLATION"
 """假模式的翻譯伺服器情境（只在 `KIKITORI_ENGINE_FAKE=1` 時讀取），見 `FAKE_TRANSLATION_PROFILES`。"""
-FAKE_TRANSLATION_PROFILES = ("ollama", "openai", "offline")
+FAKE_TRANSLATION_PROFILES = ("ollama", "openai", "offline", "auth")
 """
 - `ollama`（預設）：本機 Ollama，已安裝 qwen3.5:4b；`models.pull_translation` 會「下載」。
 - `openai`：本機的其他 OpenAI 相容伺服器（不是 Ollama）：無法替使用者下載。
 - `offline`：連不上翻譯伺服器。
+- `auth`：伺服器回 401（金鑰錯誤）：`models.pull_translation` 回
+  `translation_server_auth_failed`，`session.start` 照常開始並記 warning。
 """
 
 
@@ -352,6 +354,14 @@ class FakeTranslationServer:
                 reachable=False,
                 error="cannot connect to localhost: fake server is offline",
             )
+        if self.profile == "auth":
+            # 真實的 probe 在 401 時也是「連得上、沒有模型清單」
+            return TranslationServerInfo(
+                base_url=base_url,
+                is_local=True,
+                reachable=True,
+                error="HTTP 401 from /v1/models",
+            )
         return TranslationServerInfo(
             base_url=base_url, is_local=True, reachable=True, models=self.installed
         )
@@ -361,6 +371,14 @@ class FakeTranslationServer:
         if self.profile == "offline":
             return TranslationServerState(
                 False, False, None, "fake translation server is offline"
+            )
+        if self.profile == "auth":
+            return TranslationServerState(
+                reachable=True,
+                is_ollama=False,
+                installed=None,
+                error="HTTP 401 from /api/version: the server requires a valid API key",
+                auth_failed=True,
             )
         return TranslationServerState(
             reachable=True,

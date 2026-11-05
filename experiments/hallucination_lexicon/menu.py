@@ -126,10 +126,17 @@ def summarize() -> None:
     print(f"彙整結果：{path}")
 
 
+def export_to_engine() -> None:
+    exporter = _load_sibling("export_lexicon")
+    count = exporter.export()
+    print(f"已把 {count} 個片語寫入 {exporter.LEXICON_PY}")
+
+
 MENU: list[tuple[str, Callable[[], None] | None]] = [
     ("產生非語音片段（含 VAD 判定）", build_segments),
     ("逐模型辨識（強制 19 種語言 × 即時／完整解碼）", run_models),
     ("彙整：候選片語、過濾前後的幻覺率", summarize),
+    ("把 lexicon.json 匯出成引擎的片語表", export_to_engine),
     ("離開", None),
 ]
 

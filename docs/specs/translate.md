@@ -70,7 +70,7 @@ translator = OpenAICompatibleTranslator(TranslatorConfig(model="qwen3.5:9b"))
 translator.translate(TranslationRequest("おはよう", "ja"))
 ```
 
-- 建構時驗證設定（型別、範圍、`base_url` 必須是 http/https、有主機、沒有 query；`api_key_env` 必須是合法環境變數名稱），不合法丟 `ValueError`／`TypeError`。
+- 建構時驗證設定（型別、範圍、`base_url` 必須是 http/https、有主機、沒有 query；`api_key_env` 必須是合法環境變數名稱），不合法丟 `ValueError`／`TypeError`。錯誤訊息與 `repr()` 中的 `base_url` 經 `redact_url()` 遮蔽帳密（`http://user:pass@host` → `http://***@host`）：帳密不使用（金鑰只從環境變數讀），而訊息會回到 UI 與 log。
 - 提示詞格式與取樣參數由 `presets.py` 的 `ModelPreset` 決定：已知模型用專屬預設組（模型名稱不帶 tag 時自動補 `:latest` 再查），未知模型用通用預設組（`generic`）。也可在建構時明確傳入 `preset=`。
 - **`localhost` 先連 IPv4**：Windows 上 `localhost` 先解析成 `::1`，而 Ollama 預設只聽 `127.0.0.1`；被拒的 IPv6 連線在 Windows 要約 2 秒才失敗，實測**每個請求**都因此多等 2.06 秒。所以 `http://localhost` 依序試 `127.0.0.1`、`::1`，`Host` 標頭仍寫 `localhost:<port>`。HTTPS 不改寫（避免憑證主機名稱比對失敗）。
 

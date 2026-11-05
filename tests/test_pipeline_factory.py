@@ -627,12 +627,40 @@ class KeepWarmTest(unittest.TestCase):
         keep.stop(1.0)
         self.assertEqual(calls, [])
 
-    def test_disabled_by_zero(self) -> None:
+    def test_zero_disables_the_periodic_keep_warm(self) -> None:
+        # 0 只關掉「定期」保溫：翻譯器不必回報活動，也沒有會定期送請求的 KeepWarm
         components = _components()
         settings = Settings().merged({"translation": {"keep_warm_secs": 0}})
-        self.assertIs(
-            factory.attach_keep_warm(components, settings, "media"), components
+        result = factory.attach_keep_warm(components, settings, "media")
+        self.assertNotIsInstance(result.keep_warm, factory.KeepWarm)
+        self.assertIs(result.fast_translator, components.fast_translator)
+        self.assertIs(result.final_translator, components.final_translator)
+
+    def test_zero_still_warms_up_once_when_translation_is_turned_on(self) -> None:
+        # session 以「只顯示原文」開始時沒有預熱；執行中開啟翻譯仍要在背景預熱一次，
+        # 否則第一句的即時翻譯會因模型冷啟動而逾時
+        log: list = []
+        pinged = threading.Event()
+
+        def make(config: TranslatorConfig) -> _RecordingTranslator:
+            pinged.set()
+            return _RecordingTranslator(config, log, fail=False)
+
+        settings = Settings().merged(
+            {"translation": {"enabled": False, "keep_warm_secs": 0}}
         )
+        result = factory.attach_keep_warm(
+            _components(), settings, "media", make_translator=make
+        )
+        task = result.keep_warm
+        assert task is not None
+        task.start()
+        self.addCleanup(task.stop, 1.0)
+        self.assertFalse(pinged.is_set())
+        task.set_active(True)  # type: ignore[attr-defined]
+        self.assertTrue(pinged.wait(5.0))
+        task.stop(1.0)
+        self.assertEqual(log[0][1].target_language, "zh-TW")
 
 
 if __name__ == "__main__":

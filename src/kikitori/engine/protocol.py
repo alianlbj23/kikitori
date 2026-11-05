@@ -35,6 +35,9 @@ PULL_UNSUPPORTED = "pull_unsupported"
 """`models.pull_translation`：翻譯伺服器不是 Ollama，引擎無法替使用者下載模型。"""
 TRANSLATION_SERVER_UNREACHABLE = "translation_server_unreachable"
 """`models.pull_translation`：連不上翻譯伺服器。"""
+TRANSLATION_SERVER_AUTH_FAILED = "translation_server_auth_failed"
+"""`models.pull_translation`：翻譯伺服器回 401／403（金鑰錯誤或缺少），無法確認是不是
+Ollama；請使用者檢查 `translation.api_key_env` 指向的環境變數。"""
 INTERNAL_ERROR = "internal_error"
 
 

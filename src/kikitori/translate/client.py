@@ -48,6 +48,26 @@ MAX_RETRY_DELAY = 8.0
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _USER_AGENT = "kikitori-translate"
+_AUTHORITY = re.compile(r"([^/?#]*)(.*)", re.DOTALL)
+
+
+def redact_url(url: object) -> str:
+    """把網址的 userinfo（`user:pass@`）換成 `***@`，才放進錯誤訊息、log 與回應。
+
+    使用者可能把反向代理的帳密寫在 base URL 裡；kikitori 不使用它（金鑰只從環境變數
+    讀），但錯誤訊息會回到 UI、寫進 log，不能原樣帶出去。不靠 `urlsplit`：網址不合法
+    （例如連接埠錯誤）時正是要回報錯誤的時候，也必須遮蔽。不是字串時回傳空字串。
+    """
+    text = url.strip() if isinstance(url, str) else ""
+    scheme, sep, rest = text.partition("://")
+    if not sep:
+        scheme, rest = "", text
+    match = _AUTHORITY.match(rest)
+    assert match is not None  # 兩個群組都可以是空字串，必定符合
+    authority, tail = match.groups()
+    if "@" in authority:
+        authority = "***@" + authority.rpartition("@")[2]
+    return f"{scheme}{sep}{authority}{tail}"
 
 
 def _check_positive(name: str, value: object, upper: float) -> None:
@@ -155,16 +175,18 @@ def _parse_base_url(base_url: object) -> _Endpoint:
     parts = urlsplit(base_url.strip())
     if parts.scheme not in ("http", "https"):
         raise ValueError(
-            f"base_url must start with http:// or https://, got {base_url!r}"
+            f"base_url must start with http:// or https://, got {redact_url(base_url)!r}"
         )
     if parts.query or parts.fragment:
         raise ValueError("base_url must not contain a query or fragment")
     try:
         port = parts.port
     except ValueError as exc:
-        raise ValueError(f"base_url has an invalid port: {base_url!r}") from exc
+        raise ValueError(
+            f"base_url has an invalid port: {redact_url(base_url)!r}"
+        ) from exc
     if not parts.hostname:
-        raise ValueError(f"base_url has no host: {base_url!r}")
+        raise ValueError(f"base_url has no host: {redact_url(base_url)!r}")
     https = parts.scheme == "https"
     return _Endpoint(
         https=https,
@@ -208,7 +230,7 @@ class OpenAICompatibleTranslator:
         self._sleep = sleep
 
     def __repr__(self) -> str:
-        return f"OpenAICompatibleTranslator(model={self.config.model!r}, base_url={self.config.base_url!r})"
+        return f"OpenAICompatibleTranslator(model={self.config.model!r}, base_url={redact_url(self.config.base_url)!r})"
 
     def translate(self, request: TranslationRequest) -> str:
         """送出非串流請求，回傳整理後的完整譯文。

@@ -78,13 +78,16 @@ class TranslationServerState:
         reachable: 有收到 HTTP 回應。
         is_ollama: 是 Ollama（有原生的 `/api/version`），才能用 `/api/pull` 下載。
         installed: 伺服器回報的模型名稱；取不到時為 None。
-        error: 連不上或回應不對的原因（英文，不含金鑰）。
+        error: 連不上或回應不對的原因（英文，不含金鑰與網址中的帳密）。
+        auth_failed: 伺服器回 401／403：金鑰錯誤或缺少，無法確認是不是 Ollama。
+            與「不是 Ollama」分開，UI 才能請使用者檢查金鑰，而不是叫他自行安裝模型。
     """
 
     reachable: bool
     is_ollama: bool
     installed: tuple[str, ...] | None = None
     error: str | None = None
+    auth_failed: bool = False
 
 
 class TranslationModels(Protocol):
@@ -203,6 +206,7 @@ class DefaultTranslationModels:
         """見 `TranslationModels.server_state()`。"""
         from kikitori.hardware.ollama import (
             NotOllamaError,
+            OllamaAuthError,
             OllamaUnreachableError,
             ollama_version,
         )
@@ -214,6 +218,11 @@ class DefaultTranslationModels:
             return TranslationServerState(False, False, None, info.error)
         try:
             version = ollama_version(t.base_url, api_key_env=t.api_key_env)
+        except OllamaAuthError as exc:
+            logger.info("translation server rejected the API key: %s", exc)
+            return TranslationServerState(
+                True, False, info.models, str(exc), auth_failed=True
+            )
         except NotOllamaError as exc:
             logger.info("translation server is not Ollama: %s", exc)
             return TranslationServerState(True, False, info.models, str(exc))

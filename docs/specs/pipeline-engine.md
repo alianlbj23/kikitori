@@ -210,7 +210,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `translation.*` | 交給 `TranslatorConfig` 驗證（`base_url` 必須 http/https、模型名稱非空、`api_key_env` 是合法變數名稱）；模型名稱另限 200 字元 |
 | `translation.enabled` | 布林，預設 **true**；false = 只顯示原文：pipeline 不呼叫翻譯器、factory 不預熱也不保溫 |
 | `translation.allow_restricted` | 布林，預設 **false**：是否推薦有地區限制授權的翻譯模型（HY-MT 的授權不適用於歐盟、英國、南韓）。引擎不知道使用者所在地、用語系猜地區不可靠，推薦了不能用的授權會讓使用者在不知情下違約，所以預設不推薦；UI 在設定頁讓使用者確認「我不在歐盟／英國／南韓」後再設為 true。只影響 `recommend()` 與 `models.validate` 的警告，不阻止手動選用 |
-| `translation.keep_warm_secs` | 整數，預設 **240**：0（關閉）或 [10, 3600]。session 執行中翻譯請求停了這麼多秒，就對本機翻譯服務送一次預熱請求，讓模型不被卸載（見「ASR 接縫」的 `attach_keep_warm()`）。預設值低於 Ollama 預設的 `keep_alive` 5 分鐘；伺服器改過 `OLLAMA_KEEP_ALIVE` 時要設得比它短。遠端服務一律不送。新欄位有預設值，舊的 schema 2 檔案照樣讀得進來，所以**不升 schema** |
+| `translation.keep_warm_secs` | 整數，預設 **240**：0（關閉定期保溫；執行中開啟翻譯時仍在背景預熱一次）或 [10, 3600]。session 執行中翻譯請求停了這麼多秒，就對本機翻譯服務送一次預熱請求，讓模型不被卸載（見「ASR 接縫」的 `attach_keep_warm()`）。預設值低於 Ollama 預設的 `keep_alive` 5 分鐘；伺服器改過 `OLLAMA_KEEP_ALIVE` 時要設得比它短。遠端服務一律不送。新欄位有預設值，舊的 schema 2 檔案照樣讀得進來，所以**不升 schema** |
 | `pipeline.partial_interval_ms` | 整數，[200, 5000] |
 | `pipeline.no_speech_threshold` | 數字，[0, 1] |
 | `pipeline.context_lines` | 整數，[0, 10] |
@@ -261,11 +261,13 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `download_in_progress` | 同一個模型（或 GPU 執行環境、或同名的翻譯模型）已在下載；ASR 與翻譯模型的名稱分開計算 |
 | `pull_unsupported` | `models.pull_translation`：翻譯伺服器不是 Ollama（沒有 `/api/version`），無法替使用者下載；請使用者在該服務自行安裝 |
 | `translation_server_unreachable` | `models.pull_translation`：連不上翻譯伺服器 |
+| `translation_server_auth_failed` | `models.pull_translation`：翻譯伺服器回 401／403（金鑰錯誤或缺少，多半是要求金鑰的反向代理），無法確認是不是 Ollama；請使用者檢查 `translation.api_key_env` 指向的環境變數（不是「不是 Ollama」，不要叫使用者自行安裝模型） |
 | `license_not_accepted` | `models.download {"model": "gpu-runtime"}` 沒有帶 `"accept_license": true`；`message` 含 NVIDIA EULA 網址 `https://docs.nvidia.com/cuda/eula/index.html` |
 | `gpu_runtime_unsupported` | 這個平台沒有 GPU 執行環境（只有 Windows／Linux x86-64；macOS、ARM 回這個） |
 | `internal_error` | 未預期的例外（traceback 寫 stderr；訊息只有例外類別與簡短說明） |
 
 - 空行略過。不合法的行只回錯誤，不會讓引擎結束。
+- 錯誤訊息、`log` 事件與回應中的翻譯伺服器網址一律遮蔽帳密（`http://***@host/...`，`kikitori.translate.redact_url()`）。
 
 ### 方法
 
@@ -332,15 +334,17 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   - UI 儲存時：「同時改用推薦的模型」勾選 → `settings.set({...languages, ...patch})`；取消勾選 → 只存 `languages` 的欄位。
   - 與其他背景方法相同，參數在收到請求時與當時的設定合併；`differs` 比對執行當下的設定。重用 10 秒的偵測快取。
 - `models.pull_translation`（Milestone 13，背景）：替使用者在 Ollama 下載翻譯模型（`hardware.md`「Ollama 下載翻譯模型」）。
-  - `model`：1–200 字，只允許英數與 `._:/-`、第一個字元英數、不含 `..`（不在 `models.list` 的模型也可以，例如使用者自訂的模型）；不合法或有其他參數 → `invalid_params`（主執行緒立即回應）。
-  - 背景工作：先檢查翻譯伺服器（`GET /v1/models` 與 Ollama 的 `GET /api/version`，各 2 秒逾時）。連不上 → `translation_server_unreachable`；不是 Ollama → `pull_unsupported`；同一個翻譯模型已在下載 → `download_in_progress`。否則回 `{"model", "started": true}`，寫出回應後才啟動下載執行緒。
-  - 進度：`download_progress {"model": 名稱, "kind": "translation", "downloaded_bytes", "total_bytes", "state", "error"}`。`total_bytes` 是目前已知各層的合計，**下載途中可能變大**（Ollama 逐層回報）；第一筆是 `0／0`。`done` 時兩者相等。失敗（Ollama 回報的錯誤、120 秒沒有資料、斷線）→ `state: "error"`，`error` 為英文 `"<例外類別>: <訊息>"`（Ollama 的錯誤訊息原文，例如 `PullError: Ollama: pull model manifest: file does not exist`）。`engine.shutdown`／stdin EOF 時取消（`error` 含 `PullCancelledError`）。
+  - `model`：1–200 字，只允許英數與 `._:/-`、第一個字元英數、不含 `..`，整個字串都要符合（結尾換行也不行；`validate_pull_model_name()`）（不在 `models.list` 的模型也可以，例如使用者自訂的模型）；不合法或有其他參數 → `invalid_params`（主執行緒立即回應）。
+  - 背景工作：先檢查翻譯伺服器（`GET /v1/models` 與 Ollama 的 `GET /api/version`，各 2 秒逾時）。連不上 → `translation_server_unreachable`；401／403 → `translation_server_auth_failed`；不是 Ollama（含轉址）→ `pull_unsupported`（`message` 附上原因，例如 `HTTP 302 redirect from /api/version to …`）；同一個翻譯模型已在下載 → `download_in_progress`。否則回 `{"model", "started": true}`，寫出回應後才啟動下載執行緒。回應沒能寫出（stdout 關閉、結果無法序列化）時撤銷這次登記（`Deferred.unsent`），之後同一個模型不會永遠是 `download_in_progress`；`models.download` 的同步路徑同理。
+  - 進度：`download_progress {"model": 名稱, "kind": "translation", "downloaded_bytes", "total_bytes", "state", "error"}`。`total_bytes` 是目前已知各層的合計，**下載途中可能變大**（Ollama 逐層回報）；第一筆是 `0／0`。`done` 時兩者相等。失敗（Ollama 回報的錯誤、送出請求逾時、120 秒沒有進度、斷線、401／403、轉址）→ `state: "error"`，`error` 為英文 `"<例外類別>: <訊息>"`（Ollama 的錯誤訊息原文，例如 `PullError: Ollama: pull model manifest: file does not exist`）。`engine.shutdown`／stdin EOF 時取消（`error` 含 `PullCancelledError`）。
   - 結束（成功或失敗）時清掉偵測快取：之後的 `models.list`、推薦、預覽看得到新模型。
 - `session.start` 的**翻譯模型檢查**（Milestone 13）：載入 ASR **之前**，若這個 session 需要翻譯（`translation.enabled=true`，且不是「影片翻譯、收聽與字幕同一個 Whisper 語言」），引擎檢查翻譯伺服器（同上，最多數秒；仍在 `loading`）。伺服器是**連得上的 Ollama** 而設定的 `translation.fast_model`／`final_model` 有任一個沒裝 → `status error`，`code: "translation_model_missing"`，`data: {"models": [缺少的模型名稱]}`（依 fast、final 順序、去重）。UI 對每個模型呼叫 `models.pull_translation`，全部 `done` 後再 `session.start`。
-  - 連不上伺服器、不是 Ollama、或拿不到模型清單時**照常開始**，不檢查：字幕的原文不依賴翻譯；使用者可能正要開 Ollama、或用其他服務（只能自行安裝模型）；這時沿用既有行為——每句翻譯失敗只顯示原文，並以 `log` warning 提醒一次（連續相同的失敗只提醒一次）。檢查本身的程式錯誤只記 log，也照常開始。
+  - 連不上伺服器、不是 Ollama、金鑰被拒（401／403）、或拿不到模型清單時**照常開始**，不檢查：字幕的原文不依賴翻譯；使用者可能正要開 Ollama、或用其他服務（只能自行安裝模型）；這時沿用既有行為——每句翻譯失敗只顯示原文，並以 `log` warning 提醒一次（連續相同的失敗只提醒一次）。檢查本身的程式錯誤只記 log，也照常開始。**金鑰被拒**（`TranslationServerState.auth_failed`）不是「Ollama 還沒開」那種會自己好的狀況，所以另記一則 `log` warning（`the translation server rejected the API key (HTTP 401/403); …`），請使用者檢查 `translation.api_key_env`；不另送 status code（status 的 code 只用在 `error` 狀態，session 本身仍正常開始）。
+  - **停止與載入**：每一步之間檢查 `session.stop`——等前一個 session（見下）、翻譯模型檢查之後、建立元件（ASR 與預熱）之後。檢查翻譯伺服器、載入 ASR 與預熱本身不能中斷，停止後做完這一步就結束，不再進行下一步（檢查期間被停止就不載入 ASR）。
+  - **不會有兩個 session 同時載入**：被停止的 session 立即送出 `idle` 並釋放，UI 可以馬上 `session.start`；但它的載入執行緒可能還在 `build_components()` 裡（數秒到數十秒）。新的 session 先送 `loading`、記一則 info log（`session N: waiting for session M to finish loading`），等前一個載入執行緒結束後才開始自己的檢查與載入；等待期間也能被停止。理由：兩份 ASR 同時載入會在 GPU 上配置兩份模型（每份約 2.6 GB），預熱也會與 Ollama 搶顯示記憶體。代價是快速「停止→開始」時新的 session 要等前一個做完它目前那一步（最久是預熱的 60 秒讀取逾時）。
   - 只顯示原文（`translation.enabled=false`）時完全不連翻譯伺服器、不檢查模型、不預熱、不保溫（Milestone 14）。
 - `session.set_translation`（Milestone 14）：「顯示翻譯」開關。`enabled` 必須是布林（否則 `invalid_params`）。先存進設定 `translation.enabled`（無法寫入 → `settings_io_error`，此時不切換）；有 session 時立即套用到它的 pipeline（`Pipeline.set_translation_enabled`）：之後的句子依新狀態處理，已顯示的句子不補翻。session 還在 `loading` 時記下來，pipeline 建好、開始之前套用。回應是 `settings.get` 的結果加 `session_id`（套用到的 session；沒有 session 時 null）。
-  - 執行中**開啟**翻譯：該 session 開始時沒有預熱（只顯示原文時不預熱），所以本機翻譯服務會在背景先預熱一次、之後照常保溫（不阻塞回應；需要 `translation.keep_warm_secs > 0`）。翻譯伺服器不可用時沿用「翻譯失敗只顯示原文＋提醒一次」；不做 `translation_model_missing` 檢查（session 已在執行）。
+  - 執行中**開啟**翻譯：該 session 開始時沒有預熱（只顯示原文時不預熱），所以本機翻譯服務會在背景先預熱一次、之後照常保溫（不阻塞回應）。`translation.keep_warm_secs = 0` 時沒有定期保溫，但開啟時的這一次預熱照樣進行（`keep_warm.WarmUpOnEnable`）。翻譯伺服器不可用時沿用「翻譯失敗只顯示原文＋提醒一次」；不做 `translation_model_missing` 檢查（session 已在執行）。
   - 執行中**關閉**翻譯：不再呼叫翻譯伺服器，也不再送保溫請求（不佔 GPU）。
 - `settings.get`／`settings.set`／`settings.apply_recommendation` 的 `is_new`：`SettingsStore.is_new`（見「讀寫」）。UI 以它判斷第一次執行、自動套用推薦。
 - **推薦依語言**（Milestone 12）：`hardware.detect`、`models.list`、`settings.apply_recommendation`、`settings.preview_recommendation` 的推薦都依目前設定的語言與 `mode`（`hardware.md`「語言」）。`ModelCombination` 的 `reasons`／`warnings` 是訊息物件，另有 `translation_status`（`recommended`／`remote`／`not_needed`／`unsupported`）與 `languages`（`{mode, source_language, target_language, partner_language}`）。`translation_status` 為 `not_needed`／`unsupported` 時 `translation_fast/final` 為 null，`settings.apply_recommendation` 不改翻譯模型。
@@ -368,11 +372,11 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 可注入的服務（測試與之後的里程碑）
 
-`EngineServices`：`settings_store`、`list_devices`、`open_source`、`build_components(settings, mode)`、`hardware`（`HardwareProvider`：`detect(settings) -> HardwareInfo`、`models_overview(info, rec)`、`gpu_runtime_status()`、`install_gpu_runtime(progress, cancel)`）、`models`（`ModelCatalog`：`asr_models()`、`download(model_id, progress, cancel)`）、`translation_models`（`TranslationModels`：`server_state(settings) -> TranslationServerState{reachable, is_ollama, installed, error}`、`pull(settings, model, progress, cancel)`；預設實作 `DefaultTranslationModels` 呼叫 `hardware.translation_server` 與 `hardware.ollama`）。
+`EngineServices`：`settings_store`、`list_devices`、`open_source`、`build_components(settings, mode)`、`hardware`（`HardwareProvider`：`detect(settings) -> HardwareInfo`、`models_overview(info, rec)`、`gpu_runtime_status()`、`install_gpu_runtime(progress, cancel)`）、`models`（`ModelCatalog`：`asr_models()`、`download(model_id, progress, cancel)`）、`translation_models`（`TranslationModels`：`server_state(settings) -> TranslationServerState{reachable, is_ollama, installed, error, auth_failed}`、`pull(settings, model, progress, cancel)`；預設實作 `DefaultTranslationModels` 呼叫 `hardware.translation_server` 與 `hardware.ollama`）。
 
 - 預設實作：真實 capture、`pipeline/factory.py`、`DefaultHardwareProvider`（直接呼叫 `kikitori.hardware`）。推薦與組合驗證是純函式，由 `engine/hardware_service.py` 直接呼叫，不經 provider。
 - **假模式**：環境變數 `KIKITORI_ENGINE_FAKE=1` 時改用 `kikitori/engine/testing.py`：合成音訊（`fake:loopback:speech` 兩段「人聲」後結束、`fake:microphone:endless` 只有靜音不會結束）、依振幅判斷的 `VoiceModel`、回固定文字的 ASR 與翻譯、會回報進度的假下載。`engine.info` 的 `fake` 為 true，啟動時記 warning。只給測試與 UI 開發用。
-- **假翻譯伺服器**（`FakeTranslationServer`，同時是 `translation_models`，並提供假硬體偵測結果的 `translation_server`）：已安裝 `qwen3.5:4b`；`pull` 分四段回報 4 MiB 後把模型加入已安裝清單（`models.list`、推薦、`session.start` 的檢查都看得到）。`fake-broken-pull:1b` 在一半時失敗、`fake-slow-pull:1b` 每段等 0.5 秒（測取消）。環境變數 `KIKITORI_ENGINE_FAKE_TRANSLATION` 選情境：`ollama`（預設）、`openai`（可連但不是 Ollama：`pull_unsupported`、`session.start` 不檢查）、`offline`（連不上：`translation_server_unreachable`、`session.start` 照常開始）。
+- **假翻譯伺服器**（`FakeTranslationServer`，同時是 `translation_models`，並提供假硬體偵測結果的 `translation_server`）：已安裝 `qwen3.5:4b`；`pull` 分四段回報 4 MiB 後把模型加入已安裝清單（`models.list`、推薦、`session.start` 的檢查都看得到）。`fake-broken-pull:1b` 在一半時失敗、`fake-slow-pull:1b` 每段等 0.5 秒（測取消）。環境變數 `KIKITORI_ENGINE_FAKE_TRANSLATION` 選情境：`ollama`（預設）、`openai`（可連但不是 Ollama：`pull_unsupported`、`session.start` 不檢查）、`offline`（連不上：`translation_server_unreachable`、`session.start` 照常開始）、`auth`（回 401：`translation_server_auth_failed`、`session.start` 照常開始並記 warning）。
 - **假硬體**（`FakeHardwareProvider`）：偵測結果固定，推薦／驗證／總覽走真的 hardware 程式碼；GPU 執行環境以真的 `install_gpu_runtime()` 安裝假 wheel（記憶體中的小 zip、假 fetcher，不連網）到行程專屬的暫存目錄，所以安裝後 cuBLAS 變成可用、推薦改為 GPU 等級。環境變數 `KIKITORI_ENGINE_FAKE_HARDWARE` 選情境：`nvidia`（預設：8 GB GPU、缺 cuBLAS、本機翻譯伺服器裝了 qwen3.5:4b）、`apple`（Apple Silicon，`gpu-runtime` 不支援）、`slow-runtime`（下載慢，測取消）、`broken-runtime`（下載內容雜湊不符）。
 
 ### 協定變更（Milestone 6）
@@ -428,13 +432,13 @@ UI 流程見 `ui.md`「自動推薦」。
 2. **推薦依語言**：上述推薦都依設定的 `mode` 與語言；`recommendation` 新增 `translation_status`（`recommended`／`remote`／`not_needed`／`unsupported`）與
    `languages`（物件或 null）。`fingerprint` 改為包含語言（升級後舊的「不要再提醒」會再提醒一次）。
 3. **新方法** `languages.list`（立即）、`settings.preview_languages`（背景）、`models.pull_translation`（背景）、`session.set_translation`（立即）。
-4. **新錯誤碼**：`pull_unsupported`、`translation_server_unreachable`（`models.pull_translation`）；`download_in_progress` 也用於同名翻譯模型。
+4. **新錯誤碼**：`pull_unsupported`、`translation_server_unreachable`、`translation_server_auth_failed`（`models.pull_translation`；後者是 2026-11-05 review 後新增：401／403 不再被當成「不是 Ollama」）；`download_in_progress` 也用於同名翻譯模型。
 5. **`status` 事件**：新 code `translation_model_missing`，並新增選填欄位 `data`（此 code 時為 `{"models": [...]}`；其他 status 沒有 `data`）。
 6. **`download_progress` 事件**：新增 `kind`（`asr`／`gpu_runtime`／`translation`），既有欄位不變；翻譯模型的 `total_bytes` 可能在下載中變大。
 7. **只顯示原文**：`translation.enabled=false` 時 `session.start` 不連翻譯伺服器；`session.set_translation` 執行中切換並存檔。
 8. **建議 UI 流程**：語言選單 → `settings.preview_languages`（顯示推薦與「已安裝／第一次使用時下載約 X GB」，`translation_status=unsupported` 時說明原因）→
    儲存 `settings.set`；開始字幕 → `session.start` → 收到 `status error` 的 `model_not_downloaded`（`models.download`）或 `translation_model_missing`
-   （對 `data.models` 逐一 `models.pull_translation`；`pull_unsupported` 時請使用者自行安裝）→ 全部 `done` 後自動重試 `session.start`；
+   （對 `data.models` 逐一 `models.pull_translation`；`pull_unsupported` 時請使用者自行安裝；`translation_server_auth_failed` 時請使用者檢查金鑰的環境變數）→ 全部 `done` 後自動重試 `session.start`；
    「顯示翻譯」開關 → `session.set_translation`。
 
 ```json
@@ -471,7 +475,7 @@ UI 流程見 `ui.md`「自動推薦」。
 - `create_transcript_filter(no_speech_threshold)`：asr 的 `rejection_reason` + `FilterConfig`。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`is_downloaded`、`download_model`、`default_cache_dir`。
 - `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`），最後 `attach_keep_warm()`。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
-- `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務或設為 0 時原樣回傳，不包裝也不送請求。逐步模式（測試、smoke）不啟動。**只顯示原文**（`translation.enabled=false`，Milestone 14）時保溫是「不動作」的（`KeepWarm(active=False)`）：不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled(True)` → `KeepWarm.set_active(True)`）時才建立執行緒並先在背景預熱一次（以「開啟翻譯後」的設定組請求），之後照常保溫；再關閉就停止送請求。翻譯器在 session 開始時就要包好（活動才記得到），所以不能等開啟時才建立。不需要翻譯的語言組合（影片翻譯、收聽與字幕同一個 Whisper 語言）仍原樣回傳。
+- `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務時原樣回傳，不包裝也不送請求。設為 0 時翻譯器不包裝、不定期送請求，`keep_warm` 換成 `keep_warm.WarmUpOnEnable`：只在執行中開啟翻譯（從關閉變成開啟）時於背景 daemon 執行緒預熱一次（同時只有一個預熱在進行；失敗只記 warning），因為以「只顯示原文」開始的 session 沒有開場預熱。逐步模式（測試、smoke）不啟動。**只顯示原文**（`translation.enabled=false`，Milestone 14）時保溫是「不動作」的（`KeepWarm(active=False)`）：不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled(True)` → `KeepWarm.set_active(True)`）時才建立執行緒並先在背景預熱一次（以「開啟翻譯後」的設定組請求），之後照常保溫；再關閉就停止送請求。翻譯器在 session 開始時就要包好（活動才記得到），所以不能等開啟時才建立。不需要翻譯的語言組合（影片翻譯、收聽與字幕同一個 Whisper 語言）仍原樣回傳。
 - `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
 
 ## Tech Stack
@@ -539,7 +543,7 @@ experiments/pipeline_smoke/
 - engine（Milestone 6）：子行程測 `hardware.detect`（假 GPU、缺 cuBLAS 的推薦）、`models.list`（新舊欄位）、背景請求的回應順序、`gpu-runtime` 授權閘門（缺少／false／非布林、ASR 帶 `accept_license`）、安裝進度與安裝後推薦改為 GPU、雜湊不符的 `error` 事件、不支援的平台、`engine.shutdown` 取消下載與 `download_in_progress`、`models.validate`（目前設定、候選設定不存檔、參數錯誤）、`settings.apply_recommendation`（安裝前 CPU、安裝後 CUDA、存檔）、v1 設定檔遷移；同行程測背景工作執行緒（FIFO、錯誤碼、結束時丟棄）、偵測快取（假時鐘、設定改變、清除）、`allow_restricted`、設定與推薦組合的轉換。
 - factory：兩條路徑各自的 `compute_type`／`cpu_threads`、cuBLAS 目錄（設定 + GPU 執行環境、不重複、檢查失敗只記 warning）、自動執行緒（mock `load_transcriber` 與 hardware）；預熱的順序（ASR → 預熱 → 保溫）、保溫只給本機服務、`keep_warm_secs = 0` 關閉、保溫請求與預熱相同且失敗時丟出帶模型名稱的 `WarmUpError`。
 - keep_warm（`tests/test_keep_warm.py`，假時鐘，背景執行緒的等待注入成「推進假時鐘」，不真的睡）：閒置未滿不送、滿了才送且之後每個間隔一次、翻譯活動延後下一次、`stop()` 後不再送、失敗的 warning 限流與恢復的 info、`stop()` 立即喚醒等待且不等進行中的請求、`ActivityTranslator` 在 `translate`／`stream` 的開始與結束（含例外）回報 `begin`／`end`、請求進行中不送保溫、程式錯誤也限流。pipeline：保溫在 worker 之前啟動，`stop()`、讀完、錯誤都會停止，擷取開不起來時不啟動，啟動失敗只是 warning，逐步模式不啟動。
-- Milestone 12–14：`tests/test_engine_languages.py`（同行程、假服務）測 `languages.list`、`settings.preview_languages`（不寫檔、不下載、別名與模式、參數錯誤）、`session.set_translation`（沒有 session 只存設定、執行中切換 pipeline、載入中切換在 pipeline 建好時套用、參數錯誤）、`models.pull_translation`（進度事件與 `kind`、回應先於事件、完成後 `models.list` 已安裝、失敗事件、`download_in_progress`、結束時取消、名稱驗證、ASR 與翻譯名稱不衝突、連不上與不是 Ollama 的錯誤碼）、`translation_model_missing`（載入 ASR 之前回報、下載後重試成功、關閉翻譯與同語言不檢查、連不上或不是 Ollama 時照常開始）；`test_engine.py` 以子行程測同樣的方法與事件；`test_pipeline.py` 以計數的假翻譯器測關閉時不呼叫、執行中開啟後恢復呼叫、關閉後停止、保溫工作跟著切換；`test_keep_warm.py` 測不動作的保溫（不建立執行緒、不送請求）、開啟時在背景立即預熱、重新開啟再預熱、停止後不再建立；`test_engine_hardware.py` 測依語言的推薦、驗證、`preview_languages` 的模型與大小、指紋含語言、`Deferred.after`。
+- Milestone 12–14：`tests/test_engine_languages.py`（同行程、假服務）測 `languages.list`、`settings.preview_languages`（不寫檔、不下載、別名與模式、參數錯誤）、`session.set_translation`（沒有 session 只存設定、執行中切換 pipeline、載入中切換在 pipeline 建好時套用、參數錯誤）、`models.pull_translation`（進度事件與 `kind`、回應先於事件、完成後 `models.list` 已安裝、失敗事件、`download_in_progress`、結束時取消、名稱驗證、ASR 與翻譯名稱不衝突、連不上與不是 Ollama 的錯誤碼）、`translation_model_missing`（載入 ASR 之前回報、下載後重試成功、關閉翻譯與同語言不檢查、連不上或不是 Ollama 時照常開始）；`test_engine.py` 以子行程測同樣的方法與事件；`test_pipeline.py` 以計數的假翻譯器測關閉時不呼叫、執行中開啟後恢復呼叫、關閉後停止、保溫工作跟著切換；`test_keep_warm.py` 測不動作的保溫（不建立執行緒、不送請求）、開啟時在背景立即預熱、重新開啟再預熱、停止後不再建立，以及 `WarmUpOnEnable`（`keep_warm_secs = 0`：start 不送請求、開啟時背景預熱一次、start 之前與 stop 之後不送、失敗只記 warning）；`test_pipeline_factory.py` 測 0 時翻譯器不包裝、開啟翻譯時仍預熱一次；`test_engine_languages.py` 另測檢查翻譯伺服器期間停止就不載入 ASR、下一個 session 等前一個載入結束（同時載入的數目最多 1）、等待中的 session 也能停止、`translation_server_auth_failed` 與金鑰被拒時照常開始並記 warning、`DefaultTranslationModels` 把 `OllamaAuthError` 對應成 `auth_failed`、回應寫不出去時撤銷翻譯模型下載的登記；`test_engine_hardware.py` 測 `Deferred.unsent`（只在成功的結果寫不出去時執行）；`test_engine_hardware.py` 測依語言的推薦、驗證、`preview_languages` 的模型與大小、指紋含語言、`Deferred.after`。
 - 不連網、不開真實裝置、不載入真模型。
 
 ## Boundaries

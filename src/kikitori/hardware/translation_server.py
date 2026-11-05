@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit
 
 from kikitori.hardware.types import TranslationServerInfo
+from kikitori.translate.client import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,13 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-def _valid_model_name(name: object) -> bool:
+def is_listed_model_name(name: object) -> bool:
+    """伺服器列出的模型名稱能不能採用（寬鬆）：可列印、不含頭尾空白、長度有限。
+
+    只用來顯示與比對「已安裝」，不會再送回伺服器，所以接受任何可列印字元（其他
+    OpenAI 相容服務的模型 id 可能含空白或 `@`）。要送給 Ollama `/api/pull` 的名稱
+    改用較嚴格的 `kikitori.hardware.ollama.validate_pull_model_name()`。
+    """
     return (
         isinstance(name, str)
         and 0 < len(name) <= MAX_MODEL_NAME_CHARS
@@ -79,7 +86,7 @@ def parse_model_list(raw: bytes) -> tuple[str, ...]:
     names: list[str] = []
     for item in items[:MAX_MODELS]:
         name = item.get("id") if isinstance(item, dict) else None
-        if _valid_model_name(name) and name not in names:
+        if is_listed_model_name(name) and name not in names:
             names.append(name)
     return tuple(names)
 
@@ -116,8 +123,10 @@ def probe_translation_server(
         connect: 建立連線的函式（測試用）。
     """
     env = os.environ if env is None else env
-    text = base_url.strip() if isinstance(base_url, str) else ""
-    parts = urlsplit(text)
+    raw = base_url.strip() if isinstance(base_url, str) else ""
+    parts = urlsplit(raw)
+    # 結果會回到 UI（`hardware.detect`、推薦理由）並寫進 log：帳密一律遮蔽
+    text = redact_url(raw)
     try:
         port = parts.port
     except ValueError:

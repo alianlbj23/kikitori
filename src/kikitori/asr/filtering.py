@@ -12,9 +12,9 @@
 - `soft`：真人也常單獨說的短句（「Thank you.」「谢谢」）。只比對辨識語言那一張表（加上
   `ANY_LANGUAGE` 表），而且 no_speech 偏高時才濾，避免把其他語言的正常句子濾掉。
 
-新增語言的資料只要編輯 `DEFAULT_HALLUCINATIONS`；格式與
-`experiments/hallucination_lexicon/` 的 `lexicon.json`（`{語言: {"hard": [...], "soft": [...]}}`）
-相同，可以直接換上實測的片語表。
+預設片語表在 `hallucination_lexicon.py`：`experiments/hallucination_lexicon/` 對 19 個
+Whisper 語言實測、人工分類的 `lexicon.json`（`{語言: {"hard": [...], "soft": [...]}}`）的
+Python 版本。更新片語時改 `lexicon.json` 並重新產生該檔案。
 """
 
 import unicodedata
@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
+from kikitori.asr.hallucination_lexicon import HALLUCINATION_LEXICON
 from kikitori.asr.types import Transcript
 
 ANY_LANGUAGE = "*"
@@ -42,60 +43,38 @@ HallucinationTableInput = Mapping[str, Mapping[str, Collection[str]]] | Collecti
 """`FilterConfig.hallucinations` 接受的格式：依語言分表，或單一集合（視為不分語言的 hard）。"""
 
 
+_KEEP_MARKS = (("\u0900", "\u097f"), ("\u0e00", "\u0e7f"))
+"""保留組合記號（Mn／Mc）的區段：天城文（印地語）與泰文。"""
+
+
+def _keep_for_match(ch: str) -> bool:
+    category = unicodedata.category(ch)
+    if category[0] in "LN":
+        return True
+    # 天城文與泰文的母音、聲調記號是字的一部分（「करते हैं」與「करती है」只差在記號），
+    # 去掉會讓不同的詞變成同一個片語；用實測輸出比對，保留後印地語片語的命中只少 1/761、
+    # 泰語不變。阿拉伯文的母音符號可有可無、拉丁字母的重音經 NFKC 已合成成字母，照舊忽略。
+    return category in ("Mn", "Mc") and any(lo <= ch <= hi for lo, hi in _KEEP_MARKS)
+
+
 def normalize_for_match(text: str) -> str:
-    """比對用的正規化：NFKC、小寫、去掉標點／符號／空白。"""
+    """比對用的正規化：NFKC、小寫、去掉標點／符號／空白（天城文與泰文的組合記號保留）。"""
     folded = unicodedata.normalize("NFKC", text).casefold()
-    return "".join(ch for ch in folded if unicodedata.category(ch)[0] in "LN")
+    return "".join(ch for ch in folded if _keep_for_match(ch))
 
 
 def _phrases(hard: set[str], soft: set[str]) -> LanguagePhrases:
     return MappingProxyType({"hard": frozenset(hard), "soft": frozenset(soft)})
 
 
-# Whisper 在沒有語音時常見的輸出（來自字幕資料的片尾套話）。整句相等才過濾，
-# 以可讀形式列出，比對前經 `normalize_for_match` 正規化。
+# Whisper 在沒有語音時常見的輸出（字幕資料的片尾套話、字幕署名、擬聲詞），依語言分表。
+# 以可讀形式保存，比對前經 `normalize_for_match` 正規化（`FilterConfig` 建構時）。
+# 字幕署名放在不分語言的 "*" 表只是為了分類清楚：hard 片語本來就不論語言標籤都套用
+# （large-v3 在靜音上輸出挪威語署名時，本機實測語言標籤是候選語言之一而不是 "no"）。
 DEFAULT_HALLUCINATIONS: HallucinationTable = MappingProxyType(
     {
-        # 字幕署名不是語音。放在不分語言的表只是為了分類清楚：hard 片語本來就不論語言
-        # 標籤都套用（large-v3 在靜音上輸出挪威語署名時，本機實測語言標籤是候選語言之一
-        # 而不是 "no"）。
-        ANY_LANGUAGE: _phrases(
-            hard={
-                "Subtitles by the Amara.org community",
-                "字幕由Amara.org社区提供",
-                "字幕由Amara.org社區提供",
-                "Teksting av Nicolai Winther",
-            },
-            soft=set(),
-        ),
-        "ja": _phrases(
-            hard={
-                "ご視聴ありがとうございました",
-                "ご清聴ありがとうございました",
-                "チャンネル登録よろしくお願いします",
-                "チャンネル登録お願いします",
-                "最後までご視聴頂きありがとうございました",
-                "最後までご視聴いただきありがとうございました",
-            },
-            soft={"ありがとうございました", "おやすみなさい"},
-        ),
-        "en": _phrases(
-            hard={
-                "Thanks for watching!",
-                "Thank you for watching.",
-                "Please subscribe.",
-            },
-            soft={"Thank you.", "Thanks.", "you"},
-        ),
-        "zh": _phrases(
-            hard={
-                "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
-                "請不吝點贊 訂閱 轉發 打賞支持明鏡與點點欄目",
-                "谢谢观看",
-                "謝謝觀看",
-            },
-            soft={"谢谢", "謝謝"},
-        ),
+        language: _phrases(set(entry["hard"]), set(entry["soft"]))
+        for language, entry in HALLUCINATION_LEXICON.items()
     }
 )
 
@@ -210,6 +189,11 @@ class FilterConfig:
         return result
 
 
+_DEFAULT_CONFIG = FilterConfig()
+"""`rejection_reason()` 沒給設定時用；FilterConfig 不可變，預先建好就不必每句重新正規化
+整份片語表（數百個片語）。"""
+
+
 def compression_ratio(text: str) -> float:
     """UTF-8 長度 ÷ zlib 壓縮後長度；與 Whisper／faster-whisper 的定義相同。"""
     data = text.encode("utf-8")
@@ -226,7 +210,7 @@ def rejection_reason(
     Returns:
         None 表示保留；否則是簡短的英文原因（供 log 使用）。
     """
-    config = FilterConfig() if config is None else config
+    config = _DEFAULT_CONFIG if config is None else config
     normalized = normalize_for_match(transcript.text)
     if not normalized:
         return "empty"

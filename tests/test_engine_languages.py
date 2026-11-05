@@ -8,6 +8,7 @@
 
 import dataclasses
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -19,7 +20,11 @@ from unittest import mock
 from kikitori.config import Settings, SettingsStore
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
-from kikitori.engine.services import EngineServices, TranslationServerState
+from kikitori.engine.services import (
+    DefaultTranslationModels,
+    EngineServices,
+    TranslationServerState,
+)
 from kikitori.engine.testing import (
     ENDLESS_DEVICE,
     FAKE_BROKEN_PULL,
@@ -27,6 +32,8 @@ from kikitori.engine.testing import (
     FAKE_TRANSLATION_ENV,
     fake_services,
 )
+from kikitori.hardware.ollama import OllamaAuthError
+from kikitori.hardware.types import TranslationServerInfo
 from kikitori.pipeline import PipelineComponents
 from kikitori.pipeline.types import Mode
 
@@ -202,14 +209,19 @@ class PreviewLanguagesTest(EngineCase):
 
 
 class _CountingTranslation:
-    """包住假翻譯伺服器，記錄 server_state 被呼叫幾次。"""
+    """包住假翻譯伺服器，記錄 server_state 被呼叫幾次；`release` 清掉時讓檢查停住。"""
 
     def __init__(self, inner: Any) -> None:
         self.inner = inner
         self.state_calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
 
     def server_state(self, settings: Settings) -> TranslationServerState:
         self.state_calls += 1
+        self.entered.set()
+        self.release.wait(WAIT)
         return self.inner.server_state(settings)
 
     def pull(self, *args: Any) -> None:
@@ -225,12 +237,36 @@ class _GatedBuild:
         self.entered = threading.Event()
         self.release = threading.Event()
         self.release.set()
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        """同時在載入的 session 數的最大值（GPU 上同時載入兩份 ASR 模型會用完顯示記憶體）。"""
 
     def __call__(self, settings: Settings, mode: Mode) -> PipelineComponents:
-        self.calls += 1
-        self.entered.set()
-        self.release.wait(WAIT)
-        return self.inner(settings, mode)
+        with self._lock:
+            self.calls += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.entered.set()
+            self.release.wait(WAIT)
+            return self.inner(settings, mode)
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+class _LogWaiter(logging.Handler):
+    """等到某則 log 出現（載入在背景執行緒上，assertLogs 不能等待）。"""
+
+    def __init__(self, needle: str) -> None:
+        super().__init__(logging.DEBUG)
+        self.needle = needle
+        self.seen = threading.Event()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.needle in record.getMessage():
+            self.seen.set()
 
 
 class SessionCase(EngineCase):
@@ -339,6 +375,152 @@ class TranslationModelMissingTest(SessionCase):
         session_id = self.start("media")
         self.status(session_id, "running")
         self.assertEqual(self.translation.state_calls, 0)
+
+
+class StopWhileLoadingTest(SessionCase):
+    """停止還在載入的 session：不再繼續載入，下一個 session 也不會與它同時載入。"""
+
+    def loader(self) -> threading.Thread:
+        session = self.server._session
+        assert session is not None and session.loader is not None
+        return session.loader
+
+    def wait_for_log(self, needle: str) -> _LogWaiter:
+        waiter = _LogWaiter(needle)
+        log = logging.getLogger("kikitori.engine.server")
+        log.addHandler(waiter)
+        self.addCleanup(log.removeHandler, waiter)
+        previous = log.level
+        log.setLevel(logging.DEBUG)
+        self.addCleanup(log.setLevel, previous)
+        return waiter
+
+    def test_stop_during_the_translation_check_skips_loading(self) -> None:
+        self.translation.release.clear()
+        session_id = self.start()
+        loader = self.loader()
+        self.assertTrue(self.translation.entered.wait(WAIT))
+        self.request("session.stop")
+        self.status(session_id, "idle")
+        self.translation.release.set()
+        loader.join(WAIT)
+        self.assertFalse(loader.is_alive())
+        self.assertEqual(self.build.calls, 0)
+
+    def test_next_session_waits_for_the_stopped_one_to_finish_loading(self) -> None:
+        self.build.release.clear()
+        first = self.start()
+        first_loader = self.loader()
+        self.assertTrue(self.build.entered.wait(WAIT))
+        self.request("session.stop")
+        self.status(first, "idle")
+        waiting = self.wait_for_log("waiting for session")
+        second = self.start()
+        self.assertTrue(waiting.seen.wait(WAIT))
+        self.build.release.set()
+        self.status(second, "running")
+        first_loader.join(WAIT)
+        self.assertEqual(self.build.calls, 2)
+        self.assertEqual(self.build.max_active, 1)
+
+    def test_waiting_session_can_be_stopped_too(self) -> None:
+        self.build.release.clear()
+        first = self.start()
+        first_loader = self.loader()
+        self.assertTrue(self.build.entered.wait(WAIT))
+        self.request("session.stop")
+        self.status(first, "idle")
+        waiting = self.wait_for_log("waiting for session")
+        second = self.start()
+        second_loader = self.loader()
+        self.assertTrue(waiting.seen.wait(WAIT))
+        self.request("session.stop")
+        self.status(second, "idle")
+        self.build.release.set()
+        for loader in (first_loader, second_loader):
+            loader.join(WAIT)
+            self.assertFalse(loader.is_alive())
+        self.assertEqual(self.build.calls, 1)
+
+
+class AuthFailedTest(SessionCase):
+    translation_profile = "auth"
+
+    def test_pull_reports_auth_failure(self) -> None:
+        response = self.request("models.pull_translation", {"model": "qwen3.5:9b"})
+        self.assertError(response, "translation_server_auth_failed")
+        self.assertIn("api_key_env", response["error"]["message"])
+
+    def test_session_starts_with_a_warning(self) -> None:
+        # 無法確認模型在不在：照常開始（與連不上相同），但要留下提醒
+        self.request("settings.set", {"translation": {"final_model": "qwen3.5:9b"}})
+        with self.assertLogs("kikitori.engine.server", "WARNING") as logs:
+            session_id = self.start()
+            self.status(session_id, "running")
+        self.assertTrue(any("API key" in line for line in logs.output), logs.output)
+
+
+class DefaultTranslationModelsTest(unittest.TestCase):
+    def test_auth_failure_is_not_reported_as_not_ollama(self) -> None:
+        info = TranslationServerInfo(
+            base_url="http://localhost:11434/v1",
+            is_local=True,
+            reachable=True,
+            error="HTTP 401 from /v1/models",
+        )
+        with (
+            mock.patch(
+                "kikitori.hardware.translation_server.probe_translation_server",
+                return_value=info,
+            ),
+            mock.patch(
+                "kikitori.hardware.ollama.ollama_version",
+                side_effect=OllamaAuthError("HTTP 401 from /api/version"),
+            ),
+        ):
+            state = DefaultTranslationModels().server_state(Settings())
+        self.assertTrue(state.reachable)
+        self.assertTrue(state.auth_failed)
+        self.assertFalse(state.is_ollama)
+        self.assertIn("401", state.error or "")
+
+
+class _BreakingSink(_Sink):
+    """寫到含 `marker` 的訊息時失敗（模擬 stdout 在寫出回應時關閉）。"""
+
+    def __init__(self, marker: bytes) -> None:
+        super().__init__()
+        self.marker = marker
+
+    def write(self, data: bytes) -> int:
+        if self.marker in data:
+            raise OSError("pipe closed")
+        return super().write(data)
+
+
+class PullResponseLostTest(EngineCase):
+    def test_download_is_unregistered_when_the_response_cannot_be_written(
+        self,
+    ) -> None:
+        server = EngineServer(
+            self.services,
+            MessageWriter(_BreakingSink(b'"started":true')),  # type: ignore[arg-type]
+            version="test",
+        )
+        self.addCleanup(server.close)
+        request = {
+            "id": 1,
+            "method": "models.pull_translation",
+            "params": {"model": "qwen3.5:9b"},
+        }
+        with self.assertLogs("kikitori.engine", "ERROR"):
+            server.handle_line(json.dumps(request).encode())
+            worker = server._deferred._thread
+            assert worker is not None
+            worker.join(WAIT)
+        self.assertFalse(worker.is_alive())
+        # 回應沒寫出去：下載執行緒不會啟動，登記也不能留著（否則永遠 download_in_progress）
+        self.assertEqual(server._downloads, {})
 
 
 class UnreachableServerSessionTest(SessionCase):

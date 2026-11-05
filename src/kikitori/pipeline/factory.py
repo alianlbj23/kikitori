@@ -19,7 +19,7 @@ from kikitori.asr.types import Transcriber, Transcript
 from kikitori.config import Settings
 from kikitori.config.settings import AUTO_LANGUAGE, AsrDevice
 from kikitori.languages import WHISPER_CODES, get_language
-from kikitori.pipeline.keep_warm import ActivityTranslator, KeepWarm
+from kikitori.pipeline.keep_warm import ActivityTranslator, KeepWarm, WarmUpOnEnable
 from kikitori.pipeline.types import (
     Mode,
     PipelineComponents,
@@ -496,9 +496,12 @@ def attach_keep_warm(
 
     session 執行中翻譯請求停了 `translation.keep_warm_secs` 秒（例如影片長時間沒有對白），
     就送一次與開場預熱相同的請求，模型才不會被 Ollama 卸載（OpenAI 相容端點不能指定
-    `keep_alive`）。遠端服務或設定為 0 時原樣回傳：不對可能付費的 API 多送請求。保溫在
+    `keep_alive`）。遠端服務原樣回傳：不對可能付費的 API 多送請求。保溫在
     `Pipeline.start()` 啟動、pipeline 結束時停止。不需要翻譯的語言組合（例如繁中影片配
     簡中字幕）也原樣回傳。
+
+    設定為 0 只關掉「定期」保溫：翻譯器不包裝，`keep_warm` 換成 `WarmUpOnEnable`，只在
+    執行中開啟翻譯時於背景預熱一次（理由同下）。
 
     只顯示原文（`translation.enabled=false`）時保溫是「不動作」的（`active=False`）：
     不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled`）時
@@ -511,16 +514,16 @@ def attach_keep_warm(
     as_enabled = (
         settings if enabled else settings.merged({"translation": {"enabled": True}})
     )
-    if (
-        interval == 0
-        or warm_up_request(as_enabled, mode) is None
-        or not _is_local_server(settings)
-    ):
+    if warm_up_request(as_enabled, mode) is None or not _is_local_server(settings):
         return components
+
+    def ping() -> None:
+        ping_translation_models(as_enabled, mode, make_translator=make_translator)
+
+    if interval == 0:
+        return replace(components, keep_warm=WarmUpOnEnable(ping, active=enabled))
     keep_warm = KeepWarm(
-        lambda: ping_translation_models(
-            as_enabled, mode, make_translator=make_translator
-        ),
+        ping,
         float(interval),
         clock=clock,
         active=enabled,

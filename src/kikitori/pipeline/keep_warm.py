@@ -267,6 +267,73 @@ class KeepWarm:
                 return
 
 
+class WarmUpOnEnable:
+    """`translation.keep_warm_secs = 0`（不定期保溫）時用：執行中開啟翻譯才在背景預熱一次。
+
+    為什麼 0 也需要：以「只顯示原文」開始的 session 沒有開場預熱，執行中開啟翻譯時
+    模型多半還沒載入，第一句的即時翻譯會因冷啟動（4–10 秒）逾時。0 的意思是「不要
+    定期送請求」，不是「開啟翻譯時也不預熱」。與 `KeepWarm.set_active()` 相同的
+    `start()`／`stop()`／`set_active()` 介面，pipeline 不必分辨。
+
+    預熱在 daemon 執行緒上執行，不阻塞呼叫端；同時只有一個預熱在進行（快速連續切換
+    時不會堆積請求）。失敗只記 warning（程式錯誤記 error），不影響 session。
+    """
+
+    def __init__(self, ping: Callable[[], None], *, active: bool) -> None:
+        """
+        Args:
+            ping: 送一次預熱請求；失敗時丟 `TranslationError`（應自帶逾時）。
+            active: 翻譯目前是否開啟；開啟中的 session 已在開始時預熱過。
+        """
+        self._ping = ping
+        self._lock = threading.Lock()
+        self._active = active
+        self._started = False
+        self._stopped = False
+        self._thread: threading.Thread | None = None
+
+    @property
+    def active(self) -> bool:
+        """翻譯是否開啟。"""
+        with self._lock:
+            return self._active
+
+    def start(self) -> None:
+        """開始接受切換（不送任何請求：開場預熱已由 `warm_up_translation()` 處理）。"""
+        with self._lock:
+            self._started = True
+
+    def set_active(self, active: bool) -> None:
+        """翻譯開啟或關閉（執行緒安全、不阻塞）；從關閉變成開啟時在背景預熱一次。"""
+        with self._lock:
+            turned_on = active and not self._active
+            self._active = active
+            busy = self._thread is not None and self._thread.is_alive()
+            if not turned_on or not self._started or self._stopped or busy:
+                return
+            self._thread = threading.Thread(
+                target=self._run, name="translation-warm-up", daemon=True
+            )
+            thread = self._thread
+        thread.start()
+
+    def stop(self, timeout: float = 0.5) -> None:
+        """之後不再預熱；不等進行中的請求（daemon，請求結束後自行結束）。可重複呼叫。"""
+        with self._lock:
+            self._stopped = True
+
+    def _run(self) -> None:
+        logger.info("translation turned on; warming up the translation model")
+        try:
+            self._ping()
+        except TranslationError as exc:
+            logger.warning(
+                "cannot warm up the translation model: %s: %s", type(exc).__name__, exc
+            )
+        except Exception:
+            logger.exception("warming up the translation model failed")
+
+
 class RequestTracker(Protocol):
     """`ActivityTranslator` 回報請求開始與結束的對象（`KeepWarm` 實作它）。"""
 

@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from importlib import metadata
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 
 from kikitori.capture.errors import (
     BackendUnavailableError,
@@ -40,7 +40,7 @@ from kikitori.engine.services import (
     platform_name,
 )
 from kikitori.hardware import GPU_RUNTIME_ID
-from kikitori.hardware.ollama import validate_model_name
+from kikitori.hardware.ollama import validate_pull_model_name
 from kikitori.languages import LANGUAGES
 from kikitori.pipeline import MODES, Mode, Pipeline, PipelineState, SubtitleUpdate
 from kikitori.pipeline.factory import (
@@ -48,12 +48,15 @@ from kikitori.pipeline.factory import (
     pipeline_config,
     translation_needed,
 )
+from kikitori.translate import redact_url
 from kikitori.translate.presets import normalize_model_name
 
 ENGINE_NAME = "kikitori-engine"
 STOP_TIMEOUT = 5.0
 DOWNLOAD_JOIN_TIMEOUT = 2.0
 DEFERRED_JOIN_TIMEOUT = 2.0
+LOADER_POLL_SECS = 0.1
+"""等前一個 session 載入結束時，每隔多久檢查一次「這個 session 也被停止了」。"""
 PROGRESS_INTERVAL = 0.25
 MAX_DEVICE_ID_CHARS = 512
 
@@ -65,8 +68,8 @@ PREVIEW_LANGUAGE_PARAMS = (
     "mode",
 )
 
-DownloadKind = str
-"""`download_progress` 的 `kind`："asr"、"gpu_runtime" 或 "translation"。"""
+DownloadKind = Literal["asr", "gpu_runtime", "translation"]
+"""`download_progress` 的 `kind`。"""
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +154,10 @@ class EngineServer:
         self._hardware = HardwareService(services.hardware, services.models)
         # 回應寫出後才執行的動作：讓 UI 先拿到 session_id，再收到該 session 的事件。
         self._after_response: list[Callable[[], None]] = []
+        # 回應沒寫出去時撤銷處理函式預先做的事（對應 `Deferred.unsent`）
+        self._unsent_response: list[Callable[[], None]] = []
+        # 最後一個 session 的載入執行緒：下一個 session 先等它結束（見 `_load_session`）
+        self._last_loader: threading.Thread | None = None
         self._handlers: dict[str, Handler] = {
             "engine.info": self._engine_info,
             "hardware.detect": self._hardware_detect,
@@ -246,10 +253,20 @@ class EngineServer:
             return
         if isinstance(result, Deferred):
             # 回應由工作執行緒在完成時寫出（以 id 對應，可能晚於之後的請求）。
-            self._deferred.submit(request.id, request.method, result.job, result.after)
+            self._deferred.submit(
+                request.id, request.method, result.job, result.after, result.unsent
+            )
             return
-        self._send(p.response(request.id, result))
         actions, self._after_response = self._after_response, []
+        unsent, self._unsent_response = self._unsent_response, []
+        try:
+            self._send(p.response(request.id, result))
+        except Exception:
+            # 回應沒寫出去：之後的動作（啟動下載執行緒）不執行，預先登記的下載也要撤銷，
+            # 否則同一個模型之後永遠是 download_in_progress
+            for undo in unsent:
+                undo()
+            raise
         for action in actions:
             action()
 
@@ -489,6 +506,7 @@ class EngineServer:
             "asr", model, known[model].size_bytes, download
         )
         self._after_response.append(thread.start)
+        self._unsent_response.append(lambda: self._unregister_download("asr", model))
         return {"model": model, "started": True}
 
     def _download_gpu_runtime(self, params: dict[str, Any]) -> Mapping[str, Any]:
@@ -526,13 +544,16 @@ class EngineServer:
             "gpu_runtime", GPU_RUNTIME_ID, status.download_bytes or 0, install
         )
         self._after_response.append(thread.start)
+        self._unsent_response.append(
+            lambda: self._unregister_download("gpu_runtime", GPU_RUNTIME_ID)
+        )
         return {"model": GPU_RUNTIME_ID, "started": True}
 
     def _models_pull_translation(self, params: dict[str, Any]) -> Deferred:
         """Ollama 的 `/api/pull`：替使用者下載翻譯模型（進度同 `download_progress`）。"""
         p.reject_unknown_params(params, ("model",))
         try:
-            model = validate_model_name(params.get("model"))
+            model = validate_pull_model_name(params.get("model"))
         except ValueError as exc:
             raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
         settings = self._services.settings_store.get()
@@ -550,18 +571,26 @@ class EngineServer:
             # 要連線檢查伺服器（數秒），所以在背景工作執行緒上；錯誤以錯誤碼回應，
             # UI 才能分辨「沒開 Ollama」與「不是 Ollama（請自行安裝）」。
             state = translation.server_state(settings)
-            base_url = settings.translation.base_url
+            # 訊息會回到 UI 並寫進 log：網址中的帳密一律遮蔽
+            base_url = redact_url(settings.translation.base_url)
+            detail = f": {state.error}" if state.error else ""
             if not state.reachable:
                 raise p.ProtocolError(
                     p.TRANSLATION_SERVER_UNREACHABLE,
-                    f"cannot connect to the translation server {base_url}"
-                    + (f": {state.error}" if state.error else ""),
+                    f"cannot connect to the translation server {base_url}{detail}",
+                )
+            if state.auth_failed:
+                raise p.ProtocolError(
+                    p.TRANSLATION_SERVER_AUTH_FAILED,
+                    f"the translation server {base_url} rejected the request "
+                    "(HTTP 401/403); check the API key in the environment variable "
+                    f"named by translation.api_key_env{detail}",
                 )
             if not state.is_ollama:
                 raise p.ProtocolError(
                     p.PULL_UNSUPPORTED,
                     f"the translation server {base_url} is not Ollama; "
-                    f"install {model} on that server yourself",
+                    f"install {model} on that server yourself{detail}",
                 )
             started.append(self._register_download("translation", model, 0, pull))
             return {"model": model, "started": True}
@@ -570,7 +599,12 @@ class EngineServer:
             for thread in started:
                 thread.start()
 
-        return Deferred(job, after=start)
+        def unsent() -> None:
+            # 回應沒寫出去，start() 不會執行：撤銷 job 中的登記
+            if started:
+                self._unregister_download("translation", model)
+
+        return Deferred(job, after=start, unsent=unsent)
 
     def _register_download(
         self, kind: DownloadKind, model: str, expected_total: int, job: DownloadJob
@@ -594,6 +628,18 @@ class EngineServer:
             daemon=True,
         )
         return download.thread
+
+    def _unregister_download(self, kind: DownloadKind, model: str) -> None:
+        """撤銷尚未啟動的下載（回應沒寫出去時）；已啟動的不動，由執行緒結束時自行移除。"""
+        with self._downloads_lock:
+            download = self._downloads.get((kind, model))
+            if download is None:
+                return
+            thread = download.thread
+            if thread is not None and thread.ident is not None:
+                return
+            del self._downloads[(kind, model)]
+        logger.info("download of %s was not started: the response was not sent", model)
 
     def _run_download(
         self, download: _Download, expected_total: int, job: DownloadJob
@@ -691,22 +737,47 @@ class EngineServer:
             session = _Session(self._next_session_id, mode)
             self._next_session_id += 1
             self._session = session
+            previous = self._last_loader
+            session.loader = threading.Thread(
+                target=self._load_session,
+                args=(session, settings, source, previous),
+                name=f"session-{session.id}",
+                daemon=True,
+            )
+            self._last_loader = session.loader
 
-        session.loader = threading.Thread(
-            target=self._load_session,
-            args=(session, settings, source),
-            name=f"session-{session.id}",
-            daemon=True,
-        )
         self._after_response.append(session.loader.start)
         return {"session_id": session.id}
 
     def _load_session(
-        self, session: _Session, settings: Any, source: AudioSource
+        self,
+        session: _Session,
+        settings: Any,
+        source: AudioSource,
+        previous: threading.Thread | None = None,
     ) -> None:
+        """背景載入：等前一個 session 的載入結束 → 翻譯模型檢查 → 建立元件 → 開始。
+
+        停止（`session.cancelled`）在每一步之間檢查：檢查翻譯伺服器（數秒）、載入 ASR
+        與預熱（`build_components`，數秒到數十秒）本身不能中斷，停止後做完這一步就結束，
+        不再進行下一步。
+
+        為什麼要等前一個 session：被停止的 session 會立即送出 idle 並釋放 `_session`，
+        UI 可以馬上開始下一個；但它的載入執行緒可能還卡在 `build_components()` 裡。兩個
+        執行緒同時載入 ASR 會在 GPU 上配置兩份模型（每份約 2.6 GB），預熱也會與 Ollama
+        搶顯示記憶體（見 factory 的 `build_session_components()`）。所以新的 session 先
+        送出 `loading`，再等前一個載入執行緒結束（它看到 cancelled 後不會啟動 pipeline）；
+        等待期間這個 session 也能被停止。代價是開始得比較慢（最多是前一個 session 剩下
+        的那一步，例如預熱的 60 秒讀取逾時），而不是讓兩份模型同時佔用記憶體。
+        """
         try:
             self._session_status(session, "loading", None, None)
+            if not self._wait_for_loader(session, previous):
+                return
             missing = self._missing_translation_models(settings, session.mode)
+            if session.cancelled.is_set():
+                # 檢查期間被停止：不要再載入 ASR（數秒、佔 GPU）
+                return
             if missing:
                 # 先於載入 ASR（數秒）回報：UI 以 models.pull_translation 下載後重試
                 self._session_failed(
@@ -736,6 +807,10 @@ class EngineServer:
                     session, "load_error", f"{type(exc).__name__}: {exc}"
                 )
                 return
+            if session.cancelled.is_set():
+                # 載入與預熱期間被停止：丟掉元件（只靠參照計數就會釋放 GPU 上的模型）
+                logger.info("session %d stopped while loading", session.id)
+                return
 
             pipeline = Pipeline(
                 components,
@@ -763,6 +838,27 @@ class EngineServer:
                     )
         except ChannelClosedError:
             logger.error("session %d: protocol output closed", session.id)
+
+    def _wait_for_loader(
+        self, session: _Session, previous: threading.Thread | None
+    ) -> bool:
+        """等前一個 session 的載入執行緒結束（理由見 `_load_session`）。
+
+        Returns:
+            False 表示等待期間這個 session 也被停止了（不必再載入）。
+        """
+        if previous is None or not previous.is_alive():
+            return not session.cancelled.is_set()
+        logger.info(
+            "session %d: waiting for session %s to finish loading",
+            session.id,
+            previous.name.removeprefix("session-"),
+        )
+        while previous.is_alive():
+            if session.cancelled.is_set():
+                return False
+            previous.join(LOADER_POLL_SECS)
+        return not session.cancelled.is_set()
 
     def _on_subtitle(self, session: _Session, update: SubtitleUpdate) -> None:
         data = dataclasses.asdict(update)
@@ -803,6 +899,18 @@ class EngineServer:
         except Exception:
             # 檢查只是為了提早提示；檢查本身的程式錯誤不能讓 session 開不起來
             logger.exception("cannot check the translation server")
+            return []
+        if state.auth_failed:
+            # 與連不上相同：無法確認模型在不在，照常開始（原文不依賴翻譯）。但這不是
+            # 「Ollama 還沒開」那種會自己好的狀況，每句翻譯都會失敗，所以記 warning
+            # （經 log 事件到 UI），讓使用者知道要檢查金鑰。不另送 status code：status
+            # 的 code 只用在 error 狀態，session 本身仍會正常開始。
+            logger.warning(
+                "the translation server rejected the API key (HTTP 401/403); "
+                "starting without checking translation models, and translations will "
+                "fail until the key in translation.api_key_env is fixed: %s",
+                state.error,
+            )
             return []
         if not state.reachable or not state.is_ollama or state.installed is None:
             logger.info(
