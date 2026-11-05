@@ -4,6 +4,7 @@
 換成 stderr：任何程式庫的 `print` 都只會進 stderr，不會污染 NDJSON。
 """
 
+import io
 import logging
 import os
 import sys
@@ -32,10 +33,21 @@ def _select_services() -> EngineServices:
     return default_services()
 
 
+def _use_utf8_stderr() -> None:
+    """日誌一律以 UTF-8 寫出。
+
+    Tauri 以 UTF-8 讀 stderr 寫進程式日誌；Python 預設用系統地區編碼（例如日文 Windows
+    的 cp932），裝置名稱等非 ASCII 文字會變成亂碼。
+    """
+    if isinstance(sys.stderr, io.TextIOWrapper):
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def run_engine() -> int:
     """啟動 stdio 引擎，直到 stdin EOF 或 `engine.shutdown`；回傳結束碼。"""
     protocol_out = sys.stdout.buffer
     protocol_in = sys.stdin.buffer
+    _use_utf8_stderr()
     sys.stdout = sys.stderr
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format=LOG_FORMAT)
     server = EngineServer(_select_services(), MessageWriter(protocol_out))

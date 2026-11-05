@@ -211,7 +211,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 - stdin、stdout 都以位元組處理、UTF-8 編解碼（Windows 的主控台編碼可能是 cp950，不能靠 `sys.stdout` 的文字層）。
 - 每行一個 JSON；輸出 `json.dumps(ensure_ascii=False, separators=(",", ":"), allow_nan=False)` + `\n`，寫完立即 flush；寫入有鎖，多執行緒送事件不會交錯。
-- 啟動時把 `sys.stdout` 換成 stderr，任何程式庫的 `print` 都不會污染協定通道；logging 一律寫 stderr。
+- 啟動時把 `sys.stdout` 換成 stderr，任何程式庫的 `print` 都不會污染協定通道；logging 一律寫 stderr。stderr 也改成 UTF-8（`errors="backslashreplace"`）：Tauri 以 UTF-8 讀它寫進程式日誌，Python 預設的地區編碼（日文 Windows 為 cp932）會讓裝置名稱等文字變成亂碼。
 - 單行上限 1 MiB；超過就讀到行尾丟掉，回 `invalid_request`。
 - stdout 寫入失敗（Tauri 端關閉管線）→ 記錄到 stderr 後結束引擎。
 

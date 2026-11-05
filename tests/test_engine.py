@@ -17,6 +17,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from kikitori.engine.io import (
     LINE_TOO_LONG,
@@ -384,6 +385,23 @@ class SettingsProtocolTest(EngineTestCase):
         self.assertIn("invalid", log["message"])
         result = self.engine.request("settings.get")["result"]
         self.assertEqual(result["settings"]["mode"], "media")
+
+    def test_stderr_is_utf8_regardless_of_locale(self) -> None:
+        # Tauri 以 UTF-8 讀 stderr 寫進程式日誌。Python 的 stderr 預設用系統地區編碼
+        # （日文 Windows 是 cp932）：裝置名稱「喇叭」之類的文字在日誌裡變成亂碼，
+        # 編碼不了的字（例如 cp932 沒有的「啟」）變成 \uXXXX。以 ascii 模擬最糟的地區編碼。
+        self.engine.dispose()
+        (self.config_dir / "settings.json").write_text(
+            '{"schema_version": 2, "mode": "啟動喇叭"}', encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "ascii"}):
+            self.engine = EngineProcess(str(self.config_dir))
+        self.engine.wait_event("log", lambda d: "啟動喇叭" in d["message"])
+        self.assertEqual(self.engine.close(), 0)
+        self.engine.dispose()
+        stderr = b"".join(self.engine.stderr)
+        self.assertIn("啟動喇叭".encode(), stderr)
+        self.assertNotIn(b"Logging error", stderr)
 
 
 class DownloadProtocolTest(EngineTestCase):
