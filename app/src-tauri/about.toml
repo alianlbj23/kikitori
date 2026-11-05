@@ -1,4 +1,4 @@
-# cargo-about：產生 Rust 依賴的第三方授權聲明（scripts/app_licenses.py 呼叫，輸出 JSON 後由它
+# cargo-about：產生 Rust 依賴的第三方授權聲明（packaging/app/licenses.py 呼叫，輸出 JSON 後由它
 # 整理成 app/src-tauri/licenses/）。說明見 docs/specs/packaging-ci.md「app 的第三方授權聲明」。
 #
 # 範圍：三個發布平台的 normal 依賴（含 proc-macro 子樹，cargo-about 不分辨它們是否連結進執行檔，

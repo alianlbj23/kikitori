@@ -397,12 +397,15 @@ def read_npm_package(
         )
 
     files: dict[str, Path] = {f.name: f for f in _license_files(directory)}
-    override_files = _license_files(overrides_dir / name)
+    override_dir = overrides_dir / name
+    override_files = _license_files(override_dir)
+    if override_files:
+        _check_override_version(override_dir, name, version)
     for f in override_files:
         files.setdefault(f.name, f)
     if not _has_full_text(files.values()):
         raise NoticeError(
-            f"{name}@{version} ships no license text; add it to {overrides_dir / name}"
+            f"{name}@{version} ships no license text; add it to {override_dir}"
         )
     return NpmPackage(
         name=name,
@@ -411,8 +414,33 @@ def read_npm_package(
         repository=_repository(manifest),
         reason=reason,
         files=tuple(sorted(files.items())),
-        override=bool(override_files),
+        override=any(path.parent == override_dir for path in files.values()),
     )
+
+
+OVERRIDE_VERSIONS = "VERSIONS"
+"""override 目錄中列出「已核對過授權全文」的套件版本（一行一個，`#` 開頭為註解）。"""
+
+
+def _check_override_version(override_dir: Path, name: str, version: str) -> None:
+    """升級套件後不沿用舊版核對過的全文：版本不在 VERSIONS 裡就失敗，要求重新核對上游。"""
+    try:
+        lines = (override_dir / OVERRIDE_VERSIONS).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise NoticeError(
+            f"{override_dir} has no readable {OVERRIDE_VERSIONS}: {exc}"
+        ) from exc
+    verified = {
+        line.strip()
+        for line in lines.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if version not in verified:
+        raise NoticeError(
+            f"license override for {name} was verified for {sorted(verified)}, not {version}; "
+            f"re-check the upstream license files and add {version} to "
+            f"{override_dir / OVERRIDE_VERSIONS}"
+        )
 
 
 def collect_npm(app_dir: Path, overrides_dir: Path = OVERRIDES_DIR) -> list[NpmPackage]:
@@ -660,6 +688,10 @@ def generate(
     except NoticeError as exc:
         out(f"LICENSE NOTICES FAILED: {exc}")
         return 1
+    except OSError as exc:
+        # 寫入輸出目錄失敗（檔案被鎖、權限、磁碟）：可能留下不完整的目錄，再跑一次會整個重寫。
+        out(f"LICENSE NOTICES FAILED: cannot write {out_dir}: {exc}")
+        return 1
     out(
         f"wrote {out_dir}: {len(rust.crates)} crates "
         f"({len(rust.mpl_crates)} MPL-2.0: {', '.join(c.name for c in rust.mpl_crates) or 'none'}), "
@@ -706,14 +738,30 @@ def check_bundle(resource_dir: Path) -> list[str]:
     mpl = manifest.get("mpl_sources")
     if not isinstance(mpl, list):
         return problems + [f"{MANIFEST_NAME}: mpl_sources must be a list"]
+    statements = _mpl_statements(mpl_text)
     for entry in mpl:
         if not isinstance(entry, dict):
             problems.append(f"{MANIFEST_NAME}: bad mpl_sources entry {entry!r}")
             continue
         heading = f"{entry.get('name')} {entry.get('version')}"
-        if heading not in mpl_text or str(entry.get("crates_io")) not in mpl_text:
+        # 逐行精確比對：子字串比對會讓 `foo 1.0` 被 `foo 1.0.1` 的說明蓋過。
+        if f"crates.io:  {entry.get('crates_io')}" not in statements.get(heading, ()):
             problems.append(f"MPL-2.0-SOURCE.txt has no source statement for {heading}")
     return problems
+
+
+def _mpl_statements(text: str) -> dict[str, set[str]]:
+    """`MPL-2.0-SOURCE.txt` 的說明區塊：`<名稱> <版本>` 那一行 → 其下縮排各行（去掉縮排）。"""
+    blocks: dict[str, set[str]] = {}
+    current: set[str] | None = None
+    for line in text.splitlines():
+        if line.startswith("  ") and current is not None:
+            current.add(line.strip())
+        elif line.strip():
+            current = blocks.setdefault(line.strip(), set())
+        else:
+            current = None
+    return blocks
 
 
 def verify_bundle(resource_dir: Path, out: Callable[[str], None] = print) -> int:

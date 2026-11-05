@@ -145,7 +145,7 @@ Linux（Debian bookworm 容器、x86_64）one-folder：269 MB（`du`），啟動
 
 - **Rust**：`cargo about generate --format json`，三個發布平台（與 `deny.toml` 相同）的 **normal 依賴**，三平台聯集（每個安裝檔都附同一份，多列無害）。排除 `build-dependencies`（只在建置機器上執行，不連結進執行檔）與 `dev-dependencies`（只給測試）。proc-macro 在依賴圖上是 normal 依賴，cargo-about 不區分它是否連結進執行檔，所以**保留**（寧可多列）：例如四個 Servo 的 MPL-2.0 crate 只經 `tauri-macros`（proc-macro）→ `tauri-codegen` → `tauri-utils` → `dom_query` 進入依賴圖，實際上可能沒有連結進執行檔，仍照列並附原始碼說明。kikitori 自己的 crate（本機路徑、`source` 為空）不列，由 `kikitori/LICENSE` 涵蓋。
 - **npm**：`package-lock.json` 從根的 `dependencies`（含 `optionalDependencies`、`peerDependencies`）依 Node 的解析規則走出的遞移閉包，也就是 `@tauri-apps/api` 與三個外掛；devDependencies 不列。例外：**Vite**（把自己的 modulepreload polyfill 寫進 bundle，`dist/assets/*.js` 實測可見）與 **Rolldown**（Vite 的 bundler，某些模組型態會輸出執行期 helper；目前的 bundle 沒有，為了之後改程式不會漏掉而列入）。Vite 的 `LICENSE.md` 本身已含它內嵌依賴的授權。
-- 讀 `node_modules/<套件>/package.json` 的名稱、版本與 `license`（必須與 lock 相同，不同就要求 `npm ci`），複製套件最上層的 `LICENSE*`／`COPYING*`／`NOTICE*` 等檔案（與引擎相同的檔名規則）。`*.spdx` 只是 metadata，不算全文；沒有全文時用 `license_overrides/<套件名>/`，兩邊都沒有 → **失敗**。
+- 讀 `node_modules/<套件>/package.json` 的名稱、版本與 `license`（必須與 lock 相同，不同就要求 `npm ci`），複製套件最上層的 `LICENSE*`／`COPYING*`／`NOTICE*` 等檔案（與引擎相同的檔名規則）。`*.spdx` 只是 metadata，不算全文；沒有全文時用 `license_overrides/<套件名>/`，兩邊都沒有 → **失敗**。override 目錄的 `VERSIONS` 列出已核對過上游授權檔的套件版本；安裝的版本不在其中 → **失敗**（升級套件後不會靜默沿用沒核對過的全文）。套件自己有同名授權檔時以套件的為準。
 - 每個 crate 都必須至少對應到一份授權全文，否則失敗（`cargo about --fail` 也會在無法判定授權時失敗）。沒附授權檔的 crate（例如 Tauri 外掛、`windows-*`）由 cargo-about 填入該 SPDX 授權的標準全文。
 - 以 MPL 授權使用的 crate（雙授權時選了別的授權的不算）必須來自 crates.io，否則失敗；每個都寫進 `MPL-2.0-SOURCE.txt`（名稱、版本、crates.io 頁面、`.crate` 下載網址、上游 repository）。
 
@@ -182,7 +182,7 @@ uv run python packaging/app/licenses.py --out app/src-tauri/licenses     產生�
 uv run python packaging/app/licenses.py --check-bundle <資源目錄>         檢查安裝後的兩份授權資料夾
 ```
 
-`--check-bundle` 確認 `licenses/` 的每個檔案、`manifest.json` 由本程式產生、每個 MPL crate 在 `MPL-2.0-SOURCE.txt` 都有說明，以及引擎的 `kikitori-engine/THIRD_PARTY_LICENSES/README.txt` 存在。
+`--check-bundle` 確認 `licenses/` 的每個檔案、`manifest.json` 由本程式產生、每個 MPL crate 在 `MPL-2.0-SOURCE.txt` 都有說明（逐行精確比對名稱版本與 crates.io 網址，`foo 1.0.1` 不能頂替 `foo 1.0`），以及引擎的 `kikitori-engine/THIRD_PARTY_LICENSES/README.txt` 存在。
 
 CI：`app.yml` 的 `licenses` job 每次 push 都產生一次（確認產生得出來，結果寫進 step summary）；`release.yml` 每個平台在 `tauri build` 前產生、安裝後以 `--check-bundle` 檢查（見 `release-update.md`）。
 
@@ -234,4 +234,4 @@ uv run python -m unittest tests.test_packaging_build tests.test_packaging_licens
 - `test_sync_version.py`：暫存目錄的假 repo（每種目標檔）、check／sync／bump、只改版本字串、CRLF 保留、錯誤路徑（非 SemVer、壞 JSON、缺欄位、Cargo.lock 沒有本程式）、`uv lock`（假 runner：成功、失敗、逾時、沒有 uv）、選單。
 - `test_packaging_build.py`：禁止／系統檔名規則、target triple（參數、環境變數、rustc 輸出、rustc 缺少或逾時、格式驗證、推算表）、PyInstaller 指令、建置流程（假 PyInstaller：成功、失敗、逾時、缺執行檔、含禁止檔案）、sidecar 放置（one-folder／one-file，不動其他檔案）、選單與參數、`entry.py`（未知參數、自我檢查的錯誤彙整、原始碼環境下全部檢查通過）、對開發環境引擎跑完整冒煙測試。
 - `test_packaging_licenses.py`：假 dist-info（PathDistribution）的對應、授權檔複製與相對路徑、override、缺授權、系統函式庫標註、輸出覆寫、PyInstaller 一律列入。
-- `test_app_licenses.py`：暫存目錄的假 `package-lock.json`／`node_modules`：正式依賴閉包（巢狀解析、往上層找、dev 套件排除、optional／peer、缺依賴、壞 lock、link）、實際的 `app/package-lock.json` 只走到 `@tauri-apps/*`、Vite 列入、`.spdx` 不算全文、override、`npm ci` 提示（缺檔、版本不符）、缺 `license`；假 cargo-about JSON：略過本機 crate、MPL 判定（雙授權選 MIT 時不算）、缺全文、非 crates.io 的 MPL crate、壞資料；cargo-about 指令（假 runner：成功、未安裝、壞 JSON、逾時、找不到 cargo）；輸出目錄（內容、只覆寫自己產生的目錄、缺 LICENSE）；`--check-bundle`（完整、缺檔、缺 MPL 說明、他人的 manifest）；選單與參數。提交的 override 都有全文與 `SOURCE.md`。
+- `test_app_licenses.py`：暫存目錄的假 `package-lock.json`／`node_modules`：正式依賴閉包（巢狀解析、往上層找、dev 套件排除、optional／peer、缺依賴、壞 lock、link）、實際的 `app/package-lock.json` 只走到 `@tauri-apps/*`、Vite 列入、`.spdx` 不算全文、override（`VERSIONS` 必須列出安裝的版本、缺 `VERSIONS`、套件自己的同名檔優先）、`npm ci` 提示（缺檔、版本不符）、缺 `license`；假 cargo-about JSON：略過本機 crate、MPL 判定（雙授權選 MIT 時不算）、缺全文、非 crates.io 的 MPL crate、壞資料；cargo-about 指令（假 runner：成功、未安裝、壞 JSON、逾時、找不到 cargo）；輸出目錄（內容、只覆寫自己產生的目錄、缺 LICENSE）；`--check-bundle`（完整、缺檔、缺 MPL 說明、較長版本號不能頂替、他人的 manifest）、寫入失敗回報結束碼 1；選單與參數。提交的 override 都有全文與 `SOURCE.md`，`VERSIONS` 含 `package-lock.json` 鎖定的版本。

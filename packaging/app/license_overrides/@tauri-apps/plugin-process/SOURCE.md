@@ -10,4 +10,5 @@ npm 套件 `@tauri-apps/plugin-process` 只附 `LICENSE.spdx`（SPDX metadata，
 | `LICENSE_APACHE-2.0` | Apache-2.0 | 同上 `plugins/process/LICENSE_APACHE-2.0`，git blob `4947287f7b5ccb5d1e8b7b2d3aa5d89f322c160d` |
 
 這兩個檔案在 `process-js-v2.4.0`（本專案使用的版本）的 tag 上與上表完全相同（git blob 相同）。
-升級套件時重新核對；若之後的 npm 套件附上了授權全文，可刪除這個目錄。
+升級套件時重新核對上游授權檔，並把新版本加入 `VERSIONS`（安裝的版本不在其中時產生會失敗，
+以免沿用沒核對過的全文）；若之後的 npm 套件附上了授權全文，可刪除這個目錄。

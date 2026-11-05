@@ -273,9 +273,52 @@ class NpmPackageTests(TempCase):
         override.mkdir(parents=True)
         (override / "LICENSE_MIT").write_text("upstream mit", encoding="utf-8")
         (override / "SOURCE.md").write_text("where it came from", encoding="utf-8")
+        (override / "VERSIONS").write_text(
+            "# verified\n0.9.0\n1.0.0\n", encoding="utf-8"
+        )
         [plug] = lic.collect_npm(self.tmp, self.overrides)
         self.assertTrue(plug.override)
         self.assertEqual([f for f, _ in plug.files], ["LICENSE.spdx", "LICENSE_MIT"])
+
+    def _override(self, name: str, versions: str | None) -> Path:
+        override = self.overrides / name
+        override.mkdir(parents=True)
+        (override / "LICENSE_MIT").write_text("upstream mit", encoding="utf-8")
+        if versions is not None:
+            (override / "VERSIONS").write_text(versions, encoding="utf-8")
+        return override
+
+    def test_override_must_list_the_installed_version(self) -> None:
+        app = FakeApp(self.tmp)
+        app.root_deps("plug")
+        app.add("node_modules/plug", "2.0.0", files={"LICENSE.spdx": "x"})
+        app.write_lock()
+        self._override("plug", "1.0.0\n")
+        with self.assertRaisesRegex(
+            lic.NoticeError, r"verified for \['1.0.0'\], not 2.0.0"
+        ):
+            lic.collect_npm(self.tmp, self.overrides)
+
+    def test_override_without_versions_file_fails(self) -> None:
+        app = FakeApp(self.tmp)
+        app.root_deps("plug")
+        app.add("node_modules/plug", files={"LICENSE.spdx": "x"})
+        app.write_lock()
+        self._override("plug", None)
+        with self.assertRaisesRegex(lic.NoticeError, "VERSIONS"):
+            lic.collect_npm(self.tmp, self.overrides)
+
+    def test_package_text_wins_over_a_same_named_override(self) -> None:
+        app = FakeApp(self.tmp)
+        app.root_deps("plug")
+        app.add("node_modules/plug", files={"LICENSE_MIT": "packaged mit"})
+        app.write_lock()
+        self._override("plug", "1.0.0\n")
+        [plug] = lic.collect_npm(self.tmp, self.overrides)
+        self.assertFalse(plug.override)
+        self.assertEqual(
+            dict(plug.files)["LICENSE_MIT"].read_text("utf-8"), "packaged mit"
+        )
 
     def test_missing_package_json_asks_for_npm_ci(self) -> None:
         app = FakeApp(self.tmp)
@@ -306,12 +349,19 @@ class NpmPackageTests(TempCase):
             lic.collect_npm(self.tmp, self.overrides)
 
     def test_committed_overrides_have_full_texts_and_sources(self) -> None:
+        lock = json.loads(
+            (ROOT / "app" / "package-lock.json").read_text(encoding="utf-8")
+        )
         dirs = [p.parent for p in lic.OVERRIDES_DIR.rglob("SOURCE.md")]
         self.assertTrue(dirs)
         for d in dirs:
             with self.subTest(d=d):
                 files = [f for f in d.iterdir() if lic.LICENSE_NAME.match(f.name)]
                 self.assertTrue(lic._has_full_text(files))
+                # The locked version must be one whose upstream text was checked.
+                name = d.relative_to(lic.OVERRIDES_DIR).as_posix()
+                locked = lock["packages"][f"node_modules/{name}"]["version"]
+                lic._check_override_version(d, name, locked)
 
 
 class CargoAboutTests(unittest.TestCase):
@@ -528,6 +578,17 @@ class CheckBundleTests(TempCase):
             ["MPL-2.0-SOURCE.txt has no source statement for option-ext 0.2.0"],
         )
 
+    def test_a_longer_version_does_not_stand_in_for_the_missing_one(self) -> None:
+        resources = self._installed()
+        mpl = resources / "licenses" / "rust" / "MPL-2.0-SOURCE.txt"
+        mpl.write_text(
+            mpl.read_text("utf-8").replace("0.2.0", "0.2.01"), encoding="utf-8"
+        )
+        self.assertEqual(
+            lic.check_bundle(resources),
+            ["MPL-2.0-SOURCE.txt has no source statement for option-ext 0.2.0"],
+        )
+
     def test_foreign_manifest_is_rejected(self) -> None:
         resources = self._installed()
         (resources / "licenses" / "manifest.json").write_text("{}", encoding="utf-8")
@@ -546,6 +607,34 @@ class CliTests(TempCase):
         self.assertEqual(code, 1)
         self.assertIn("LICENSE NOTICES FAILED", lines[-1])
         self.assertFalse((self.tmp / "out").exists())
+
+    def test_generate_reports_write_errors(self) -> None:
+        app = FakeApp(self.tmp / "app")
+        app.root_deps("a")
+        app.add("node_modules/a")
+        app.write_lock()
+        about = self.tmp / "about.json"
+        about.write_text(
+            json.dumps(about_json([("MIT", "", [crate("serde")])])), "utf-8"
+        )
+        lines: list[str] = []
+        original = lic.write
+
+        def failing_write(*args: Any, **kwargs: Any) -> None:
+            raise PermissionError("locked")
+
+        lic.write = failing_write
+        try:
+            code = lic.generate(
+                out_dir=self.tmp / "out",
+                app_dir=self.tmp / "app",
+                cargo_about_json=about,
+                out=lines.append,
+            )
+        finally:
+            lic.write = original
+        self.assertEqual(code, 1)
+        self.assertIn("cannot write", lines[-1])
 
     def test_generate_from_saved_cargo_about_json(self) -> None:
         app = FakeApp(self.tmp / "app")
