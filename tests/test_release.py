@@ -409,6 +409,12 @@ class RepoConfigTest(unittest.TestCase):
         # macOS 不做付費簽章：以 ad-hoc 簽章（Apple Silicon 必要）。
         self.assertEqual(conf["bundle"]["macOS"]["signingIdentity"], "-")
 
+    def test_deb_recommends_cjk_font(self) -> None:
+        # 介面與字幕全是中日文；精簡安裝的 Debian／Ubuntu 只有 DejaVu，容器實測整個
+        # 介面變成豆腐方塊。建議（不強制）安裝 Noto CJK。
+        deb = rel.tauri_config(ROOT)["bundle"]["linux"]["deb"]
+        self.assertIn("fonts-noto-cjk", deb["recommends"])
+
     def test_project_version_matches_tauri(self) -> None:
         self.assertEqual(rel.project_version(ROOT), rel.tauri_config(ROOT)["version"])
 

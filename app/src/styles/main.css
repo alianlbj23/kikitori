@@ -150,6 +150,9 @@ select {
   border: 1px solid rgb(255 255 255 / 0.18);
   background: var(--ai-deep);
   color: var(--on-ai);
+  /* Linux WebKitGTK draws <select> natively and ignores the background above, so
+     the light text sat on a white box; a dark color scheme makes the native control dark. */
+  color-scheme: dark;
 }
 
 .rail-hint {
