@@ -596,7 +596,9 @@ class EngineServer:
         code = None
         if state == "error":
             # 執行中的擷取錯誤（例如拔掉 USB 裝置的 DeviceLostError）用擷取的 code，
-            # 介面才能說明是裝置的問題；其他錯誤是 pipeline_error。
+            # 介面才能說明是裝置的問題；其他錯誤是 pipeline_error。session.pipeline 在
+            # pipeline.start() 之前就設好，只有送出結束狀態（_session_status）後才清成
+            # None，而之後的狀態都會被 terminal_sent 丟掉，所以這裡讀得到。
             pipeline = session.pipeline
             error = pipeline.error if pipeline is not None else None
             code = (

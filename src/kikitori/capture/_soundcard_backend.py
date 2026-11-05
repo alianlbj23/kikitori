@@ -42,9 +42,12 @@ CAPTURE_RATE = 48000
 # 20 ms：PulseAudio 的 fragsize 由它決定（不設會是秒級延遲）。
 BLOCK_SECONDS = 0.02
 # 多久確認一次裝置還在。PulseAudio／PipeWire 在裝置移除時會把串流搬到預設 source
-# 而不報錯（例如拔掉 USB 耳機後，monitor 的串流被搬到麥克風），所以要自己檢查；
-# 間隔也是搬走後最多會混進來的他處音訊長度。
+# 而不報錯（例如拔掉 USB 耳機後，monitor 的串流被搬到麥克風），所以要自己檢查。
+# 不在清單上時隔 PRESENCE_RECHECK 秒當場再查一次，仍不在才算消失：避免列舉偶爾
+# 漏掉一次就結束 session，又不必等下一次 record() 返回（搬走後的 source 可能一次
+# 只送秒級的區塊，多等一輪就多混進那麼多他處音訊——容器內 sine source 實測約 2 s）。
 PRESENCE_INTERVAL = 0.25
+PRESENCE_RECHECK = 0.1
 
 _PULSE_STREAM_FAILED = "stream is in status failed"
 
@@ -167,7 +170,7 @@ def find_microphone(
     raise DeviceNotFoundError(f"{kind} device not found: {native_id}")
 
 
-def _is_present(
+def _device_listed(
     sc: ModuleType, platform: str, kind: DeviceKind, native_id: str
 ) -> bool:
     return any(
@@ -189,7 +192,7 @@ def open_microphone(
     mic_id = str(mic.id)
     return SoundcardSource(
         mic,
-        is_present=lambda: _is_present(sc, platform, kind, mic_id),
+        is_present=lambda: _device_listed(sc, platform, kind, mic_id),
         presence_interval=presence_interval,
     )
 
@@ -223,15 +226,35 @@ class _RecorderReader:
         self._is_present = is_present
         self._presence_interval = presence_interval
         self._last_check = time.monotonic()
+        self._check_failed = False
+
+    def _check_presence(self, is_present: Callable[[], bool]) -> None:
+        try:
+            present = is_present()
+            if not present:
+                time.sleep(PRESENCE_RECHECK)
+                present = is_present()
+        except CaptureError as exc:
+            # 列舉失敗不代表裝置消失（裝置真的壞了時 record() 會自己報錯）；
+            # 不然會變成 device_not_found，叫使用者重選還在的裝置。只記第一次。
+            if not self._check_failed:
+                logger.warning(
+                    "cannot check whether %s is still present: %s", self._device_id, exc
+                )
+            self._check_failed = True
+            return
+        self._check_failed = False
+        if not present:
+            raise DeviceLostError(f"audio device disappeared: {self._device_id}")
 
     def read_block(self) -> npt.NDArray[np.float32]:
+        is_present = self._is_present
         if (
-            self._is_present is not None
+            is_present is not None
             and time.monotonic() - self._last_check >= self._presence_interval
         ):
             self._last_check = time.monotonic()
-            if not self._is_present():
-                raise DeviceLostError(f"audio device disappeared: {self._device_id}")
+            self._check_presence(is_present)
         # numframes=None：拿系統目前已有的資料，不為湊滿固定長度而多等。
         return self._recorder.record(numframes=None)
 
@@ -239,8 +262,9 @@ class _RecorderReader:
 class SoundcardSource(ThreadedSource):
     """以 soundcard 擷取單一裝置（`find_microphone()` 的結果）的 `AudioSource`。
 
-    `is_present` 給了的話，擷取中每 `presence_interval` 秒呼叫一次，回傳 False 時
-    以 `DeviceLostError` 結束（`open_microphone()` 會設定它）。
+    `is_present` 給了的話，擷取中每 `presence_interval` 秒呼叫一次，回傳 False 且
+    `PRESENCE_RECHECK` 秒後再查仍是 False 時以 `DeviceLostError` 結束；它拋出 `CaptureError`
+    （列舉失敗）時只記錄、不結束（`open_microphone()` 會設定它）。
     """
 
     def __init__(

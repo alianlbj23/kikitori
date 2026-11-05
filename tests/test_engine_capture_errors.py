@@ -6,29 +6,41 @@
 """
 
 import dataclasses
+import gc
 import json
 import os
 import tempfile
 import threading
+import time
 import unittest
+import weakref
 from typing import Any
 from unittest import mock
 
 import numpy as np
 import numpy.typing as npt
 
-from kikitori.capture import AudioSource, CaptureError, DeviceKind, DeviceLostError
+from kikitori.capture import (
+    AudioSource,
+    CaptureError,
+    DeviceKind,
+    DeviceLostError,
+    PermissionDeniedError,
+)
+from kikitori.config import Settings
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
 from kikitori.engine.testing import fake_services
+from kikitori.pipeline import PipelineComponents
+from kikitori.pipeline.types import Mode
 
 WAIT = 10.0
 
 
 class FailingSource:
-    """送一點靜音後拋出指定的擷取錯誤（像錄音中被拔掉的裝置）。"""
+    """送一點靜音後拋出指定的錯誤（像錄音中被拔掉的裝置）。"""
 
-    def __init__(self, error: CaptureError) -> None:
+    def __init__(self, error: Exception) -> None:
         self._error = error
         self._reads = 0
 
@@ -82,7 +94,7 @@ class _Sink:
 
 
 class MidSessionCaptureErrorTest(unittest.TestCase):
-    def run_session(self, error: CaptureError) -> dict[str, Any]:
+    def run_session(self, error: Exception) -> dict[str, Any]:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         env = mock.patch.dict(os.environ, {"KIKITORI_CONFIG_DIR": tmp.name})
@@ -92,9 +104,20 @@ class MidSessionCaptureErrorTest(unittest.TestCase):
         def open_source(device_id: str | None, kind: DeviceKind) -> AudioSource:
             return FailingSource(error)
 
+        services = fake_services()
+        original = services.build_components
+        self.built: list[weakref.ref[Any]] = []
+
+        def build(settings: Settings, mode: Mode) -> PipelineComponents:
+            components = original(settings, mode)
+            self.built.append(weakref.ref(components.final_transcriber))
+            return components
+
         sink = _Sink()
         server = EngineServer(
-            dataclasses.replace(fake_services(), open_source=open_source),
+            dataclasses.replace(
+                services, open_source=open_source, build_components=build
+            ),
             MessageWriter(sink),  # type: ignore[arg-type]
             version="test",
         )
@@ -116,6 +139,30 @@ class MidSessionCaptureErrorTest(unittest.TestCase):
     def test_other_capture_error_while_running(self) -> None:
         status = self.run_session(CaptureError("stream broke"))
         self.assertEqual(status["code"], "capture_error")
+
+    def test_permission_revoked_while_running(self) -> None:
+        status = self.run_session(PermissionDeniedError("screen recording revoked"))
+        self.assertEqual(status["code"], "permission_denied")
+
+    def test_non_capture_error_is_pipeline_error(self) -> None:
+        status = self.run_session(RuntimeError("boom"))
+        self.assertEqual(status["code"], "pipeline_error")
+
+    def test_failed_session_releases_its_components(self) -> None:
+        # 以 error 結束的 session 也要只靠參照計數就釋放元件（GPU 上的 ASR 模型）：
+        # 保存的例外不能經由 traceback 參照回 pipeline。
+        gc.collect()
+        gc.disable()
+        self.addCleanup(gc.enable)
+        self.run_session(DeviceLostError("audio device disappeared: usb"))
+        deadline = time.monotonic() + WAIT
+        while self.built[0]() is not None:
+            if time.monotonic() > deadline:
+                referrers = [
+                    type(r).__name__ for r in gc.get_referrers(self.built[0]())
+                ]
+                self.fail(f"components of the failed session still alive: {referrers}")
+            time.sleep(0.02)
 
 
 if __name__ == "__main__":

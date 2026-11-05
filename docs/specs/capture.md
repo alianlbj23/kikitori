@@ -81,7 +81,7 @@ def open_source(device_id: str | None, kind: DeviceKind) -> AudioSource: ...
 - monitor source 在靜音時仍持續送出（全零的）資料，不需補零。
 - 裝置比對只做原生 id 完全比對；soundcard 自己的 `get_microphone` 會做名稱模糊比對，可能開錯裝置，所以不用。
 - 沒有 PulseAudio 伺服器或沒有 `libpulse` → 匯入 soundcard 失敗 → `BackendUnavailableError`。soundcard 匯入時就連線，連不上伺服器時以 `assert` 檢查 context 狀態，所以 `AssertionError` 也歸為此類（容器實測）。
-- **裝置移除**：PulseAudio（16.1 實測）在裝置移除時不會讓串流失敗，而是把它搬到預設 source 繼續送資料——拔掉 USB 耳機時，錄它 monitor 的串流會被搬到麥克風。所以 `open_microphone()` 建立的來源在擷取中每 0.25 秒以 `all_microphones()` 確認原生 id 還在，不在就拋 `DeviceLostError`（最多混進一個讀取區塊的他處音訊）。不用 `PA_STREAM_DONT_MOVE`：soundcard 沒有開放串流旗標，而且它會讓使用者無法在 pavucontrol 手動改來源。
+- **裝置移除**：PulseAudio（16.1 實測）在裝置移除時不會讓串流失敗，而是把它搬到預設 source 繼續送資料——拔掉 USB 耳機時，錄它 monitor 的串流會被搬到麥克風。所以 `open_microphone()` 建立的來源在擷取中每 0.25 秒以 `all_microphones()` 確認原生 id 還在，不在時隔 0.1 秒當場再查一次，仍不在就拋 `DeviceLostError`（避免列舉偶爾漏掉一次就結束 session，又不必多等一次 `record()`；檢查在兩次 `record()` 之間進行，所以搬走後最多混進一個讀取區塊的他處音訊）。列舉本身失敗時只記 warning、不結束——串流真的壞掉時 `record()` 會自己報錯。不用 `PA_STREAM_DONT_MOVE`：soundcard 沒有開放串流旗標，而且它會讓使用者無法在 pavucontrol 手動改來源。
 - 開始錄 null sink 的 monitor 時，約 1.9 s 後才收到第一筆資料（容器內 null sink 實測；真實音效卡待實機確認），之後連續交付。
 
 ### macOS：ScreenCaptureKit（系統聲音）＋ CoreAudio（麥克風）

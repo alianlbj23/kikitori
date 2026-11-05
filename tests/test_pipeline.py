@@ -154,6 +154,8 @@ class Harness:
         self.final_tr = FakeTranslator()
         self.updates: list[SubtitleUpdate] = []
         self.statuses: list[tuple[str, str | None]] = []
+        # 每次 on_status 當下的 pipeline.error（engine 在回呼中讀它決定 code）。
+        self.errors_at_status: list[BaseException | None] = []
         self.logs: list[tuple[str, str]] = []
         self.on_update: Callable[[SubtitleUpdate], None] | None = None
         pause, max_secs = (0.6, 10.0) if mode == "media" else (0.5, 8.0)
@@ -176,9 +178,13 @@ class Harness:
             self.config,
             clock=clock or (lambda: 0.0),
             on_subtitle=self._record,
-            on_status=lambda s, d: self.statuses.append((s, d)),
+            on_status=self._status,
             on_log=lambda level, m: self.logs.append((level, m)),
         )
+
+    def _status(self, state: str, detail: str | None) -> None:
+        self.statuses.append((state, detail))
+        self.errors_at_status.append(self.pipeline.error)
 
     def _record(self, update: SubtitleUpdate) -> None:
         self.updates.append(update)
@@ -745,8 +751,11 @@ class ThreadedTest(unittest.TestCase):
             self.assertTrue(h.pipeline.wait(WAIT))
         self.assertEqual(h.pipeline.state, "error")
         self.assertEqual(h.statuses[-1], ("error", "DeviceLostError: device unplugged"))
-        # engine 依例外類型決定 status 的 code（device_lost）。
-        self.assertIsInstance(h.pipeline.error, DeviceLostError)
+        # engine 在 on_status 回呼中依例外類型決定 status 的 code（device_lost）。
+        self.assertIsInstance(h.errors_at_status[-1], DeviceLostError)
+        self.assertIs(h.pipeline.error, h.errors_at_status[-1])
+        # 保存的例外不帶 traceback（避免經由 frame 參照回 pipeline）。
+        self.assertIsNone(h.pipeline.error.__traceback__)
         self.assertGreaterEqual(source.stop_calls, 1)
 
     def test_worker_error_stops_pipeline(self) -> None:

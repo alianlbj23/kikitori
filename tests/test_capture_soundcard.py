@@ -356,6 +356,53 @@ class OpenMicrophoneTest(unittest.TestCase):
         # 有確認過裝置還在（不只是建立時列舉一次）。
         self.assertGreater(len(sc.include_loopback_calls), 3)
 
+    def run_with_listing(
+        self, listing: "Callable[[bool], list[FakeMic]]", seconds: float
+    ) -> tuple[int, BaseException | None]:
+        """以自訂的 all_microphones 跑一段時間；回傳收到的樣本數與 read 拋出的錯誤。"""
+        sc = linux_fake()
+        mic = sc.mics[0]
+        self.endless_blocks(mic)
+        src = backend.open_microphone(
+            sc, "linux", "loopback", mic.id, presence_interval=0.01
+        )
+        sc.all_microphones = listing  # type: ignore[method-assign]
+        src.start()
+        total, error = 0, None
+        try:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                total += len(src.read(timeout=0.1))
+        except CaptureError as exc:
+            error = exc
+        finally:
+            src.stop()
+        return total, error
+
+    def test_single_missing_listing_is_tolerated(self) -> None:
+        # 列舉偶爾漏掉一次（伺服器重新設定）不算裝置消失；連續消失才算。
+        sc = linux_fake()
+        calls = {"n": 0}
+
+        def flaky(include_loopback: bool = False) -> list[FakeMic]:
+            calls["n"] += 1
+            return [] if calls["n"] % 3 == 0 else list(sc.mics)
+
+        total, error = self.run_with_listing(flaky, 0.4)
+        self.assertIsNone(error)
+        self.assertGreater(total, 0)
+
+    def test_listing_failure_is_not_device_loss(self) -> None:
+        # 擷取中列舉失敗（例如 IndexError）不能被當成 DeviceNotFoundError／DeviceLostError
+        # 結束 session；串流本身有問題時 record() 會自己報錯。
+        def broken(include_loopback: bool = False) -> list[FakeMic]:
+            raise IndexError("no soundcard with id 7")
+
+        with self.assertLogs("kikitori.capture._soundcard_backend", "WARNING"):
+            total, error = self.run_with_listing(broken, 0.3)
+        self.assertIsNone(error)
+        self.assertGreater(total, 0)
+
     def test_invalid_presence_interval(self) -> None:
         for value in (0.0, -1.0, float("nan")):
             with self.subTest(value=value), self.assertRaises(ValueError):

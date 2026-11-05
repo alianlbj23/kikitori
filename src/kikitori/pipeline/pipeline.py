@@ -619,6 +619,10 @@ class Pipeline:
         self._stop.set()
         self._slot.close()
         self._stop_source()
+        # traceback 已經記錄過；留著的話它的 frame（locals 有 self）會讓
+        # pipeline → 來源／error → traceback → frame → pipeline 成為循環，結束後元件
+        # （GPU 上的 ASR 模型）要等循環垃圾回收才釋放。
+        exc.with_traceback(None)
         self._finish("error", f"{type(exc).__name__}: {exc}", exc)
 
     def _stop_source(self) -> None:
