@@ -1,0 +1,2 @@
+# 模型檔要逐位元組保存，SHA-256 驗證才會通過；避免 core.autocrlf 改動內容。
+*.onnx binary

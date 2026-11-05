@@ -47,6 +47,7 @@
    - `(b) AFTER_UTTERANCE`：除了 (a)，另外在每句結束後重置（維護者在 discussion #791 回答 "Ideally yes"）。
    - `(c) AFTER_LONG_NON_SPEECH`：除了 (a)，另外在連續非人聲超過 `reset_after_non_speech_secs`（預設 2.0 秒）且最近 5 個視窗機率都 < 0.1 時重置；之後每再經過同樣長度的非人聲才會再重置一次。
    - 用評測音軌比較三種之後再決定預設值；在那之前建構 `Segmenter` 時必須明確指定。
+   - **評測結果（2026-11-05）：預設為 `AFTER_LONG_NON_SPEECH`**。理由與數據見下方「實作與評測結果」與 `experiments/silero_reset/README.md`。
 
 ### 預設參數（可調）
 
@@ -58,6 +59,7 @@
 | `pre_roll_ms` | 200 | 使用者確認：避免切掉句首第一個音 |
 | `pause_secs` | 0.6 | 本專案實驗：比 0.2 更接近一句字幕 |
 | `max_secs` | 10.0 | 使用者確認，之後依實測調整 |
+| `reset_policy` | `AFTER_LONG_NON_SPEECH` | 評測結果（2026-11-05） |
 | `reset_after_non_speech_secs` | 2.0 | 僅 `AFTER_LONG_NON_SPEECH` 使用；仿 pipecat 1.14.0，評測時可調 |
 
 ### 模型打包
@@ -153,6 +155,7 @@ src/kikitori/evaluation/
   noise.py             → 白噪音、粉紅噪音產生器（固定種子）
   mixing.py            → 間隔填入、依 SNR 疊加，輸出正確答案
   metrics.py           → ROC-AUC、誤報率、漏報率、開始延遲、提早切斷、漏抓
+  wav.py               → 以標準庫 wave 讀寫 16 kHz 單聲道 16-bit WAV（檢查格式）
 tests/
   test_vad_segmenter.py → 以腳本化機率測試事件邏輯、重置策略、request_end
   test_silero_vad.py    → 雜湊驗證、輸入驗證、前文與 state 的串接、合成訊號
@@ -161,6 +164,7 @@ tests/
 experiments/silero_reset/
   menu.py              → 互動選單工具
   musan.py             → MUSAN 下載、續傳、部分解壓
+  evaluate.py          → 產生音軌、跑三種重置策略與前文對照、輸出指標表
   README.md            → 評測結果與結論
   data/                → 本機資料（.gitignore）
 docs/specs/vad-segmenter.md → 本文件
@@ -238,6 +242,28 @@ class UtteranceEnded:
 7. 評測素材：程式產生的白噪音／粉紅噪音（進 repo）＋ MUSAN（只在本機、`.gitignore`、標註出處），兩者都做「間隔填入」與「人聲底下疊加」；另加本機動漫、VTuber 片段。
 8. MUSAN 下載做成互動選單工具的選項，不靠指令參數。
 9. 模型層可替換（`VoiceModel` 介面）；預留外部提早結束介面（`request_end()`）。
+
+## 實作與評測結果（2026-11-05）
+
+### 實作時確定的細節
+
+- 依賴：`onnxruntime==1.31.1`、`numpy==2.5.4`（皆有 Python 3.12 的 Windows、Linux x86_64／aarch64、macOS arm64 wheel；onnxruntime 1.31 已不提供 macOS x86_64 wheel）。
+- 模型：v6.2.3 的 `silero_vad.onnx`，SHA-256 `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`。實際載入確認輸入為 `input [B, N]`、`state [2, B, 128]`、`sr`（int64 純量），輸出為 `output [B, 1]` 與 `stateN`，與本規格一致。`uv build` 不需調整設定，wheel 即含模型與授權檔。
+- `SileroVad` 依官方 `OnnxWrapper`：int16 固定除以 32768、session 單執行緒；另外拒絕含 NaN／inf 的 float32 視窗，並檢查模型輸出形狀。
+- `neg_threshold` 預設 `max(threshold − 0.15, 0.01)`（與官方相同的下限）。
+- `UtteranceEnded.end_sample` = 這句已送出音訊的結尾：同一句的 `UtteranceAudio` 首尾相接，合起來剛好是 `[start_sample, end_sample)`。因此 `pause` 結束時包含約 `pause_secs` 的靜音尾巴。
+- 前置緩衝不越過上一句的結尾，同一段音訊不會交給兩句；`max_length`／`external` 切斷後人聲持續時，下一句從切點接續。
+- `request_end()` 在候選期間（人聲尚未持續到 `min_speech_ms`）也沒有效果，只作用一次。
+- `flush()` = 串流結束：剩餘不足一個視窗的樣本有進行中句子時併入最後一段音訊，之後回到新串流（樣本位置歸零、模型 reset）。
+- (b) 在 `pause`／`max_length`／`external` 結束後重置；(c) 的「非人聲」指沒有進行中句子、也沒有候選人聲的視窗（句尾停頓仍屬於句子）。
+- 指標：視窗以中心點判斷是否在正確區間內；開始延遲 = 送出 `UtteranceStarted` 時的串流位置 − 正確起點，對應的句子是與該段實質重疊（≥ min(250 ms, 段長一半)）的句子中最早的一句，若它在該段開始前就已確認（與前一段併成一句）則不列入。
+- 評測另做「長間隔」版面（同一批片段，句間 3–4 秒）：原版面最長間隔 1.5 秒，(c) 不會觸發，無法比較。MUSAN 音樂依 `ANNOTATIONS` 的 vocals 欄分成有人聲演唱與純音樂兩種背景。間隔填入的背景音量以 SNR 10 dB 計。
+
+### 評測摘要與預設值
+
+- 選定 **`ResetPolicy.AFTER_LONG_NON_SPEECH`** 為預設（`reset_after_non_speech_secs` 2.0）：全部 68 條音軌漏抓 35/408（(a) 42、(b) 46）、開始延遲中位數 473 ms／P90 721 ms（(a) 502／791、(b) 544／1256）。優勢集中在「長間隔的音樂背景」（純音樂 longgap 漏抓 (a) 9/48 → (c) 2/48）；沒有長間隔時與 (a) 相同。代價是白／粉紅噪音 longgap 多漏 2 段（12/96 vs 10/96）。
+- 原始動漫、VTuber 音軌三種策略都抓到全部 12 段；每視窗平均推論 0.20 ms；前文對照 68/68 條音軌判定「機率異常偏低」（不接前文時人聲區平均機率 ≤ 0.0021）。
+- **未完成**：MUSAN 下載速度只有 0.01–2 MB/s，本次只取得 `music/`，尚未評測 MUSAN `noise/` 版本（Success Criteria 4 的 MUSAN 雜音部分）。下載可在選單續傳，完成後重跑評測即可。
 
 ## 之後的方向（暫不實作）
 
