@@ -129,14 +129,14 @@
 ## Phase 4：評測與文件
 
 ### Task 12：執行評測並決定重置策略預設值
-- [ ] 下載 MUSAN（方式見 `tasks/plan.md` Open Questions）— 部分完成：經選單確認後開始下載，但伺服器與鏡像站只有 0.01–2 MB/s，只取得前段的 `music/`；`noise/` 尚未下載，可在選單續傳
-- [ ] 跑完所有音軌版本；結果寫入 `experiments/silero_reset/README.md` — 原始、白／粉紅噪音、MUSAN 音樂（有人聲／純音樂，三組曲目）已完成；MUSAN 雜音待下載完成後補跑
+- [x] 下載 MUSAN（方式見 `tasks/plan.md` Open Questions）— 經選單確認後下載，伺服器只有 0.01–2 MB/s，約 1 小時完成；只解壓 `music/`、`noise/`（1,606 個檔案、5.3 GB）
+- [x] 跑完所有音軌版本；結果寫入 `experiments/silero_reset/README.md`（84 條音軌：原始、白／粉紅噪音、MUSAN 雜音、MUSAN 有人聲音樂、MUSAN 純音樂 × 兩種版面）
 - [x] 依結果設定 `ResetPolicy` 預設值，更新程式、測試與規格
 - [x] 確認原始動漫、VTuber 音軌上至少一種策略抓到全部 12 段；每視窗平均推論時間 < 1 ms
 - 依賴：Task 11
 - 檔案：`experiments/silero_reset/README.md`、`src/kikitori/vad/segmenter.py`、`tests/test_vad_segmenter.py`、`docs/specs/vad-segmenter.md`
 - 規模：S
-- 結果：預設改為 `ResetPolicy.AFTER_LONG_NON_SPEECH`（測試 `test_default_reset_policy_is_after_long_non_speech` 先失敗後通過）；68 條音軌漏抓 (a) 42／(b) 46／(c) 35（共 408 段），開始延遲 P90 (a) 791／(b) 1256／(c) 721 ms，優勢在長間隔音樂背景；原始動漫、VTuber 三種策略都 12/12；推論 0.20 ms／視窗；前文對照 68/68 判定異常偏低；MUSAN 雜音版本因下載未完成而缺，已記錄續傳方式。
+- 結果：預設改為 `ResetPolicy.AFTER_LONG_NON_SPEECH`（測試 `test_default_reset_policy_is_after_long_non_speech` 先失敗後通過）；84 條音軌漏抓 (a) 43／(b) 49／(c) 42（共 504 段），開始延遲 P90 (a) 876／(b) 1440／(c) 820 ms；(c) 優勢在長間隔音樂背景、代價在長間隔噪音背景，屬小幅領先；原始動漫、VTuber 三種策略都 12/12；推論 0.18 ms／視窗；前文對照 84/84 判定異常偏低。
 
 ### Task 13：架構決策紀錄與架構文件
 - [x] 用 `documentation-and-adrs` 寫 ADR：VAD 改用 Silero ONNX、不用 pipecat，以及重置策略的選擇
@@ -147,7 +147,7 @@
 - 結果：新增 `docs/adr/0001-vad-silero-onnx-and-reset-policy.md`（背景、決策、替代方案 pipecat／PyTorch／(a)／(b) 與數據、影響與限制）；`docs/architecture.md` 補上 VAD 切句段落（資料流、檔案角色、事件不變式、依賴）。
 
 ### Checkpoint 4：完成
-- [ ] 規格的 Success Criteria 全部達成 — 1、2、3、5、6、7、8 已達成；4 缺 MUSAN 雜音版本（MUSAN 下載未完成，可在選單續傳後補跑）
+- [x] 規格的 Success Criteria 全部達成
 - [ ] 使用者 review
 
 ---
@@ -158,6 +158,7 @@
 
 - [x] 里程碑 1：VAD 切句（上方 Task 1–13）
   - 結果：Silero v6.2.3 ONNX 打包進套件；預設重置策略 `AFTER_LONG_NON_SPEECH`；原始動漫／VTuber 12/12、純噪音 0 句、0.20 ms／視窗；MUSAN 只下載到 music，雜音版本待補。
+  - 補充：MUSAN 之後下載完成，已用選單補跑全部 84 條音軌（含 MUSAN 雜音）；預設仍為 (c)，但領先幅度變小（漏抓 42/504 vs (a) 43/504，長間隔噪音背景 (a) 較好），README、規格、ADR 已更新。
 - [x] 里程碑 2：語音辨識
   - 結果：CTranslate2（MIT）＋ Whisper 權重（MIT），不用 faster-whisper（PyAV 內附 GPL 編碼器）；RTX 5070 CUDA fp16 可用（需 cuBLAS 12），large-v3-turbo 單句 0.15 s；CPU 只有 tiny／base 跟得上即時字幕；turbo 的 no_speech 恆為 0，改靠幻覺清單與 VAD。
 - [x] 里程碑 3：翻譯
