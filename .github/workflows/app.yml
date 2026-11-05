@@ -1,0 +1,143 @@
+# Tauri 程式（app/）的檢查：前端型別檢查、測試與建置，Rust 的格式、clippy、測試，以及 Rust 依賴的授權。
+# 任何分支的 push 與 pull request 都跑；release.yml 也以 workflow_call 重用它。
+# 設計說明見 docs/specs/release-update.md。第三方 action 一律釘在完整 commit SHA（註解是對應的版本）。
+name: app
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+# 只需要讀原始碼。
+permissions:
+  contents: read
+
+concurrency:
+  # 被 release.yml 呼叫時 github.workflow 是 "release"，與單獨執行的群組不同，不會互相取消。
+  group: app-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  UV_VERSION: "0.13.4"
+  # 與本機開發相同的版本；固定下來，clippy 的新 lint 不會讓 CI 無預警失敗。
+  RUST_TOOLCHAIN: "1.99.1"
+  NODE_VERSION: "24.20.0"
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    name: app (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Linux packages for Tauri (WebKitGTK 4.1 etc.)
+        if: runner.os == 'Linux'
+        # https://v2.tauri.app/start/prerequisites/ 的 Debian/Ubuntu 清單。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_TOOLCHAIN"
+          rustc -V
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: app/src-tauri -> target
+          prefix-key: app-checks
+
+      # Rust 的端到端測試以真的子行程啟動引擎（`uv run kikitori engine` 與 app/dev/fake_engine.py），
+      # 所以需要 uv 與鎖定的 Python 環境；不略過它們。
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Python environment for the engine (locked)
+        run: uv sync --locked
+
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: app
+        run: npm run typecheck
+
+      - name: Frontend tests (vitest)
+        working-directory: app
+        run: npm test
+
+      # tauri::generate_context! 在編譯時嵌入 app/dist，所以要先建置前端才能編譯 Rust。
+      - name: Frontend build
+        working-directory: app
+        run: npm run build
+
+      - name: cargo fmt --check
+        working-directory: app/src-tauri
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: app/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: app/src-tauri
+        run: cargo test --locked
+
+  licenses:
+    # Rust 依賴只允許寬鬆授權（app/src-tauri/deny.toml）。直接下載 cargo-deny 的發行檔並核對
+    # SHA-256，不用 cargo-deny-action（它在執行時才建置 Docker 映像、下載時不驗雜湊）。
+    name: cargo-deny licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny (pinned, checksum verified)
+        run: |
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl --fail --silent --show-error --location --max-time 120 \
+            -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: cargo deny check licenses
+        working-directory: app/src-tauri
+        run: cargo-deny --locked check licenses

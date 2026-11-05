@@ -54,6 +54,9 @@
     "license": "MIT",
     "category": "Education",
     "shortDescription": "即時語音翻譯與雙語字幕",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

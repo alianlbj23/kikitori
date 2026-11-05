@@ -1,10 +1,11 @@
-# 測試：任何分支的 push 與 pull request 都跑。
+# 測試：任何分支的 push 與 pull request 都跑；release.yml 也以 workflow_call 重用它。
 # 設計說明見 docs/specs/packaging-ci.md。第三方 action 一律釘在完整 commit SHA（註解是對應的版本）。
 name: test
 
 on:
   push:
   pull_request:
+  workflow_call:
 
 # 只需要讀原始碼；沒有任何步驟要寫回 repo、建立 release 或讀 secrets。
 permissions:
@@ -84,22 +85,4 @@ jobs:
         # --no-sidecar：這裡只驗證引擎；放進 app/src-tauri/binaries/ 由 Tauri 的 job 負責。
         run: uv run python packaging/engine/build.py --no-sidecar --smoke
 
-  # ------------------------------------------------------------------------------------
-  # TODO（app/ 穩定後由協調者加入）：Tauri 前端與 Rust 的檢查。
-  # 架構規格要求：前端型別檢查與建置、cargo test、cargo clippy。預計的形狀：
-  #
-  # app:
-  #   name: app (${{ matrix.os }})
-  #   strategy: { fail-fast: false, matrix: { os: [windows-latest, ubuntu-latest, macos-latest] } }
-  #   runs-on: ${{ matrix.os }}
-  #   steps:
-  #     - actions/checkout（同上，釘 SHA）
-  #     - actions/setup-node（釘 SHA；node 版本與 app/ 一致）→ npm ci、npm run typecheck、
-  #       npm test、npm run build（working-directory: app）
-  #     - Rust toolchain（釘 SHA 的 action 或 runner 內建 rustup）＋ Linux 需 apt 安裝
-  #       WebKitGTK 等 Tauri 依賴
-  #     - cargo test --locked、cargo clippy --locked -- -D warnings（working-directory: app/src-tauri）
-  #     - 若 tauri.conf.json 的 bundle.resources 指向 binaries/kikitori-engine/，cargo build
-  #       會檢查該路徑存在：先跑 engine 建置（build.py，不加 --no-sidecar），或建立空的
-  #       佔位目錄。
-  # ------------------------------------------------------------------------------------
+  # Tauri 前端與 Rust 的檢查在 app.yml。
