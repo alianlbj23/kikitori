@@ -518,9 +518,9 @@ class GpuRuntimeProtocolTest(EngineTestCase):
         self.assertEqual(
             rec["fast_asr"],
             {
-                "model": "small",
+                "model": "large-v3-turbo",
                 "device": "cuda",
-                "compute_type": "float16",
+                "compute_type": "int8_float16",
                 "cpu_threads": 0,
             },
         )
@@ -683,7 +683,7 @@ class ApplyRecommendationTest(EngineTestCase):
         self.assertEqual(settings["asr"]["device"], "cuda")
         self.assertEqual(
             (settings["asr"]["fast_model"], settings["asr"]["final_model"]),
-            ("small", "large-v3-turbo"),
+            ("large-v3-turbo", "large-v3"),
         )
         self.assertIsNone(settings["asr"]["fast_cpu_threads"])
 

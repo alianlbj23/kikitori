@@ -26,6 +26,7 @@ from kikitori.translate.errors import (
     TranslationResponseError,
     TranslationTimeoutError,
 )
+from kikitori.translate.glossary import Glossary, GlossaryEntry
 from kikitori.translate.presets import preset_for_model
 from kikitori.translate.types import TranslationRequest, Translator
 
@@ -235,7 +236,7 @@ class TranslateTest(ClientTestCase):
         self.assertEqual(req.headers["content-type"], "application/json")
         self.assertEqual(req.body["model"], "hy-mt1.5-7b:latest")
         self.assertIs(req.body["stream"], False)
-        self.assertEqual(req.body["temperature"], 0.7)
+        self.assertEqual(req.body["temperature"], 0.0)
         self.assertEqual(req.body["top_p"], 0.6)
         self.assertEqual(req.body["max_tokens"], 256)
         self.assertNotIn("reasoning_effort", req.body)
@@ -265,6 +266,40 @@ class TranslateTest(ClientTestCase):
         body = self.server.requests[0].body
         self.assertEqual(body["model"], "my-qwen")
         self.assertEqual(body["reasoning_effort"], "none")
+
+    def test_glossary_terms_present_in_source_go_into_the_prompt(self) -> None:
+        self.server.script.extend([completion("謝謝超級留言"), completion("早安")])
+        translator = OpenAICompatibleTranslator(
+            TranslatorConfig(model="qwen3.5:9b", base_url=self.server.base_url),
+            glossary=Glossary([GlossaryEntry("ぺこら", "佩克拉")]),
+        )
+        translator.translate(TranslationRequest("スパチャありがとう", "ja"))
+        translator.translate(TranslationRequest("おはよう", "ja"))
+        with_terms = self.server.requests[0].body["messages"][1]["content"]
+        without = self.server.requests[1].body["messages"][1]["content"]
+        self.assertIn("スパチャ → 超級留言", with_terms)
+        self.assertNotIn("ぺこら", with_terms)
+        self.assertNotIn("術語", without)
+
+    def test_glossary_used_by_stream_and_absent_by_default(self) -> None:
+        self.server.script.extend(
+            [sse([chunk("推", finish="stop")]), sse([chunk("推", finish="stop")])]
+        )
+        list(
+            OpenAICompatibleTranslator(
+                TranslatorConfig(model="qwen3.5:9b", base_url=self.server.base_url),
+                glossary=Glossary(),
+            ).stream(TranslationRequest("推しが尊い", "ja", "en"))
+        )
+        list(
+            self.make("qwen3.5:9b").stream(TranslationRequest("推しが尊い", "ja", "en"))
+        )
+        self.assertIn(
+            "推し → oshi", self.server.requests[0].body["messages"][1]["content"]
+        )
+        self.assertNotIn(
+            "Terminology", self.server.requests[1].body["messages"][1]["content"]
+        )
 
     def test_think_tags_are_stripped(self) -> None:
         self.server.script.append(

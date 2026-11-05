@@ -102,11 +102,14 @@ def _hunyuan(
 ) -> ModelPreset:
     # model card 建議 top_k 20、top_p 0.6、repetition_penalty 1.05、temperature 0.7；
     # OpenAI 相容 API 沒有 top_k／repetition_penalty，由 Ollama 模型檔的預設值負責。
+    # 溫度改 0（greedy）：experiments/translate_eval 中 HY-MT 的 0 與 0.7 在四個資料集都
+    # 沒有顯著差別（1.8B 在 social 反而 0 較好），0 讓同一句永遠得到同一個譯文，字幕不會
+    # 因重翻而跳動。溫度 0 時 top_p 不起作用，保留只是為了與評測設定一致。
     return ModelPreset(
         model=model,
         label=label,
         prompt_style="hunyuan_mt",
-        temperature=0.7,
+        temperature=0.0,
         top_p=0.6,
         presence_penalty=None,
         reasoning_effort=None,
@@ -123,12 +126,16 @@ def _hunyuan(
 
 def _qwen(model: str, label: str, vram: float, repo: str) -> ModelPreset:
     # Qwen3.5 預設會思考；官方不支援 /no_think，Ollama 以 reasoning_effort="none"
-    # 關閉。取樣參數用 model card 的非思考模式建議值。
+    # 關閉。top_p、presence_penalty 用 model card 的非思考模式建議值；溫度不用建議的
+    # 0.7 而用 0：experiments/translate_eval 中溫度 0 讓 ja→zh 兩個資料集的 chrF 都顯著
+    # 提高（speech +0.7、social +2.3，9B／4B 皆然），social 的 COMET 也顯著提高，沒有任何
+    # 資料集變差。溫度 0 時 top_p 不起作用；presence_penalty 是對 logits 的懲罰，greedy
+    # 時仍有作用，而評測的溫度 0 設定保留了 1.5，所以照樣送出。
     return ModelPreset(
         model=model,
         label=label,
         prompt_style="generic",
-        temperature=0.7,
+        temperature=0.0,
         top_p=0.8,
         presence_penalty=1.5,
         reasoning_effort="none",

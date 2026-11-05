@@ -70,6 +70,18 @@ CATALOG: Mapping[str, MessageSpec] = MappingProxyType(
             final_model=str,
             fast_model=str,
         ),
+        "asr_bgm_robust_final": _spec(
+            "{final_model} for final subtitles holds up best against background music "
+            "and game sound in livestreams (kikitori's Japanese livestream evaluation)",
+            final_model=str,
+        ),
+        "asr_live_model_for_language": _spec(
+            "{fast_model} is much less accurate for {language}, so live subtitles also "
+            "use {model} (loaded once and shared by both)",
+            language=str,
+            fast_model=str,
+            model=str,
+        ),
         "asr_large_v3_remote_translation": _spec(
             "Translation does not run on this computer, so final subtitles use "
             "{final_model} (similar quality, reliable no_speech, about 0.33 s per sentence)",

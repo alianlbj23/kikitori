@@ -395,6 +395,42 @@ class CleanSubtitleTest(unittest.TestCase):
 
     def test_keeps_ordinary_angle_brackets(self) -> None:
         self.assertEqual(clean_subtitle("a < b"), "a < b")
+        self.assertEqual(clean_subtitle("a<b>c | d"), "a<b>c | d")
+        self.assertEqual(clean_subtitle("音量 <3 和 a|b"), "音量 <3 和 a|b")
+
+    def test_strips_incomplete_special_token_fragments(self) -> None:
+        # experiments/translate_eval 的 HY-MT 1.8B 輸出：特殊 token 沒有收尾的「|>」。
+        for raw, expected in [
+            ("原來如此<|/code>", "原來如此"),
+            ("真是美不勝收。<|extra_0>", "真是美不勝收。"),
+            ("不愧是三上博史<|extra_2>", "不愧是三上博史"),
+            ("請各位繼續關注我們吧。<|tagline></tagline>", "請各位繼續關注我們吧。"),
+            ("只會選不同的選項。<| recreation |", "只會選不同的選項。"),
+            ("<|>將這些數字轉換成可理解的語言", "將這些數字轉換成可理解的語言"),
+            ("<|extra_0>早安", "早安"),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(clean_subtitle(raw), expected)
+
+    def test_text_after_a_leaked_special_token_is_dropped(self) -> None:
+        # 模型已越過回合結尾：實測特殊 token 之後幾乎都是把同一句再輸出一次或憑空續寫。
+        for raw, expected in [
+            (
+                "那麼，選擇紅肉會比較好嗎？<|begin_quote>那麼，選擇紅肉會比較好嗎？</begin_quote>",
+                "那麼，選擇紅肉會比較好嗎？",
+            ),
+            (
+                "有木野的過去有點了解。<|text>有木野的過去有點了解。",
+                "有木野的過去有點了解。",
+            ),
+            (
+                "在日韓國人也相當多。<|重新開始文本|>在日韓國人也相當多。",
+                "在日韓國人也相當多。",
+            ),
+            ("早安<|eos|>晚安", "早安"),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(clean_subtitle(raw), expected)
 
 
 class TraditionalConversionTest(unittest.TestCase):
@@ -415,6 +451,39 @@ class TraditionalConversionTest(unittest.TestCase):
     def test_mixed_text_is_converted(self) -> None:
         self.assertEqual(
             to_taiwan_traditional("老实說，你看到了吗？"), "老實說，你看到了嗎？"
+        )
+
+    def test_mixed_text_converts_only_around_simplified_characters(self) -> None:
+        # translate_eval：整句 s2twp 會把句中其他正確的「台」改成「臺」、「傢伙」改成
+        # 「傢夥」。繁體為主、只漏出幾個簡體字的句子只轉簡體字附近的片段。
+        for raw, expected in [
+            (
+                "夏季時，可以從露台的躺椅上欣賞，真是非常惬意。",
+                "夏季時，可以從露台的躺椅上欣賞，真是非常愜意。",
+            ),
+            (
+                "結果完全答不上來……真是个有趣的傢伙。",
+                "結果完全答不上來……真是個有趣的傢伙。",
+            ),
+            (
+                "不過监察官這傢伙只會發出令人討厭的臭味。",
+                "不過監察官這傢伙只會發出令人討厭的臭味。",
+            ),
+            ("哇，這個拉麵真的好吃，这个也是！", "哇，這個拉麵真的好吃，這個也是！"),
+            ("大時代台词被認出來了", "大時代台詞被認出來了"),
+            ("我們看视频吧", "我們看影片吧"),
+            ("他的頭发很長", "他的頭髮很長"),
+        ]:
+            with self.subTest(raw=raw):
+                result = to_taiwan_traditional(raw)
+                self.assertEqual(result, expected)
+                for wrong in ("臺", "傢夥", "喫"):
+                    self.assertNotIn(wrong, result)
+
+    def test_fully_simplified_text_keeps_whole_sentence_conversion(self) -> None:
+        # 整句都是簡體（Sakura 一律輸出簡體）時維持整句 s2twp，才能轉台灣用語。
+        self.assertEqual(
+            to_taiwan_traditional("那家伙在看视频，好吃吗"), "那傢伙在看影片，好吃嗎"
         )
 
     def test_detects_only_simplified_only_characters(self) -> None:
@@ -459,6 +528,25 @@ class PresetsTest(unittest.TestCase):
         self.assertIsNone(preset.reasoning_effort)
         self.assertEqual(preset.languages, ALL_LANGUAGE_CODES)
         self.assertIsNone(preset.pairs)
+
+    def test_temperature_follows_translate_eval(self) -> None:
+        # experiments/translate_eval：Qwen3.5 溫度 0 在 ja→zh 兩個資料集 chrF 都顯著提高、
+        # 沒有任何資料集變差；HY-MT 0 與 0.7 沒有差別，改 0 換取可重現的輸出。
+        # Sakura 沒有比較過，維持官方建議的 0.3。
+        for model in [
+            "qwen3.5:4b",
+            "qwen3.5:9b",
+            "hy-mt1.5-1.8b:latest",
+            "hy-mt1.5-7b:latest",
+        ]:
+            with self.subTest(model=model):
+                self.assertEqual(preset_for_model(model).temperature, 0.0)
+        sakura = preset_for_model("hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS")
+        self.assertEqual(sakura.temperature, 0.3)
+        # 評測的溫度 0 設定保留了其他參數；presence_penalty 在 greedy 時仍會影響結果。
+        self.assertEqual(preset_for_model("qwen3.5:9b").presence_penalty, 1.5)
+        self.assertEqual(preset_for_model("qwen3.5:9b").top_p, 0.8)
+        self.assertEqual(preset_for_model("hy-mt1.5-7b:latest").top_p, 0.6)
 
     def test_qwen_disables_thinking(self) -> None:
         self.assertEqual(preset_for_model("qwen3.5:4b").reasoning_effort, "none")

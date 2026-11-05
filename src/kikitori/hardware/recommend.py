@@ -7,7 +7,15 @@
 
 語言只影響「能不能用」與提示，不改變硬體等級：ASR 模型依硬體挑（只支援單一語言的模型
 只在該語言時才會被選）、語言品質低時加警告；翻譯模型在支援這個語言組合的預設組中依
-VRAM 順序挑。原因與警告都是結構化訊息（`messages.py`），由 UI 依介面語系組句。
+VRAM 順序挑。唯一的例外是即時模型在某語言是 C 級、完整模型較好時（th、ar、hi 的
+large-v3-turbo），即時也改用完整模型（同一份權重共用，見 `asr_vram_need_mb()`）。
+原因與警告都是結構化訊息（`messages.py`），由 UI 依介面語系組句。
+
+8 GB 以上的 GPU（Milestone 16，日語直播特化）：即時 large-v3-turbo、完整 large-v3
+（experiments/vtuber_eval：口語 CER 比 small 低 5.6 點，BGM 下 large-v3 完整路徑最穩）。
+與本機翻譯 LLM 共用 GPU 時，在只差精度的組合（int8_float16 與 float16 品質相同）中挑
+「翻譯模型等級最高、精度又最高」的那個；連 qwen3.5:4b 都放不下時才換較小的即時模型，
+再不行退回最省 VRAM 的組合。各等級的算式見 `docs/specs/hardware.md`。
 """
 
 from collections.abc import Collection, Mapping
@@ -30,6 +38,7 @@ from kikitori.hardware.types import (
 from kikitori.languages import WHISPER_CODES, asr_quality, get_language
 from kikitori.translate.presets import (
     PRESETS,
+    RECOMMENDATION_TIERS,
     NoSupportingModelError,
     normalize_model_name,
     preset_for_model,
@@ -47,8 +56,13 @@ CUDA_CONTEXT_MB = 500
 TIER_8GB_MIN_MB = 7680
 """標稱 8 GB 的卡 nvidia-smi 回報約 8188 MiB；留 0.5 GiB 誤差。"""
 TIER_4GB_MIN_MB = 3584
-LARGE_V3_MIN_MB = 11264
-"""≥ 12 GB（容許誤差）且不跑本機 LLM 時，完整路徑改用 large-v3（no_speech 可用）。"""
+SHARED_WORKER_EXTRA_MB = 512
+"""即時與完整路徑共用同一份權重（同模型、同精度）時，第二個 CTranslate2 worker 另需的
+工作記憶體（解碼暫存、cuBLAS workspace）。CTranslate2 文件：同一裝置的 worker 共用權重；
+暫存量沒有官方數字，registry 的量測也只含一步解碼的暖機，所以保守抓 0.5 GiB（未實測）。"""
+MIN_TRANSLATION_BUDGET_GB = 4.0
+"""翻譯至少要能放 qwen3.5:4b 的等級（`RECOMMENDATION_TIERS` 的 4 GB 門檻）。低於這個只剩
+HY-MT1.5 1.8B：translate_eval 中它在每個資料集都顯著較差，短句還會幻覺。"""
 MIN_DRIVER_MAJOR = 525
 """CUDA 12.x minor version compatibility 的最低驅動（NVIDIA CUDA Compatibility 文件）。"""
 CPU_HIGH_RAM_MIN_BYTES = 15 * GIB
@@ -80,8 +94,8 @@ MAX_TRANSLATION_MODEL_CHARS = 200
 LOW_QUALITY_TIER = "C"
 
 ASR_CANDIDATES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "nvidia_8gb": (("small",), ("large-v3-turbo",)),
-    "nvidia_8gb_large": (("small",), ("large-v3",)),
+    "nvidia_8gb": (("large-v3-turbo",), ("large-v3",)),
+    "nvidia_8gb_small_fast": (("small",), ("large-v3",)),
     "nvidia_4gb": (("base",), ("large-v3-turbo",)),
     "nvidia_lt4gb": (("base",), ("small",)),
     "cpu": (("base",), ("small",)),
@@ -92,9 +106,28 @@ ASR_CANDIDATES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 
 只支援單一語言的模型（例如之後加入的日語特化模型）放在多語言模型前面：辨識語言全部
 在它支援的範圍內才選它，否則選下一個。最後一個一定是多語言模型（測試檢查），所以
-「自動偵測」與其他語言永遠有模型可用。`nvidia_8gb_large` 是 `nvidia_8gb` 在 VRAM
-寬裕、翻譯不在本機時的變體（回報的 tier 仍是 `nvidia_8gb`）。
+「自動偵測」與其他語言永遠有模型可用。`nvidia_8gb_small_fast` 是 `nvidia_8gb` 在 VRAM
+連 qwen3.5:4b 都放不下時的退路（回報的 tier 仍是 `nvidia_8gb`，見 `GPU_LADDERS`）。
 """
+
+Precision = tuple[str, str]
+"""（即時, 完整）的 CUDA 精度；Pascal（6.1）一律換成 int8。"""
+F16, I8 = "float16", "int8_float16"
+
+GPU_LADDERS: dict[str, tuple[tuple[str, tuple[Precision, ...]], ...]] = {
+    "nvidia_8gb": (
+        # 只差精度的一組（品質相同，vtuber_eval：large-v3 int8_float16 Δ −0.4 [−1.0, 0.3]），
+        # 越前面延遲越低（float16 較快）、VRAM 越多。
+        ("nvidia_8gb", ((F16, F16), (F16, I8), (I8, I8))),
+        # 品質較低的退路：即時改 small（口語 CER 高 5.6 點），換 VRAM 給翻譯模型。
+        ("nvidia_8gb_small_fast", ((I8, I8),)),
+    ),
+    "nvidia_4gb": (("nvidia_4gb", ((I8, I8),)),),
+    "nvidia_lt4gb": (("nvidia_lt4gb", ((I8, I8),)),),
+}
+"""每個 GPU 等級的候選組合：（`ASR_CANDIDATES` 的 slot, 精度選項）依品質分組，組內只差
+精度。挑法見 `_choose_option()`。4 GB 以下的等級沿用先前的組合：VRAM 放不下兩個大模型
+再加上翻譯模型。"""
 
 
 # --- 共用的小工具 --------------------------------------------------------------
@@ -110,12 +143,18 @@ def _asr_vram_mb(spec: ModelSpec, compute_type: str) -> int:
 
 
 def asr_vram_need_mb(choices: Collection[AsrChoice]) -> int:
-    """在 CUDA 上的 ASR 模型合計 VRAM（MiB），扣掉重複計算的 CUDA context。"""
+    """在 CUDA 上的 ASR 模型合計 VRAM（MiB），扣掉重複計算的 CUDA context。
+
+    模型與精度都相同的路徑只載入一份權重（`pipeline.factory` 以兩個 CTranslate2 worker
+    共用），每多一條共用的路徑加 `SHARED_WORKER_EXTRA_MB`。
+    """
     cuda = [c for c in choices if c.device == "cuda" and c.model in MODELS]
     if not cuda:
         return 0
-    total = sum(_asr_vram_mb(MODELS[c.model], c.compute_type) for c in cuda)
-    return total - CUDA_CONTEXT_MB * (len(cuda) - 1)
+    loaded = list(dict.fromkeys((c.model, c.compute_type) for c in cuda))
+    total = sum(_asr_vram_mb(MODELS[m], t) for m, t in loaded)
+    shared = len(cuda) - len(loaded)
+    return total - CUDA_CONTEXT_MB * (len(loaded) - 1) + SHARED_WORKER_EXTRA_MB * shared
 
 
 def asr_ram_need_mb(choices: Collection[AsrChoice]) -> int:
@@ -257,64 +296,150 @@ def _cpu_plan(
     )
 
 
+def _live_model_upgrades(
+    fast: str, final: str, spoken_languages: tuple[str, ...]
+) -> list[str]:
+    """即時模型在這些語言是 C 級、而完整模型不是（例如 large-v3-turbo 的 th、ar、hi）。"""
+    return [
+        code
+        for code in spoken_languages
+        if asr_quality(code, fast) == LOW_QUALITY_TIER
+        and asr_quality(code, final) not in (None, LOW_QUALITY_TIER)
+    ]
+
+
+def _translation_tier_gb(budget_gb: float) -> float:
+    """這個預算落在 `RECOMMENDATION_TIERS` 的哪一級（門檻 GB）。"""
+    return max(
+        t.min_vram_gb for t in RECOMMENDATION_TIERS if budget_gb >= t.min_vram_gb
+    )
+
+
+def _choose_option(
+    groups: list[list[tuple[AsrChoice, AsrChoice]]], total_mb: int, llm_on_gpu: bool
+) -> tuple[AsrChoice, AsrChoice]:
+    """從依品質分組的候選中挑一個（候選至少一個）。
+
+    - 翻譯不在這張卡上：第一個放得下的（品質最好、精度最高）。
+    - 與本機翻譯 LLM 共用：依組的順序，在組內放得下的候選中找「翻譯等級最高」（就是
+      組內最省 VRAM 的那個能到的等級），挑組內第一個達到該等級的；等級至少要到
+      `MIN_TRANSLATION_BUDGET_GB`，否則看下一組。
+    - 都不行：最省 VRAM 的候選（放不下時由呼叫端改用 CPU 並警告）。
+    """
+    available = total_mb - DESKTOP_VRAM_RESERVE_MB
+
+    def translation_gb(option: tuple[AsrChoice, AsrChoice]) -> float:
+        return _translation_tier_gb(_gb(max(0, available - asr_vram_need_mb(option))))
+
+    fitting = [
+        [o for o in group if asr_vram_need_mb(o) <= available] for group in groups
+    ]
+    if not llm_on_gpu:
+        for group in fitting:
+            if group:
+                return group[0]
+    else:
+        for group in fitting:
+            if not group:
+                continue
+            best = max(translation_gb(o) for o in group)
+            if best >= MIN_TRANSLATION_BUDGET_GB:
+                return next(o for o in group if translation_gb(o) == best)
+    every = [o for group in groups for o in group]
+    return min(every, key=asr_vram_need_mb)
+
+
 def _gpu_plan(
-    gpu: GpuInfo, translation_local: bool, whisper_codes: tuple[str, ...]
+    gpu: GpuInfo,
+    llm_on_gpu: bool,
+    whisper_codes: tuple[str, ...],
+    spoken_languages: tuple[str, ...],
+    translation_remote: bool,
 ) -> _AsrPlan:
     total = gpu.memory_total_mb
     cc = gpu.compute_capability_tuple
     pascal = cc == (6, 1)  # 只支援 int8（CTranslate2 文件：float16 需要 7.0 以上）
-
-    def plan(tier: str, slot: str, ctype: str, *extra: Message) -> _AsrPlan:
-        fast, final = _models(slot, whisper_codes)
-        reasons = [
-            message(
-                "asr_gpu",
-                gpu_name=gpu.name,
-                vram_mb=total,
-                fast_model=fast,
-                final_model=final,
-                compute_type=ctype,
-            ),
-            *extra,
-        ]
-        fast_spec, final_spec = MODELS.get(fast), MODELS.get(final)
-        if (
-            final_spec is not None
-            and not final_spec.no_speech_reliable
-            and fast_spec is not None
-            and fast_spec.no_speech_reliable
-        ):
-            reasons.append(
-                message(
-                    "asr_final_no_speech_unreliable",
-                    final_model=final,
-                    fast_model=fast,
-                )
-            )
-        return _AsrPlan(
-            tier,
-            AsrChoice(fast, "cuda", ctype),
-            AsrChoice(final, "cuda", ctype),
-            tuple(reasons),
-        )
-
     if total >= TIER_8GB_MIN_MB:
-        ctype = "int8" if pascal else "float16"
-        if total >= LARGE_V3_MIN_MB and not translation_local:
-            final = _models("nvidia_8gb_large", whisper_codes)[1]
-            return plan(
-                "nvidia_8gb",
-                "nvidia_8gb_large",
-                ctype,
-                message("asr_large_v3_remote_translation", final_model=final),
-            )
-        return plan("nvidia_8gb", "nvidia_8gb", ctype)
-    ctype = "int8" if pascal else "int8_float16"
-    if total >= TIER_4GB_MIN_MB:
-        return plan(
-            "nvidia_4gb", "nvidia_4gb", ctype, message("asr_gpu_int8_saves_vram")
+        tier = "nvidia_8gb"
+    elif total >= TIER_4GB_MIN_MB:
+        tier = "nvidia_4gb"
+    else:
+        tier = "nvidia_lt4gb"
+
+    # 每個候選記下「原本的即時模型」與讓它換成完整模型的語言，選定後才知道要不要說明
+    upgraded: dict[tuple[AsrChoice, AsrChoice], tuple[str, list[str]]] = {}
+    groups: list[list[tuple[AsrChoice, AsrChoice]]] = []
+    for slot, precisions in GPU_LADDERS[tier]:
+        fast_model, final_model = _models(slot, whisper_codes)
+        languages = _live_model_upgrades(fast_model, final_model, spoken_languages)
+        group: list[tuple[AsrChoice, AsrChoice]] = []
+        for fast_type, final_type in precisions:
+            if pascal:
+                fast_type = final_type = "int8"
+            final_choice = AsrChoice(final_model, "cuda", final_type)
+            if languages:
+                # 即時也用完整模型、同一個精度：factory 只載入一份權重，兩條路徑共用
+                option = (final_choice, final_choice)
+            else:
+                option = (AsrChoice(fast_model, "cuda", fast_type), final_choice)
+            # Pascal 或換模型後，不同精度可能變成同一個組合；保留第一次出現的
+            if all(option not in g for g in (*groups, group)):
+                group.append(option)
+                if languages:
+                    upgraded[option] = (fast_model, languages)
+        if group:
+            groups.append(group)
+    fast, final = _choose_option(groups, total, llm_on_gpu)
+
+    compute_type = (
+        fast.compute_type
+        if fast.compute_type == final.compute_type
+        else f"{fast.compute_type} / {final.compute_type}"
+    )
+    reasons = [
+        message(
+            "asr_gpu",
+            gpu_name=gpu.name,
+            vram_mb=total,
+            fast_model=fast.model,
+            final_model=final.model,
+            compute_type=compute_type,
         )
-    return plan("nvidia_lt4gb", "nvidia_lt4gb", ctype)
+    ]
+    if (fast, final) in upgraded:
+        original_fast, languages = upgraded[(fast, final)]
+        reasons.extend(
+            message(
+                "asr_live_model_for_language",
+                language=code,
+                fast_model=original_fast,
+                model=final.model,
+            )
+            for code in languages
+        )
+    if tier == "nvidia_8gb" and final.model == "large-v3":
+        reasons.append(message("asr_bgm_robust_final", final_model=final.model))
+        if translation_remote:
+            reasons.append(
+                message("asr_large_v3_remote_translation", final_model=final.model)
+            )
+    if not pascal and I8 in (fast.compute_type, final.compute_type):
+        reasons.append(message("asr_gpu_int8_saves_vram"))
+    fast_spec, final_spec = MODELS.get(fast.model), MODELS.get(final.model)
+    if (
+        final_spec is not None
+        and not final_spec.no_speech_reliable
+        and fast_spec is not None
+        and fast_spec.no_speech_reliable
+    ):
+        reasons.append(
+            message(
+                "asr_final_no_speech_unreliable",
+                final_model=final.model,
+                fast_model=fast.model,
+            )
+        )
+    return _AsrPlan(tier, fast, final, tuple(reasons))
 
 
 def _translation_budget_mb(
@@ -530,7 +655,18 @@ def recommend(
             gpu_runtime_missing = True
             warnings.append(message("gpu_runtime_missing"))
         else:
-            plan = _gpu_plan(gpu, info.translation_server.is_local, whisper_codes)
+            # 翻譯不需要模型（同一個 Whisper 語言）或伺服器不在本機時，GPU 全給 ASR
+            llm_on_gpu = info.translation_server.is_local and (
+                languages is None or bool(languages.translation_pairs)
+            )
+            spoken = () if languages is None else languages.spoken_languages
+            plan = _gpu_plan(
+                gpu,
+                llm_on_gpu,
+                whisper_codes,
+                spoken,
+                translation_remote=not info.translation_server.is_local,
+            )
             need = asr_vram_need_mb((plan.fast, plan.final))
             if need > gpu.memory_total_mb - DESKTOP_VRAM_RESERVE_MB:
                 warnings.append(message("asr_vram_insufficient", need_mb=need))

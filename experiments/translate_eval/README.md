@@ -42,6 +42,73 @@
 
 WMT25 speech 上，整篇一次翻譯的官方系統 COMET：Gemini-2.5-Pro 0.826、GPT-4.1 0.818、Shy-hunyuan-MT（Hunyuan-MT-7B）0.815、Qwen3-235B 0.802、TowerPlus-9B 0.771、Qwen2.5-7B 0.767、Gemma-3-12B 0.720。本機設定逐片段翻成 zh-TW 後最好是 0.76（HY-MT 7B、Qwen3.5 9B），落在 Qwen2.5-7B 與 Gemma-3-12B 之間。差距有一部分來自條件不同（官方系統看得到整篇、直接輸出簡中；本機只看前兩句、輸出台灣用語再轉字形），不能直接當模型強弱。
 
+## Milestone 16：術語表開／關（2026-11-06）
+
+正式程式加入了內建直播術語表（`kikitori.translate.glossary`，53 個詞條，原文出現才放進提示詞，最多 8 條）、前文保險
+（`ContextFallbackTranslator`）、特殊 token 碎片清除與選擇性繁簡轉換，Qwen3.5 預設組的溫度改成 0。新增兩組設定，都用
+**正式預設組（溫度 0）＋前文＋前文保險**，只差術語表：`q9-m16`（關）、`q9-m16-gloss`（開）。執行時 GPU 與記憶體壓力測試
+（`experiments/memory_soak/`，Ollama 上同時載著 qwen3.5:4b）共用，只看品質。
+
+**結論：術語表修正了 VTuber 句中 9B 一直翻錯的直播用語（30 句 × 2 個譯文語言中 18 格譯文改變；有術語的格子術語全部譯對，其中 1 格的動詞意思變錯，見下），
+而 WMT25 speech 上幾乎沒有作用：726 個片段只有 5 個出現術語、5 個譯文改變，COMET −0.0005 [−0.0009, −0.0001]（p = 0.037，
+未做多重比較校正）——統計上偵測得到、但只有前文效果（+0.0146）的 1/30，chrF／BLEU 差異不顯著。** 新程式本身（溫度 0 預設組、
+前文保險、後處理）與舊的 `q9-t0-ctx` 輸出逐句完全相同（VTuber 句 60 格、speech 726 句、COMET Δ 0.0000），前文保險在這兩組資料上
+沒有觸發。
+
+### VTuber 風格句（30 句，人工檢查）
+
+只列術語表開／關譯文不同的格子（其餘 42 格相同）：
+
+| 原文 | 譯文語言 | 術語表關（`q9-m16`） | 術語表開（`q9-m16-gloss`） | 放進提示詞的術語 |
+|---|---|---|---|---|
+| スパチャありがとう！めっちゃ嬉しい！ | zh-TW | 收到超讚的贊助！超級開心！ | 收到超級留言好開心！真的超感動！ | スパチャ → 超級留言 |
+| 草生えるｗｗｗ | zh-TW | 笑死人了哈哈哈 | 笑死哈哈哈 | 草生え → 笑死、www → 哈哈哈 |
+| 草生えるｗｗｗ | en | Lmao lol | lol lol | 草生え → lol、www → lol |
+| 推しが尊すぎて無理… | zh-TW | 我喜歡的人太帥了，完全受不了…… | 推實在太神聖了，我做不到…… | 推し → 推 |
+| 推しが尊すぎて無理… | en | My crush is too perfect... I can't handle it! | My oshi is too precious... I can't handle it... | 推し → oshi |
+| チャンネル登録と高評価、よろしくお願いします！ | zh-TW | 請訂閱頻道並給予按讚，謝謝！ | 請訂閱頻道並按讚，感謝您！ | チャンネル登録、高評価 |
+| 明日の配信は夜九時からです。お楽しみに！ | zh-TW | 明天的直播將於晚上九點開始，請期待！ | 明天的直播從晚上九點開始，請期待！ | 配信 → 直播 |
+| 初見さんいらっしゃい！ゆっくりしていってね。 | zh-TW | 初次見面！請慢慢休息。 | 歡迎第一次來的觀眾，請慢慢休息吧！ | 初見さん → 第一次來的觀眾 |
+| 初見さんいらっしゃい！ゆっくりしていってね。 | en | Welcome! Take your time and relax. | Welcome, first-time viewers! Take your time and relax. | 初見さん → first-time viewer |
+| 今日の同接すごくない？みんなありがとう！ | zh-TW | 今天的同時收視人數真驚人，謝謝大家！ | 今天的同時觀看人數真驚人，謝謝大家！ | 同接 → 同時觀看人數 |
+| 今日の同接すごくない？みんなありがとう！ | en | Isn't today's stream amazing? Thank you all! | Isn't today's concurrent viewer count amazing? Thank you, everyone! | 同接 → concurrent viewers |
+| さっきのコラボ、二人ともてぇてぇすぎる… | zh-TW | 剛才的合體太可愛了，兩位都萌翻了…… | 剛才的聯動，兩位都太尊了…… | コラボ → 聯動、てぇてぇ → 太尊了 |
+| さっきのコラボ、二人ともてぇてぇすぎる… | en | That collab earlier was too much for both of you... | That collab just now was too precious for both of you... | コラボ → collab、てぇてぇ → so precious |
+| 赤スパありがとうございます！え、こんなにいいの？ | zh-TW | 感謝大家送來的紅色火花！咦，這麼棒嗎？ | 感謝大家的紅色超級留言！咦，這麼棒嗎？ | 赤スパ → 紅色超級留言 |
+| 赤スパありがとうございます！え、こんなにいいの？ | en | Thanks for the red spicy! Wow, it's this good? | Thank you for the Red Super Chat! Wow, is this really that good? | 赤スパ → red Super Chat |
+| 切り抜き師さん、今のところ切り抜いといて！ | zh-TW | 剪輯師先生，先幫我剪出來吧！ | 剪輯師，先幫我剪掉這段！ | 切り抜き師 → 剪輯師 |
+| 切り抜き師さん、今のところ切り抜いといて！ | en | Editor, cut it out for now! | Clipper, cut it out for now! | 切り抜き師 → clipper |
+| メン限で歌枠やるから、メンバーの人は来てね。 | zh-TW | 因為是限定成員的歌唱環節，所以希望各位成員都能來喔。 | 因為是會員專屬的歌回，所以成員們一定要來喔！ | メン限 → 會員專屬、歌枠 → 歌回 |
+| メン限で歌枠やるから、メンバーの人は来てね。 | en | We're doing a song segment for the men's lineup, so members should come! | We're doing a members-only karaoke stream, so please come if you're a member! | メン限 → members-only、歌枠 → karaoke stream |
+
+- 先前人工檢查指出 9B 仍會錯的三個詞（赤スパ「紅色辣椒粉／red spicy」、推し「我喜歡的人／crush」、メン限 "men's lineup"）都改對。
+- 仍有的問題（與術語表無關或只部分解決）：「推しが尊すぎて無理」的「無理」譯成「我做不到」（字面）；「切り抜いといて」zh-TW 譯成
+  「剪掉這段」（意思反了，應是「剪出來」；關閉術語表時是對的）——術語表只管名詞，動詞「切り抜く」不在表內，這句的變化是模型輸出的
+  連帶差異。
+
+### WMT25 ja→zh speech（59 篇、726 片段）
+
+| 設定 | chrF | BLEU | COMET | 對 `q9-m16` 的 Δ COMET [95% CI] (p) |
+|---|---|---|---|---|
+| `q9-t0-ctx`（舊程式） | 19.29 | 18.56 | 0.7589 | +0.0000 [+0.0000, +0.0000] (1.000) |
+| `q9-m16`（新程式，術語表關） | 19.29 | 18.56 | 0.7589 | （基準） |
+| `q9-m16-gloss`（術語表開） | 19.26 | 18.53 | 0.7585 | −0.0005 [−0.0009, −0.0001] (0.037)；chrF −0.03 (p 0.116)、BLEU −0.03 (p 0.162) |
+
+術語命中：チャンネル登録 ×3、高評価、配信、生配信（5 個片段）。改變的 5 句：
+
+| 原文 | 術語表關 | 術語表開 |
+|---|---|---|
+| チャンネル登録高評価。 | 請訂閱頻道並給予讚好。 | 請訂閱頻道並按讚。 |
+| こっちバーンと配信するときにですね、顔がどうしても影になって暗くて…… | 這邊在直播時，臉部會因為陰影而變得很暗，看起來怪可怕的…… | 這邊在進行直播時，臉部會因陰影而顯得昏暗，看起來相當詭異…… |
+| ……一緒に貯金頑張りたいなって思ってくれた方は、チャンネル登録よろしくお願いします。 | 所以希望大家能一起努力存錢，請務必訂閱頻道。 | 所以希望大家一起努力存錢，想加入的人請務必訂閱頻道。 |
+| グッドボタンとチャンネル登録の方、よろしくお願いいたします。 | 請按讚並訂閱頻道，感謝您的支持。 | 按下讚並訂閱頻道的各位，請多多支持。 |
+| 生配信のチケット4000円。 | 直播門票 4000 日圓。 | 直播門票四千元。 |
+
+判讀：speech 資料（遊戲實況、Vlog、閒聊的 Whisper 轉寫）幾乎不含直播術語，術語表只動到 5 句；COMET 的小幅下降來自其中兩三句
+（「四千元」漏掉日圓、「按下讚並訂閱頻道的各位」語序變差），術語本身都譯對了。差值只有前文效果的 1/30、chrF／BLEU 不顯著，
+而直播用語的改善在 VTuber 句上很明確，所以維持**預設開啟**。沒有 ja→en 的直播參考譯文集，英文只能看 VTuber 句的人工檢查。
+可疑輸出計數：兩組都是錯誤語言 2、含假名 4、附加文字 0、疑似翻出前文 0（與 `q9-t0-ctx` 相同）。
+
 ## 結果
 
 各表依 chrF 由高到低排序；「95% CI」是 chrF 的 bootstrap 信賴區間半寬；「Δ … vs 基準」是對現行正式設定 `q9-preset-ctx` 的差值與 p 值。`wmt25:` 開頭的列是校準用的官方輸出，不參與結論。由 `results/report.md`（選單 8）產生後貼入。
@@ -337,7 +404,7 @@ WMT25 speech 上，整篇一次翻譯的官方系統 COMET：Gemini-2.5-Pro 0.82
 | あ、ミュートになってた？ごめんごめん！ | Oh, you were muted? Sorry, sorry! | Oh, I was muted? Sorry, sorry! | Oh, you muted me? Sorry sorry! | Oh, it must have been muted. Sorry, sorry! |
 | それな！わかりみが深い。 | Totally! I get it. | That's right! I totally get it. | Got it! You're really deep. | Indeed! It’s very insightful. |
 
-## 本實驗順帶發現的正式程式問題（未修改 `src/`，留給後續任務）
+## 本實驗順帶發現的正式程式問題（Milestone 16 已全部處理，見 `docs/specs/translate.md`）
 
 1. **特殊 token 碎片沒清乾淨**：HY-MT 1.8B 會輸出 `<|/code>`、`<|extra_0>`、`<|begin_quote>…`、`<|tagline></tagline>` 這類沒有收尾 `|>` 的碎片，`postprocess` 的正則只認 `<|…|>` 與結尾的 `<|`，所以會留在字幕上：zh_speech 1–3/726、zh_social 6–12/311（溫度 0／0.7）。
 2. **HY-MT 1.8B 的幻覺與提示詞回顯**：見上表；翻譯器目前只靠 `max_tokens` 截斷（log 出現 `translation truncated by max_tokens=256`）。
@@ -375,6 +442,7 @@ uv run python -I -X utf8 experiments/translate_eval/menu.py
 | 8 產生報表 | 錯誤統計＋所有表格 → `results/report.md`、`results/errors.json` |
 | 9／10 VTuber 句 | 用指定設定翻譯 30 句 VTuber 風格日文（zh-TW 與 en），並排顯示 |
 | 11 顯示進度 | 每組設定在每個資料集翻了幾句、錯幾句 |
+| 12 切換術語表 | 開啟後，「3 選一組設定」與「9 VTuber 句」改用正式的內建術語表（`kikitori.translate.Glossary()`），結果存在 `<設定>-gloss`（例如 `q9-t0-ctx-gloss`）；`q9-m16-gloss` 是固定列入報表的術語表組。「3 選一組設定」另可只選一個資料集 |
 
 隔離環境的實際指令（menu 用 `subprocess` 執行，不經過 shell）：
 
@@ -435,6 +503,8 @@ uv run --isolated --no-project --python 3.12 --with-requirements experiments/tra
 | `hy7-preset`／`hy7-t0` | hy-mt1.5-7b | 0.7／0 | top_p 0.6 | 無（預設組本來就不帶） |
 | `hy18-preset`／`hy18-t0` | hy-mt1.5-1.8b | 0.7／0 | top_p 0.6 | 無 |
 | `sakura-preset`（**非商用，只當參考點**） | Sakura-GalTransl-7B-v3 | 0.3 | top_p 0.8 | 無；只做日翻中 |
+| `q9-m16`（Milestone 16 正式設定，術語表關） | qwen3.5:9b | 預設組（已改 0） | 同 Qwen | 前兩句原文＋前文保險（`ContextFallbackTranslator`） |
+| `q9-m16-gloss`（同上，術語表開） | qwen3.5:9b | 同上 | 同上 | 同上＋內建術語表；只跑 zh_speech 與 VTuber 句 |
 
 - `en_covost` 沒有文件結構，前文永遠是空的，所以 `-noctx` 設定不重跑這個資料集。
 - 溫度 0.7 是單次取樣，分數本身帶取樣變異；溫度 0 的比較不受這個影響。

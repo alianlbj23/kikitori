@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 from kikitori.asr.types import Transcriber, Transcript
@@ -27,6 +27,8 @@ from kikitori.pipeline.types import (
     TranscriptFilter,
 )
 from kikitori.translate import (
+    ContextFallbackTranslator,
+    Glossary,
     OpenAICompatibleTranslator,
     TranslationError,
     TranslationRequest,
@@ -37,6 +39,9 @@ from kikitori.translate import (
 )
 
 TranscriberRole = Literal["fast", "final"]
+
+if TYPE_CHECKING:
+    from kikitori.asr import DecodeOptions, WhisperTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +164,8 @@ def create_transcriber(
     compute_type: str | None = None,
     cpu_threads: int = 0,
     cuda_library_dirs: Sequence[str | Path] = (),
-) -> Transcriber:
+    workers: int = 1,
+) -> "WhisperTranscriber":
     """載入 ASR 模型（不下載）。
 
     Args:
@@ -171,6 +177,7 @@ def create_transcriber(
         compute_type: CTranslate2 精度；None 用 asr 模組依裝置的預設值。
         cpu_threads: CPU 執行緒數；0 表示 CTranslate2 預設值。
         cuda_library_dirs: cuBLAS 12 所在目錄（見 `asr_cuda_library_dirs()`）。
+        workers: 可並行的解碼數；2 表示之後會用 `with_options()` 讓另一條路徑共用。
 
     Raises:
         UnknownModelError: 模型 id 不在清單中。
@@ -178,24 +185,35 @@ def create_transcriber(
         RuntimeError: 模型載入失敗或指定的 CUDA 無法使用（同一行程 CUDA 失敗過後
             asr 會要求重啟引擎，訊息原樣成為 status error 的 detail）。
     """
-    from kikitori.asr import FAST_DECODE, FINAL_DECODE, get_model, load_transcriber
+    from kikitori.asr import get_model, load_transcriber
 
     try:
         spec = get_model(model_id)
     except KeyError as exc:
         raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
-    base = FAST_DECODE if role == "fast" else FINAL_DECODE
-    options = replace(
-        base, candidate_languages=candidate_languages, forced_language=forced_language
-    )
     return load_transcriber(
         spec,
         device=device,
         compute_type=compute_type,
         cpu_threads=cpu_threads,
-        options=options,
+        options=decode_options(role, candidate_languages, forced_language),
         cuda_library_dirs=[Path(d) for d in cuda_library_dirs],
         download=False,
+        workers=workers,
+    )
+
+
+def decode_options(
+    role: TranscriberRole,
+    candidate_languages: tuple[str, ...] | None,
+    forced_language: str | None,
+) -> "DecodeOptions":
+    """這條路徑的解碼參數：即時 greedy、完整 beam search，語言範圍依設定。"""
+    from kikitori.asr import FAST_DECODE, FINAL_DECODE
+
+    base = FAST_DECODE if role == "fast" else FINAL_DECODE
+    return replace(
+        base, candidate_languages=candidate_languages, forced_language=forced_language
     )
 
 
@@ -302,11 +320,22 @@ def download_asr_model(
     download_model(spec, default_cache_dir(), progress=progress, cancel=cancel)
 
 
+def create_glossary(settings: Settings) -> Glossary:
+    """依設定建立術語表（內建表開關＋使用者詞條）；兩條路徑共用同一個。"""
+    g = settings.translation.glossary
+    return Glossary(entries=g.entries, builtin=g.builtin)
+
+
 def create_translators(
     settings: Settings,
-) -> tuple[OpenAICompatibleTranslator, OpenAICompatibleTranslator]:
-    """建立即時與完整路徑的翻譯器（同一個 API；即時路徑不重試、逾時較短）。"""
+) -> tuple[ContextFallbackTranslator, ContextFallbackTranslator]:
+    """建立即時與完整路徑的翻譯器（同一個 API；即時路徑不重試、逾時較短）。
+
+    兩者共用設定的術語表，並包上前文保險（`ContextFallbackTranslator`：帶前文的譯文像是
+    把前文也翻出來時，改不帶前文重翻一次）。
+    """
     t = settings.translation
+    glossary = create_glossary(settings)
     fast = OpenAICompatibleTranslator(
         TranslatorConfig(
             model=t.fast_model,
@@ -314,20 +343,24 @@ def create_translators(
             api_key_env=t.api_key_env,
             read_timeout=FAST_TRANSLATE_READ_TIMEOUT,
             max_retries=FAST_TRANSLATE_RETRIES,
-        )
+        ),
+        glossary=glossary,
     )
     final = OpenAICompatibleTranslator(
         TranslatorConfig(
             model=t.final_model, base_url=t.base_url, api_key_env=t.api_key_env
-        )
+        ),
+        glossary=glossary,
     )
-    return fast, final
+    return ContextFallbackTranslator(fast), ContextFallbackTranslator(final)
 
 
 def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
     """依設定建立一個 session 的全部元件（載入 Silero 與兩個 ASR 模型，可能要數秒）。
 
-    即時與完整路徑各載入一個 transcriber 實例，即使模型相同也分開，才能並行。
+    兩條路徑的模型、精度與執行緒數都相同時（例如 th／ar／hi 的推薦兩條都用 large-v3）
+    只載入一次：CTranslate2 以兩個 worker 共用同一份權重（VRAM 只算一個模型），完整路徑
+    用 `with_options()` 換成自己的解碼參數，兩條路徑仍可並行。其他情況各載入一個。
 
     Raises:
         UnknownModelError、FileNotFoundError、RuntimeError: 見 `create_transcriber()`。
@@ -339,28 +372,45 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
     fast_translator, final_translator = create_translators(settings)
     asr = settings.asr
     cuda_dirs = asr_cuda_library_dirs(settings)
-    return PipelineComponents(
-        voice_model=SileroVad(),
-        fast_transcriber=create_transcriber(
-            asr.fast_model,
-            device=asr.device,
-            role="fast",
-            candidate_languages=candidate_languages,
-            forced_language=forced_language,
-            compute_type=asr.fast_compute_type,
-            cpu_threads=resolve_cpu_threads(asr.fast_cpu_threads, asr.device),
-            cuda_library_dirs=cuda_dirs,
-        ),
-        final_transcriber=create_transcriber(
+    fast_threads = resolve_cpu_threads(asr.fast_cpu_threads, asr.device)
+    final_threads = resolve_cpu_threads(asr.final_cpu_threads, asr.device)
+    shared = (
+        asr.fast_model == asr.final_model
+        and _resolved_compute_type(asr.fast_compute_type, asr.device)
+        == _resolved_compute_type(asr.final_compute_type, asr.device)
+        and fast_threads == final_threads
+    )
+    fast_transcriber = create_transcriber(
+        asr.fast_model,
+        device=asr.device,
+        role="fast",
+        candidate_languages=candidate_languages,
+        forced_language=forced_language,
+        compute_type=asr.fast_compute_type,
+        cpu_threads=fast_threads,
+        cuda_library_dirs=cuda_dirs,
+        workers=2 if shared else 1,
+    )
+    final_transcriber: Transcriber
+    if shared:
+        final_transcriber = fast_transcriber.with_options(
+            decode_options("final", candidate_languages, forced_language)
+        )
+    else:
+        final_transcriber = create_transcriber(
             asr.final_model,
             device=asr.device,
             role="final",
             candidate_languages=candidate_languages,
             forced_language=forced_language,
             compute_type=asr.final_compute_type,
-            cpu_threads=resolve_cpu_threads(asr.final_cpu_threads, asr.device),
+            cpu_threads=final_threads,
             cuda_library_dirs=cuda_dirs,
-        ),
+        )
+    return PipelineComponents(
+        voice_model=SileroVad(),
+        fast_transcriber=fast_transcriber,
+        final_transcriber=final_transcriber,
         fast_translator=fast_translator,
         final_translator=final_translator,
         transcript_filter=create_transcript_filter(
@@ -368,6 +418,19 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
         ),
         final_no_speech_reliable=no_speech_reliable(asr.final_model),
     )
+
+
+def _resolved_compute_type(value: str | None, device: AsrDevice) -> str | None:
+    """設定的精度；null 在固定裝置上換成 asr 的預設精度（CUDA float16、CPU int8）。
+
+    與 hardware 的 VRAM 計算（`validate_combination()` 同樣把 null 換成裝置預設）一致，
+    「null」和明寫的預設精度才會被當成同一份權重。`auto` 時實際裝置要載入後才知道，原樣比較。
+    """
+    if value is not None or device == "auto":
+        return value
+    from kikitori.asr.whisper import default_compute_type
+
+    return default_compute_type(device)
 
 
 def _is_local_server(settings: Settings) -> bool:

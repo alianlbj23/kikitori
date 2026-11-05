@@ -32,9 +32,12 @@ from common import (
 
 from kikitori.translate import (
     PRESETS,
+    ContextFallbackTranslator,
+    Glossary,
     OpenAICompatibleTranslator,
     TranslationError,
     TranslationRequest,
+    Translator,
     TranslatorConfig,
 )
 from kikitori.translate.postprocess import to_script
@@ -45,8 +48,8 @@ LATENCY_PER_SET = 60  # 只量延遲時每個資料集取前幾句
 NEWLINE = b"\n"
 
 
-def make_translator(system: SystemConfig) -> OpenAICompatibleTranslator:
-    """依設定建立正式翻譯器。
+def make_translator(system: SystemConfig) -> Translator:
+    """依設定建立正式翻譯器（術語表、前文保險依設定加上，與 pipeline 的 factory 相同）。
 
     `convert_script=False` 才能拿到模型原始輸出（算簡體殘留）；之後用正式程式的
     `to_script()` 轉成使用者實際看到的譯文，結果與 `convert_script=True` 相同。
@@ -61,7 +64,10 @@ def make_translator(system: SystemConfig) -> OpenAICompatibleTranslator:
         read_timeout=READ_TIMEOUT,
         convert_script=False,
     )
-    return OpenAICompatibleTranslator(config, preset=preset)
+    translator = OpenAICompatibleTranslator(
+        config, preset=preset, glossary=Glossary() if system.glossary else None
+    )
+    return ContextFallbackTranslator(translator) if system.guard else translator
 
 
 def gpu_snapshot() -> str:
@@ -84,7 +90,7 @@ def gpu_snapshot() -> str:
 
 
 def translate_one(
-    translator: OpenAICompatibleTranslator,
+    translator: Translator,
     text: str,
     target: str,
     context: tuple[str, ...],
@@ -111,7 +117,7 @@ def translate_one(
     }
 
 
-def warmup(translator: OpenAICompatibleTranslator, target: str) -> float:
+def warmup(translator: Translator, target: str) -> float:
     """送一句短請求讓 Ollama 載入模型；回傳載入時間（秒）。"""
     start = time.perf_counter()
     translator.translate(TranslationRequest("こんにちは", "ja", target))

@@ -29,11 +29,13 @@ from common import (
     SCORING_DIR,
     SYSTEMS,
     SYSTEMS_BY_KEY,
+    SystemConfig,
     output_path,
     read_json,
     read_jsonl,
     set_path,
     system_applies,
+    with_glossary,
 )
 
 from kikitori.translate import TranslationError
@@ -52,6 +54,8 @@ RUN_ORDER = [
     "q9-preset-ctx",
     "q9-t0-ctx",
     "q9-t0-noctx",
+    "q9-m16",
+    "q9-m16-gloss",
 ]
 SCORE_TIMEOUT = 30 * 60  # 秒；sacrebleu 計分加 bootstrap
 COMET_TIMEOUT = 6 * 60 * 60  # 秒；CPU 上跑 COMET 很慢，第一次還要下載模型
@@ -75,6 +79,20 @@ def choose_system() -> str | None:
     """選一組受測設定；回傳 key。"""
     index = choose("設定：", [f"{s.key}　{s.label}" for s in SYSTEMS])
     return None if index is None else SYSTEMS[index].key
+
+
+def picked_system(key: str, glossary: bool) -> SystemConfig:
+    """選到的設定；術語表開關打開時換成用內建術語表的變體（key 加 `-gloss`）。"""
+    system = SYSTEMS_BY_KEY[key]
+    return with_glossary(system) if glossary else system
+
+
+def choose_sets(sets: list[str]) -> list[str]:
+    """要跑的資料集：全部或其中一個。"""
+    index = choose("資料集：", ["全部", *sets])
+    if index is None:
+        return []
+    return sets if index == 0 else [sets[index - 1]]
 
 
 def require_data() -> bool:
@@ -155,10 +173,13 @@ def main() -> None:
         "VTuber 句：選一組設定翻譯",
         "VTuber 句：顯示並排表格",
         "顯示進度",
+        "切換術語表（影響「選一組設定」與「VTuber 句」）",
     ]
     sets = list(EVAL_SETS)
+    glossary = False
     while True:
         print("\nVTuber 直播翻譯評測")
+        print(f"術語表：{'開（內建直播用語）' if glossary else '關'}")
         picked = choose("選擇：", actions)
         if picked is None:
             return
@@ -171,7 +192,9 @@ def main() -> None:
             elif picked == 2 and require_data():
                 key = choose_system()
                 if key is not None:
-                    run.run_quality(SYSTEMS_BY_KEY[key], sets)
+                    names = choose_sets(sets)
+                    if names:
+                        run.run_quality(picked_system(key, glossary), names)
             elif picked in (3, 4) and require_data():
                 keys = RUN_ORDER if picked == 3 else [choose_system()]
                 for key in keys:
@@ -205,13 +228,15 @@ def main() -> None:
             elif picked == 8:
                 key = choose_system()
                 if key is not None:
-                    vtuber.run_vtuber(SYSTEMS_BY_KEY[key])
+                    vtuber.run_vtuber(picked_system(key, glossary))
             elif picked == 9:
                 for target in ("zh-TW", "en"):
                     print(f"\n#### {target}\n")
                     print(vtuber.render_table(target))
             elif picked == 10:
                 show_progress()
+            elif picked == 11:
+                glossary = not glossary
         except (urllib.error.URLError, TimeoutError, OSError, TranslationError) as exc:
             print(f"失敗：{type(exc).__name__}: {exc}")
 

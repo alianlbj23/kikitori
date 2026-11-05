@@ -147,8 +147,9 @@ class OverviewTest(unittest.TestCase):
             )
         json.dumps(data)
         asr = {m["id"]: m for m in data["asr"]}
-        self.assertEqual(asr["small"]["recommended_for"], ["fast"])
-        self.assertEqual(asr["large-v3-turbo"]["recommended_for"], ["final"])
+        self.assertEqual(asr["large-v3-turbo"]["recommended_for"], ["fast"])
+        self.assertEqual(asr["large-v3"]["recommended_for"], ["final"])
+        self.assertEqual(asr["small"]["recommended_for"], [])
         self.assertFalse(asr["small"]["downloaded"])
         self.assertFalse(asr["large-v3-turbo"]["no_speech_reliable"])
         self.assertTrue(data["gpu_runtime"]["cublas_available"])

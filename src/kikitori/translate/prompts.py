@@ -6,6 +6,7 @@
 語言碼（中文為 "zh"），譯文語言是語言清單的語言碼。
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -16,6 +17,7 @@ from kikitori.languages import (
     whisper_language_name,
 )
 from kikitori.translate.errors import InvalidRequestError
+from kikitori.translate.glossary import Term
 from kikitori.translate.languages import SAKURA_PAIRS
 from kikitori.translate.types import TranslationRequest
 
@@ -77,6 +79,7 @@ class _GenericTemplate:
     source_names: dict[str, str]
     context_header: str
     instruction: str
+    terms_header: str
 
 
 # 原文語言（Whisper 語言碼）在各指示語言中的名稱。
@@ -145,6 +148,8 @@ _SOURCE_NAMES_JA = {
 }
 _SOURCE_NAMES_EN = {code: whisper_language_name(code) for code in WHISPER_CODES}
 
+_ENGLISH_TERMS_HEADER = "Terminology (use these translations when the terms appear):"
+
 # zh-TW、zh-CN、ja、en 的指示用「譯文語言」寫：實測英文指示下 qwen3.5:9b 翻日文時有
 # 11/18 次直接輸出日文，改用繁體中文指示後為 0/18（experiments/translate_benchmark/README.md）。
 _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
@@ -161,6 +166,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         source_names=_SOURCE_NAMES_ZH_TW,
         context_header="前文（只供參考，不要翻譯）：",
         instruction="請翻譯成繁體中文：",
+        terms_header="術語（原文出現時請用這些譯法）：",
     ),
     "zh-CN": _GenericTemplate(
         system_lines=(
@@ -175,6 +181,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         source_names=_SOURCE_NAMES_ZH_CN,
         context_header="前文（只供参考，不要翻译）：",
         instruction="请翻译成简体中文：",
+        terms_header="术语（原文出现时请用这些译法）：",
     ),
     "ja": _GenericTemplate(
         system_lines=(
@@ -188,6 +195,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         source_names=_SOURCE_NAMES_JA,
         context_header="前の文（参考用、翻訳しない）：",
         instruction="日本語に翻訳してください：",
+        terms_header="用語（原文に出てきたらこの訳を使う）：",
     ),
     "en": _GenericTemplate(
         system_lines=(
@@ -201,6 +209,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         source_names=_SOURCE_NAMES_EN,
         context_header="Earlier lines (reference only, do not translate):",
         instruction="Translate into English:",
+        terms_header=_ENGLISH_TERMS_HEADER,
     ),
 }
 
@@ -226,6 +235,7 @@ def _english_template(target_code: str) -> _GenericTemplate:
         source_names=_SOURCE_NAMES_EN,
         context_header="Earlier lines (reference only, do not translate):",
         instruction=f"Translate into {name}:",
+        terms_header=_ENGLISH_TERMS_HEADER,
     )
 
 
@@ -243,34 +253,49 @@ SAKURA_SYSTEM_PROMPT = (
 )
 
 
-def build_messages(style: PromptStyle, request: TranslationRequest) -> list[Message]:
+def build_messages(
+    style: PromptStyle, request: TranslationRequest, terms: Sequence[Term] = ()
+) -> list[Message]:
     """組出要送給模型的 messages。
 
     Args:
         style: 提示詞格式。
         request: 已正規化的請求。
+        terms: 這句原文出現的術語（`Glossary.lookup()` 的結果）；空的時候提示詞與
+            沒有術語表時完全相同。
 
     Raises:
         InvalidRequestError: 這個格式不支援請求的語言組合（例如 Sakura 只做日翻中）。
         ValueError: 不認得的格式。
     """
     if style == "hunyuan_mt":
-        return _hunyuan(request)
+        return _hunyuan(request, terms)
     if style == "sakura":
-        return _sakura(request)
+        return _sakura(request, terms)
     if style == "generic":
-        return _generic(request)
+        return _generic(request, terms)
     raise ValueError(f"unknown prompt style: {style!r}")
 
 
-def _hunyuan(request: TranslationRequest) -> list[Message]:
+def _hunyuan(request: TranslationRequest, terms: Sequence[Term]) -> list[Message]:
     # 官方說模型沒有預設 system prompt，範本整段放在 user 訊息。原文或譯文是中文時用
     # ZH<=>XX 範本（中文指示、中文語言名），其他組合用 XX<=>XX 範本（英文）。
     target_code = request.target_language
     if target_code not in _HUNYUAN_CHINESE_NAMES:
         raise InvalidRequestError(f"HY-MT does not support target {target_code!r}")
     chinese = request.source_language == "zh" or target_code in ("zh-TW", "zh-CN")
-    if request.context:
+    if terms:
+        # 官方術語干預範本（model card「Prompt Template for terminology intervention」，
+        # 2026-11-06 查閱）只有中文版，所以任何組合都用它與中文語言名；範本一次一條，
+        # 多條時逐行列出。HY-MT 的預設組不帶前文，術語與前文不會同時出現。
+        target = _HUNYUAN_CHINESE_NAMES[target_code]
+        lines = "\n".join(f"{t.source} 翻译成 {t.target}" for t in terms)
+        content = (
+            f"参考下面的翻译：\n{lines}\n\n"
+            f"将以下文本翻译为{target}，注意只需要输出翻译后的结果，不要额外解释：\n"
+            + request.text
+        )
+    elif request.context:
         # 官方只有一個（中文的）前文範本，所以任何組合帶前文時都用它。
         target = _HUNYUAN_CHINESE_NAMES[target_code]
         content = (
@@ -293,14 +318,18 @@ def _hunyuan(request: TranslationRequest) -> list[Message]:
     return [{"role": "user", "content": content}]
 
 
-def _sakura(request: TranslationRequest) -> list[Message]:
+def _sakura(request: TranslationRequest, terms: Sequence[Term]) -> list[Message]:
     if (request.source_language, request.target_language) not in SAKURA_PAIRS:
         raise InvalidRequestError("Sakura models only translate ja -> zh-TW / zh-CN")
     # 模型只輸出簡體中文；zh-TW 由後處理的 OpenCC 轉成台灣正體。官方的 [History] 是「上一輪的譯文」，而 request.context 是前文原文，格式不合，
-    # 硬塞進去可能讓模型把前文也翻出來，所以不放前文；術語表目前留空。
+    # 硬塞進去可能讓模型把前文也翻出來，所以不放前文。術語表用官方的 GPT 字典格式
+    # （model card：每行「src->dst #备注」，可為空），放在 [Glossary] 的位置；譯法照譯文
+    # 語言給（zh-TW 時是繁體），模型照抄後由後處理的選擇性轉換保留。
+    glossary = "\n".join(f"{t.source}->{t.target}" for t in terms)
     content = (
-        "参考以下术语表（可为空，格式为src->dst #备注）：\n\n"
-        "根据以上术语表的对应关系和备注，结合历史剧情和上下文，"
+        "参考以下术语表（可为空，格式为src->dst #备注）：\n"
+        + glossary
+        + "\n根据以上术语表的对应关系和备注，结合历史剧情和上下文，"
         "将下面的文本从日文翻译成简体中文：\n" + request.text
     )
     return [
@@ -309,7 +338,7 @@ def _sakura(request: TranslationRequest) -> list[Message]:
     ]
 
 
-def _generic(request: TranslationRequest) -> list[Message]:
+def _generic(request: TranslationRequest, terms: Sequence[Term]) -> list[Message]:
     template = _GENERIC_TEMPLATES.get(request.target_language)
     if template is None or request.source_language not in template.source_names:
         raise InvalidRequestError(
@@ -321,6 +350,10 @@ def _generic(request: TranslationRequest) -> list[Message]:
     user = ""
     if request.context:
         user = template.context_header + "\n" + "\n".join(request.context) + "\n\n"
+    if terms:
+        # WMT 術語任務的做法：「原文 → 譯法」逐行列出，標題用與指示相同的語言。
+        lines = "\n".join(f"{t.source} → {t.target}" for t in terms)
+        user += template.terms_header + "\n" + lines + "\n\n"
     user += template.instruction + "\n" + request.text
     return [
         {"role": "system", "content": system},

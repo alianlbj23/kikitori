@@ -10,9 +10,9 @@ from typing import Any
 from common import (
     CONTEXT_LINES,
     HERE,
-    SYSTEMS_BY_KEY,
     VTUBER_DIR,
     SystemConfig,
+    find_system,
     read_json,
     write_json,
 )
@@ -56,7 +56,7 @@ def render_table(target: str) -> str:
     """把已存的 VTuber 結果並排成 Markdown 表格（一欄一個設定）。"""
     saved = sorted(VTUBER_DIR.glob("*.json"))
     results = [read_json(p) for p in saved]
-    results = [r for r in results if r["system"] in SYSTEMS_BY_KEY]
+    results = [r for r in results if find_system(r["system"]) is not None]
     if not results:
         return "還沒有 VTuber 句結果。"
     header = "| 原文 | " + " | ".join(f"`{r['system']}`" for r in results) + " |"

@@ -150,7 +150,9 @@ def _default_storage(array: npt.NDArray[np.float32]) -> Any:
 class WhisperTranscriber:
     """CTranslate2 Whisper 的 `Transcriber` 實作。
 
-    同一個實例的呼叫以 lock 串行化；即時與完整路徑要並行就各建一個實例。
+    同一個實例的呼叫以 lock 串行化。即時與完整路徑要並行：模型不同就各載入一個；
+    模型、裝置、精度都相同時，以 `load_transcriber(workers=2)` 載入一次，再用
+    `with_options()` 建立共用權重的另一個實例（各自的 lock 與解碼參數）。
     """
 
     def __init__(
@@ -188,6 +190,27 @@ class WhisperTranscriber:
                 self._check_language(code)
         if self.options.forced_language is not None:
             self._check_language(self.options.forced_language)
+
+    def with_options(self, options: DecodeOptions) -> "WhisperTranscriber":
+        """共用同一個已載入模型、只換解碼參數的新實例（有自己的 lock）。
+
+        CTranslate2 官方文件（Parallel execution）：同一個裝置上的多個 worker 共用模型
+        權重，計算方法釋放 GIL，可以從多個 Python 執行緒呼叫；原始碼中同一裝置的
+        replica 都指向同一個 `Model` 物件。所以載入時 `inter_threads` 要等於共用的實例數，
+        兩條路徑才會真的並行，而不是在同一個 worker 上排隊。
+
+        Raises:
+            ValueError: 新參數指定的語言模型不支援。
+        """
+        return WhisperTranscriber(
+            self._model,
+            self._tokenizer,
+            options,
+            storage=self._storage,
+            name=self.name,
+            device=self.device,
+            compute_type=self.compute_type,
+        )
 
     @property
     def languages(self) -> tuple[str, ...]:
@@ -436,15 +459,22 @@ def _validate_model_path(path: Path) -> Path:
     return path
 
 
-def _create_model(path: Path, device: str, compute_type: str, cpu_threads: int) -> Any:
+MAX_WORKERS = 4
+
+
+def _create_model(
+    path: Path, device: str, compute_type: str, cpu_threads: int, workers: int
+) -> Any:
     import ctranslate2
 
+    # inter_threads 個 worker 在同一個裝置上共用權重（官方 Parallel execution 文件）；
+    # CPU 上每個 worker 各用 intra_threads 個執行緒，所以總數與分開載入兩個模型相同。
     return ctranslate2.models.Whisper(
         os.fspath(path),
         device=device,
         compute_type=compute_type,
         intra_threads=cpu_threads,
-        inter_threads=1,
+        inter_threads=workers,
     )
 
 
@@ -469,6 +499,7 @@ def load_transcriber(
     cuda_library_dirs: Sequence[Path] = (),
     download: bool = False,
     progress: ProgressCallback | None = None,
+    workers: int = 1,
 ) -> WhisperTranscriber:
     """載入模型並回傳 `WhisperTranscriber`。
 
@@ -483,6 +514,8 @@ def load_transcriber(
         cuda_library_dirs: cuBLAS 所在目錄（見 `preload_cuda_libraries()`）。
         download: 模型不在快取時是否下載；False 時丟 `FileNotFoundError`。
         progress: 下載進度回報。
+        workers: 可並行的解碼數（CTranslate2 `inter_threads`）；要用 `with_options()`
+            讓即時與完整路徑共用這個模型時設 2。權重只載入一份。
 
     Raises:
         ValueError: 參數組合不合法。
@@ -495,6 +528,8 @@ def load_transcriber(
         raise ValueError(f"device must be auto, cpu or cuda, got {device!r}")
     if cpu_threads < 0:
         raise ValueError(f"cpu_threads must be >= 0, got {cpu_threads}")
+    if not 1 <= workers <= MAX_WORKERS:
+        raise ValueError(f"workers must be in [1, {MAX_WORKERS}], got {workers}")
 
     if model_path is not None:
         path = _validate_model_path(Path(model_path))
@@ -548,7 +583,7 @@ def load_transcriber(
                 cuda_type = compute_type or default_compute_type("cuda")
                 try:
                     transcriber = WhisperTranscriber(
-                        _create_model(path, "cuda", cuda_type, cpu_threads),
+                        _create_model(path, "cuda", cuda_type, cpu_threads, workers),
                         tokenizer,
                         options,
                         name=name,
@@ -567,7 +602,7 @@ def load_transcriber(
 
     cpu_type = compute_type or default_compute_type("cpu")
     transcriber = WhisperTranscriber(
-        _create_model(path, "cpu", cpu_type, cpu_threads),
+        _create_model(path, "cpu", cpu_type, cpu_threads, workers),
         tokenizer,
         options,
         name=name,

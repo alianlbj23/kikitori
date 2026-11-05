@@ -2,6 +2,8 @@
 
 > 狀態：已採用（2026-11-05，使用者授權依建議自主實作，不等待審核）。Milestone 12–14（多國語言）：推薦依語言、
 > 原因／警告／驗證訊息改為結構化訊息碼（見「訊息碼」）、Ollama 下載翻譯模型（見「Ollama 下載翻譯模型」）。
+> Milestone 16（日語直播特化，`docs/specs/vtuber-profile.md`）：8 GB 以上等級改為即時 large-v3-turbo＋完整 large-v3，與本機翻譯
+> LLM 共用時依 VRAM 選精度（見「8 GB 以上等級的組合」）；th／ar／hi 即時也用 large-v3；同模型同精度的兩條路徑共用一份權重。
 > 上位文件：`docs/specs/app-architecture.md` 的 `hardware` 一節與引擎方法 `hardware.detect`、`models.list`、`models.download`；本文件不得與之矛盾。
 > 依據：`docs/specs/asr.md` 的「硬體等級推薦」、`docs/specs/translate.md` 的「依 VRAM 的推薦順序」、CTranslate2 官方文件（quantization、installation）、NVIDIA CUDA Compatibility 文件。
 
@@ -85,7 +87,8 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 | CUDA context | 500 MiB | registry 的 VRAM 量測各含一份；同一行程兩個模型只算一次 |
 | 8 GB 等級門檻 | 7680 MiB | 標稱 8 GB 的卡回報約 8188 MiB，容許 0.5 GiB 誤差 |
 | 4 GB 等級門檻 | 3584 MiB | 同上 |
-| large-v3 門檻 | 11264 MiB 且翻譯不在本機 | asr.md：「VRAM 寬裕（≥ 12 GB 且不跑本機 LLM）可改 large-v3」 |
+| 共用權重的第二個 worker | 512 MiB（`SHARED_WORKER_EXTRA_MB`） | 兩條路徑同模型同精度時只載入一份權重（見下），第二個 CTranslate2 worker 的解碼暫存保守估計；未實測 |
+| 翻譯最低等級 | 4.0 GB（`MIN_TRANSLATION_BUDGET_GB`） | qwen3.5:4b 的等級（`RECOMMENDATION_TIERS`）；更低只剩 HY-MT 1.8B，translate_eval 中每個資料集都顯著較差且會幻覺 |
 | 最低驅動 | 525 | NVIDIA CUDA minor version compatibility：CUDA 12.x 需要 ≥ 525 |
 | CPU 高 RAM 門檻 | 15 GiB | 標稱 16 GB 扣掉內顯共用後常為 15.x GiB |
 | CPU 低核心 | 實體核心 ≤ 4 | asr.md |
@@ -129,7 +132,7 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 
 | tier | 條件 | 即時 | 完整 |
 |---|---|---|---|
-| `nvidia_8gb` | VRAM ≥ 7680 MiB | `small` cuda float16 | `large-v3-turbo` cuda float16（≥ 11 GiB 且翻譯不在本機時 `large-v3`） |
+| `nvidia_8gb` | VRAM ≥ 7680 MiB | `large-v3-turbo`（float16 或 int8_float16；VRAM 不夠給 4B 時 `small`） | `large-v3`（float16 或 int8_float16），見下節 |
 | `nvidia_4gb` | 3584 ≤ VRAM < 7680 | `base` cuda int8_float16 | `large-v3-turbo` cuda int8_float16 |
 | `nvidia_lt4gb` | VRAM < 3584 | `base` cuda int8_float16 | `small` cuda int8_float16 |
 | `cpu` | 無可用 GPU，RAM ≥ 15 GiB 且實體核心 > 4 | `base` cpu int8 | `small` cpu int8 |
@@ -137,7 +140,69 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 | `apple_silicon` | macOS Apple Silicon | `base` cpu int8 | `small` cpu int8（未實測） |
 
 - compute capability 6.1（Pascal）時 GPU 等級的精度一律 `int8`。
-- ASR 需要的 VRAM（registry 數值，fp16 用 `approx_gpu_vram_mb`、int8 類用 `approx_gpu_vram_int8_mb`，兩個模型扣一次 context）大於「VRAM − 1024」時改用 CPU 等級並警告。
+- ASR 需要的 VRAM（`asr_vram_need_mb()`：registry 數值，fp16 用 `approx_gpu_vram_mb`、int8 類用 `approx_gpu_vram_int8_mb`，
+  兩個模型扣一次 context；**模型與精度都相同時只算一份權重＋`SHARED_WORKER_EXTRA_MB`**）大於「VRAM − 1024」時改用 CPU 等級並警告。
+  `validate_combination()` 的 `vram_overflow` 也用同一個算法。
+
+### 8 GB 以上等級的組合（Milestone 16）
+
+依據 `experiments/vtuber_eval/README.md`：即時 large-v3-turbo 的口語 CER 比 small 低 5.6 點（95% CI [2.9, 8.2]）；完整路徑在
+BGM 10／5 dB 時 large-v3 比 turbo 好 4.1／5.3 點，乾淨語音打平；large-v3 的 int8_float16 與 float16 品質相同（Δ −0.4 [−1.0, 0.3]）。
+所以候選（`GPU_LADDERS`）依品質分組，組內只差精度、越前面延遲越低（float16 較快）、VRAM 越多：
+
+| 組 | 候選（即時／完整） | ASR VRAM（MiB） |
+|---|---|---|
+| 1 | turbo f16 ／ v3 f16 | 2300 + 4170 − 500 = **5970** |
+| 1 | turbo f16 ／ v3 int8_float16 | 2300 + 2140 − 500 = **3940** |
+| 1 | turbo int8_float16 ／ v3 int8_float16 | 1240 + 2140 − 500 = **2880** |
+| 2（退路） | small int8_float16 ／ v3 int8_float16 | 650 + 2140 − 500 = **2290** |
+
+挑法（`_choose_option()`）：
+
+- **翻譯不在這張卡上**（遠端伺服器，或收聽與字幕語言是同一個 Whisper 語言、不需要翻譯模型）：第一個放得下的（VRAM − 1024 ≥ ASR）。
+  8 GB 等級一律是 turbo f16 ／ v3 f16。
+- **與本機翻譯 LLM 共用**：翻譯預算 = VRAM − 1024 − ASR（GB，取到小數 2 位），等級依 `RECOMMENDATION_TIERS`（≥ 7.5 GB 9B、
+  ≥ 4.0 GB 4B、其他 HY-MT 1.8B）。依組的順序：組內放得下的候選中，「翻譯等級最高」的就是組內最省 VRAM 的那個能到的等級；
+  若該等級 ≥ 4.0 GB，挑組內**第一個**達到該等級的（精度最高、延遲最低）。否則看下一組。都不到 4.0 GB 時用最省 VRAM 的候選。
+  int8_float16 品質相同，所以「翻譯模型升一級」永遠優先於「ASR 用 float16」；但不會為了升級翻譯而把即時模型換成 small
+  （第 2 組只在第 1 組連 4B 都放不下時才用）。
+- **語言**：辨識語言用即時模型是 C 級、完整模型不是（`asr_quality`；large-v3-turbo 的 th、ar、hi）時，即時也用完整模型、同一個
+  精度（候選變成 v3／v3，只算一份權重：f16 4170 + 512 = **4682**、int8_float16 2140 + 512 = **2652**），原因 `asr_live_model_for_language`。
+  vi 在兩個模型都是 C，不換（只警告）。`auto` 不換。
+- 4 GB 以下的等級（`nvidia_4gb`、`nvidia_lt4gb`）沿用先前的組合：放不下兩個大模型再加上 4B。
+
+各種顯示卡（`recommend()` 實際輸出；翻譯預算＝VRAM − 1024 − ASR）：
+
+| VRAM（MiB） | 翻譯在本機 | 即時／完整 | ASR | 翻譯預算 | 翻譯模型 |
+|---|---|---|---|---|---|
+| 24564（24 GB） | 是 | turbo f16 ／ v3 f16 | 5970 | 17.16 GB | qwen3.5:9b |
+| 16303（16 GB） | 是 | turbo f16 ／ v3 f16 | 5970 | 9.09 GB | qwen3.5:9b |
+| 12227（12 GB，RTX 5070） | 是 | turbo int8 ／ v3 int8（f16／int8 只剩 7.09 GB，放不下 9B） | 2880 | 8.13 GB | qwen3.5:9b |
+| 11264（11 GB） | 是 | turbo f16 ／ v3 f16（全 int8 也只有 7.19 GB，仍是 4B） | 5970 | 4.17 GB | qwen3.5:4b |
+| 10240（10 GB） | 是 | turbo f16 ／ v3 int8（兩個 f16 只剩 3.17 GB） | 3940 | 5.15 GB | qwen3.5:4b |
+| 8188（8 GB） | 是 | turbo int8 ／ v3 int8 | 2880 | 4.18 GB | qwen3.5:4b |
+| 7680（8 GB 等級下限） | 是 | **small** int8 ／ v3 int8（turbo int8 只剩 3.69 GB） | 2290 | 4.26 GB | qwen3.5:4b |
+| 7680–24564 | 否（遠端或不需翻譯） | turbo f16 ／ v3 f16 | 5970 | — | — |
+| 6144（6 GB） | 是／否 | base int8 ／ turbo int8（沿用） | 1190 | 3.84 GB | hy-mt1.5-1.8b |
+| 4096（4 GB） | 是／否 | base int8 ／ turbo int8（沿用） | 1190 | 1.84 GB | hy-mt1.5-1.8b（超過預算警告） |
+| 2048 | 是／否 | base int8 ／ small int8（沿用） | 600 | 0.41 GB | hy-mt1.5-1.8b |
+| 12227，收聽 th／ar／hi | 是 | v3 int8 ／ v3 int8（共用權重） | 2652 | 8.35 GB | qwen3.5:9b |
+| 16303，收聽 th／ar／hi | 是 | v3 f16 ／ v3 f16（共用權重） | 4682 | 10.35 GB | qwen3.5:9b |
+| 7680，收聽 th／ar／hi | 是 | v3 int8 ／ v3 int8（共用權重） | 2652 | 3.91 GB | hy-mt1.5-1.8b |
+
+（int8 ＝ int8_float16；Pascal 6.1 一律 int8：8192 MiB 時 turbo int8 ／ v3 int8、qwen3.5:4b。）LLM 的 VRAM 用預設組的
+`approx_vram_gb`（權重，9B 6.6 GB、4B 3.3 GB），門檻 7.5／4.0 GB 已含 KV cache 的餘裕；`tests/test_hardware_recommend.py`
+檢查 7680–24576 MiB 每 256 MiB 的推薦都滿足「ASR＋翻譯權重＋1024 ≤ VRAM」、翻譯預算 ≥ 4.0 GB，且 `validate_combination()` 不報
+`vram_overflow`。實際 VRAM 由端到端驗收量測（`vtuber-profile.md`「驗證」）。
+
+### 兩條路徑共用一份權重
+
+即時與完整路徑的模型、精度、CPU 執行緒數都相同時（目前只有 th／ar／hi 的推薦，或使用者手動這樣設定），`pipeline.factory` 只載入
+一次（`load_transcriber(workers=2)`，CTranslate2 `inter_threads=2`），完整路徑用 `WhisperTranscriber.with_options()` 換成自己的
+解碼參數與 lock。依據：CTranslate2 官方文件 *Parallel execution*：「When the workers are running on the same device, the model
+weights are shared to save on memory」，計算方法釋放 GIL、可從多個 Python 執行緒呼叫；原始碼 `ModelLoader::load()` 中同一裝置的
+replica 都指向同一個 `Model`；`encode()` 回傳前會 `synchronize_stream`，所以一個 worker 的編碼結果交給另一個 worker 解碼是安全的
+（faster-whisper 的 `num_workers` 也是同樣用法）。worker 數等於共用的路徑數，兩條路徑才會真的並行、不在同一個 worker 上排隊。
 - CPU 執行緒：即時與完整同時執行，各用 `min(8, 實體核心 // 2)`（asr.md：兩者合計不超過實體核心數）；核心數未知時 0（CTranslate2 預設）。GPU 時 0。
 
 ### 翻譯模型
@@ -185,10 +250,12 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
 
 | code | params | English（`message`） | 意義 |
 |---|---|---|---|
-| `asr_gpu` | `gpu_name` str, `vram_mb` int, `fast_model` str, `final_model` str, `compute_type` str | {gpu_name} ({vram_mb} MiB VRAM): {fast_model} for live subtitles, {final_model} for final subtitles ({compute_type}) | 推薦 GPU 等級的 ASR：顯示卡、即時／完整模型與精度 |
-| `asr_gpu_int8_saves_vram` | — | int8_float16 halves the VRAM used by speech recognition, leaving more for the translation model | 4 GB 等級用 int8_float16，省 VRAM 給翻譯模型 |
+| `asr_gpu` | `gpu_name` str, `vram_mb` int, `fast_model` str, `final_model` str, `compute_type` str | {gpu_name} ({vram_mb} MiB VRAM): {fast_model} for live subtitles, {final_model} for final subtitles ({compute_type}) | 推薦 GPU 等級的 ASR：顯示卡、即時／完整模型與精度（兩條路徑精度不同時 `compute_type` 是「即時 / 完整」，例如 `float16 / int8_float16`） |
+| `asr_gpu_int8_saves_vram` | — | int8_float16 halves the VRAM used by speech recognition, leaving more for the translation model | 有路徑用 int8_float16（Pascal 除外）：省 VRAM 給翻譯模型；8 GB 以上等級品質相同（vtuber_eval） |
 | `asr_final_no_speech_unreliable` | `final_model` str, `fast_model` str | {final_model} cannot tell speech from silence (no_speech); {fast_model}'s no_speech and the voice detector filter non-speech instead | 完整模型（large-v3-turbo）的 no_speech 不可用，改用即時模型的值與 VAD 過濾 |
-| `asr_large_v3_remote_translation` | `final_model` str | Translation does not run on this computer, so final subtitles use {final_model} (similar quality, reliable no_speech, about 0.33 s per sentence) | VRAM ≥ 11 GiB 且翻譯不在本機：完整路徑改用 large-v3 |
+| `asr_bgm_robust_final` | `final_model` str | {final_model} for final subtitles holds up best against background music and game sound in livestreams (kikitori's Japanese livestream evaluation) | 8 GB 以上等級的完整路徑用 large-v3 的理由（Milestone 16，vtuber_eval：BGM 下退化最小） |
+| `asr_live_model_for_language` | `language` str, `fast_model` str, `model` str | {fast_model} is much less accurate for {language}, so live subtitles also use {model} (loaded once and shared by both) | 即時模型在辨識語言是 C 級、完整模型較好（large-v3-turbo 的 th、ar、hi）：即時也用完整模型，兩條路徑共用一份權重；每個語言一則 |
+| `asr_large_v3_remote_translation` | `final_model` str | Translation does not run on this computer, so final subtitles use {final_model} (similar quality, reliable no_speech, about 0.33 s per sentence) | 翻譯不在這張卡上（遠端伺服器或不需要翻譯）：8 GB 以上等級兩條路徑都用 float16（Milestone 16 起本機翻譯時完整路徑也是 large-v3，只是可能用 int8_float16） |
 | `asr_apple_silicon` | `fast_model` str, `final_model` str | Apple Silicon: speech recognition runs on the CPU on macOS; {fast_model} for live subtitles, {final_model} for final subtitles | Apple Silicon：ASR 在 CPU |
 | `asr_apple_silicon_untested` | — | Apple Silicon latency has not been measured yet; using the same models as a CPU with 16 GB of RAM or more | Apple Silicon 延遲未實測，比照 CPU ≥ 16 GB |
 | `asr_cpu` | `fast_model` str, `final_model` str | Speech recognition runs on the CPU (16 GB of RAM or more): {fast_model} for live subtitles, {final_model} for final subtitles | 沒有可用 GPU、RAM ≥ 16 GB：CPU 等級 |
@@ -459,7 +526,7 @@ def hardware_report(*, base_url=..., api_key_env=..., cuda_library_dirs=(), allo
  "errors": []}
 ```
 
-`recommend()`（cuBLAS 安裝後）：
+`recommend()`（cuBLAS 安裝後；Milestone 16 之前的結果，現在同一台機器是 turbo int8 ／ large-v3 int8 ＋ qwen3.5:9b，見「8 GB 以上等級的組合」）：
 
 ```json
 {"tier": "nvidia_8gb",

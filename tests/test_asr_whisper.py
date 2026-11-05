@@ -360,6 +360,38 @@ class ConcurrencyAndWarmupTest(unittest.TestCase):
         self.assertEqual(len(model.generate_calls), 4)
         self.assertFalse(model.overlap)
 
+    def test_with_options_shares_the_model_but_not_the_lock(self) -> None:
+        # 即時與完整路徑用同一個模型時共用一份權重（CTranslate2 的 inter_threads 個
+        # worker 共用權重），各自的解碼參數與 lock 分開，兩條路徑才能並行。
+        model = FakeWhisper()
+        fast = make(model, DecodeOptions(beam_size=1, forced_language="ja"))
+        final = fast.with_options(DecodeOptions(beam_size=5, forced_language="ja"))
+        self.assertIs(final._model, fast._model)
+        self.assertIsNot(final._lock, fast._lock)
+        self.assertEqual((final.options.beam_size, fast.options.beam_size), (5, 1))
+        self.assertEqual(
+            (final.name, final.device, final.compute_type),
+            (fast.name, fast.device, fast.compute_type),
+        )
+        final.transcribe(AUDIO)
+        self.assertEqual(model.generate_calls[-1][1]["beam_size"], 5)
+        with self.assertRaises(ValueError):
+            fast.with_options(DecodeOptions(forced_language="xx"))
+
+    def test_siblings_run_in_parallel(self) -> None:
+        model = FakeWhisper()
+        fast = make(model)
+        final = fast.with_options(DecodeOptions(beam_size=5))
+        threads = [
+            threading.Thread(target=t.transcribe, args=(AUDIO, "ja"))
+            for t in (fast, final, fast, final)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(model.generate_calls), 4)
+
     def test_warmup_runs_encoder_and_one_decode_step(self) -> None:
         model = FakeWhisper(n_mels=128)
         make(model).warmup()
@@ -451,10 +483,22 @@ class LoadTranscriberTest(unittest.TestCase):
             transcriber = load_transcriber(
                 model_path=self.model_path, device="cpu", cpu_threads=4
             )
-        cm.assert_called_once_with(self.model_path, "cpu", "int8", 4)
+        cm.assert_called_once_with(self.model_path, "cpu", "int8", 4, 1)
         self.assertEqual(
             (transcriber.device, transcriber.compute_type), ("cpu", "int8")
         )
+
+    def test_workers_load_one_model_with_parallel_workers(self) -> None:
+        with mock.patch(
+            "kikitori.asr.whisper._create_model", return_value=FakeWhisper()
+        ) as cm:
+            load_transcriber(
+                model_path=self.model_path, device="cpu", cpu_threads=2, workers=2
+            )
+        cm.assert_called_once_with(self.model_path, "cpu", "int8", 2, 2)
+        for bad in (0, 5):
+            with self.subTest(workers=bad), self.assertRaises(ValueError):
+                load_transcriber(model_path=self.model_path, device="cpu", workers=bad)
 
     def test_auto_uses_cuda_when_it_works(self) -> None:
         with (
@@ -469,7 +513,7 @@ class LoadTranscriberTest(unittest.TestCase):
 
     def test_auto_falls_back_to_cpu_when_cuda_fails(self) -> None:
         def create(
-            path: Path, device: str, compute_type: str, threads: int
+            path: Path, device: str, compute_type: str, threads: int, workers: int
         ) -> FakeWhisper:
             if device == "cuda":
                 raise RuntimeError("Library cublas64_12.dll is not found")
@@ -504,7 +548,7 @@ class LoadTranscriberTest(unittest.TestCase):
         calls: list[str] = []
 
         def create(
-            path: Path, device: str, compute_type: str, threads: int
+            path: Path, device: str, compute_type: str, threads: int, workers: int
         ) -> FakeWhisper:
             calls.append(device)
             if device == "cuda":

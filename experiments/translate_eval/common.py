@@ -5,7 +5,7 @@
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,8 @@ class SystemConfig:
         label: 表格顯示名稱。
         zh_only: 只支援日翻中（Sakura）。
         reference_only: 非商用授權，只當參考點，不列入推薦。
+        glossary: 用正式的內建術語表（`kikitori.translate.Glossary()`；Milestone 16）。
+        guard: 包上正式的前文保險（`ContextFallbackTranslator`；Milestone 16）。
     """
 
     key: str
@@ -77,6 +79,8 @@ class SystemConfig:
     label: str
     zh_only: bool = False
     reference_only: bool = False
+    glossary: bool = False
+    guard: bool = False
 
 
 SYSTEMS: list[SystemConfig] = [
@@ -109,8 +113,50 @@ SYSTEMS: list[SystemConfig] = [
         zh_only=True,
         reference_only=True,
     ),
+    # Milestone 16 的正式設定：預設組（Qwen 溫度已改 0）、前文、前文保險；術語表關／開。
+    # 與 q9-t0-ctx 的差別只有前文保險與後處理（選擇性繁簡轉換、特殊 token），用來確認
+    # 新程式沒有改變譯文；術語表的效果看 q9-m16 → q9-m16-gloss。
+    SystemConfig(
+        "q9-m16",
+        "qwen3.5:9b",
+        None,
+        True,
+        "Qwen3.5 9B｜M16 正式（t=0、前文、前文保險）｜術語表關",
+        guard=True,
+    ),
+    SystemConfig(
+        "q9-m16-gloss",
+        "qwen3.5:9b",
+        None,
+        True,
+        "Qwen3.5 9B｜M16 正式（t=0、前文、前文保險）｜術語表開",
+        glossary=True,
+        guard=True,
+    ),
 ]
 SYSTEMS_BY_KEY: dict[str, SystemConfig] = {s.key: s for s in SYSTEMS}
+GLOSSARY_SUFFIX = "-gloss"
+
+
+def with_glossary(system: SystemConfig) -> SystemConfig:
+    """同一組設定改用內建術語表（選單的術語表開關）；key 加上 `-gloss`。"""
+    if system.glossary:
+        return system
+    key = system.key + GLOSSARY_SUFFIX
+    return SYSTEMS_BY_KEY.get(key) or replace(
+        system, key=key, label=system.label + "｜術語表開", glossary=True
+    )
+
+
+def find_system(key: str) -> SystemConfig | None:
+    """依 key 找設定；`<key>-gloss` 是選單術語表開關產生的變體。"""
+    if key in SYSTEMS_BY_KEY:
+        return SYSTEMS_BY_KEY[key]
+    if key.endswith(GLOSSARY_SUFFIX):
+        base = SYSTEMS_BY_KEY.get(key.removesuffix(GLOSSARY_SUFFIX))
+        return None if base is None else with_glossary(base)
+    return None
+
 
 # paired bootstrap 的基準：現行正式設定。
 BASELINE_KEY = "q9-preset-ctx"
@@ -130,6 +176,9 @@ CONTRASTS: list[tuple[str, str]] = [
     ("q4-t0-ctx", "q9-t0-ctx"),
     ("q4-t0-ctx", "hy7-t0"),
     ("hy18-t0", "q4-t0-ctx"),
+    # Milestone 16：新程式（前文保險、後處理）不改變結果；術語表關 → 開
+    ("q9-t0-ctx", "q9-m16"),
+    ("q9-m16", "q9-m16-gloss"),
 ]
 
 

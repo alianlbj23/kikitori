@@ -27,6 +27,7 @@ from kikitori.translate.errors import (
     TranslationResponseError,
     TranslationTimeoutError,
 )
+from kikitori.translate.glossary import Glossary
 from kikitori.translate.languages import DEFAULT_MAX_CONTEXT_LINES, validate_request
 from kikitori.translate.postprocess import finalize_translation
 from kikitori.translate.presets import ModelPreset, preset_for_model
@@ -216,6 +217,7 @@ class OpenAICompatibleTranslator:
         preset: ModelPreset | None = None,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        glossary: Glossary | None = None,
     ) -> None:
         """
         Args:
@@ -223,9 +225,11 @@ class OpenAICompatibleTranslator:
             preset: 提示詞格式與取樣參數；None 時依 `config.model` 查預設組，
                 不認得的模型用通用格式。
             sleep: 重試等待用的函式；測試時換成不真的等待的版本。
+            glossary: 術語表；每句只把原文出現的詞放進提示詞。None 表示不用術語表。
         """
         self.config = config
         self.preset = preset or preset_for_model(config.model)
+        self.glossary = glossary
         self._endpoint = _parse_base_url(config.base_url)
         self._sleep = sleep
 
@@ -280,7 +284,14 @@ class OpenAICompatibleTranslator:
         req = validate_request(
             request, self.preset.languages, self.preset.pairs, context_lines
         )
-        return req, build_messages(self.preset.prompt_style, req)
+        terms = (
+            ()
+            if self.glossary is None
+            else self.glossary.lookup(
+                req.text, req.source_language, req.target_language
+            )
+        )
+        return req, build_messages(self.preset.prompt_style, req, terms)
 
     def _payload(
         self, prepared: tuple[TranslationRequest, list[dict[str, str]]], stream: bool

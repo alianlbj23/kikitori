@@ -184,7 +184,14 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
     "final_model": "qwen3.5:4b",
     "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
     "allow_restricted": false,
-    "keep_warm_secs": 240
+    "keep_warm_secs": 240,
+    "glossary": {
+      "builtin": true,
+      "entries": [
+        {"source": "ぺこら", "target": "佩克拉", "target_language": "zh-TW"},
+        {"source": "Hololive", "target": "hololive", "target_language": null}
+      ]
+    }
   },
   "pipeline": {"partial_interval_ms": 700, "no_speech_threshold": 0.6, "context_lines": 3, "asr_prompt_context": true},
   "subtitle": {},
@@ -211,6 +218,12 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `translation.enabled` | 布林，預設 **true**；false = 只顯示原文：pipeline 不呼叫翻譯器、factory 不預熱也不保溫 |
 | `translation.allow_restricted` | 布林，預設 **false**：是否推薦有地區限制授權的翻譯模型（HY-MT 的授權不適用於歐盟、英國、南韓）。引擎不知道使用者所在地、用語系猜地區不可靠，推薦了不能用的授權會讓使用者在不知情下違約，所以預設不推薦；UI 在設定頁讓使用者確認「我不在歐盟／英國／南韓」後再設為 true。只影響 `recommend()` 與 `models.validate` 的警告，不阻止手動選用 |
 | `translation.keep_warm_secs` | 整數，預設 **240**：0（關閉定期保溫；執行中開啟翻譯時仍在背景預熱一次）或 [10, 3600]。session 執行中翻譯請求停了這麼多秒，就對本機翻譯服務送一次預熱請求，讓模型不被卸載（見「ASR 接縫」的 `attach_keep_warm()`）。預設值低於 Ollama 預設的 `keep_alive` 5 分鐘；伺服器改過 `OLLAMA_KEEP_ALIVE` 時要設得比它短。遠端服務一律不送。新欄位有預設值，舊的 schema 2 檔案照樣讀得進來，所以**不升 schema** |
+| `translation.glossary` | 物件，只能有 `builtin`、`entries`（Milestone 16，`translate.md`「術語表」）。缺少時用預設值 `{"builtin": true, "entries": []}`；新欄位有預設值，**不升 schema**（與 `keep_warm_secs` 相同） |
+| `translation.glossary.builtin` | 布林，預設 **true**：原文是日語、譯文是 zh-TW／zh-CN／en／ko 時，使用內建的直播用語術語表（53 個詞條） |
+| `translation.glossary.entries` | 陣列，最多 **500** 筆，預設 `[]`；每筆是只有 `source`、`target`、`target_language` 三個鍵的物件（`target_language` 可省略）。錯誤路徑形如 `translation.glossary.entries[3].source` |
+| `entries[].source` | 字串，1–100 字元，不可有頭尾空白、換行或控制字元（原文寫法；比對時不分大小寫與全半形） |
+| `entries[].target` | 字串，1–200 字元，同上的限制（譯法） |
+| `entries[].target_language` | `null`／省略（所有譯文語言）或語言清單的語言碼（同語言碼共通規則，存成正規化後的碼；`zh` 不接受）。同一個原文寫法（NFKC＋不分大小寫）與同一個 `target_language` 只能有一筆（`entries[i].source: duplicate of an earlier entry`）；同寫法、不同 `target_language` 可以並存 |
 | `pipeline.partial_interval_ms` | 整數，[200, 5000] |
 | `pipeline.no_speech_threshold` | 數字，[0, 1] |
 | `pipeline.context_lines` | 整數，[0, 10] |
@@ -476,7 +489,7 @@ UI 流程見 `ui.md`「自動推薦」。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`is_downloaded`、`download_model`、`default_cache_dir`。
 - `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`），最後 `attach_keep_warm()`。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
 - `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務時原樣回傳，不包裝也不送請求。設為 0 時翻譯器不包裝、不定期送請求，`keep_warm` 換成 `keep_warm.WarmUpOnEnable`：只在執行中開啟翻譯（從關閉變成開啟）時於背景 daemon 執行緒預熱一次（同時只有一個預熱在進行；失敗只記 warning），因為以「只顯示原文」開始的 session 沒有開場預熱。逐步模式（測試、smoke）不啟動。**只顯示原文**（`translation.enabled=false`，Milestone 14）時保溫是「不動作」的（`KeepWarm(active=False)`）：不建立執行緒、不送任何請求；執行中開啟翻譯（`Pipeline.set_translation_enabled(True)` → `KeepWarm.set_active(True)`）時才建立執行緒並先在背景預熱一次（以「開啟翻譯後」的設定組請求），之後照常保溫；再關閉就停止送請求。翻譯器在 session 開始時就要包好（活動才記得到），所以不能等開啟時才建立。不需要翻譯的語言組合（影片翻譯、收聽與字幕同一個 Whisper 語言）仍原樣回傳。
-- `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
+- `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄；Milestone 16：模型、精度、執行緒數都相同時只載入一次——`workers=2`、完整路徑用 `with_options()`，兩條路徑共用一份權重仍可並行，見 `hardware.md`「兩條路徑共用一份權重」）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值；Milestone 16：共用依 `translation.glossary` 建立的 `Glossary`，並各自包上 `ContextFallbackTranslator`——譯文像是翻出前文時不帶前文重翻一次，見 `translate.md`「前文處理」）、filter。
 
 ## Tech Stack
 

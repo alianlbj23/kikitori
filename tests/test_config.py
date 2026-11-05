@@ -24,6 +24,7 @@ from kikitori.config import (
     write_json_atomic,
 )
 from kikitori.config import store as store_module
+from kikitori.translate.glossary import GlossaryEntry
 
 
 def _with(path: str, value: Any) -> dict[str, Any]:
@@ -238,6 +239,134 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(s.translation.keep_warm_secs, 240)
         merged = Settings().merged({"translation": {"keep_warm_secs": 30}})
         self.assertEqual(merged.translation.keep_warm_secs, 30)
+
+    def test_glossary_defaults_and_round_trip(self) -> None:
+        s = Settings()
+        self.assertTrue(s.translation.glossary.builtin)
+        self.assertEqual(s.translation.glossary.entries, ())
+        self.assertEqual(
+            s.to_dict()["translation"]["glossary"], {"builtin": True, "entries": []}
+        )
+        entries = [
+            {"source": "ぺこら", "target": "佩克拉", "target_language": "zh-TW"},
+            {"source": "Hololive", "target": "hololive", "target_language": None},
+        ]
+        data = _with("translation.glossary", {"builtin": False, "entries": entries})
+        s = Settings.from_dict(data)
+        self.assertFalse(s.translation.glossary.builtin)
+        self.assertEqual(
+            s.translation.glossary.entries,
+            (
+                GlossaryEntry("ぺこら", "佩克拉", "zh-TW"),
+                GlossaryEntry("Hololive", "hololive", None),
+            ),
+        )
+        self.assertEqual(
+            s.to_dict()["translation"]["glossary"],
+            {"builtin": False, "entries": entries},
+        )
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
+
+    def test_glossary_missing_uses_default_without_migration(self) -> None:
+        # 新欄位有預設值：沒有 glossary 的 schema 3 設定檔照樣讀得進來，不必升 schema。
+        data = Settings().to_dict()
+        del data["translation"]["glossary"]
+        self.assertEqual(Settings.from_dict(data), Settings())
+        partial = _with("translation.glossary", {"entries": []})
+        self.assertTrue(Settings.from_dict(partial).translation.glossary.builtin)
+        merged = Settings().merged({"translation": {"glossary": {"builtin": False}}})
+        self.assertFalse(merged.translation.glossary.builtin)
+
+    def test_glossary_entry_language_is_normalized(self) -> None:
+        data = _with(
+            "translation.glossary",
+            {"entries": [{"source": "a", "target": "b", "target_language": "zh-tw"}]},
+        )
+        entry = Settings.from_dict(data).translation.glossary.entries[0]
+        self.assertEqual(entry.target_language, "zh-TW")
+        # target_language 可以省略（= 所有譯文語言）
+        data = _with(
+            "translation.glossary", {"entries": [{"source": "a", "target": "b"}]}
+        )
+        entry = Settings.from_dict(data).translation.glossary.entries[0]
+        self.assertIsNone(entry.target_language)
+
+    def test_glossary_validation(self) -> None:
+        good = {"source": "a", "target": "b", "target_language": None}
+        for glossary, path in [
+            ("on", "translation.glossary"),
+            ({"builtin": "yes"}, "translation.glossary.builtin"),
+            ({"extra": 1}, "translation.glossary.extra"),
+            ({"entries": {}}, "translation.glossary.entries"),
+            ({"entries": [good] * 501}, "translation.glossary.entries"),
+            ({"entries": ["a->b"]}, "translation.glossary.entries[0]"),
+            (
+                {"entries": [{**good, "note": "x"}]},
+                "translation.glossary.entries[0].note",
+            ),
+            ({"entries": [{"target": "b"}]}, "translation.glossary.entries[0].source"),
+            (
+                {"entries": [good, {**good, "source": ""}]},
+                "translation.glossary.entries[1].source",
+            ),
+            (
+                {"entries": [{**good, "source": "a\nb"}]},
+                "translation.glossary.entries[0].source",
+            ),
+            (
+                {"entries": [{**good, "target": "x" * 201}]},
+                "translation.glossary.entries[0].target",
+            ),
+            (
+                {"entries": [{**good, "target": 5}]},
+                "translation.glossary.entries[0].target",
+            ),
+            (
+                {"entries": [{**good, "target_language": "xx"}]},
+                "translation.glossary.entries[0].target_language",
+            ),
+            (
+                {"entries": [{**good, "target_language": "zh"}]},
+                "translation.glossary.entries[0].target_language",
+            ),
+            # 同一個原文寫法（不分大小寫與全半形）＋同一個譯文語言只能有一筆
+            (
+                {"entries": [good, {**good, "source": "Ａ", "target": "c"}]},
+                "translation.glossary.entries[1].source",
+            ),
+        ]:
+            with self.subTest(glossary=glossary):
+                self.assertInvalid(_with("translation.glossary", glossary), path)
+        # 同一個寫法、不同譯文語言可以並存
+        ok = {
+            "entries": [
+                good,
+                {**good, "target_language": "en"},
+                {**good, "target_language": "ko"},
+            ]
+        }
+        self.assertEqual(
+            len(
+                Settings.from_dict(
+                    _with("translation.glossary", ok)
+                ).translation.glossary.entries
+            ),
+            3,
+        )
+        self.assertEqual(
+            len(
+                Settings.from_dict(
+                    _with(
+                        "translation.glossary",
+                        {
+                            "entries": [good] * 1
+                            + [{**good, "source": f"s{i}"} for i in range(499)]
+                        },
+                    )
+                ).translation.glossary.entries
+            ),
+            500,
+        )
 
     def test_translation_fields_use_translator_validation(self) -> None:
         self.assertInvalid(

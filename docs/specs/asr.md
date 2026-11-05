@@ -161,7 +161,7 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 | 壓縮比 > `compression_ratio_threshold` | 2.4 | Whisper 的重複迴圈判斷 |
 | 正規化後完全等於已知幻覺句 | 19 語言實測片語表（可擴充） | Whisper 在無語音時的常見輸出（`experiments/hallucination_lexicon/`） |
 
-- 已知幻覺句清單**依 Whisper 語言碼分表**（`DEFAULT_HALLUCINATIONS`，`{語言碼: {"hard": frozenset, "soft": frozenset}}`），由 `asr/hallucination_lexicon.py` 的 `HALLUCINATION_LEXICON` 建立。那是 `experiments/hallucination_lexicon/lexicon.json`（Milestone 11：small／large-v3-turbo／large-v3 對強制 19 個語言、確定沒有人聲的 MUSAN 噪音與無人聲音樂、靜音、合成噪音與音效的輸出，人工分類；19 語言 + `"*"` 共 228 個片語）的 Python 版本——用 Python 資料而不是 JSON 資源，PyInstaller 隨匯入自動收進去，`packaging/engine/build.py` 不必另列資料檔。`tests/test_asr_hallucination_lexicon.py` 檢查兩者逐字一致，更新時改 `lexicon.json` 並重新產生該檔案。實測效果（README）：推薦組合的完整路徑（turbo final）在 VAD 通過的非語音上，幻覺率 52.8% → 10.3%（交叉驗證 11.0%）；即時路徑（small fast）12.8% → 5.1%。NFKC、去標點、小寫後**整句相等**才算：
+- 已知幻覺句清單**依 Whisper 語言碼分表**（`DEFAULT_HALLUCINATIONS`，`{語言碼: {"hard": frozenset, "soft": frozenset}}`），由 `asr/hallucination_lexicon.py` 的 `HALLUCINATION_LEXICON` 建立。那是 `experiments/hallucination_lexicon/lexicon.json`（Milestone 11：small／large-v3-turbo／large-v3 對強制 19 個語言、確定沒有人聲的 MUSAN 噪音與無人聲音樂、靜音、合成噪音與音效的輸出，人工分類；19 語言 + `"*"` 共 229 個片語；Milestone 16 加入 vtuber_eval 在純 BGM 上通過過濾的 ja hard「次の動画でお会いしましょう。」）的 Python 版本——用 Python 資料而不是 JSON 資源，PyInstaller 隨匯入自動收進去，`packaging/engine/build.py` 不必另列資料檔。`tests/test_asr_hallucination_lexicon.py` 檢查兩者逐字一致，更新時改 `lexicon.json` 並重新產生該檔案。實測效果（README）：推薦組合的完整路徑（turbo final）在 VAD 通過的非語音上，幻覺率 52.8% → 10.3%（交叉驗證 11.0%）；即時路徑（small fast）12.8% → 5.1%。NFKC、去標點、小寫後**整句相等**才算：
   - **hard**（整句字幕套話，例如日文「ご視聴ありがとうございました」「チャンネル登録よろしくお願いします」、英文「Thanks for watching!」「Please subscribe.」、中文「谢谢观看」「请不吝点赞 订阅 转发 打赏支持明镜与点点栏目」）：**所有語言的 hard 片語不論 `Transcript.language` 都套用**。這些句子幾乎不可能是另一個語言的正常語音，而 Whisper 常把它們標成別的語言（英文套話標成 `nl`、中文套話標成 `ja`）。
   - **soft**（真人也常單獨說的短句，例如「Thank you.」「you」「ありがとうございました」「おやすみなさい」「谢谢」）：只比對 `Transcript.language` 那一張表加上不分語言的 `ANY_LANGUAGE`（`"*"`）表，而且 `no_speech_probability > soft_no_speech_threshold`（0.3）時才過濾，避免把其他語言的正常句子濾掉。
 - `"*"` 表放字幕署名（Amara.org 的英／中文署名、large-v3 在靜音上輸出的挪威語署名「Teksting av Nicolai Winther」，其語言標籤不會是 `no`）。所有 hard 片語正規化後至少 4 字、且不與任何 soft 片語相同（測試檢查）。印地語、泰語沒有找到可確定是套話的句子，全部是 soft；越南語全部是 hard（訂閱宣傳與署名）。新增語言的資料改 `lexicon.json` 並重新產生 `hallucination_lexicon.py`；`FilterConfig(hallucinations=...)` 也接受單一集合（視為不分語言的 hard 片語），hard／soft 以外的鍵視為錯誤。
@@ -177,7 +177,9 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 | 即時（`is_final=False`，每 700 ms） | 單次延遲 < 間隔，落後就跳過 | `FAST_DECODE`：greedy、無溫度 fallback、最多 128 token、不帶 prompt | 單次延遲明顯低於 700 ms（CPU 上只有 tiny、base 做得到） |
 | 完整（`UtteranceEnded` 後） | 準確 | `FINAL_DECODE`：beam 5、溫度 (0.0, 0.2, 0.4)、帶前文 prompt | 在硬體預算內品質最高、單句延遲可接受（字幕情境 < 約 2 s） |
 
-兩者可以是同一個模型（例如 GPU 充足時都用 `large-v3-turbo`），pipeline 仍建立兩個實例以便並行。
+兩者可以是同一個模型（例如 th／ar／hi 的推薦兩條都用 `large-v3`）。模型、精度、執行緒數都相同時，pipeline 只載入一次
+（`load_transcriber(workers=2)` → CTranslate2 `inter_threads=2`，同一裝置的 worker 共用權重），完整路徑用
+`WhisperTranscriber.with_options()` 換成自己的解碼參數與 lock，兩條路徑仍可並行；依據見 `hardware.md`「兩條路徑共用一份權重」。
 
 ## 硬體等級推薦（供 `hardware` 模組使用）
 
@@ -185,7 +187,7 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 
 | 等級 | 判斷條件（建議） | 即時模型 | 完整模型 | 依據（本機延遲／資源） | 備註 |
 |---|---|---|---|---|---|
-| NVIDIA ≥ 8 GB VRAM | 偵測到 NVIDIA GPU、VRAM ≥ 8 GB、cuBLAS 可載入 | `small` CUDA float16 | `large-v3-turbo` CUDA float16 | 0.13 s＋0.15 s；VRAM 約 1.0＋2.3 GB | 品質最佳且最快；保留 ≥ 4 GB 給翻譯 LLM。turbo 的 no_speech 不可用，以 small 的 no_speech 與 VAD 輔助過濾。VRAM 寬裕（≥ 12 GB 且不跑本機 LLM）可改 `large-v3`（0.33 s、4.2 GB），本機樣本上品質與 turbo 相當 |
+| NVIDIA ≥ 8 GB VRAM（Milestone 16） | 偵測到 NVIDIA GPU、VRAM ≥ 8 GB、cuBLAS 可載入 | `large-v3-turbo` CUDA float16 或 int8_float16 | `large-v3` CUDA float16 或 int8_float16 | 延遲中位約 0.16 s（turbo greedy，GPU 共用下）＋0.27–0.41 s（large-v3 f16／int8 單獨執行）；VRAM 2.9–6.0 GB | `experiments/vtuber_eval`：YODAS 口語 CER turbo 比 small 低 5.6 點；BGM 10／5 dB 時 large-v3 完整路徑比 turbo 好 4.1／5.3 點；int8_float16 品質不變。精度依與本機翻譯 LLM 共用時的 VRAM 預算決定，連 4B 都放不下時即時改 `small`（見 `hardware.md`「8 GB 以上等級的組合」）。th／ar／hi 即時也用 `large-v3`（turbo 是 C 級），共用一份權重。large-v3 的 no_speech 可用 |
 | NVIDIA 4–8 GB VRAM | 同上，4 GB ≤ VRAM < 8 GB | `base` CUDA int8_float16 | `large-v3-turbo` CUDA int8_float16 | 0.07–0.19 s＋0.17 s；VRAM 約 0.45＋1.25 GB | 留空間給翻譯 LLM；int8_float16 比 float16 慢 5–50% 但省一半 VRAM |
 | NVIDIA < 4 GB VRAM | VRAM < 4 GB | `base` CUDA int8_float16 | `small` CUDA int8_float16 | 0.07–0.19 s＋0.18 s；VRAM 約 0.45＋0.65 GB | 若翻譯 LLM 也在 GPU，VRAM 可能仍不足，改用 CPU 等級 |
 | CPU、RAM ≥ 16 GB | 沒有可用 NVIDIA GPU（或 cuBLAS 不可載入），RAM ≥ 16 GB | `base` CPU int8 | `small` CPU int8 | 0.45 s＋1.3 s；RAM 約 0.35＋0.95 GB | 8 核以上 CPU 實測。`medium`（3.6 s、RTF 0.9）與 `large-v3-turbo`（5.1 s、RTF 1.2）在 CPU 上太慢，不建議 |
@@ -216,6 +218,9 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 - 指令：`uv run python -m unittest discover -s tests`、`uv run ruff check`。
 
 ## 已知限制與待驗證
+
+- Milestone 16：兩條路徑共用權重時第二個 worker 的 VRAM 以 512 MiB 估計（`hardware.SHARED_WORKER_EXTRA_MB`），沒有單獨量測；
+  新推薦組合（turbo int8 ／ large-v3 int8 ＋ qwen3.5:9b）在 12 GB 卡上的實際 VRAM 由端到端驗收量測（`vtuber-profile.md`）。
 
 - 只量了 12 段日文（動漫、VTuber）；英文、中文的準確度與語言偵測未量測。CER 樣本只有 6 段且受片假名人名影響。
 - macOS（Apple Silicon，Accelerate）與 Linux 未在實機執行：快取目錄只有單元測試；Linux 的 cuBLAS 預載（`ctypes.CDLL` + `RTLD_GLOBAL`）未實測。

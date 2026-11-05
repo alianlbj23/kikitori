@@ -219,6 +219,8 @@ class LexiconFilteringTest(unittest.TestCase):
     def test_representative_hard_phrases_per_language(self) -> None:
         for phrase in (
             "ご視聴ありがとうございました",
+            # vtuber_eval：large-v3 即時路徑在純 BGM 上輸出、且通過過濾的套話
+            "次の動画でお会いしましょう。",
             "Thanks for watching!",
             "字幕by索兰娅",
             "다음 영상에서 만나요.",

@@ -15,6 +15,9 @@ from kikitori.languages import WHISPER_CODES
 from kikitori.pipeline import factory
 from kikitori.pipeline.types import PipelineComponents
 from kikitori.translate import (
+    ContextFallbackTranslator,
+    OpenAICompatibleTranslator,
+    Term,
     TranslationError,
     TranslationRequest,
     TranslationTimeoutError,
@@ -148,9 +151,42 @@ class FactoryTest(unittest.TestCase):
 
     def test_translators(self) -> None:
         fast, final = factory.create_translators(Settings())
-        self.assertEqual(fast.config.max_retries, 0)
-        self.assertLess(fast.config.read_timeout, final.config.read_timeout)
-        self.assertEqual(final.config.model, Settings().translation.final_model)
+        # 兩條路徑都包上前文保險（譯文像是翻出前文時改不帶前文重翻）
+        self.assertIsInstance(fast, ContextFallbackTranslator)
+        self.assertIsInstance(final, ContextFallbackTranslator)
+        fast_inner, final_inner = fast.inner, final.inner
+        assert isinstance(fast_inner, OpenAICompatibleTranslator)
+        assert isinstance(final_inner, OpenAICompatibleTranslator)
+        self.assertEqual(fast_inner.config.max_retries, 0)
+        self.assertLess(fast_inner.config.read_timeout, final_inner.config.read_timeout)
+        self.assertEqual(final_inner.config.model, Settings().translation.final_model)
+
+    def test_translators_share_the_glossary_from_settings(self) -> None:
+        settings = Settings().merged(
+            {
+                "translation": {
+                    "glossary": {
+                        "builtin": False,
+                        "entries": [{"source": "ぺこら", "target": "佩克拉"}],
+                    }
+                }
+            }
+        )
+        fast, final = factory.create_translators(settings)
+        assert isinstance(fast.inner, OpenAICompatibleTranslator)
+        assert isinstance(final.inner, OpenAICompatibleTranslator)
+        glossary = fast.inner.glossary
+        self.assertIs(final.inner.glossary, glossary)
+        assert glossary is not None
+        self.assertFalse(glossary.builtin)
+        self.assertEqual(
+            glossary.lookup("ぺこらのスパチャ", "ja", "zh-TW"),
+            (Term("ぺこら", "佩克拉"),),
+        )
+        default_fast, _ = factory.create_translators(Settings())
+        assert isinstance(default_fast.inner, OpenAICompatibleTranslator)
+        assert default_fast.inner.glossary is not None
+        self.assertTrue(default_fast.inner.glossary.builtin)
 
     def test_transcript_filter_uses_asr_rules(self) -> None:
         from kikitori.asr.types import Transcript
@@ -226,6 +262,67 @@ class BuildComponentsAsrTest(unittest.TestCase):
         self.assertEqual(fast["cuda_library_dirs"], expected)
         self.assertEqual(final["cuda_library_dirs"], expected)
         self.auto_threads.assert_not_called()
+
+    def test_same_model_and_precision_loads_once_with_two_workers(self) -> None:
+        # th／ar／hi 的推薦讓即時與完整都用 large-v3：權重只載入一份，CTranslate2 的兩個
+        # worker 共用，VRAM 只算一個模型。
+        settings = Settings().merged(
+            {
+                "source_language": "th",
+                "asr": {
+                    "fast_model": "large-v3",
+                    "final_model": "large-v3",
+                    "device": "cuda",
+                    "fast_compute_type": "int8_float16",
+                    "final_compute_type": "int8_float16",
+                },
+            }
+        )
+        components = factory.build_components(settings, "media")
+        self.load.assert_called_once()
+        call = self.load.call_args
+        self.assertEqual(call.args[0].id, "large-v3")
+        self.assertEqual(call.kwargs["workers"], 2)
+        self.assertEqual(call.kwargs["options"].beam_size, 1)
+        shared = self.load.return_value
+        self.assertIs(components.fast_transcriber, shared)
+        shared.with_options.assert_called_once()
+        final_options = shared.with_options.call_args.args[0]
+        self.assertGreater(final_options.beam_size, 1)
+        self.assertEqual(final_options.forced_language, "th")
+        self.assertIs(components.final_transcriber, shared.with_options.return_value)
+
+    def test_default_precision_counts_as_the_device_default(self) -> None:
+        # 與 hardware 的 VRAM 計算一致：null 精度在固定裝置上就是該裝置的預設精度
+        # （CUDA float16），和明寫的 float16 是同一份權重。
+        settings = Settings().merged(
+            {
+                "asr": {
+                    "fast_model": "large-v3",
+                    "final_model": "large-v3",
+                    "device": "cuda",
+                    "fast_compute_type": None,
+                    "final_compute_type": "float16",
+                }
+            }
+        )
+        factory.build_components(settings, "media")
+        self.load.assert_called_once()
+        self.assertEqual(self.load.call_args.kwargs["workers"], 2)
+
+    def test_different_precision_or_threads_loads_two_models(self) -> None:
+        for asr in (
+            {"fast_compute_type": "float16", "final_compute_type": "int8_float16"},
+            {"device": "cpu", "fast_cpu_threads": 2, "final_cpu_threads": 4},
+        ):
+            with self.subTest(asr=asr):
+                self.load.reset_mock()
+                settings = Settings().merged(
+                    {"asr": {"fast_model": "small", "final_model": "small", **asr}}
+                )
+                calls = self._calls(settings)
+                self.assertEqual(calls["fast"]["workers"], 1)
+                self.assertEqual(calls["final"]["workers"], 1)
 
     def test_auto_threads_and_no_runtime(self) -> None:
         self.runtime_dir.return_value = None

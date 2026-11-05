@@ -18,6 +18,7 @@ from typing import Any, Literal, cast
 from kikitori.languages import UnknownLanguageError, get_language, normalize_language
 from kikitori.pipeline.types import MODES, Mode
 from kikitori.translate import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TranslatorConfig
+from kikitori.translate.glossary import MAX_USER_ENTRIES, GlossaryEntry, match_key
 
 SCHEMA_VERSION = 3
 """目前的設定檔版本；改變結構時加一並在 `MIGRATIONS` 補上轉換。"""
@@ -151,6 +152,19 @@ class AsrSettings:
 
 
 @dataclass(frozen=True)
+class GlossarySettings:
+    """翻譯術語表（`translate.glossary`）。
+
+    Attributes:
+        builtin: 是否使用內建的日語直播用語（原文是日語、譯文是 zh-TW／zh-CN／en／ko 時）。
+        entries: 使用者詞條（最多 `MAX_USER_ENTRIES` 筆）；同一個原文寫法優先於內建表。
+    """
+
+    builtin: bool = True
+    entries: tuple[GlossaryEntry, ...] = ()
+
+
+@dataclass(frozen=True)
 class TranslationSettings:
     """OpenAI 相容翻譯 API 的位置與模型；`api_key_env` 是環境變數名稱，不是金鑰。
 
@@ -163,6 +177,7 @@ class TranslationSettings:
             預熱請求，讓模型不被卸載（Ollama 預設閒置 5 分鐘就卸載，OpenAI 相容端點
             無法指定 keep_alive）。0 關閉；遠端服務一律不送。
         enabled: False 時只顯示原文：pipeline 不呼叫翻譯伺服器，也不預熱、不保溫。
+        glossary: 術語表設定；每句只把原文出現的詞放進提示詞。
     """
 
     enabled: bool = True
@@ -172,6 +187,7 @@ class TranslationSettings:
     api_key_env: str = DEFAULT_API_KEY_ENV
     allow_restricted: bool = False
     keep_warm_secs: int = 240
+    glossary: GlossarySettings = field(default_factory=GlossarySettings)
 
 
 @dataclass(frozen=True)
@@ -260,6 +276,17 @@ class Settings:
                 "api_key_env": self.translation.api_key_env,
                 "allow_restricted": self.translation.allow_restricted,
                 "keep_warm_secs": self.translation.keep_warm_secs,
+                "glossary": {
+                    "builtin": self.translation.glossary.builtin,
+                    "entries": [
+                        {
+                            "source": e.source,
+                            "target": e.target,
+                            "target_language": e.target_language,
+                        }
+                        for e in self.translation.glossary.entries
+                    ],
+                },
             },
             "pipeline": {
                 "partial_interval_ms": self.pipeline.partial_interval_ms,
@@ -361,15 +388,22 @@ def _deep_merge(base: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any
 
 
 def _section(
-    data: Mapping[str, Any], key: str, allowed: tuple[str, ...]
+    data: Mapping[str, Any],
+    key: str,
+    allowed: tuple[str, ...],
+    path: str | None = None,
 ) -> dict[str, Any]:
-    """取出子物件並擋掉未知欄位；缺少時回傳空 dict（全部用預設值）。"""
+    """取出子物件並擋掉未知欄位；缺少時回傳空 dict（全部用預設值）。
+
+    `path` 是錯誤訊息用的完整路徑（巢狀物件用，例如 `translation.glossary`），預設為 `key`。
+    """
     if key not in data:
         return {}
+    path = key if path is None else path
     value = data[key]
     if not isinstance(value, Mapping):
-        raise SettingsError(f"{key}: expected an object, got {type(value).__name__}")
-    _reject_unknown(value, allowed, prefix=f"{key}.")
+        raise SettingsError(f"{path}: expected an object, got {type(value).__name__}")
+    _reject_unknown(value, allowed, prefix=f"{path}.")
     return dict(value)
 
 
@@ -538,6 +572,7 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
             "api_key_env",
             "allow_restricted",
             "keep_warm_secs",
+            "glossary",
         ),
     )
     values: dict[str, str] = {}
@@ -579,7 +614,57 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
         enabled=enabled,
         allow_restricted=allow_restricted,
         keep_warm_secs=keep_warm_secs,
+        glossary=_parse_glossary(section),
     )
+
+
+_GLOSSARY_ENTRY_KEYS = ("source", "target", "target_language")
+
+
+def _parse_glossary(section: Mapping[str, Any]) -> GlossarySettings:
+    """`translation.glossary`：內建表開關與使用者詞條（UI 的術語表編輯器直接寫入）。"""
+    default = GlossarySettings()
+    path = "translation.glossary"
+    data = _section(section, "glossary", ("builtin", "entries"), path)
+    builtin = _boolean(data.get("builtin", default.builtin), f"{path}.builtin")
+    raw = data.get("entries", [])
+    if not isinstance(raw, list) or len(raw) > MAX_USER_ENTRIES:
+        raise SettingsError(
+            f"{path}.entries: expected a list of at most {MAX_USER_ENTRIES} entries, "
+            f"got {type(raw).__name__} of length "
+            f"{len(raw) if isinstance(raw, list) else '-'}"
+        )
+    entries: list[GlossaryEntry] = []
+    seen: set[tuple[str, str | None]] = set()
+    for i, item in enumerate(raw):
+        entry_path = f"{path}.entries[{i}]"
+        if not isinstance(item, Mapping):
+            raise SettingsError(
+                f"{entry_path}: expected an object, got {type(item).__name__}"
+            )
+        _reject_unknown(item, _GLOSSARY_ENTRY_KEYS, prefix=f"{entry_path}.")
+        for name in ("source", "target"):
+            if name not in item:
+                raise SettingsError(f"{entry_path}.{name}: missing")
+        language = item.get("target_language")
+        if language is not None:
+            language = _language(language, f"{entry_path}.target_language")
+        try:
+            entry = GlossaryEntry(item["source"], item["target"], language)
+        except (TypeError, ValueError) as exc:
+            # 例外訊息以欄位名稱開頭（"source must ..."），取出來組成完整路徑
+            name = str(exc).split(" ", 1)[0]
+            field_path = name if name in _GLOSSARY_ENTRY_KEYS else "source"
+            raise SettingsError(f"{entry_path}.{field_path}: {exc}") from exc
+        key = (match_key(entry.source), entry.target_language)
+        if key in seen:
+            raise SettingsError(
+                f"{entry_path}.source: duplicate of an earlier entry "
+                f"({entry.source!r} for target_language {entry.target_language!r})"
+            )
+        seen.add(key)
+        entries.append(entry)
+    return GlossarySettings(builtin=builtin, entries=tuple(entries))
 
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:

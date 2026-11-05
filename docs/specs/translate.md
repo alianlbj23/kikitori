@@ -3,6 +3,8 @@
 > 狀態：已採用（2026-11-05，使用者授權自主實作）。
 > 上層約定：`docs/specs/app-architecture.md` 的 `translate` 一節；本文件不得與之矛盾。
 > 實測結果與各項決定的依據：`experiments/translate_benchmark/README.md`。
+> Milestone 16（日語直播特化，`docs/specs/vtuber-profile.md`）：Qwen3.5／HY-MT 溫度改 0、內建直播術語表與使用者術語表、
+> 前文保險（`ContextFallbackTranslator`）、特殊 token 碎片清除與選擇性繁簡轉換只轉簡體片段；依據 `experiments/translate_eval/README.md`。
 
 ## 前提假設
 
@@ -66,7 +68,10 @@ class TranslatorConfig:
     max_context_lines: int = 3           # 只取最後幾句前文
     convert_script: bool = True          # 依譯文語言做字形轉換（見「後處理」）
 
-translator = OpenAICompatibleTranslator(TranslatorConfig(model="qwen3.5:9b"))
+translator = OpenAICompatibleTranslator(
+    TranslatorConfig(model="qwen3.5:9b"),
+    glossary=Glossary(),                 # 選用：術語表（見「術語表」）
+)
 translator.translate(TranslationRequest("おはよう", "ja"))
 ```
 
@@ -81,7 +86,7 @@ translator.translate(TranslationRequest("おはよう", "ja"))
   "model": "<model>",
   "messages": [...],
   "stream": true | false,
-  "temperature": 0.7,
+  "temperature": 0,
   "top_p": 0.8,
   "presence_penalty": 1.5,
   "max_tokens": 256,
@@ -113,13 +118,28 @@ Translate the following segment into {target_language}, without additional expla
 {source_text}
 ```
 
+**術語干預**（Milestone 16）：這句有術語時改用官方的術語干預範本（model card「Prompt Template for terminology
+intervention」，2026-11-06 查閱）。官方範本一次一條、只有中文版，所以任何語言組合都用它與中文語言名，多條時逐行列出：
+
+```text
+参考下面的翻译：
+{source_term} 翻译成 {target_term}
+{source_term} 翻译成 {target_term}
+
+将以下文本翻译为{target_language}，注意只需要输出翻译后的结果，不要额外解释：
+{source_text}
+```
+
 官方另有 contextual 範本（`{context}\n参考上面的信息，把下面的文本翻译成{target_language}，注意不需要翻译上文，也不要额外解释：\n{source_text}`），`prompts.py` 有實作（官方只有這個中文版，任何組合帶前文時都用它），但兩個 HY-MT 預設組都**關閉前文**（`supports_context=False`）：實測 1.8B 有 11/12 次把前文或指令一起輸出，7B 在實測句組中也會把前一句一起翻出來。
 
 ### `sakura`（SakuraLLM Sakura-GalTransl-7B-v3）
 
 依官方 model card 的 v3 範本（system prompt 原文照用，含「翻译成简体中文」）。只支援 `ja → zh-TW`、`ja → zh-CN`；模型輸出簡體，zh-TW 靠 OpenCC 轉成繁體。
 
-- 官方的 `[History]` 欄位是「上一輪的**譯文**」，而本模組的 `context` 是前文**原文**，格式不合，因此不使用前文；術語表（`[Glossary]`）留空。
+- 官方的 `[History]` 欄位是「上一輪的**譯文**」，而本模組的 `context` 是前文**原文**，格式不合，因此不使用前文。
+- 術語表（`[Glossary]`，Milestone 16）：官方的 GPT 字典格式，每行 `src->dst`（`#备注` 選用，本模組不用），放在
+  「参考以下术语表（可为空，格式为src->dst #备注）：」與「根据以上术语表…」之間；沒有術語時是空行，與先前完全相同。
+  譯法照譯文語言給（zh-TW 時是繁體），模型照抄後由後處理的選擇性繁簡轉換保留。
 
 ### `generic`（Qwen3.5 與未知模型）
 
@@ -147,20 +167,52 @@ system 訊息寫規則、user 訊息放前文與待翻句子。目標 `zh-TW`、
 
 目標 `zh-CN`、`ja`、`en` 用同樣結構的簡體中文／日文／英文版本，其他目標用英文版本加上目標語言名稱（見 `prompts.py`）。沒有前文時省略前文段落。
 
+**術語**（Milestone 16）：這句有術語時，在前文之後、指示之前加一段「原文 → 譯法」（WMT 術語任務的做法），標題用指示的語言：
+zh-TW「術語（原文出現時請用這些譯法）：」、zh-CN「术语（原文出现时请用这些译法）：」、ja「用語（原文に出てきたらこの訳を使う）：」、
+en 與其他目標「Terminology (use these translations when the terms appear):」。
+
+```text
+術語（原文出現時請用這些譯法）：
+赤スパ → 紅色超級留言
+推し → 推
+
+請翻譯成繁體中文：
+赤スパありがとう！推しが尊い
+```
+
+沒有術語時提示詞與先前完全相同。
+
 ### 前文處理
 
 - 只取 `context` 最後 `max_context_lines`（預設 3）句；空白字串略過；預設組 `supports_context=False` 時不放前文。
 - 前文只當參考，提示詞明確要求不要翻譯。
+- **前文保險**（Milestone 16，`context_guard.py` 的 `ContextFallbackTranslator`，pipeline 的 factory 包在兩條路徑的翻譯器外面）：
+  帶前文的譯文看起來把前文也翻出來時，改**不帶前文重翻一次**（只重翻一次，結果照用）。判斷（`looks_like_context_leak()`）：
+  - 長度：譯文字數 > 原文字數 × 3 **且** > 40 字。原文是中日韓（ja、zh、ko）、譯文是拼音文字時倍數用 8（日文一字常對應好幾個英文
+    字母；translate_eval 的「過長」對英文也用 8 倍），否則正常的英譯會被誤判。
+  - 抄出前文：任一句 ≥ 6 字的前文原句（NFKC 正規化後）完整出現在譯文裡。
+  - `stream()`：每次累積的譯文都檢查，一符合任一條件（過長，或已完整抄出某句前文）就關掉原本的串流、改送不帶前文的請求（字幕不必等錯的譯文說完；異常的那一段不產出）。請求驗證與被包住的翻譯器一樣在呼叫 `stream()` 時進行。
+  - 依據：translate_eval 中前文讓 ASR 片段的 COMET 顯著提高（9B +0.015、4B +0.032），所以前文要留；代價是 4B 在 social 的標籤行上
+    3–4/311 次把前兩句的譯文也輸出。log 只記長度，不記原文與譯文。
 
 ## 後處理
 
 依序：
 
 1. **去掉思考內容**：移除 `<think>…</think>`（也接受 `<thinking>`，不分大小寫）；只有開頭標籤而尚未結束（串流中）時，從標籤起全部丟掉；只出現結束標籤（聊天範本已預先放入開頭標籤）時，丟掉結束標籤之前的內容；結尾是不完整的開頭標籤（例如串流剛好切在 `<thi`）時先藏起來。OpenAI 相容串流中另外放在 `delta.reasoning`／`reasoning_content` 的推理內容一律不讀。
-2. **整理字幕**：移除漏出來的特殊 token（`<|eos|>`、`<|extra_0|>` 等，以及結尾的 `<|` 碎片；實測 HY-MT 1.8B 會出現）；去頭尾空白；去掉開頭的「譯文：」「翻譯：」「翻訳：」「번역:」「Translation:」「Traducción:」「Перевод:」等「標籤＋冒號」；整句被同一對引號（`"…"`、`「…」`、`『…』`、`“…”` 等）包住、且內部沒有同種引號時去掉外層引號。
+2. **整理字幕**：移除漏出來的特殊 token：`<|` 在一般字幕裡不會出現，所以只要看到它就當成特殊 token 的開頭，碎片本身到第一個 `>`、
+   換行、下一個 `<` 或文字結尾為止（最多 40 字），涵蓋完整的 `<|eos|>`、`<|extra_0|>` 與沒有收尾的 `<|/code>`、`<|extra_0>`、
+   `<|begin_quote>`、`<| recreation |`（translate_eval：HY-MT 1.8B 在 zh_social 6–12/311 句留下這種碎片）。開頭的 token 只去掉
+   token 本身；其他位置的 token **連同之後的文字一起丟掉**：模型已越過回合結尾，錯誤清單裡 token 之後幾乎都是同一句再輸出一次
+   （`…嗎？<|begin_quote>…嗎？`）或憑空續寫的段落。`a < b`、`a|b` 這類一般文字不受影響；去頭尾空白；去掉開頭的「譯文：」「翻譯：」「翻訳：」「번역:」「Translation:」「Traducción:」「Перевод:」等「標籤＋冒號」；整句被同一對引號（`"…"`、`「…」`、`『…』`、`“…”` 等）包住、且內部沒有同種引號時去掉外層引號。
 3. **字形轉換**（`convert_script=True`，依語言清單的 `script_conversion`）：目標 `zh-CN` 整句以 OpenCC `t2s` 轉簡體；目標 `zh-TW` 做以下選擇性簡轉繁：
    - 先找「簡體專用字」：OpenCC `s2tw` 會改掉、且不在 Big5 字集內的漢字，另加 `么于网扰`（在 Big5 內但台灣文字幾乎只以簡體身分出現）。Big5 用來排除「才、吃、伙、台、里、后」這類兩岸通用、OpenCC 卻會改寫的字。
    - **有簡體專用字才轉**，用 OpenCC `s2twp`（台灣正體＋台灣慣用詞，例如 视频→影片、软件→軟體）。沒有就原樣回傳：實測 `s2twp` 會把正確的「那個傢伙」改成「那個傢夥」、「台灣」改成「臺灣」。
+   - **整句都是簡體**（沒有任何「繁體專用字」＝ OpenCC `t2s` 會改掉的漢字，例如 Sakura 的輸出）：整句 `s2twp`（維持先前行為）。
+   - **繁體為主、只漏出幾個簡體字**（Milestone 16；translate_eval：HY-MT 7B 的 zh-TW 原始輸出有 4–14% 是這種句子）：只轉簡體專用字
+     附近的片段——每個簡體專用字加上兩側各一個相鄰漢字（給 OpenCC 詞組比對，例如「后来」「干净」「头发」），重疊的片段合併；
+     片段先 `t2s` 再 `s2twp`（「頭发」→「头发」→「頭髮」），片段裡原本就是「台」「伙」「吃」的字保留原字。句中其他字維持原樣，
+     不再產生「露臺」「傢夥」「好喫」。
    - OpenCC 的 Python 綁定沒有說明執行緒安全性，轉換時加鎖。
 
 清理後為空字串時丟 `TranslationResponseError`：模型只輸出思考或空白屬於異常，交給呼叫端決定是否略過。
@@ -194,11 +246,17 @@ system 訊息寫規則、user 訊息放前文與待翻句子。目標 `zh-TW`、
 
 | 預設組（Ollama 名稱） | 格式 | 語言組合 | 前文 | 取樣參數（來源） | 權重 | 授權 |
 |---|---|---|---|---|---|---|
-| `qwen3.5:9b`（Q4_K_M） | `generic`，`reasoning_effort: none` | 清單 20 種任意方向 | 是 | 非思考模式：temperature 0.7、top_p 0.8、presence_penalty 1.5（model card） | 6.6 GB | Apache-2.0 |
+| `qwen3.5:9b`（Q4_K_M） | `generic`，`reasoning_effort: none` | 清單 20 種任意方向 | 是 | **temperature 0**（translate_eval）；top_p 0.8、presence_penalty 1.5（model card 非思考模式） | 6.6 GB | Apache-2.0 |
 | `qwen3.5:4b`（Q4_K_M） | 同上 | 清單 20 種任意方向 | 是 | 同上 | 3.3 GB | Apache-2.0 |
-| `hy-mt1.5-7b:latest`（Q4_K_M） | `hunyuan_mt` | 清單 20 種任意方向 | 否 | temperature 0.7、top_p 0.6（model card） | 4.6 GB | Tencent HY Community License ⚠ |
+| `hy-mt1.5-7b:latest`（Q4_K_M） | `hunyuan_mt` | 清單 20 種任意方向 | 否 | **temperature 0**（translate_eval）；top_p 0.6（model card） | 4.6 GB | Tencent HY Community License ⚠ |
 | `hy-mt1.5-1.8b:latest`（Q8_0） | `hunyuan_mt` | 清單 20 種任意方向 | 否 | 同上 | 1.9 GB | Tencent HY Community License ⚠ |
 | `hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS` | `sakura` | 只有 `ja → zh-TW`／`zh-CN` | 否 | temperature 0.3、top_p 0.8（model card） | 4.3 GB | CC BY-NC-SA 4.0 ⚠ |
+
+**溫度（Milestone 16）**：Qwen3.5 與 HY-MT 一律 0（greedy）。translate_eval（有參考譯文、paired bootstrap 1,000 次）：Qwen3.5
+溫度 0 讓 ja→zh 兩個資料集的 chrF 都顯著提高（speech +0.65～+0.75，p ≤ 0.002；social +2.1～+2.3，p < 0.001），social 的
+COMET 也顯著提高（9B +0.0094、4B +0.0117），ja→en 沒有變差；HY-MT 的 0 與 0.7 沒有實質差別，改 0 換取可重現的輸出（同一句
+重翻得到同一個譯文，字幕不跳動）。溫度 0 時 `top_p` 不起作用（只是與評測設定一致而保留）；`presence_penalty` 是對 logits 的
+懲罰，greedy 時仍有作用，而評測的溫度 0 設定就帶著 1.5，所以照送。Sakura 沒有比較過，維持官方建議的 0.3。
 
 授權限制（UI 選模型時要顯示）：
 
@@ -209,6 +267,27 @@ system 訊息寫規則、user 訊息放前文與待翻句子。目標 `zh-TW`、
 `ModelPreset` 帶有 `license`、`license_url`、`commercial_use`、`excluded_regions` 欄位，供 UI 顯示與 `recommend` 過濾。
 
 語言支援：`languages`（支援的清單語言碼）＋選用的 `pairs`（只支援特定方向時的（Whisper 原文, 清單譯文）組合，例如 Sakura；其方向清單 `SAKURA_PAIRS` 定義在 `translate/languages.py`，預設組與提示詞共用同一份）。`supports(preset, source, target)` 回傳能否翻譯；語言碼不合法或 Whisper 語言相同時回傳 False。Qwen3.5 的 model card 只寫「201 languages and dialects」而沒有列表，清單的 20 種主流語言視為全部支援；HY-MT 依 model card 語言表。
+
+## 術語表（Milestone 16，`glossary.py`）
+
+- **為什麼**：translate_eval 的 VTuber 句中，連 Qwen3.5 9B 都把 赤スパ 譯成「紅色辣椒粉」、推し 譯成「我喜歡的人」、メン限 譯成
+  "men's lineup"；HY-MT 7B 把 スパチャ 音譯成「斯帕查」。WMT 術語任務與 HY-MT 官方術語範本都是「出現才給」：提示詞短、不會讓
+  模型把沒出現的詞塞進譯文。
+- **內建表**（`BUILTIN_TERMS`，Python 資料，打包不需額外設定）：53 個詞條，只用於原文是日語（Whisper `ja`）、譯文是 zh-TW／zh-CN／
+  en／ko；每個詞條有原文寫法變體（例如 スパチャ／スーパーチャット）與各語言譯法，沒有可靠譯法的語言不列（例如 てぇてぇ、ガチ恋、
+  中の人 沒有韓文）。有平台官方名稱者用官方名稱：YouTube 繁中介面的 Super Chat＝「超級留言」、Super Sticker＝「超級貼圖」、
+  會員＝「頻道會員」、會員限定＝「會員專屬」；其餘用中文／英文／韓文 VTuber 社群的通用說法（聯動、切片、歌回、斗內、業配、
+  collab、clipper、최애、ㅋㅋㅋ）。容易和一般用語撞字的詞只收不會誤判的寫法：不收單獨的「草」「箱」「枠」「おつ」「メンバー」
+  「案件」「耐久」「初見」，改收「草生え／大草原」「箱推し」「歌枠／雑談枠」「おつです」「メンバーシップ／メン限」「案件配信」
+  「耐久配信」「初見さん／初見プレイ」。8888（拍手）特別收錄：中文的 8888 是「掰掰」，最容易被誤譯。
+- **使用者詞條**：設定 `translation.glossary.entries`（見 `pipeline-engine.md`）；任何原文語言都適用。同一個原文寫法時使用者的
+  譯法優先於內建表，指定 `target_language` 的優先於不指定的。
+- **比對**（`Glossary.lookup(text, source_language, target_language)`）：原文與詞條都以 NFKC＋casefold 正規化（全形英數、半形片假名、
+  大小寫統一：ｗｗｗ＝www、ｽﾊﾟﾁｬ＝スパチャ），同一位置取最長的寫法（「スパチャ読み」優先於「スパチャ」），找到的範圍不重疊；
+  依出現順序、不重複，**最多 8 條**（`MAX_TERMS_PER_REQUEST`）。正規化後的比對表依（原文語言, 譯文語言）快取。
+- **注入**：`OpenAICompatibleTranslator(glossary=...)` 在 `_prepare()` 查這句的術語，交給 `build_messages(style, request, terms)`；
+  三種提示詞的格式見上。pipeline 的 factory 以設定建立一個 `Glossary`，兩條路徑共用。
+- **評測**：見 `experiments/translate_eval/README.md`「術語表」一節（VTuber 句術語表開／關、WMT25 speech 的 COMET 不退步）。
 
 ### 依 VRAM 的推薦順序（給 hardware 模組使用）
 
@@ -258,10 +337,14 @@ src/kikitori/translate/
   presets.py       → ModelPreset、各模型預設組、VRAM 推薦
   prompts.py       → 依 PromptStyle 組 messages
   postprocess.py   → 去思考內容、整理字幕、簡體偵測與簡轉繁
-  client.py        → TranslatorConfig、OpenAICompatibleTranslator（HTTP、SSE、重試）
+  client.py        → TranslatorConfig、OpenAICompatibleTranslator（HTTP、SSE、重試、術語注入）
+  glossary.py      → 內建直播術語表、使用者詞條、Glossary.lookup()（Milestone 16）
+  context_guard.py → ContextFallbackTranslator：譯文像是翻出前文時不帶前文重翻（Milestone 16）
 tests/
-  test_translate_prompts.py → 語言驗證、提示詞、預設組、後處理、VRAM 推薦
-  test_translate_client.py  → 本機假伺服器：成功、串流、錯誤、逾時、重試、API key、輸入驗證
+  test_translate_prompts.py       → 語言驗證、提示詞、預設組（含溫度）、後處理（特殊 token、選擇性繁簡轉換）、VRAM 推薦
+  test_translate_client.py        → 本機假伺服器：成功、串流、錯誤、逾時、重試、API key、輸入驗證、術語注入
+  test_translate_glossary.py      → 內建表資料、出現才注入、最長比對、上限、使用者覆寫、各提示詞格式
+  test_translate_context_guard.py → 假翻譯器：長度異常／抄出前文時重翻一次（translate 與 stream）
 experiments/translate_benchmark/
   menu.py          → 互動選單：列出模型、執行實測、顯示摘要
   lines.json       → 測試句（自寫）
