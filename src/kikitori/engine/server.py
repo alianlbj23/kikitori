@@ -141,6 +141,7 @@ class EngineServer:
             "settings.get": self._settings_get,
             "settings.set": self._settings_set,
             "settings.apply_recommendation": self._settings_apply_recommendation,
+            "settings.preview_recommendation": self._settings_preview_recommendation,
             "session.start": self._session_start,
             "session.stop": self._session_stop,
             "engine.shutdown": self._engine_shutdown,
@@ -295,7 +296,12 @@ class EngineServer:
 
     def _settings_result(self) -> Mapping[str, Any]:
         store = self._services.settings_store
-        return {"settings": store.get().to_dict(), "path": str(store.path)}
+        # is_new：還沒有設定檔（第一次執行），UI 據此自動套用硬體推薦
+        return {
+            "settings": store.get().to_dict(),
+            "path": str(store.path),
+            "is_new": store.is_new,
+        }
 
     def _settings_get(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)
@@ -314,14 +320,25 @@ class EngineServer:
         return self._settings_result()
 
     def _settings_apply_recommendation(self, params: dict[str, Any]) -> Deferred:
-        p.reject_unknown_params(params)
+        p.reject_unknown_params(params, ("only_if_new",))
+        only_if_new = params.get("only_if_new", False)
+        if not isinstance(only_if_new, bool):
+            raise p.ProtocolError(
+                p.INVALID_PARAMS,
+                f"only_if_new must be true or false, got {only_if_new!r}",
+            )
         settings = self._services.settings_store.get()
 
         def job() -> Mapping[str, Any]:
+            store = self._services.settings_store
             _, rec = self._hardware.recommendation(settings)
             patch = recommendation_patch(rec)
             try:
-                self._services.settings_store.update(patch)
+                # only_if_new：第一次執行的自動套用。是否已存過要在寫入的同一把鎖內判斷，
+                # 使用者在偵測期間存的組合才不會被覆寫。
+                written = (
+                    store.update_if_new(patch) if only_if_new else store.update(patch)
+                )
             except OSError as exc:
                 logger.error("cannot save settings: %s", exc)
                 raise p.ProtocolError(
@@ -330,10 +347,21 @@ class EngineServer:
             # SettingsError 不轉成 invalid_settings：推薦組合不合法是程式錯誤（internal_error）
             return {
                 **self._settings_result(),
-                "applied": patch,
+                "applied": None if written is None else patch,
                 "recommendation": rec.to_dict(),
             }
 
+        return Deferred(job)
+
+    def _settings_preview_recommendation(self, params: dict[str, Any]) -> Deferred:
+        p.reject_unknown_params(params)
+
+        def job() -> Mapping[str, Any]:
+            # 設定在執行時才取（不是收到請求時）：預覽可能排在其他背景請求之後，
+            # differs 要和 UI 收到回應當下的設定比較，剛存的組合才不會被誤判成「不同」。
+            return self._hardware.preview(self._services.settings_store.get())
+
+        # 轉換規則只在引擎：UI 用 differs 決定是否提示「有更適合的組合」，不自己比較
         return Deferred(job)
 
     # --- models -----------------------------------------------------------------

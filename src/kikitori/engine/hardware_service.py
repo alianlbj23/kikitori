@@ -6,6 +6,8 @@
 用 `ModelCombination` 的格式（`fast_asr.model`…），兩者的對應只寫在這裡。
 """
 
+import hashlib
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -88,6 +90,40 @@ def recommendation_patch(rec: ModelCombination) -> dict[str, Any]:
     return patch
 
 
+FINGERPRINT_CHARS = 16
+"""推薦指紋的長度（SHA-256 前 16 個十六進位字元，64 位元：只用來分辨推薦是否改變）。"""
+
+
+def recommendation_fingerprint(patch: dict[str, Any]) -> str:
+    """部分設定的穩定識別碼：同一份 patch（不論鍵的順序）得到同一個字串。
+
+    UI 以它記住「不要再提醒」過哪個推薦（存在設定的 `ui` 物件），推薦改變時指紋跟著
+    改變，才能再提醒一次。以 patch 而不是 `ModelCombination` 計算：原因與警告的文字
+    改變但寫入的設定相同時，不必再提醒。
+    """
+    text = json.dumps(patch, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:FINGERPRINT_CHARS]
+
+
+def recommendation_preview(settings: Settings, rec: ModelCombination) -> dict[str, Any]:
+    """`settings.preview_recommendation`：套用推薦「會」寫入什麼，不存檔。
+
+    `differs` 比較合併 patch 後的設定與目前設定，所以只有推薦涵蓋的欄位（模型、裝置、
+    精度、執行緒、翻譯模型）會影響結果；`patch` 與 `settings.apply_recommendation` 的
+    `applied` 完全相同（同一個 `recommendation_patch()`）。
+
+    Raises:
+        SettingsError: 推薦組合轉成的設定不合法（程式錯誤）。
+    """
+    patch = recommendation_patch(rec)
+    return {
+        "patch": patch,
+        "recommendation": rec.to_dict(),
+        "differs": settings.merged(patch) != settings,
+        "fingerprint": recommendation_fingerprint(patch),
+    }
+
+
 def legacy_presets(installed: tuple[str, ...] | None) -> list[dict[str, Any]]:
     """`models.list` 第一版的 `translation.presets`（保留給尚未改用 `models` 的 UI）。"""
     names = None if installed is None else {normalize_model_name(m) for m in installed}
@@ -122,7 +158,7 @@ def _detect_key(settings: Settings) -> tuple[object, ...]:
 
 
 class HardwareService:
-    """`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation` 的實作。
+    """`hardware.detect`、`models.list`、`models.validate` 與推薦相關方法的實作。
 
     方法會偵測硬體（數秒），只能在背景工作執行緒上呼叫；快取有鎖，`invalidate()`
     可從其他執行緒呼叫（例如 GPU 執行環境裝好之後）。
@@ -190,6 +226,11 @@ class HardwareService:
         """`hardware.detect`：一律重新偵測。"""
         info, rec = self.recommendation(settings, fresh=True)
         return {"hardware": info.to_dict(), "recommendation": rec.to_dict()}
+
+    def preview(self, settings: Settings) -> dict[str, Any]:
+        """`settings.preview_recommendation`：重用近期的偵測結果，不存檔。"""
+        _, rec = self.recommendation(settings)
+        return recommendation_preview(settings, rec)
 
     def models_list(self, settings: Settings) -> dict[str, Any]:
         """`models.list`：`models_overview()` 加上第一版的翻譯欄位（只增不改）。"""

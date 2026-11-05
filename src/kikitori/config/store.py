@@ -95,6 +95,18 @@ class SettingsStore:
         self._lock = threading.Lock()
         self._settings = Settings()
         self._file_invalid = False
+        # load() 之前不知道檔案在不在：當成「不是新的」，UI 不會因此自動改設定
+        self._is_new = False
+
+    @property
+    def is_new(self) -> bool:
+        """設定檔還不存在、也還沒存過（第一次執行）。
+
+        UI 以此決定是否自動套用硬體推薦；檔案存在但無效時不算新的（那是使用者存過的
+        設定，不該被自動覆寫）。第一次成功的 `update()` 之後一律為 False。
+        """
+        with self._lock:
+            return self._is_new
 
     def load(self) -> str | None:
         """從檔案載入設定。
@@ -109,12 +121,14 @@ class SettingsStore:
             with self._lock:
                 self._settings = Settings()
                 self._file_invalid = True
+                self._is_new = False
             message = f"settings file is invalid, using defaults: {exc}"
             logger.warning("%s", message)
             return message
         with self._lock:
             self._settings = loaded if loaded is not None else Settings()
             self._file_invalid = False
+            self._is_new = loaded is None
         return None
 
     def get(self) -> Settings:
@@ -132,13 +146,32 @@ class SettingsStore:
             OSError: 存檔失敗。
         """
         with self._lock:
-            updated = self._settings.merged(patch)
-            if self._file_invalid:
-                self._preserve_invalid_file()
-            save_settings(updated, self.path)
-            self._settings = updated
-            self._file_invalid = False
-            return updated
+            return self._update_locked(patch)
+
+    def update_if_new(self, patch: object) -> Settings | None:
+        """同 `update()`，但只在設定檔仍是新的（`is_new`）時寫入；否則不動並回傳 None。
+
+        檢查與寫入在同一把鎖內：第一次執行自動套用推薦時，使用者剛好在這之前存了
+        自己的組合，就不會被覆寫。
+
+        Raises:
+            SettingsError: 合併結果不合法。
+            OSError: 存檔失敗。
+        """
+        with self._lock:
+            if not self._is_new:
+                return None
+            return self._update_locked(patch)
+
+    def _update_locked(self, patch: object) -> Settings:
+        updated = self._settings.merged(patch)
+        if self._file_invalid:
+            self._preserve_invalid_file()
+        save_settings(updated, self.path)
+        self._settings = updated
+        self._file_invalid = False
+        self._is_new = False
+        return updated
 
     def _preserve_invalid_file(self) -> None:
         # 使用者手改壞的檔案可能含有想保留的內容，改名而不是覆寫。

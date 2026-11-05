@@ -57,8 +57,9 @@ CONTEXT_LINES_RANGE = (0, 10)
 MAX_DEVICE_ID_CHARS = 512
 MAX_ASR_MODEL_CHARS = 100
 MAX_TRANSLATION_MODEL_CHARS = 200
-MAX_SUBTITLE_BYTES = 16 * 1024
-MAX_SUBTITLE_DEPTH = 5
+MAX_OPAQUE_BYTES = 16 * 1024
+MAX_OPAQUE_DEPTH = 5
+"""`subtitle` 與 `ui`（UI 原樣保存的物件）序列化後的大小與巢狀層數上限。"""
 
 MAX_CUDA_DIRS = 16
 CPU_THREADS_RANGE = (1, 256)
@@ -182,8 +183,9 @@ def _default_interpret() -> ModeSettings:
 class Settings:
     """全部使用者設定。用 `from_dict()` 從外部資料建立（會驗證），`to_dict()` 輸出 JSON。
 
-    `subtitle` 是 UI 的字幕顯示偏好（字型、位置…），引擎不解讀、原樣保存；
-    請把它當唯讀資料，修改請用 `merged()`。
+    `subtitle` 是 UI 的字幕顯示偏好（字型、位置…），`ui` 是 UI 自己的狀態（例如
+    「不要再提醒」過的推薦組合）；兩者引擎都不解讀、原樣保存。請把它們當唯讀資料，
+    修改請用 `merged()`。
     """
 
     schema_version: int = SCHEMA_VERSION
@@ -196,6 +198,7 @@ class Settings:
     translation: TranslationSettings = field(default_factory=TranslationSettings)
     pipeline: PipelineSettings = field(default_factory=PipelineSettings)
     subtitle: dict[str, Any] = field(default_factory=dict)
+    ui: dict[str, Any] = field(default_factory=dict)
 
     def mode_settings(self, mode: Mode) -> ModeSettings:
         """回傳指定模式的設定。"""
@@ -239,6 +242,7 @@ class Settings:
                 "asr_prompt_context": self.pipeline.asr_prompt_context,
             },
             "subtitle": copy.deepcopy(self.subtitle),
+            "ui": copy.deepcopy(self.ui),
         }
 
     @classmethod
@@ -584,8 +588,8 @@ def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:
 
 
 def _check_json(value: object, path: str, depth: int) -> None:
-    if depth > MAX_SUBTITLE_DEPTH:
-        raise SettingsError(f"{path}: nested deeper than {MAX_SUBTITLE_DEPTH} levels")
+    if depth > MAX_OPAQUE_DEPTH:
+        raise SettingsError(f"{path}: nested deeper than {MAX_OPAQUE_DEPTH} levels")
     if value is None or isinstance(value, bool | int | str):
         return
     if isinstance(value, float):
@@ -605,15 +609,16 @@ def _check_json(value: object, path: str, depth: int) -> None:
     raise SettingsError(f"{path}: unsupported value type {type(value).__name__}")
 
 
-def _parse_subtitle(data: Mapping[str, Any]) -> dict[str, Any]:
-    value = data.get("subtitle", {})
+def _parse_opaque(data: Mapping[str, Any], key: str) -> dict[str, Any]:
+    """UI 原樣保存的物件（`subtitle`、`ui`）：只檢查是合法、有大小上限的 JSON。"""
+    value = data.get(key, {})
     if not isinstance(value, Mapping):
-        raise SettingsError(f"subtitle: expected an object, got {type(value).__name__}")
-    _check_json(value, "subtitle", 1)
+        raise SettingsError(f"{key}: expected an object, got {type(value).__name__}")
+    _check_json(value, key, 1)
     size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
-    if size > MAX_SUBTITLE_BYTES:
+    if size > MAX_OPAQUE_BYTES:
         raise SettingsError(
-            f"subtitle: {size} bytes exceeds the limit of {MAX_SUBTITLE_BYTES}"
+            f"{key}: {size} bytes exceeds the limit of {MAX_OPAQUE_BYTES}"
         )
     return copy.deepcopy(dict(value))
 
@@ -629,6 +634,7 @@ _TOP_LEVEL = (
     "translation",
     "pipeline",
     "subtitle",
+    "ui",
 )
 
 
@@ -654,5 +660,6 @@ def _parse(data: Mapping[str, Any]) -> Settings:
         asr=_parse_asr(data),
         translation=_parse_translation(data),
         pipeline=_parse_pipeline(data),
-        subtitle=_parse_subtitle(data),
+        subtitle=_parse_opaque(data, "subtitle"),
+        ui=_parse_opaque(data, "ui"),
     )

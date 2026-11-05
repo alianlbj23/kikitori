@@ -18,6 +18,7 @@ from kikitori.engine.hardware_service import (
     HardwareService,
     combination_from_settings,
     recommendation_patch,
+    recommendation_preview,
 )
 from kikitori.engine.testing import FakeHardwareProvider, FakeModelCatalog
 from kikitori.hardware import AsrChoice, HardwareInfo, ModelCombination
@@ -266,6 +267,56 @@ class MappingTest(unittest.TestCase):
             translation_final=None,
         )
         self.assertEqual(recommendation_patch(rec)["asr"]["device"], "auto")
+
+
+def _gpu_rec(final: str = "large-v3-turbo") -> ModelCombination:
+    return ModelCombination(
+        tier="nvidia_8gb",
+        fast_asr=AsrChoice("small", "cuda", "float16", 0),
+        final_asr=AsrChoice(final, "cuda", "float16", 0),
+        translation_fast="qwen3.5:9b",
+        translation_final="qwen3.5:9b",
+    )
+
+
+class PreviewTest(unittest.TestCase):
+    def test_patch_is_what_apply_writes(self) -> None:
+        rec = _gpu_rec()
+        preview = recommendation_preview(Settings(), rec)
+        self.assertEqual(preview["patch"], recommendation_patch(rec))
+        self.assertEqual(preview["recommendation"], rec.to_dict())
+        self.assertTrue(preview["differs"])
+
+    def test_not_different_after_applying(self) -> None:
+        rec = _gpu_rec()
+        applied = Settings().merged(recommendation_patch(rec))
+        self.assertFalse(recommendation_preview(applied, rec)["differs"])
+        # 推薦以外的欄位（字幕外觀、ui）不影響比較
+        other = applied.merged({"subtitle": {"font_size": 40}, "mode": "interpret"})
+        self.assertFalse(recommendation_preview(other, rec)["differs"])
+
+    def test_different_after_a_relevant_change(self) -> None:
+        rec = _gpu_rec()
+        applied = Settings().merged(recommendation_patch(rec))
+        manual = applied.merged({"asr": {"final_model": "medium"}})
+        self.assertTrue(recommendation_preview(manual, rec)["differs"])
+        manual_tr = applied.merged({"translation": {"fast_model": "qwen3.5:4b"}})
+        self.assertTrue(recommendation_preview(manual_tr, rec)["differs"])
+
+    def test_fingerprint_identifies_the_patch(self) -> None:
+        a = recommendation_preview(Settings(), _gpu_rec())["fingerprint"]
+        again = recommendation_preview(
+            Settings().merged({"mode": "interpret"}), _gpu_rec()
+        )["fingerprint"]
+        other = recommendation_preview(Settings(), _gpu_rec("large-v3"))["fingerprint"]
+        self.assertRegex(a, r"^[0-9a-f]{16}$")
+        # 同一個推薦（不論目前設定）同一個指紋；推薦改變就換指紋
+        self.assertEqual(a, again)
+        self.assertNotEqual(a, other)
+
+    def test_result_is_json(self) -> None:
+        preview = recommendation_preview(Settings(), _gpu_rec())
+        self.assertEqual(json.loads(json.dumps(preview)), preview)
 
 
 if __name__ == "__main__":

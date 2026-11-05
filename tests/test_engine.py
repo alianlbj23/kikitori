@@ -328,6 +328,7 @@ class BasicProtocolTest(EngineTestCase):
             "hardware.detect",
             "models.list",
             "settings.apply_recommendation",
+            "settings.preview_recommendation",
         ):
             with self.subTest(method=method):
                 self.assertError(
@@ -356,6 +357,19 @@ class SettingsProtocolTest(EngineTestCase):
         self.assertIsNone(result["settings"]["asr"]["fast_cpu_threads"])
         self.assertEqual(result["settings"]["media"]["pause_secs"], 0.6)
         self.assertEqual(Path(result["path"]), self.config_dir / "settings.json")
+
+    def test_is_new_until_first_save(self) -> None:
+        # 沒有設定檔 → is_new；UI 以此判斷第一次執行、自動套用推薦組合
+        first = self.engine.request("settings.get")["result"]
+        self.assertIs(first["is_new"], True)
+        self.assertFalse((self.config_dir / "settings.json").exists())
+        saved = self.engine.request("settings.set", {"mode": "interpret"})["result"]
+        self.assertIs(saved["is_new"], False)
+        self.assertIs(self.engine.request("settings.get")["result"]["is_new"], False)
+        # 重新啟動後檔案已存在：不再是新的
+        self.engine.dispose()
+        self.engine = EngineProcess(str(self.config_dir))
+        self.assertIs(self.engine.request("settings.get")["result"]["is_new"], False)
 
     def test_set_persists_and_validates(self) -> None:
         result = self.engine.request(
@@ -652,6 +666,76 @@ class ApplyRecommendationTest(EngineTestCase):
             ("small", "large-v3-turbo"),
         )
         self.assertIsNone(settings["asr"]["fast_cpu_threads"])
+
+
+class PreviewRecommendationTest(EngineTestCase):
+    def test_preview_is_what_apply_writes_without_saving(self) -> None:
+        preview = self.engine.request("settings.preview_recommendation")["result"]
+        self.assertEqual(
+            set(preview), {"patch", "recommendation", "differs", "fingerprint"}
+        )
+        # 預設組合（auto、精度自動）與推薦（cpu、int8、4 執行緒）不同
+        self.assertIs(preview["differs"], True)
+        self.assertRegex(preview["fingerprint"], r"^[0-9a-f]{16}$")
+        self.assertFalse((self.config_dir / "settings.json").exists())
+        self.assertIs(self.engine.request("settings.get")["result"]["is_new"], True)
+
+        applied = self.engine.request("settings.apply_recommendation")["result"]
+        self.assertEqual(preview["patch"], applied["applied"])
+        self.assertEqual(preview["recommendation"], applied["recommendation"])
+        after = self.engine.request("settings.preview_recommendation")["result"]
+        self.assertIs(after["differs"], False)
+        self.assertEqual(after["fingerprint"], preview["fingerprint"])
+
+    def test_only_if_new_never_overrides_saved_settings(self) -> None:
+        # 第一次執行的自動套用：使用者在偵測期間已經存了組合時不覆寫
+        self.engine.request("settings.set", {"asr": {"final_model": "base"}})
+        skipped = self.engine.request(
+            "settings.apply_recommendation", {"only_if_new": True}
+        )["result"]
+        self.assertIsNone(skipped["applied"])
+        self.assertEqual(skipped["settings"]["asr"]["final_model"], "base")
+        self.assertEqual(skipped["recommendation"]["tier"], "cpu")
+        saved = json.loads(
+            (self.config_dir / "settings.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["asr"]["final_model"], "base")
+        self.assertError(
+            self.engine.request("settings.apply_recommendation", {"only_if_new": 1}),
+            "invalid_params",
+        )
+
+    def test_only_if_new_applies_on_first_run(self) -> None:
+        result = self.engine.request(
+            "settings.apply_recommendation", {"only_if_new": True}
+        )["result"]
+        self.assertEqual(result["applied"]["asr"]["device"], "cpu")
+        self.assertIs(result["is_new"], False)
+
+    def test_differs_after_manual_change(self) -> None:
+        self.engine.request("settings.apply_recommendation")
+        self.engine.request("settings.set", {"asr": {"final_model": "base"}})
+        preview = self.engine.request("settings.preview_recommendation")["result"]
+        self.assertIs(preview["differs"], True)
+        self.assertEqual(preview["patch"]["asr"]["final_model"], "small")
+
+    def test_gpu_runtime_install_changes_the_recommendation(self) -> None:
+        self.engine.request("settings.apply_recommendation")
+        before = self.engine.request("settings.preview_recommendation")["result"]
+        self.assertIs(before["differs"], False)
+        self.engine.request(
+            "models.download", {"model": "gpu-runtime", "accept_license": True}
+        )
+        done = self.engine.wait_event(
+            "download_progress", lambda d: d["state"] != "downloading"
+        )
+        self.assertEqual(done["state"], "done")
+        file_before = (self.config_dir / "settings.json").read_bytes()
+        after = self.engine.request("settings.preview_recommendation")["result"]
+        self.assertIs(after["differs"], True)
+        self.assertNotEqual(after["fingerprint"], before["fingerprint"])
+        self.assertEqual(after["patch"]["asr"]["device"], "cuda")
+        self.assertEqual((self.config_dir / "settings.json").read_bytes(), file_before)
 
 
 class SettingsMigrationProtocolTest(EngineTestCase):

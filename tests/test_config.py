@@ -64,6 +64,7 @@ class DefaultsTest(unittest.TestCase):
         self.assertFalse(s.translation.allow_restricted)
         self.assertEqual(s.pipeline.no_speech_threshold, 0.6)
         self.assertEqual(s.subtitle, {})
+        self.assertEqual(s.ui, {})
 
     def test_defaults_are_valid(self) -> None:
         self.assertEqual(Settings.from_dict(Settings().to_dict()), Settings())
@@ -269,6 +270,31 @@ class ValidationTest(unittest.TestCase):
         self.assertInvalid(_with("subtitle", deep), "subtitle")
         self.assertInvalid(_with("subtitle", {"blob": "x" * 20000}), "subtitle")
 
+    def test_ui_passthrough(self) -> None:
+        state = {"dismissed_recommendations": ["0123abcd", "89efcdab"], "x": {"y": 1}}
+        s = Settings.from_dict(_with("ui", state))
+        self.assertEqual(s.ui, state)
+        self.assertEqual(s.to_dict()["ui"], state)
+
+    def test_ui_validation(self) -> None:
+        # 與 subtitle 相同的限制：物件、不得有 NaN、巢狀 ≤ 5 層、≤ 16 KiB
+        self.assertInvalid(_with("ui", "dismissed"), "ui")
+        self.assertInvalid(_with("ui", {"x": float("nan")}), "ui.x")
+        deep: dict[str, Any] = {}
+        node = deep
+        for _ in range(6):
+            node["a"] = {}
+            node = node["a"]
+        self.assertInvalid(_with("ui", deep), "ui")
+        self.assertInvalid(_with("ui", {"blob": "x" * 20000}), "ui")
+
+    def test_ui_missing_uses_default_without_migration(self) -> None:
+        # schema 2 之後新增、不升版：舊的 schema 2 檔案沒有 ui 照樣讀得進來
+        data = Settings().to_dict()
+        del data["ui"]
+        self.assertEqual(Settings.from_dict(data).ui, {})
+        self.assertEqual(Settings.from_dict(data).schema_version, 2)
+
     def test_error_message_shows_received_value(self) -> None:
         with self.assertRaises(SettingsError) as ctx:
             Settings.from_dict(_with("media.pause_secs", "abc"))
@@ -392,6 +418,15 @@ class MergeTest(unittest.TestCase):
         s = Settings().merged({"subtitle": {"a": 1}}).merged({"subtitle": {"b": 2}})
         self.assertEqual(s.subtitle, {"a": 1, "b": 2})
 
+    def test_merge_ui_keys_and_replace_lists(self) -> None:
+        s = (
+            Settings()
+            .merged({"ui": {"dismissed_recommendations": ["a"]}})
+            .merged({"ui": {"other": True}})
+            .merged({"ui": {"dismissed_recommendations": ["b"]}})
+        )
+        self.assertEqual(s.ui, {"dismissed_recommendations": ["b"], "other": True})
+
 
 class FileTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -474,6 +509,42 @@ class StoreTest(unittest.TestCase):
         fresh = SettingsStore(self.path)
         self.assertIsNone(fresh.load())
         self.assertEqual(fresh.get().mode, "interpret")
+
+    def test_is_new_until_first_save(self) -> None:
+        store = SettingsStore(self.path)
+        # load() 之前不知道檔案在不在：保守地當成「不是新的」，不會觸發自動套用
+        self.assertFalse(store.is_new)
+        store.load()
+        self.assertTrue(store.is_new)
+        with self.assertRaises(SettingsError):
+            store.update({"mode": "karaoke"})
+        self.assertTrue(store.is_new)
+        store.update({"mode": "interpret"})
+        self.assertFalse(store.is_new)
+        again = SettingsStore(self.path)
+        again.load()
+        self.assertFalse(again.is_new)
+
+    def test_update_if_new_only_writes_a_new_file(self) -> None:
+        store = SettingsStore(self.path)
+        store.load()
+        first = store.update_if_new({"asr": {"device": "cuda"}})
+        self.assertIsNotNone(first)
+        self.assertEqual(store.get().asr.device, "cuda")
+        self.assertFalse(store.is_new)
+        store.update({"asr": {"device": "cpu"}})
+        # 檢查與寫入在同一把鎖內：已存過的設定不會被覆寫
+        self.assertIsNone(store.update_if_new({"asr": {"device": "cuda"}}))
+        self.assertEqual(store.get().asr.device, "cpu")
+        self.assertIn('"cpu"', self.path.read_text(encoding="utf-8"))
+
+    def test_invalid_file_is_not_new(self) -> None:
+        # 使用者存過（後來壞掉）的設定檔不算第一次執行：不自動覆寫成推薦組合
+        self.path.write_text("{broken", encoding="utf-8")
+        store = SettingsStore(self.path)
+        with self.assertLogs("kikitori.config.store", "WARNING"):
+            store.load()
+        self.assertFalse(store.is_new)
 
     def test_failed_update_changes_nothing(self) -> None:
         store = SettingsStore(self.path)
