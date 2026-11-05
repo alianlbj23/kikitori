@@ -291,7 +291,13 @@ def run_protocol(
                 and m["data"].get("session_id") == session_id
             ]
             finals = [s for s in subtitles if s["is_final"]]
-            _require(bool(finals), f"no final subtitle events; got {subtitles}")
+            # 沒有字幕時只看字幕清單無從判斷原因；附上 status／log 事件與 stderr。
+            events = [m for m in client.messages if m.get("event") in ("status", "log")]
+            _require(
+                bool(finals),
+                f"no final subtitle events; got {subtitles}\nevents: {events}\n"
+                f"stderr tail:\n{client.stderr_tail()}",
+            )
             _require(
                 all(s["translation"] for s in finals),
                 f"final subtitle without translation: {finals}",

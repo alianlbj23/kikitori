@@ -21,7 +21,7 @@
 | `kikitori-engine.spec` | PyInstaller 規格：收集內容、過濾、產生授權目錄 |
 | `policy.py` | 打包規則（名稱、排除的模組、禁止打包的檔名、系統提供的檔名），spec 與 build.py 共用 |
 | `licenses.py` | 產生 `THIRD_PARTY_LICENSES/` |
-| `license_overrides/` | wheel 沒附授權檔的套件的授權全文（目前只有 `ctranslate2/`，來源見其 `SOURCE.md`） |
+| `license_overrides/` | wheel 沒附授權檔的套件的授權全文（`ctranslate2/`，以及 macOS 才打包的 `pyobjc-core/`、`pyobjc-framework-coremedia/`、`pyobjc-framework-libdispatch/`、`pyobjc-framework-screencapturekit/`；來源見各目錄的 `SOURCE.md`） |
 | `build.py` | 建置腳本：人用的編號選單；CI 用參數或 `KIKITORI_BUILD_NONINTERACTIVE=1` |
 | `smoke_test.py` | 冒煙測試（`--self-check` + 假模式協定 + 啟動時間），CI 與人工共用 |
 
@@ -116,7 +116,7 @@ Linux（Debian bookworm 容器、x86_64）one-folder：269 MB（`du`），啟動
 
 ### `THIRD_PARTY_LICENSES/`
 
-由 `licenses.py` 依「實際打包的檔案」產生：PyInstaller 分析出的每個來源檔，依各套件 RECORD 對回提供它的套件，再複製該套件 dist-info 內的授權檔與套件目錄內的 `LICENSE*`／`NOTICE*`／`ThirdPartyNotices*`。另外固定加入：kikitori（`LICENSE`、`src/` 內附的 `LICENSE-silero-vad`）、Python（`LICENSE.txt`，含 CPython 內附元件的條款）、PyInstaller（bootloader）。每個元件一個子目錄（保留原始相對路徑），加上 `README.txt` 與 `manifest.json`。
+由 `licenses.py` 依「實際打包的檔案」產生：PyInstaller 分析出的每個來源檔，依各套件 RECORD 對回提供它的套件，再複製該套件 dist-info 內的授權檔與套件目錄內的 `LICENSE*`／`NOTICE*`／`ThirdPartyNotices*`（程式碼與二進位檔、macOS `.dSYM` 除錯符號內的檔案除外，例如 pyobjc-core 的測試模組 `copying.*.so`）。另外固定加入：kikitori（`LICENSE`、`src/` 內附的 `LICENSE-silero-vad`）、Python（`LICENSE.txt`，含 CPython 內附元件的條款）、PyInstaller（bootloader）。每個元件一個子目錄（保留原始相對路徑），加上 `README.txt` 與 `manifest.json`。
 
 - 打包了卻找不到授權全文的元件 → **建置失敗**（補到 `license_overrides/<套件名>/`）。
 - 對不回任何套件的檔案（系統函式庫）列在 README，已知的標註授權：Microsoft Visual C++ 執行階段（`msvcp140*`、`vcruntime140*`，Visual Studio 授權的 Distributable Code）、GCC 執行階段（`libstdc++`、`libgcc_s`、`libgomp`，GPL-3.0 附 GCC Runtime Library Exception）、`libz`（zlib）。不認得的標成 `UNKNOWN - review before release` 並在建置時印 warning。

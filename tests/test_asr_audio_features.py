@@ -74,7 +74,12 @@ class LogMelTest(unittest.TestCase):
     def test_silence_is_constant_floor(self) -> None:
         features = log_mel_spectrogram(np.zeros(16000, dtype=np.float32), 80)
         # log10(1e-10) = -10 → (-10 + 4) / 4 = -1.5
-        np.testing.assert_allclose(features, -1.5)
+        # float32 的 log10 不保證正確捨入：Linux x86-64 的 numpy 在支援 AVX-512 的 CPU
+        # 上改用 SVML（誤差上限 4 ULP），CI 實測差 1 ULP（-10.00000095）。-10 附近
+        # 1 ULP = spacing(10)，正規化除以 4 後是 spacing(10) / 4；容許 4 ULP 即 spacing(10)。
+        np.testing.assert_allclose(
+            features, -1.5, rtol=0, atol=float(np.spacing(np.float32(10)))
+        )
 
     def test_dynamic_range_is_clamped_to_8(self) -> None:
         rng = np.random.default_rng(0)

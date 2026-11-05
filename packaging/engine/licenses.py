@@ -115,6 +115,20 @@ def _license_summary(meta: metadata.PackageMetadata) -> str:
     return first_line[:120] or "UNKNOWN"
 
 
+_NOT_LICENSE_SUFFIXES = frozenset(
+    {".py", ".pyc", ".pyi", ".pyd", ".so", ".dylib", ".dll", ".yml", ".yaml"}
+)
+"""檔名帶這些副檔名的不是授權全文，即使名稱以 copying 等字開頭（例如 pyobjc-core 的
+測試擴充模組 `copying.cpython-312-darwin.so`）。"""
+
+
+def _is_code_or_debug_file(parts: Sequence[str]) -> bool:
+    # macOS 的 `.dSYM` 是除錯符號套件，裡面的檔案都不是授權全文。
+    if any(part.endswith(".dSYM") for part in parts[:-1]):
+        return True
+    return any(s.lower() in _NOT_LICENSE_SUFFIXES for s in PurePath(parts[-1]).suffixes)
+
+
 def _dist_license_files(dist: metadata.Distribution) -> dict[str, Path]:
     found: dict[str, Path] = {}
     for item in dist.files or ():
@@ -122,9 +136,10 @@ def _dist_license_files(dist: metadata.Distribution) -> dict[str, Path]:
         if not parts or ".." in parts:
             continue
         in_dist_info = parts[0].endswith((".dist-info", ".egg-info"))
-        is_license = LICENSE_NAME.match(parts[-1]) is not None or (
-            in_dist_info and len(parts) > 2 and parts[1] == "licenses"
-        )
+        is_license = (
+            LICENSE_NAME.match(parts[-1]) is not None
+            and not _is_code_or_debug_file(parts)
+        ) or (in_dist_info and len(parts) > 2 and parts[1] == "licenses")
         if not is_license:
             continue
         source = Path(str(dist.locate_file(item)))

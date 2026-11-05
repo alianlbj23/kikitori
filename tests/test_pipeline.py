@@ -583,6 +583,40 @@ class StoppableSource:
         self._stopped.set()
 
 
+class HeldSource:
+    """送出 `audio[:hold_at]` 後停住（像沒資料的裝置），`release` 設定後才送出其餘部分。
+
+    讓測試能確定「某件事發生時句子還沒結束」，不必依賴執行緒的啟動順序。
+    """
+
+    def __init__(
+        self, audio: npt.NDArray[np.int16], hold_at: int, release: threading.Event
+    ) -> None:
+        self._audio = audio
+        self._hold_at = hold_at
+        self._release = release
+        self._pos = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self._pos >= len(self._audio)
+
+    def start(self) -> None:
+        pass
+
+    def read(self, timeout: float) -> npt.NDArray[np.int16]:
+        if self._pos >= self._hold_at and not self._release.wait(timeout):
+            return np.zeros(0, dtype=np.int16)
+        limit = len(self._audio) if self._release.is_set() else self._hold_at
+        end = min(self._pos + 320, limit)
+        chunk = self._audio[self._pos : end].copy()
+        self._pos = end
+        return chunk
+
+    def stop(self) -> None:
+        pass
+
+
 class ThreadedTest(unittest.TestCase):
     def test_array_source_runs_to_idle(self) -> None:
         h = Harness()
@@ -606,7 +640,9 @@ class ThreadedTest(unittest.TestCase):
         h.fast.gate = threading.Event()
         final_emitted = threading.Event()
         h.on_update = lambda u: final_emitted.set() if u.is_final else None
-        h.pipeline.start(ArraySource(ONE_UTTERANCE))
+        # 人聲送完就停住，直到即時辨識開始：讀得比 worker 啟動還快時，句子會在
+        # 即時工作被取走前就結束，即時路徑根本不會執行（macOS CI 曾發生）。
+        h.pipeline.start(HeldSource(ONE_UTTERANCE, 3 * SR, h.fast.entered))
         self.assertTrue(h.fast.entered.wait(WAIT))
         self.assertTrue(final_emitted.wait(WAIT))
         h.fast.gate.set()

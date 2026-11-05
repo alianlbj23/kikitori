@@ -206,6 +206,27 @@ class LicenseCollectionTest(unittest.TestCase):
         ct2 = next(c for c in report.components if c.key == "ctranslate2")
         self.assertEqual(list(ct2.files), ["upstream/third_party/ruy/LICENSE"])
 
+    def test_code_and_debug_files_named_like_licenses_are_not_licenses(self) -> None:
+        # pyobjc-core 13.0 的 macOS wheel 沒附授權檔，卻有測試擴充模組 copying.*.so
+        # 與它的 dSYM 除錯符號；檔名以 "copying" 開頭不代表是授權全文。
+        dsym = "PyObjCTest/copying.cpython-312-darwin.so.dSYM/Contents/Resources"
+        self.site.add(
+            "pyobjc-core",
+            "13.0",
+            {
+                "objc/__init__.py": "",
+                "objc/copying.py": "",
+                "PyObjCTest/copying.cpython-312-darwin.so": "",
+                f"{dsym}/DWARF/copying.cpython-312-darwin.so": "",
+                f"{dsym}/Relocations/aarch64/copying.cpython-312-darwin.so.yml": "",
+                f"{dsym}/LICENSE.txt": "",
+            },
+        )
+        report = self.collect([self.site.root / "objc" / "__init__.py"])
+        core = next(c for c in report.components if c.key == "pyobjc-core")
+        self.assertEqual(core.files, {})
+        self.assertEqual(report.missing, ["pyobjc-core"])
+
     def test_pyinstaller_is_always_listed_with_bootloader_exception(self) -> None:
         self.site.add(
             "pyinstaller",
@@ -275,6 +296,20 @@ class RealEnvironmentTest(unittest.TestCase):
         overrides = ROOT / "packaging" / "engine" / "license_overrides" / "ctranslate2"
         self.assertTrue((overrides / "LICENSE").is_file())
         self.assertTrue((overrides / "SOURCE.md").is_file())
+
+    def test_pyobjc_overrides_cover_packages_without_license_files(self) -> None:
+        # 這些 macOS wheel（13.0）沒附授權檔；pyobjc-framework-cocoa 有附，不需要補。
+        overrides = ROOT / "packaging" / "engine" / "license_overrides"
+        for key in (
+            "pyobjc-core",
+            "pyobjc-framework-coremedia",
+            "pyobjc-framework-libdispatch",
+            "pyobjc-framework-screencapturekit",
+        ):
+            with self.subTest(key=key):
+                text = (overrides / key / "License.txt").read_text(encoding="utf-8")
+                self.assertIn("MIT license", text)
+                self.assertTrue((overrides / key / "SOURCE.md").is_file())
 
 
 if __name__ == "__main__":
