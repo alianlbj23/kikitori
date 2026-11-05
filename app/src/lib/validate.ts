@@ -9,23 +9,29 @@
  */
 
 import type {
+  AboutInfo,
   AsrChoice,
   AsrModel,
   BridgeStatus,
+  CombinationCheck,
   CommandError,
   DeviceInfo,
   DownloadProgressEvent,
   EngineInfo,
+  GpuInfo,
   GpuRuntime,
+  HardwareInfo,
   HardwareReport,
   LogEvent,
+  ModelRole,
   ModelsList,
   OverlaySnapshot,
   OverlayStyle,
   Recommendation,
   StatusEvent,
   SubtitleEvent,
-  TranslationPreset,
+  TranslationModel,
+  TranslationServerInfo,
 } from "./types";
 
 export class ValidationError extends Error {
@@ -69,6 +75,22 @@ function optUint(o: Obj, key: string, path: string): number | null {
   const v = o[key];
   if (v === undefined || v === null) return null;
   return uint(o, key, path);
+}
+
+function optBool(o: Obj, key: string, path: string): boolean | null {
+  const v = o[key];
+  if (v === undefined || v === null) return null;
+  return bool(o, key, path);
+}
+
+/** Finite non-negative number (sizes in GB and the like); null when absent. */
+function optNum(o: Obj, key: string, path: string): number | null {
+  const v = o[key];
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+    throw new ValidationError(`${path}.${key}`, "expected a non-negative number");
+  }
+  return v;
 }
 
 function bool(o: Obj, key: string, path: string): boolean {
@@ -237,63 +259,112 @@ export function parseDevices(v: unknown): DeviceInfo[] {
   });
 }
 
-function strList(v: unknown, maxItems = 50): string[] {
+/** List of strings; non-string items and overflow are dropped (display-only lists). */
+function strList(v: unknown, maxItems = 50, maxLen = 2000): string[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x): x is string => typeof x === "string" && x.length <= 2000).slice(0, maxItems);
+  return v.filter((x): x is string => typeof x === "string" && x.length <= maxLen).slice(0, maxItems);
 }
 
-function parseAsrChoice(v: unknown, path: string): AsrChoice | null {
-  if (v === null || v === undefined) return null;
+function roles(v: unknown): ModelRole[] {
+  return strList(v, 4).filter((r): r is ModelRole => r === "fast" || r === "final");
+}
+
+function optObj(o: Obj, key: string, path: string): Obj {
+  const v = o[key];
+  return v === undefined || v === null ? {} : obj(v, `${path}.${key}`);
+}
+
+function parseAsrChoice(v: unknown, path: string): AsrChoice {
   const o = obj(v, path);
   return {
     model: str(o, "model", path, 100),
     device: str(o, "device", path, 20),
     compute_type: optStr(o, "compute_type", path),
-    cpu_threads: optUint(o, "cpu_threads", path),
+    cpu_threads: optUint(o, "cpu_threads", path) ?? 0,
   };
 }
 
-export function parseRecommendation(v: unknown): Recommendation | null {
-  const p = "hardware.detect.recommendation";
-  if (v === null || v === undefined) return null;
+export function parseRecommendation(v: unknown, p = "recommendation"): Recommendation {
   const o = obj(v, p);
   return {
+    tier: str(o, "tier", p, 100),
     fast_asr: parseAsrChoice(o.fast_asr, `${p}.fast_asr`),
     final_asr: parseAsrChoice(o.final_asr, `${p}.final_asr`),
     translation_fast: optStr(o, "translation_fast", p),
     translation_final: optStr(o, "translation_final", p),
-    gpu_runtime_missing: o.gpu_runtime_missing === true,
+    translation_budget_gb: optNum(o, "translation_budget_gb", p),
+    gpu_runtime_missing: bool(o, "gpu_runtime_missing", p),
     reasons: strList(o.reasons),
     warnings: strList(o.warnings),
   };
 }
 
+function parseGpu(v: unknown, path: string): GpuInfo {
+  const o = obj(v, path);
+  return {
+    index: uint(o, "index", path),
+    name: str(o, "name", path, 200),
+    memory_total_mb: uint(o, "memory_total_mb", path),
+    memory_used_mb: optUint(o, "memory_used_mb", path),
+    driver_version: optStr(o, "driver_version", path),
+    compute_capability: optStr(o, "compute_capability", path),
+  };
+}
+
+function parseTranslationServer(v: unknown, path: string): TranslationServerInfo | null {
+  if (v === null || v === undefined) return null;
+  const o = obj(v, path);
+  const models = o.models;
+  return {
+    base_url: str(o, "base_url", path, 2000),
+    is_local: optBool(o, "is_local", path) ?? false,
+    reachable: optBool(o, "reachable", path) ?? false,
+    models: Array.isArray(models) ? strList(models, 500, 200) : null,
+    error: optStr(o, "error", path),
+  };
+}
+
+function parseHardwareInfo(v: unknown, hp: string): HardwareInfo {
+  const h = obj(v, hp);
+  const cpu = optObj(h, "cpu", hp);
+  const mem = optObj(h, "memory", hp);
+  const cublas = optObj(h, "cublas", hp);
+  return {
+    os: str(h, "os", hp, 100),
+    os_version: optStr(h, "os_version", hp) ?? "",
+    machine: optStr(h, "machine", hp) ?? "",
+    cpu: {
+      model: optStr(cpu, "model", `${hp}.cpu`),
+      physical_cores: optUint(cpu, "physical_cores", `${hp}.cpu`),
+      logical_cores: optUint(cpu, "logical_cores", `${hp}.cpu`),
+      architecture: optStr(cpu, "architecture", `${hp}.cpu`),
+    },
+    cpu_count: optUint(h, "cpu_count", hp),
+    memory: {
+      // ram_bytes is the first-version name of the same number.
+      total_bytes: optUint(mem, "total_bytes", `${hp}.memory`) ?? optUint(h, "ram_bytes", hp),
+      available_bytes: optUint(mem, "available_bytes", `${hp}.memory`),
+    },
+    gpus: arr(h, "gpus", hp).map((g, i) => parseGpu(g, `${hp}.gpus[${i}]`)),
+    apple_silicon: bool(h, "apple_silicon", hp),
+    cublas: {
+      supported_platform: optBool(cublas, "supported_platform", `${hp}.cublas`) ?? false,
+      available: optBool(cublas, "available", `${hp}.cublas`) ?? false,
+      library_dirs: strList(cublas.library_dirs, 16),
+      source: optStr(cublas, "source", `${hp}.cublas`),
+    },
+    translation_server: parseTranslationServer(h.translation_server, `${hp}.translation_server`),
+    errors: strList(h.errors),
+  };
+}
+
+/** `hardware.detect`: `{hardware, recommendation}`. */
 export function parseHardware(v: unknown): HardwareReport {
   const p = "hardware.detect";
   const o = obj(v, p);
-  const h = obj(o.hardware, `${p}.hardware`);
-  const hp = `${p}.hardware`;
-  const gpus = arr(h, "gpus", hp).map((g, i) => {
-    const gp = `${hp}.gpus[${i}]`;
-    const go = obj(g, gp);
-    // hardware.md reports memory_total_mb; the first engine version vram_bytes.
-    const mb = optUint(go, "memory_total_mb", gp);
-    return {
-      name: str(go, "name", gp, 200),
-      vram_bytes: optUint(go, "vram_bytes", gp) ?? (mb === null ? null : mb * 1024 * 1024),
-    };
-  });
   return {
-    hardware: {
-      os: str(h, "os", hp, 100),
-      os_version: optStr(h, "os_version", hp) ?? "",
-      machine: optStr(h, "machine", hp) ?? "",
-      cpu_count: optUint(h, "cpu_count", hp),
-      ram_bytes: optUint(h, "ram_bytes", hp),
-      gpus,
-      apple_silicon: h.apple_silicon === true,
-    },
-    recommendation: parseRecommendation(o.recommendation),
+    hardware: parseHardwareInfo(o.hardware, `${p}.hardware`),
+    recommendation: parseRecommendation(o.recommendation, `${p}.recommendation`),
   };
 }
 
@@ -302,99 +373,95 @@ function parseAsrModel(v: unknown, path: string): AsrModel {
   return {
     id: str(o, "id", path, 100),
     size_bytes: uint(o, "size_bytes", path),
+    downloaded: bool(o, "downloaded", path),
     license: str(o, "license", path, 200),
     speed_tier: str(o, "speed_tier", path, 50),
-    downloaded: bool(o, "downloaded", path),
-    recommended_for: strList(o.recommended_for, 4),
+    no_speech_reliable: optBool(o, "no_speech_reliable", path),
+    cpu_ram_mb: optUint(o, "cpu_ram_mb", path),
+    vram_mb: optUint(o, "vram_mb", path),
+    vram_int8_mb: optUint(o, "vram_int8_mb", path),
+    recommended_for: roles(o.recommended_for),
   };
 }
 
-function parseGpuRuntime(v: unknown): GpuRuntime | null {
-  const p = "models.list.gpu_runtime";
-  if (v === null || v === undefined) return null;
+function parseGpuRuntime(v: unknown, p: string): GpuRuntime {
   const o = obj(v, p);
   return {
     id: str(o, "id", p, 100),
     supported: bool(o, "supported", p),
     installed: bool(o, "installed", p),
+    package: optStr(o, "package", p),
+    version: optStr(o, "version", p),
+    path: optStr(o, "path", p),
     download_bytes: optUint(o, "download_bytes", p),
+    installed_bytes: optUint(o, "installed_bytes", p),
     license: optStr(o, "license", p),
     license_url: optStr(o, "license_url", p),
+    cublas_available: optBool(o, "cublas_available", p) ?? false,
+    cublas_source: optStr(o, "cublas_source", p),
   };
 }
 
-/** hardware.md `translation.models[]` entry, mapped onto the preset shape. */
-function parseTranslationModel(v: unknown, path: string): TranslationPreset {
+function parseTranslationModel(v: unknown, path: string): TranslationModel {
   const o = obj(v, path);
-  const installed = o.installed;
   const name = str(o, "name", path, 200);
   return {
-    model: name,
+    name,
     label: optStr(o, "label", path) ?? name,
-    license: optStr(o, "license", path) ?? "未知",
+    installed: optBool(o, "installed", path),
+    known: optBool(o, "known", path) ?? false,
+    recommended_for: roles(o.recommended_for),
+    license: optStr(o, "license", path),
     license_url: optStr(o, "license_url", path),
-    commercial_use: o.commercial_use === true,
-    excluded_regions: strList(o.excluded_regions, 20),
-    installed: typeof installed === "boolean" ? installed : null,
-  };
-}
-
-function parsePreset(v: unknown, path: string): TranslationPreset {
-  const o = obj(v, path);
-  const installed = o.installed;
-  if (installed !== null && installed !== undefined && typeof installed !== "boolean") {
-    throw new ValidationError(`${path}.installed`, "expected boolean or null");
-  }
-  return {
-    model: str(o, "model", path, 200),
-    label: str(o, "label", path, 200),
-    license: str(o, "license", path, 200),
-    license_url: optStr(o, "license_url", path),
-    commercial_use: bool(o, "commercial_use", path),
-    excluded_regions: arr(o, "excluded_regions", path).filter(
-      (r): r is string => typeof r === "string",
-    ),
-    installed: typeof installed === "boolean" ? installed : null,
+    commercial_use: optBool(o, "commercial_use", path),
+    excluded_regions: strList(o.excluded_regions, 20, 20),
+    approx_vram_gb: optNum(o, "approx_vram_gb", path),
   };
 }
 
 /**
- * `models.list`. Accepts the first engine shape (`translation.{base_url,
- * installed, error, presets}`) and the hardware.md shape (`translation.{server,
- * models}` plus `gpu_runtime`).
+ * `models.list` (hardware.md `models_overview()`). The first-version fields the
+ * engine still sends (`translation.base_url/installed/error/presets`) are
+ * ignored: `translation.server` and `translation.models` carry the same data.
  */
 export function parseModels(v: unknown): ModelsList {
   const p = "models.list";
   const o = obj(v, p);
   const tp = `${p}.translation`;
   const t = obj(o.translation, tp);
-  const hasServer = t.server !== undefined;
-  const sp = hasServer ? `${tp}.server` : tp;
-  const server = hasServer ? obj(t.server, sp) : t;
-
-  const presets: TranslationPreset[] = Array.isArray(t.models)
-    ? t.models.map((m, i) => parseTranslationModel(m, `${tp}.models[${i}]`))
-    : arr(t, "presets", tp).map((m, i) => parsePreset(m, `${tp}.presets[${i}]`));
-
-  let installed: string[] | null = null;
-  const installedRaw = t.installed;
-  if (Array.isArray(installedRaw)) {
-    installed = installedRaw.filter((n): n is string => typeof n === "string");
-  } else if (installedRaw !== null && installedRaw !== undefined) {
-    throw new ValidationError(`${tp}.installed`, "expected an array or null");
-  } else if (Array.isArray(t.models) && server.reachable !== false) {
-    installed = presets.filter((m) => m.installed === true).map((m) => m.model);
-  }
-
+  const sp = `${tp}.server`;
+  const server = obj(t.server, sp);
   return {
     asr: arr(o, "asr", p).map((m, i) => parseAsrModel(m, `${p}.asr[${i}]`)),
-    gpu_runtime: parseGpuRuntime(o.gpu_runtime),
+    gpu_runtime: parseGpuRuntime(o.gpu_runtime, `${p}.gpu_runtime`),
     translation: {
-      base_url: str(server, "base_url", sp, 2000),
-      installed,
-      error: optStr(server, "error", sp),
-      presets,
+      server: {
+        base_url: str(server, "base_url", sp, 2000),
+        is_local: optBool(server, "is_local", sp) ?? false,
+        reachable: bool(server, "reachable", sp),
+        error: optStr(server, "error", sp),
+      },
+      models: arr(t, "models", tp).map((m, i) => parseTranslationModel(m, `${tp}.models[${i}]`)),
     },
+  };
+}
+
+/** `models.validate`: `{ok, errors, warnings}`. */
+export function parseCombinationCheck(v: unknown): CombinationCheck {
+  const p = "models.validate";
+  const o = obj(v, p);
+  const errors = strList(o.errors);
+  // The engine sets ok=false exactly when there are errors; if the two ever
+  // disagree, trust the errors so saving is never offered next to one.
+  return { ok: bool(o, "ok", p) && errors.length === 0, errors, warnings: strList(o.warnings) };
+}
+
+export function parseAbout(v: unknown): AboutInfo {
+  const p = "app_about";
+  const o = obj(v, p);
+  return {
+    license: str(o, "license", p, 100),
+    third_party_licenses: optStr(o, "third_party_licenses", p),
   };
 }
 

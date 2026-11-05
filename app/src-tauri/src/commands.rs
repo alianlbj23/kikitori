@@ -6,29 +6,34 @@
 //! suited to that method. Overlay commands drive the subtitle window. Which
 //! window may call which command is decided by `capabilities/*.json`.
 
+use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::connection::RequestError;
-use crate::engine::{BridgeStatus, EngineBridge};
+use crate::engine::{BridgeStatus, EngineBridge, third_party_licenses_dir};
 use crate::overlay::{OVERLAY_LABEL, OverlaySnapshot, OverlayState, OverlayStyle};
 
 type CmdResult<T> = Result<T, RequestError>;
 
 const QUICK: Duration = Duration::from_secs(10);
-/// Hardware probing runs `nvidia-smi` and similar tools in the engine.
-const HARDWARE: Duration = Duration::from_secs(30);
-/// Includes a 3 s HTTP call to the translation server inside the engine.
-const MODELS: Duration = Duration::from_secs(20);
+/// Background methods (`hardware.detect`, `models.list`, `models.validate`,
+/// `settings.apply_recommendation`) run `nvidia-smi` and probe the translation
+/// server (2 s timeout per address), and the engine runs them one at a time in
+/// arrival order, so a request may first wait for the ones queued before it.
+const BACKGROUND: Duration = Duration::from_secs(45);
 /// The engine answers `session.start` after validating, before loading models.
 const SESSION_START: Duration = Duration::from_secs(30);
 /// The engine joins its worker threads with a 5 s timeout.
 const SESSION_STOP: Duration = Duration::from_secs(15);
 
 const MAX_MODEL_ID_CHARS: usize = 100;
+/// `models.download` id of the optional NVIDIA cuBLAS runtime (hardware.md).
+pub const GPU_RUNTIME_ID: &str = "gpu-runtime";
 const MAX_DEVICE_ID_CHARS: usize = 512;
 /// The engine caps `settings.subtitle` at 16 KiB; the whole patch is far smaller.
 const MAX_SETTINGS_PATCH_BYTES: usize = 64 * 1024;
@@ -109,6 +114,36 @@ pub fn session_start_params(mode: Mode, device_id: Option<&str>) -> Result<Value
     Ok(json!({ "mode": mode.as_str(), "device_id": device_id }))
 }
 
+/// `models.download` parameters. `accept_license` only exists for the GPU
+/// runtime (the engine rejects it for ASR models) and is sent only when the user
+/// ticked the NVIDIA EULA box; without it the engine answers
+/// `license_not_accepted`, so the gate holds even if the UI misbehaves.
+pub fn models_download_params(model: &str, accept_license: bool) -> Result<Value, RequestError> {
+    validate_model_id(model)?;
+    if model == GPU_RUNTIME_ID {
+        if accept_license {
+            return Ok(json!({ "model": model, "accept_license": true }));
+        }
+        return Ok(json!({ "model": model }));
+    }
+    if accept_license {
+        return Err(invalid("accept_license only applies to the GPU runtime"));
+    }
+    Ok(json!({ "model": model }))
+}
+
+/// `models.validate` parameters: the candidate partial settings, or none to
+/// check the saved settings.
+pub fn models_validate_params(settings: Option<&Value>) -> Result<Value, RequestError> {
+    match settings {
+        Some(patch) => {
+            validate_settings_patch(patch)?;
+            Ok(json!({ "settings": patch }))
+        }
+        None => Ok(json!({})),
+    }
+}
+
 #[tauri::command]
 pub async fn engine_info(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
     bridge.request("engine.info", json!({}), QUICK).await
@@ -116,20 +151,33 @@ pub async fn engine_info(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
 
 #[tauri::command]
 pub async fn hardware_detect(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
-    bridge.request("hardware.detect", json!({}), HARDWARE).await
+    bridge
+        .request("hardware.detect", json!({}), BACKGROUND)
+        .await
 }
 
 #[tauri::command]
 pub async fn models_list(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
-    bridge.request("models.list", json!({}), MODELS).await
+    bridge.request("models.list", json!({}), BACKGROUND).await
 }
 
 #[tauri::command]
-pub async fn models_download(bridge: State<'_, EngineBridge>, model: String) -> CmdResult<Value> {
-    validate_model_id(&model)?;
-    bridge
-        .request("models.download", json!({ "model": model }), QUICK)
-        .await
+pub async fn models_download(
+    bridge: State<'_, EngineBridge>,
+    model: String,
+    accept_license: Option<bool>,
+) -> CmdResult<Value> {
+    let params = models_download_params(&model, accept_license.unwrap_or(false))?;
+    bridge.request("models.download", params, QUICK).await
+}
+
+#[tauri::command]
+pub async fn models_validate(
+    bridge: State<'_, EngineBridge>,
+    settings: Option<Value>,
+) -> CmdResult<Value> {
+    let params = models_validate_params(settings.as_ref())?;
+    bridge.request("models.validate", params, BACKGROUND).await
 }
 
 #[tauri::command]
@@ -146,6 +194,13 @@ pub async fn settings_get(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
 pub async fn settings_set(bridge: State<'_, EngineBridge>, patch: Value) -> CmdResult<Value> {
     validate_settings_patch(&patch)?;
     bridge.request("settings.set", patch, QUICK).await
+}
+
+#[tauri::command]
+pub async fn settings_apply_recommendation(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge
+        .request("settings.apply_recommendation", json!({}), BACKGROUND)
+        .await
 }
 
 #[tauri::command]
@@ -183,6 +238,54 @@ pub async fn engine_restart(bridge: State<'_, EngineBridge>) -> CmdResult<Bridge
 #[tauri::command]
 pub fn bridge_status(bridge: State<'_, EngineBridge>) -> BridgeStatus {
     bridge.status()
+}
+
+/// License facts for the settings page's "about" section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AboutInfo {
+    /// The app's own license (Cargo.toml / tauri.conf.json `bundle.license`).
+    pub license: &'static str,
+    /// Where the bundled engine's third-party licenses are, when they exist
+    /// (release builds); development builds have no bundled engine.
+    pub third_party_licenses: Option<String>,
+}
+
+pub fn about_info(resource_dir: Option<&Path>) -> AboutInfo {
+    let third_party_licenses = resource_dir
+        .map(third_party_licenses_dir)
+        .filter(|dir| dir.is_dir())
+        .map(|dir| dir.to_string_lossy().into_owned());
+    AboutInfo {
+        license: env!("CARGO_PKG_LICENSE"),
+        third_party_licenses,
+    }
+}
+
+fn resource_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .resource_dir()
+        .map_err(|e| log::error!("cannot resolve the resource directory: {e}"))
+        .ok()
+}
+
+#[tauri::command]
+pub fn app_about(app: AppHandle) -> AboutInfo {
+    about_info(resource_dir(&app).as_deref())
+}
+
+/// Opens the bundled THIRD_PARTY_LICENSES folder in the file manager. Takes no
+/// path from the webview, so it cannot be used to open anything else.
+#[tauri::command]
+pub fn open_third_party_licenses(app: AppHandle) -> CmdResult<()> {
+    let dir = about_info(resource_dir(&app).as_deref())
+        .third_party_licenses
+        .ok_or_else(|| invalid("this build has no bundled third-party license folder"))?;
+    app.opener()
+        .open_path(dir.clone(), None::<String>)
+        .map_err(|e| {
+            log::error!("cannot open {dir}: {e}");
+            invalid(format!("cannot open the license folder: {e}"))
+        })
 }
 
 #[tauri::command]
@@ -293,6 +396,55 @@ mod tests {
         assert!(validate_settings_patch(&json!("x")).is_err());
         let big = json!({"subtitle": {"note": "x".repeat(MAX_SETTINGS_PATCH_BYTES)}});
         assert!(validate_settings_patch(&big).is_err());
+    }
+
+    #[test]
+    fn download_params_gate_the_gpu_runtime_license() {
+        assert_eq!(
+            models_download_params("base", false).unwrap(),
+            json!({"model": "base"})
+        );
+        assert!(models_download_params("base", true).is_err());
+        assert_eq!(
+            models_download_params(GPU_RUNTIME_ID, true).unwrap(),
+            json!({"model": "gpu-runtime", "accept_license": true})
+        );
+        // Not accepted: no flag at all, so the engine refuses with license_not_accepted.
+        assert_eq!(
+            models_download_params(GPU_RUNTIME_ID, false).unwrap(),
+            json!({"model": "gpu-runtime"})
+        );
+        assert!(models_download_params("../x", false).is_err());
+    }
+
+    #[test]
+    fn validate_params_wrap_the_candidate() {
+        assert_eq!(models_validate_params(None).unwrap(), json!({}));
+        let patch = json!({"asr": {"device": "cuda"}});
+        assert_eq!(
+            models_validate_params(Some(&patch)).unwrap(),
+            json!({"settings": {"asr": {"device": "cuda"}}})
+        );
+        assert!(models_validate_params(Some(&json!([1]))).is_err());
+    }
+
+    #[test]
+    fn about_reports_licenses_only_when_bundled() {
+        let none = about_info(None);
+        assert_eq!(none.license, "MIT");
+        assert_eq!(none.third_party_licenses, None);
+
+        let resources = std::env::temp_dir().join(format!("kikitori-about-{}", std::process::id()));
+        assert_eq!(about_info(Some(&resources)).third_party_licenses, None);
+        let dir = third_party_licenses_dir(&resources);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            about_info(Some(&resources)).third_party_licenses,
+            Some(dir.to_string_lossy().into_owned())
+        );
+        if let Err(e) = std::fs::remove_dir_all(&resources) {
+            eprintln!("could not remove {}: {e}", resources.display());
+        }
     }
 
     #[test]

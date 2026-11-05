@@ -1,8 +1,8 @@
 //! Engine process supervisor.
 //!
 //! Role: owns the `kikitori-engine` child process. It decides which command to run
-//! (developer override, `uv run kikitori engine` in debug builds, or the bundled
-//! sidecar in release builds), wires the child's stdio to a [`Connection`],
+//! (developer override, `uv run kikitori engine` in debug builds, or the
+//! PyInstaller one-folder engine bundled as a Tauri resource in release builds), wires the child's stdio to a [`Connection`],
 //! verifies the protocol version, forwards stderr to the app log, and restarts the
 //! engine with backoff when it dies unexpectedly. The current state is reported to
 //! the UI through [`BridgeSink::bridge_state`] so the user always sees whether the
@@ -31,8 +31,23 @@ use crate::protocol::{EngineEvent, MAX_LINE_BYTES, PROTOCOL_VERSION};
 pub const ENGINE_CMD_ENV: &str = "KIKITORI_ENGINE_CMD";
 /// Optional working directory for the engine command.
 pub const ENGINE_CWD_ENV: &str = "KIKITORI_ENGINE_CWD";
-/// Base name of the bundled sidecar (`bundle.externalBin`).
-pub const SIDECAR_NAME: &str = "kikitori-engine";
+/// Folder inside the app's resource directory that holds the PyInstaller
+/// one-folder engine (`bundle.resources` in `tauri.sidecar.conf.json`).
+pub const ENGINE_RESOURCE_DIR: &str = "kikitori-engine";
+/// Engine executable inside [`ENGINE_RESOURCE_DIR`] (plus `EXE_SUFFIX`).
+pub const ENGINE_BINARY_NAME: &str = "kikitori-engine";
+/// License texts of everything PyInstaller bundled (packaging/engine/licenses.py).
+pub const THIRD_PARTY_LICENSES_DIR: &str = "THIRD_PARTY_LICENSES";
+
+/// The bundled engine folder for a given resource directory.
+pub fn bundled_engine_dir(resource_dir: &Path) -> PathBuf {
+    resource_dir.join(ENGINE_RESOURCE_DIR)
+}
+
+/// Third-party license folder shipped with the bundled engine.
+pub fn third_party_licenses_dir(resource_dir: &Path) -> PathBuf {
+    bundled_engine_dir(resource_dir).join(THIRD_PARTY_LICENSES_DIR)
+}
 
 /// The first `uv run` may have to create the virtualenv and download wheels
 /// before Python even starts, so the handshake gets a generous deadline.
@@ -96,11 +111,13 @@ pub struct ResolveInput<'a> {
     pub env_cmd: Option<&'a str>,
     pub env_cwd: Option<&'a str>,
     pub debug_build: bool,
-    pub exe_dir: Option<&'a Path>,
+    /// `PathResolver::resource_dir()`: the install directory on Windows,
+    /// `Contents/Resources` on macOS, `/usr/lib/<productName>` on Linux.
+    pub resource_dir: Option<&'a Path>,
     pub repo_root: &'a Path,
 }
 
-/// Picks the engine command: env override > debug `uv run` > release sidecar.
+/// Picks the engine command: env override > debug `uv run` > bundled engine.
 pub fn resolve_engine_command(input: &ResolveInput<'_>) -> Result<EngineCommand, String> {
     let cwd_override = match input.env_cwd.map(str::trim).filter(|s| !s.is_empty()) {
         Some(dir) => {
@@ -138,16 +155,17 @@ pub fn resolve_engine_command(input: &ResolveInput<'_>) -> Result<EngineCommand,
             source: CommandSource::DevUv,
         });
     }
-    let exe_dir = input
-        .exe_dir
-        .ok_or_else(|| "cannot locate the app executable directory".to_string())?;
-    // Tauri copies `externalBin` next to the main executable without the target
-    // triple suffix.
-    let file = format!("{SIDECAR_NAME}{}", std::env::consts::EXE_SUFFIX);
+    let resource_dir = input
+        .resource_dir
+        .ok_or_else(|| "cannot locate the app resource directory".to_string())?;
+    let engine_dir = bundled_engine_dir(resource_dir);
+    let file = format!("{ENGINE_BINARY_NAME}{}", std::env::consts::EXE_SUFFIX);
     Ok(EngineCommand {
-        program: exe_dir.join(file).to_string_lossy().into_owned(),
+        program: engine_dir.join(file).to_string_lossy().into_owned(),
         args: Vec::new(),
-        cwd: cwd_override.or_else(|| Some(exe_dir.to_path_buf())),
+        // The one-folder build finds `_internal/` next to its executable either
+        // way; running from its own folder keeps relative paths predictable.
+        cwd: cwd_override.or(Some(engine_dir)),
         env: Vec::new(),
         source: CommandSource::Sidecar,
     })
@@ -641,13 +659,13 @@ mod tests {
         env_cmd: Option<&'a str>,
         env_cwd: Option<&'a str>,
         debug: bool,
-        exe: Option<&'a Path>,
+        resources: Option<&'a Path>,
     ) -> ResolveInput<'a> {
         ResolveInput {
             env_cmd,
             env_cwd,
             debug_build: debug,
-            exe_dir: exe,
+            resource_dir: resources,
             repo_root: Path::new("/repo"),
         }
     }
@@ -671,13 +689,42 @@ mod tests {
     }
 
     #[test]
-    fn release_uses_sidecar_next_to_exe() {
-        let exe = PathBuf::from("/opt/kikitori");
-        let cmd = resolve_engine_command(&input(None, None, false, Some(&exe))).unwrap();
-        let expected = exe.join(format!("kikitori-engine{}", std::env::consts::EXE_SUFFIX));
+    fn release_uses_the_bundled_engine_folder() {
+        let resources = PathBuf::from("/usr/lib/kikitori");
+        let cmd = resolve_engine_command(&input(None, None, false, Some(&resources))).unwrap();
+        let folder = resources.join("kikitori-engine");
+        let expected = folder.join(format!("kikitori-engine{}", std::env::consts::EXE_SUFFIX));
         assert_eq!(PathBuf::from(&cmd.program), expected);
+        assert!(cmd.args.is_empty());
+        assert_eq!(cmd.cwd.as_deref(), Some(folder.as_path()));
         assert_eq!(cmd.source, CommandSource::Sidecar);
         assert!(resolve_engine_command(&input(None, None, false, None)).is_err());
+    }
+
+    #[test]
+    fn release_honours_overrides() {
+        let resources = PathBuf::from("/usr/lib/kikitori");
+        let abs = std::env::temp_dir();
+        let abs_str = abs.to_string_lossy().into_owned();
+        let cmd =
+            resolve_engine_command(&input(None, Some(&abs_str), false, Some(&resources))).unwrap();
+        assert_eq!(cmd.cwd.as_deref(), Some(abs.as_path()));
+        let cmd =
+            resolve_engine_command(&input(Some("python e.py"), None, false, Some(&resources)))
+                .unwrap();
+        assert_eq!(cmd.program, "python");
+        assert_eq!(cmd.source, CommandSource::Env);
+    }
+
+    #[test]
+    fn third_party_licenses_live_inside_the_engine_folder() {
+        let resources = PathBuf::from("/usr/lib/kikitori");
+        assert_eq!(
+            third_party_licenses_dir(&resources),
+            resources
+                .join("kikitori-engine")
+                .join("THIRD_PARTY_LICENSES")
+        );
     }
 
     #[test]
@@ -718,7 +765,12 @@ mod tests {
     /// Needs `uv` on PATH (the project's Python toolchain, also present in CI).
     mod fake_engine {
         use super::*;
-        use crate::protocol::SubtitlePayload;
+        use crate::commands::{GPU_RUNTIME_ID, models_download_params, models_validate_params};
+        use crate::protocol::{DownloadProgressPayload, DownloadState, SubtitlePayload};
+
+        const EULA_URL: &str = "https://docs.nvidia.com/cuda/eula/index.html";
+        /// Background methods queue behind each other in the engine.
+        const SLOW: Duration = Duration::from_secs(45);
 
         #[derive(Default)]
         struct Recorder {
@@ -761,12 +813,19 @@ mod tests {
         /// The real engine (`kikitori engine`) in its built-in fake mode, with
         /// settings in a throwaway directory so the developer's file is untouched.
         fn real_engine_fake_mode(config_dir: &Path) -> EngineCommand {
+            real_engine_fake_hardware(config_dir, "nvidia")
+        }
+
+        /// Same, choosing the engine's fake hardware scenario
+        /// (`KIKITORI_ENGINE_FAKE_HARDWARE`: nvidia, apple, slow-runtime, broken-runtime).
+        fn real_engine_fake_hardware(config_dir: &Path, scenario: &str) -> EngineCommand {
             EngineCommand {
                 program: "uv".into(),
                 args: vec!["run".into(), "kikitori".into(), "engine".into()],
                 cwd: Some(compile_time_repo_root()),
                 env: vec![
                     ("KIKITORI_ENGINE_FAKE".into(), "1".into()),
+                    ("KIKITORI_ENGINE_FAKE_HARDWARE".into(), scenario.into()),
                     (
                         "KIKITORI_CONFIG_DIR".into(),
                         config_dir.to_string_lossy().into_owned(),
@@ -774,6 +833,47 @@ mod tests {
                 ],
                 source: CommandSource::Env,
             }
+        }
+
+        /// A fresh settings directory per test, removed on drop.
+        struct TempConfig(PathBuf);
+
+        impl TempConfig {
+            fn new(tag: &str) -> Self {
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let dir = std::env::temp_dir().join(format!(
+                    "kikitori-app-test-{tag}-{}-{}",
+                    std::process::id(),
+                    COUNTER.fetch_add(1, Ordering::SeqCst)
+                ));
+                std::fs::create_dir_all(&dir).expect("create temp config dir");
+                Self(dir)
+            }
+        }
+
+        impl Drop for TempConfig {
+            fn drop(&mut self) {
+                if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                    eprintln!("could not remove {}: {e}", self.0.display());
+                }
+            }
+        }
+
+        fn engine_code(result: Result<Value, RequestError>) -> (String, String) {
+            match result {
+                Err(RequestError::Engine { code, message }) => (code, message),
+                other => panic!("expected an engine error, got {other:?}"),
+            }
+        }
+
+        fn downloads(rec: &Recorder, model: &str) -> Vec<DownloadProgressPayload> {
+            lock(&rec.events)
+                .iter()
+                .filter_map(|e| match e {
+                    EngineEvent::DownloadProgress(p) if p.model == model => Some(p.clone()),
+                    _ => None,
+                })
+                .collect()
         }
 
         async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -898,6 +998,200 @@ mod tests {
             if let Err(e) = std::fs::remove_dir_all(&config_dir) {
                 eprintln!("could not remove {}: {e}", config_dir.display());
             }
+        }
+
+        /// The fake engine answers background methods after a delay, so a later
+        /// request is answered first; each caller must still get its own result.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn background_responses_may_overtake_and_are_matched_by_id() {
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(Ok(fake_command(&[])), rec.clone());
+            bridge.start().await.expect("handshake");
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let timed = |method: &'static str, params: Value| {
+                let bridge = bridge.clone();
+                let order = order.clone();
+                async move {
+                    let result = bridge.request(method, params, SLOW).await;
+                    lock(&order).push(method);
+                    result
+                }
+            };
+            let (detect, settings) = tokio::join!(timed("hardware.detect", json!({})), async {
+                // Make sure the engine received hardware.detect first.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                timed("settings.get", json!({})).await
+            });
+            assert_eq!(*lock(&order), vec!["settings.get", "hardware.detect"]);
+            assert!(detect.unwrap()["recommendation"]["fast_asr"].is_object());
+            assert!(settings.unwrap()["settings"]["asr"].is_object());
+            bridge.shutdown().await;
+        }
+
+        /// Milestone 6 methods against the real engine with fake NVIDIA hardware
+        /// (8 GB GPU, cuBLAS missing): detect, validate, apply, the license gate,
+        /// then the GPU runtime install switches the recommendation to CUDA.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn real_engine_hardware_methods_and_gpu_runtime_gate() {
+            let config = TempConfig::new("hw");
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(Ok(real_engine_fake_mode(&config.0)), rec.clone());
+            bridge
+                .start()
+                .await
+                .expect("handshake with the real engine");
+
+            // Background methods may answer after later requests; responses are
+            // matched by id, so concurrent callers each get their own result.
+            let (detect, settings, devices) = tokio::join!(
+                bridge.request("hardware.detect", json!({}), SLOW),
+                bridge.request("settings.get", json!({}), Duration::from_secs(10)),
+                bridge.request("devices.list", json!({}), Duration::from_secs(10)),
+            );
+            let detect = detect.unwrap();
+            assert!(settings.unwrap()["settings"]["asr"].is_object());
+            assert!(devices.unwrap()["devices"].is_array());
+            let gpu = &detect["hardware"]["gpus"][0];
+            assert!(gpu["memory_total_mb"].as_u64().unwrap() > 0);
+            assert!(gpu.get("vram_bytes").is_none());
+            let before = &detect["recommendation"];
+            assert_eq!(before["gpu_runtime_missing"], json!(true));
+            assert_eq!(before["fast_asr"]["device"], json!("cpu"));
+            assert!(before["final_asr"]["compute_type"].is_string());
+            assert!(before["reasons"].is_array() && before["warnings"].is_array());
+
+            let models = bridge
+                .request("models.list", json!({}), SLOW)
+                .await
+                .unwrap();
+            let runtime = &models["gpu_runtime"];
+            assert_eq!(runtime["id"], json!(GPU_RUNTIME_ID));
+            assert_eq!(runtime["supported"], json!(true));
+            assert_eq!(runtime["installed"], json!(false));
+            assert_eq!(runtime["license_url"], json!(EULA_URL));
+            assert!(models["asr"][0]["recommended_for"].is_array());
+            assert!(models["translation"]["models"][0]["commercial_use"].is_boolean());
+
+            // Live validation: a candidate is checked without being saved.
+            let candidate = json!({"asr": {"device": "cuda"}});
+            let checked = bridge
+                .request(
+                    "models.validate",
+                    models_validate_params(Some(&candidate)).unwrap(),
+                    SLOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(checked["ok"], json!(false));
+            assert!(!checked["errors"].as_array().unwrap().is_empty());
+            let current = bridge
+                .request(
+                    "models.validate",
+                    models_validate_params(None).unwrap(),
+                    SLOW,
+                )
+                .await
+                .unwrap();
+            assert!(current["ok"].is_boolean());
+            let bad = json!({"asr": {"fast_cpu_threads": 0}});
+            let (code, _) = engine_code(
+                bridge
+                    .request(
+                        "models.validate",
+                        models_validate_params(Some(&bad)).unwrap(),
+                        SLOW,
+                    )
+                    .await,
+            );
+            assert_eq!(code, "invalid_settings");
+            let saved = bridge
+                .request("settings.get", json!({}), Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert_eq!(saved["settings"]["asr"]["device"], json!("auto"));
+
+            // Applying the recommendation is the engine's job; before cuBLAS it is CPU.
+            let applied = bridge
+                .request("settings.apply_recommendation", json!({}), SLOW)
+                .await
+                .unwrap();
+            assert_eq!(applied["applied"]["asr"]["device"], json!("cpu"));
+            assert_eq!(applied["settings"]["asr"]["device"], json!("cpu"));
+            assert!(applied["recommendation"]["tier"].is_string());
+
+            // License gate: without the flag the engine refuses and names the EULA.
+            let (code, message) = engine_code(
+                bridge
+                    .request(
+                        "models.download",
+                        models_download_params(GPU_RUNTIME_ID, false).unwrap(),
+                        Duration::from_secs(10),
+                    )
+                    .await,
+            );
+            assert_eq!(code, "license_not_accepted");
+            assert!(message.contains(EULA_URL));
+            assert!(downloads(&rec, GPU_RUNTIME_ID).is_empty());
+
+            let started = bridge
+                .request(
+                    "models.download",
+                    models_download_params(GPU_RUNTIME_ID, true).unwrap(),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+            assert_eq!(started["started"], json!(true));
+            wait_until("the GPU runtime install to finish", || {
+                downloads(&rec, GPU_RUNTIME_ID)
+                    .iter()
+                    .any(|p| p.state != DownloadState::Downloading)
+            })
+            .await;
+            let last = downloads(&rec, GPU_RUNTIME_ID).pop().unwrap();
+            assert_eq!(last.state, DownloadState::Done, "{:?}", last.error);
+
+            let after = bridge
+                .request("settings.apply_recommendation", json!({}), SLOW)
+                .await
+                .unwrap();
+            assert_eq!(after["applied"]["asr"]["device"], json!("cuda"));
+            assert_eq!(after["recommendation"]["gpu_runtime_missing"], json!(false));
+
+            bridge.shutdown().await;
+            wait_until("stopped", || bridge.status().phase == BridgePhase::Stopped).await;
+        }
+
+        /// macOS / ARM: there is no GPU runtime, whether or not the license was accepted.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn real_engine_reports_gpu_runtime_unsupported() {
+            let config = TempConfig::new("apple");
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(
+                Ok(real_engine_fake_hardware(&config.0, "apple")),
+                rec.clone(),
+            );
+            bridge
+                .start()
+                .await
+                .expect("handshake with the real engine");
+            let models = bridge
+                .request("models.list", json!({}), SLOW)
+                .await
+                .unwrap();
+            assert_eq!(models["gpu_runtime"]["supported"], json!(false));
+            let (code, _) = engine_code(
+                bridge
+                    .request(
+                        "models.download",
+                        models_download_params(GPU_RUNTIME_ID, true).unwrap(),
+                        Duration::from_secs(10),
+                    )
+                    .await,
+            );
+            assert_eq!(code, "gpu_runtime_unsupported");
+            bridge.shutdown().await;
+            wait_until("stopped", || bridge.status().phase == BridgePhase::Stopped).await;
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

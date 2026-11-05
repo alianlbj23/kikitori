@@ -22,9 +22,19 @@ const fakeCmd = (extra = []) =>
 
 const choices = [
   {
-    label: "開發模式：正式引擎的假模式（合成聲音、假辨識與翻譯，建議）",
+    label: "開發模式：正式引擎的假模式（合成聲音、假辨識與翻譯、假 8 GB NVIDIA 顯示卡缺 cuBLAS，建議）",
     args: ["dev"],
     env: { KIKITORI_ENGINE_FAKE: "1" },
+  },
+  {
+    label: "開發模式：正式引擎的假模式，假硬體為 Apple Silicon（GPU 加速元件不支援）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_FAKE: "1", KIKITORI_ENGINE_FAKE_HARDWARE: "apple" },
+  },
+  {
+    label: "開發模式：正式引擎的假模式，GPU 加速元件下載會失敗（雜湊不符）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_FAKE: "1", KIKITORI_ENGINE_FAKE_HARDWARE: "broken-runtime" },
   },
   {
     label: "開發模式：app/dev/fake_engine.py（不需要 Python 專案環境，字幕會一直產生）",

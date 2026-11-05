@@ -6,6 +6,13 @@ NDJSON protocol (docs/specs/app-architecture.md, docs/specs/pipeline-engine.md):
 answers every method with plausibly shaped results and, during a session, emits
 partial subtitles that grow word by word and are then replaced by a final one.
 
+Compared with the real engine's own fake mode (`KIKITORI_ENGINE_FAKE=1`), it needs
+no project environment, its subtitles never stop, and it can inject faults. The
+hardware/model methods (Milestone 6 shapes) are a small fixed imitation: an 8 GB
+NVIDIA machine without cuBLAS, a GPU runtime behind the NVIDIA EULA gate, and
+background methods answered on one worker thread after a short delay, so later
+requests can be answered first, as with the real engine.
+
 Point the app at it with
     KIKITORI_ENGINE_CMD='["uv","run","--no-project","python","app/dev/fake_engine.py"]'
 or use `npm run menu` in app/.
@@ -21,6 +28,7 @@ import copy
 import json
 import os
 import platform
+import queue
 import sys
 import threading
 import time
@@ -96,8 +104,76 @@ ASR_MODELS: list[dict[str, Any]] = [
     },
 ]
 
+# (no_speech_reliable, cpu_ram_mb, vram_mb, vram_int8_mb), shaped like models_overview().
+ASR_RESOURCES: dict[str, dict[str, Any]] = {
+    model_id: {
+        "no_speech_reliable": reliable,
+        "cpu_ram_mb": ram,
+        "vram_mb": vram,
+        "vram_int8_mb": vram_int8,
+    }
+    for model_id, reliable, ram, vram, vram_int8 in (
+        ("tiny", True, 250, 500, 400),
+        ("base", True, 348, 600, 450),
+        ("small", True, 950, 1000, 650),
+        ("medium", True, 2300, 2400, 1400),
+        ("large-v3-turbo", False, 1890, 2300, 1240),
+        ("large-v3", True, 3600, 4200, 2300),
+    )
+}
+
 GPU_RUNTIME_ID = "gpu-runtime"
 GPU_RUNTIME_BYTES = 567_544_208
+EULA_URL = "https://docs.nvidia.com/cuda/eula/index.html"
+# Long enough that a request sent right after a background one is answered first.
+BACKGROUND_DELAY_SECS = 0.3
+
+TRANSLATION_MODELS: list[dict[str, Any]] = [
+    {
+        "name": name,
+        "label": label,
+        "installed": installed,
+        "known": True,
+        "recommended_for": ["fast", "final"] if name == "qwen3.5:4b" else [],
+        "license": license_name,
+        "license_url": None,
+        "commercial_use": commercial,
+        "excluded_regions": regions,
+        "approx_vram_gb": vram,
+    }
+    for name, label, installed, license_name, commercial, regions, vram in (
+        ("qwen3.5:4b", "Qwen3.5 4B", True, "Apache-2.0", True, [], 3.3),
+        ("qwen3.5:9b", "Qwen3.5 9B", False, "Apache-2.0", True, [], 6.6),
+        (
+            "hy-mt1.5-7b:latest",
+            "HY-MT1.5 7B",
+            False,
+            "Tencent HY Community License",
+            True,
+            ["EU", "UK", "KR"],
+            4.6,
+        ),
+        (
+            "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+            "Sakura-GalTransl 7B v3（非商用）",
+            False,
+            "CC BY-NC-SA 4.0",
+            False,
+            [],
+            4.3,
+        ),
+    )
+]
+COMPUTE_TYPES = (
+    "int8",
+    "int8_float32",
+    "int8_float16",
+    "int8_bfloat16",
+    "int16",
+    "float16",
+    "bfloat16",
+    "float32",
+)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "schema_version": 2,
@@ -108,18 +184,20 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "interpret": {"pause_secs": 0.5, "max_secs": 8.0, "device_id": None},
     "asr": {
         "fast_model": "base",
-        "final_model": "large-v3-turbo",
+        "final_model": "small",
         "device": "auto",
         "fast_compute_type": None,
         "final_compute_type": None,
         "fast_cpu_threads": None,
         "final_cpu_threads": None,
+        "cuda_library_dirs": [],
     },
     "translation": {
         "base_url": "http://localhost:11434/v1",
         "fast_model": "qwen3.5:4b",
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
+        "allow_restricted": False,
     },
     "pipeline": {
         "partial_interval_ms": 700,
@@ -230,6 +308,41 @@ def validate_settings(settings: dict[str, Any]) -> None:
     ):
         raise ProtocolError(
             "invalid_settings", "translation.api_key_env: not a variable name"
+        )
+    if not isinstance(settings["translation"].get("allow_restricted"), bool):
+        raise ProtocolError(
+            "invalid_settings", "translation.allow_restricted: expected a boolean"
+        )
+    asr = settings["asr"]
+    unknown_asr = set(asr) - set(DEFAULT_SETTINGS["asr"])
+    if unknown_asr:
+        raise ProtocolError(
+            "invalid_settings", f"asr.{min(unknown_asr)}: unknown field"
+        )
+    if asr["device"] not in ("auto", "cpu", "cuda"):
+        raise ProtocolError(
+            "invalid_settings", "asr.device: expected auto, cpu or cuda"
+        )
+    for role in ("fast", "final"):
+        ctype = asr[f"{role}_compute_type"]
+        if ctype is not None and ctype not in COMPUTE_TYPES:
+            raise ProtocolError(
+                "invalid_settings", f"asr.{role}_compute_type: unknown precision"
+            )
+        threads = asr[f"{role}_cpu_threads"]
+        if threads is not None and (
+            not isinstance(threads, int)
+            or isinstance(threads, bool)
+            or not 1 <= threads <= 256
+        ):
+            raise ProtocolError(
+                "invalid_settings",
+                f"asr.{role}_cpu_threads: expected an integer in [1, 256], got {threads!r}",
+            )
+    dirs = asr["cuda_library_dirs"]
+    if not isinstance(dirs, list) or len(dirs) > 16:
+        raise ProtocolError(
+            "invalid_settings", "asr.cuda_library_dirs: at most 16 paths"
         )
     if not isinstance(settings["subtitle"], dict):
         raise ProtocolError("invalid_settings", "subtitle: expected an object")
@@ -349,7 +462,7 @@ class FakeEngine:
     def __init__(self, writer: Writer) -> None:
         self.writer = writer
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
-        self.downloaded = {"tiny", "base"}
+        self.downloaded = {"tiny", "base", "small"}
         self.downloading: set[str] = set()
         self.session: Session | None = None
         self.next_session_id = 1
@@ -357,8 +470,6 @@ class FakeEngine:
         self.after_response: list[Callable[[], None]] = []
         self.methods: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "engine.info": self.engine_info,
-            "hardware.detect": self.hardware_detect,
-            "models.list": self.models_list,
             "models.download": self.models_download,
             "devices.list": lambda _p: {"devices": DEVICES},
             "settings.get": lambda _p: self.settings_result(),
@@ -367,6 +478,42 @@ class FakeEngine:
             "session.stop": self.session_stop,
             "engine.shutdown": lambda _p: {},
         }
+        # Like the real engine, these run on one worker thread in arrival order
+        # and answer when done, i.e. possibly after requests sent later.
+        self.background: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+            "hardware.detect": self.hardware_detect,
+            "models.list": self.models_list,
+            "models.validate": self.models_validate,
+            "settings.apply_recommendation": self.settings_apply_recommendation,
+        }
+        self.jobs: queue.Queue[tuple[int, str, dict[str, Any]] | None] = queue.Queue()
+        self.worker = threading.Thread(
+            target=self._work, name="background", daemon=True
+        )
+        self.worker.start()
+
+    def _work(self) -> None:
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            request_id, method, params = job
+            time.sleep(BACKGROUND_DELAY_SECS)
+            try:
+                result = self.background[method](params)
+            except ProtocolError as exc:
+                self.writer.send(
+                    {
+                        "id": request_id,
+                        "error": {"code": exc.code, "message": exc.message},
+                    }
+                )
+                continue
+            self.writer.send({"id": request_id, "result": result})
+
+    def stop_worker(self) -> None:
+        self.jobs.put(None)
+        self.worker.join(timeout=2)
 
     def engine_info(self, _params: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -381,18 +528,58 @@ class FakeEngine:
             "fake": True,
         }
 
+    def _runtime_installed(self) -> bool:
+        return GPU_RUNTIME_ID in self.downloaded
+
+    def recommendation(self) -> dict[str, Any]:
+        """A fixed 8 GB NVIDIA machine; CPU combination until the runtime is installed."""
+        if self._runtime_installed():
+            fast = {"model": "small", "device": "cuda", "compute_type": "float16"}
+            final = {
+                "model": "large-v3-turbo",
+                "device": "cuda",
+                "compute_type": "float16",
+            }
+            threads, tier, budget = 0, "nvidia_8gb", 4.9
+            warnings: list[str] = []
+        else:
+            fast = {"model": "base", "device": "cpu", "compute_type": "int8"}
+            final = {"model": "small", "device": "cpu", "compute_type": "int8"}
+            threads, tier, budget = 4, "cpu", 7.0
+            warnings = [
+                "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
+            ]
+        return {
+            "tier": tier,
+            "fast_asr": {**fast, "cpu_threads": threads},
+            "final_asr": {**final, "cpu_threads": threads},
+            "translation_fast": "qwen3.5:4b",
+            "translation_final": "qwen3.5:4b",
+            "translation_budget_gb": budget,
+            "gpu_runtime_missing": not self._runtime_installed(),
+            "reasons": ["假引擎：依假的 8 GB 顯示卡推薦"],
+            "warnings": warnings,
+        }
+
     def hardware_detect(self, _params: dict[str, Any]) -> dict[str, Any]:
-        """Shape of docs/specs/hardware.md (`hardware_report()`), before cuBLAS."""
-        runtime = GPU_RUNTIME_ID in self.downloaded
-        device = "cuda" if runtime else "cpu"
-        compute = "float16" if runtime else "int8"
-        threads = 0 if runtime else 4
+        """Shape of docs/specs/hardware.md (`HardwareInfo.to_dict()`)."""
+        runtime = self._runtime_installed()
         return {
             "hardware": {
                 "os": "windows",
                 "os_version": "Windows 11 (10.0.26200)",
                 "machine": "AMD64",
+                "cpu": {
+                    "model": "Fake 8-Core CPU",
+                    "physical_cores": 8,
+                    "logical_cores": 16,
+                    "architecture": "AMD64",
+                },
                 "cpu_count": 16,
+                "memory": {
+                    "total_bytes": 32 * 1024**3,
+                    "available_bytes": 16 * 1024**3,
+                },
                 "ram_bytes": 32 * 1024**3,
                 "gpus": [
                     {
@@ -400,54 +587,60 @@ class FakeEngine:
                         "name": "NVIDIA GeForce RTX 4060 (fake)",
                         "memory_total_mb": 8188,
                         "memory_used_mb": 900,
+                        "driver_version": "560.94",
+                        "compute_capability": "8.9",
                     }
                 ],
                 "apple_silicon": False,
-            },
-            "recommendation": {
-                "tier": "nvidia_8gb" if runtime else "cpu",
-                "fast_asr": {
-                    "model": "base",
-                    "device": device,
-                    "compute_type": compute,
-                    "cpu_threads": threads,
+                "cublas": {
+                    "supported_platform": True,
+                    "available": runtime,
+                    "library_dirs": ["C:/fake/cublas"] if runtime else [],
+                    "source": "runtime" if runtime else None,
                 },
-                "final_asr": {
-                    "model": "large-v3-turbo" if runtime else "small",
-                    "device": device,
-                    "compute_type": compute,
-                    "cpu_threads": threads,
+                "translation_server": {
+                    "base_url": self.settings["translation"]["base_url"],
+                    "is_local": True,
+                    "reachable": True,
+                    "models": ["qwen3.5:4b"],
+                    "error": None,
                 },
-                "translation_fast": "qwen3.5:4b",
-                "translation_final": "qwen3.5:4b",
-                "gpu_runtime_missing": not runtime,
-                "reasons": ["假引擎：依假的 8 GB 顯示卡推薦"],
-                "warnings": []
-                if runtime
-                else ["cuBLAS 未安裝，GPU 加速需要先下載 GPU 加速元件"],
+                "errors": [],
             },
+            "recommendation": self.recommendation(),
         }
 
     def models_list(self, _params: dict[str, Any]) -> dict[str, Any]:
         """Shape of docs/specs/hardware.md (`models_overview()`)."""
-        installed = {"qwen3.5:4b"}
+        rec = self.recommendation()
+        roles = {
+            rec["fast_asr"]["model"]: ["fast"],
+        }
+        roles.setdefault(rec["final_asr"]["model"], []).append("final")
+        runtime = self._runtime_installed()
         return {
             "asr": [
                 {
                     **m,
+                    **ASR_RESOURCES[m["id"]],
                     "downloaded": m["id"] in self.downloaded,
-                    "recommended_for": ["fast"] if m["id"] == "base" else [],
+                    "recommended_for": roles.get(m["id"], []),
                 }
                 for m in ASR_MODELS
             ],
             "gpu_runtime": {
                 "id": GPU_RUNTIME_ID,
                 "supported": True,
-                "installed": GPU_RUNTIME_ID in self.downloaded,
+                "installed": runtime,
                 "package": "nvidia-cublas-cu12",
+                "version": "12.8.4.1",
+                "path": "C:/fake/cublas" if runtime else None,
                 "download_bytes": GPU_RUNTIME_BYTES,
+                "installed_bytes": 795_000_000,
                 "license": "NVIDIA CUDA Toolkit End User License Agreement",
-                "license_url": "https://docs.nvidia.com/cuda/eula/index.html",
+                "license_url": EULA_URL,
+                "cublas_available": runtime,
+                "cublas_source": "runtime" if runtime else None,
             },
             "translation": {
                 "server": {
@@ -456,27 +649,59 @@ class FakeEngine:
                     "reachable": True,
                     "error": None,
                 },
-                "models": [
-                    {
-                        "name": name,
-                        "label": label,
-                        "installed": name in installed,
-                        "known": True,
-                        "recommended_for": ["fast", "final"]
-                        if name == "qwen3.5:4b"
-                        else [],
-                        "license": "Apache-2.0",
-                        "license_url": None,
-                        "commercial_use": True,
-                        "excluded_regions": [],
-                    }
-                    for name, label in (
-                        ("qwen3.5:4b", "Qwen3.5 4B"),
-                        ("qwen3.5:9b", "Qwen3.5 9B"),
-                    )
-                ],
+                "models": TRANSLATION_MODELS,
             },
         }
+
+    def models_validate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """A few of `validate_combination()`'s rules, enough to see errors and warnings."""
+        candidate = params.get("settings", {})
+        if not isinstance(candidate, dict):
+            raise ProtocolError("invalid_params", "settings: expected an object")
+        merged = deep_merge(self.settings, candidate)
+        validate_settings(merged)
+        asr, tr = merged["asr"], merged["translation"]
+        errors: list[str] = []
+        warnings: list[str] = []
+        ids = {m["id"] for m in ASR_MODELS}
+        for role in ("fast", "final"):
+            model = asr[f"{role}_model"]
+            if model not in ids:
+                errors.append(f"{role}_asr.model：未知的 ASR 模型 {model!r}")
+            elif model not in self.downloaded:
+                warnings.append(f"{role}_asr：{model} 尚未下載")
+        if asr["device"] == "cuda" and not self._runtime_installed():
+            errors.append("選了 CUDA，但 cuBLAS 未安裝；請先下載 GPU 執行環境")
+        for name in {tr["fast_model"], tr["final_model"]}:
+            info = next((m for m in TRANSLATION_MODELS if m["name"] == name), None)
+            if info is None or not info["installed"]:
+                warnings.append(f"翻譯模型 {name} 不在翻譯伺服器上")
+            elif info["excluded_regions"] and not tr["allow_restricted"]:
+                warnings.append(f"{name} 的授權不適用於歐盟、英國、南韓")
+            elif info["commercial_use"] is False:
+                warnings.append(f"{name} 為非商用授權")
+        return {"ok": not errors, "errors": errors, "warnings": warnings}
+
+    def settings_apply_recommendation(self, _params: dict[str, Any]) -> dict[str, Any]:
+        rec = self.recommendation()
+        fast, final = rec["fast_asr"], rec["final_asr"]
+        applied = {
+            "asr": {
+                "fast_model": fast["model"],
+                "final_model": final["model"],
+                "device": fast["device"],
+                "fast_compute_type": fast["compute_type"],
+                "final_compute_type": final["compute_type"],
+                "fast_cpu_threads": fast["cpu_threads"] or None,
+                "final_cpu_threads": final["cpu_threads"] or None,
+            },
+            "translation": {
+                "fast_model": rec["translation_fast"],
+                "final_model": rec["translation_final"],
+            },
+        }
+        self.settings_set(applied)
+        return {**self.settings_result(), "applied": applied, "recommendation": rec}
 
     def models_download(self, params: dict[str, Any]) -> dict[str, Any]:
         model = params.get("model")
@@ -484,6 +709,22 @@ class FakeEngine:
         sizes[GPU_RUNTIME_ID] = GPU_RUNTIME_BYTES
         if not isinstance(model, str) or model not in sizes:
             raise ProtocolError("unknown_model", f"unknown model {model!r}")
+        accept = params.get("accept_license")
+        if model == GPU_RUNTIME_ID:
+            if accept is not None and not isinstance(accept, bool):
+                raise ProtocolError(
+                    "invalid_params", "accept_license: expected a boolean"
+                )
+            if accept is not True:
+                raise ProtocolError(
+                    "license_not_accepted",
+                    f"downloading nvidia-cublas-cu12 requires accepting the NVIDIA CUDA "
+                    f"Toolkit End User License Agreement: {EULA_URL}",
+                )
+        elif accept is not None:
+            raise ProtocolError(
+                "invalid_params", "accept_license only applies to gpu-runtime"
+            )
         with self.lock:
             if model in self.downloading:
                 raise ProtocolError(
@@ -585,6 +826,17 @@ class FakeEngine:
             params = request.get("params", {})
             if not isinstance(params, dict):
                 raise ProtocolError("invalid_request", "params must be an object")
+            if isinstance(method, str) and method in self.background:
+                # Settings errors are answered at once, like the real engine.
+                if method == "models.validate":
+                    candidate = params.get("settings", {})
+                    if not isinstance(candidate, dict):
+                        raise ProtocolError(
+                            "invalid_params", "settings: expected an object"
+                        )
+                    validate_settings(deep_merge(self.settings, candidate))
+                self.jobs.put((request_id, method, params))
+                return True
             handler = self.methods.get(method) if isinstance(method, str) else None
             if handler is None:
                 raise ProtocolError("unknown_method", f"unknown method {method!r}")
@@ -645,6 +897,7 @@ def main() -> int:
         if not engine.handle(raw):
             break
     engine.session_stop({})
+    engine.stop_worker()
     log("fake engine exiting")
     return 0
 

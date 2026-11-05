@@ -1,6 +1,6 @@
 # Spec: ui（Tauri 桌面程式）
 
-> 狀態：Milestone 7 第一階段已實作（2026-11-05）。
+> 狀態：Milestone 7 第一階段已實作（2026-11-05）；第二階段（2026-11-05）對齊 Milestone 6 的引擎協定（硬體偵測、推薦、組合驗證、GPU 加速元件與授權）並改用 `bundle.resources` 打包引擎。
 > 上層約定：`docs/specs/app-architecture.md`（行程架構、引擎協定、視窗、更新）與 `docs/specs/pipeline-engine.md`（協定欄位細節、設定檔結構）。本文件只補充 UI 端的設計，不改協定。
 
 ## 範圍
@@ -8,7 +8,7 @@
 - `app/`：Tauri v2 + Vite + TypeScript（不用 UI 框架）。
 - 兩個視窗：`main`（控制與設定）、`overlay`（雙語字幕）。
 - Rust 端的引擎橋接（spawn 引擎、NDJSON、id 配對、逾時、重啟）、字幕視窗控制、全域快速鍵、自動更新。
-- 開發用的假引擎 `app/dev/fake_engine.py`、開發選單 `app/dev/launch.mjs`、圖示產生器 `app/dev/make_icon.py`。
+- 開發用的假引擎 `app/dev/fake_engine.py`（故障注入、不停產生字幕；Milestone 6 的方法以固定的假資料模仿）、開發選單 `app/dev/launch.mjs`、圖示產生器 `app/dev/make_icon.py`。
 
 ## 視覺方向
 
@@ -61,29 +61,50 @@
 
 ### 模型頁
 
-- **這台電腦**：`hardware.detect` 的作業系統、處理器執行緒數、記憶體、顯示卡（或 Apple Silicon）。
-- **建議組合**：形狀依 `docs/specs/hardware.md` 的 `ModelCombination.to_dict()`（`fast_asr`／`final_asr` 各含 `model`、`device`、`compute_type`、`cpu_threads`，`translation_fast`／`translation_final`，`reasons`，`warnings`，`gpu_runtime_missing`）。`recommendation` 為 `null` 時說明這一版還不會自動推薦並給出一般建議；有值時列出兩條辨識路徑與翻譯模型、原因與警告，「套用建議組合」以 `settings.set` 寫入，規則與引擎的 `recommendation_patch` 相同（兩條路徑裝置相同才寫該裝置，否則 `auto`；執行緒 0 存成 `null`；沒推薦翻譯模型就保留原設定）。設定檔有 `asr.fast_compute_type` 等 v2 欄位時才一併寫入精度與執行緒。
-- **語音辨識模型**：`models.list.asr` 表格（大小、速度等級、授權、狀態，`recommended_for` 標示「建議：即時／完整」）。未下載的有「下載」按鈕；下載中顯示進度條與百分比（`download_progress` 事件），失敗顯示原因與「重新下載」，完成後重新讀取清單。下方三個選單選即時／完整模型與運算裝置（自動／CPU／CUDA），「套用」寫入 `asr`。
-- **GPU 加速元件**：`models.list.gpu_runtime` 存在且 `supported`、未安裝時啟用「下載 GPU 加速元件」。旁邊依 hardware.md 的要求說明「會從 PyPI 下載 NVIDIA cuBLAS（大小），使用即表示同意 NVIDIA CUDA EULA」並附授權網址；按下後先出現「同意並下載」確認，才呼叫 `models.download {"model": "gpu-runtime"}`，進度沿用 `download_progress`。引擎沒有回報 `gpu_runtime` 時按鈕停用並註明之後提供。（UI 沒有開啟外部連結的權限，授權網址以可選取的文字顯示。）
-- **翻譯模型**：翻譯服務網址、已安裝數量或連線錯誤（例如 Ollama 沒開）；模型清單附授權、不可商用、授權排除地區、是否已安裝。兩個輸入框（附自動完成）選即時／完整翻譯模型，「套用」寫入 `translation`。
-- `models.list` 同時接受兩種形狀：第一版（`translation.{base_url, installed, error, presets}`）與 hardware.md（`translation.{server, models}` 加 `gpu_runtime`）。`hardware.gpus[]` 的顯示記憶體讀 `vram_bytes` 或 `memory_total_mb`。
+協定依 `pipeline-engine.md`「協定變更（Milestone 6）」。進入頁面（或按「重新偵測」）時同時送 `hardware.detect` 與 `models.list`；兩者在引擎的背景工作執行緒上依序處理，回應以 `id` 對應，可能晚於之後送出的其他請求（UI 不假設回應順序，見「回應順序」）。任一個失敗只影響自己那一塊。
+
+- **這台電腦**：`hardware.detect.hardware`——作業系統、處理器（型號、實體核心／邏輯執行緒）、記憶體（總量與目前可用）、顯示卡（每張：名稱、顯示記憶體 `memory_total_mb`、驅動版本、運算能力；Apple Silicon 另外註明）、cuBLAS 狀態（不適用此平台／可以使用與來源：kikitori 下載的元件、自訂資料夾、系統 CUDA／未安裝）、翻譯服務（網址、本機或遠端、模型數或連線錯誤）。`errors[]` 以「偵測不完整：…」列在下方。
+- **建議組合**：`recommendation` 全部欄位——硬體等級（`tier` 轉成文字，不認得的 id 原樣顯示）、即時與完整兩條辨識路徑各自的模型、裝置、精度、執行緒（0＝自動；GPU 路徑不顯示執行緒）、即時與完整翻譯模型（`null` 時說明翻譯服務不在本機、請在自訂組合選）、可給翻譯模型的記憶體（`translation_budget_gb`）、`reasons`、`warnings`（紅字）；`gpu_runtime_missing` 時提示先下載 GPU 加速元件。「**套用建議組合**」呼叫 `settings.apply_recommendation`，以回應的 `settings` 更新畫面與自訂組合、以回應的 `recommendation` 更新顯示，並告知寫入了什麼。**UI 不再自己把推薦轉成設定**（第一階段的 `recommendationPatch` 已移除），轉換規則只存在引擎。
+- **GPU 加速元件**（`models.list.gpu_runtime`）：
+  - `supported=false`：說明平台不支援（只有 Windows／Linux x86-64 搭配 NVIDIA 顯示卡），沒有按鈕。
+  - 未安裝：依偵測結果說明現況（缺元件而改用 CPU／沒有 NVIDIA 顯示卡就不必下載），並依 hardware.md 顯示「這會從 PyPI 下載 NVIDIA cuBLAS（套件與版本，約 X MB），使用即表示同意 NVIDIA CUDA EULA」、授權網址（可選取的文字）、「閱讀授權條款」按鈕（以 opener 外掛開啟，只在引擎回報的網址正好是 `https://docs.nvidia.com/cuda/eula/index.html` 時出現）、勾選框「**我同意 NVIDIA CUDA EULA**」。勾選後「下載 GPU 加速元件」才啟用，按下才送 `models.download {"model": "gpu-runtime", "accept_license": true}`；同意只對這一次下載有效，不寫入任何檔案。Rust 端也只在前端明確傳 `acceptLicense: true` 時才帶 `accept_license`，所以 UI 出錯時引擎仍會回 `license_not_accepted`。
+  - 下載中：`download_progress`（`model="gpu-runtime"`）的進度條；下載量到達總量後顯示「下載完成，正在驗證與解壓」（引擎此時不送進度）。`state: "error"` 顯示 `error` 並可重新勾選下載。
+  - 錯誤碼：`license_not_accepted`、`gpu_runtime_unsupported`（同時重新讀取清單）、`download_in_progress`（不視為失敗，保留進度顯示）都有對應的繁體中文說明。
+  - 安裝完成（`state: "done"`）：asr 在同一個引擎行程裡 CUDA 失敗過就不再嘗試，所以要重啟引擎。沒有 session 在跑、也沒有其他下載時**自動重新啟動引擎**（重啟後重新偵測，建議組合會改用 GPU）；否則只顯示提示與「重新啟動引擎」按鈕，不打斷使用者（規則在 `lib/combination.ts` 的 `afterGpuRuntimeInstalled`）。
+  - 已安裝：顯示套件、版本、位置；`cublas_available=false` 時提示重啟引擎後重新偵測。
+- **語音辨識模型**：`models.list.asr` 表格——模型（使用中、`recommended_for` 的「建議：即時／完整」、`no_speech_reliable=false` 時「不判斷非人聲」並以 title 說明）、大小、速度等級、記憶體（CPU `cpu_ram_mb`／GPU `vram_mb`，未知時「未知」）、授權、狀態（下載按鈕、進度、失敗原因與「重新下載」）。
+- **翻譯模型**：伺服器狀態（`translation.server`；連不上時提示啟動 Ollama），`translation.models` 每個模型：名稱、建議用途、**「不可商用」**（`commercial_use=false`）與**「授權不適用於歐盟、英國、南韓」**（`excluded_regions`）兩種警示標籤、授權名稱（`known=false` 時「不在 kikitori 的清單中，授權請自行確認」）、約需記憶體、安裝狀態、授權網址（可選取的文字，不開啟）。第一版的 `translation.base_url／installed／error／presets` 不再讀取。
+- **自訂組合**（表單）：即時／完整辨識模型（下拉，未下載的註明）、運算裝置（自動／CPU／CUDA，兩條路徑共用，`asr.device`）、即時／完整翻譯模型（輸入框，附 `translation.models` 自動完成）；收合的「**進階**」：兩條路徑各自的精度（自動＝`null`，或 CTranslate2 精度名稱）、CPU 執行緒（留空＝自動，1–256）、自行安裝的 cuBLAS 12 資料夾（每行一個絕對路徑，最多 16 個）。
+  - **即時檢查**：每次輸入先做本地格式檢查（`validateCombinationForm`）；通過後等 350 ms 沒有新輸入才送 `models.validate {"settings": 表單的部分設定}`（不存檔）。結果顯示在表單下方：`errors` 紅字、`warnings` 一般文字。
+  - **儲存**：`ok=false`、檢查中、本地格式錯誤、或引擎回 `invalid_settings`（訊息依欄位路徑標到對應欄位，例如 `asr.cuda_library_dirs[2]` → 資料夾欄）時「儲存組合」停用。檢查本身無法執行（逾時、引擎重啟中）時仍可儲存並說明原因——`settings.set` 一樣會驗證欄位，卡住的檢查不應鎖住使用者。規則在 `canSave()`。
+  - 送出的部分設定一律包含組合的全部欄位，「自動」明確送 `null`；未儲存的修改在重新讀取清單時保留，「還原成目前設定」放棄修改。
+
+#### 回應順序
+
+背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`）可能晚於之後送出的請求才回應。Rust 端一律以 `id` 配對（`connection.rs`），不依賴順序；前端的即時檢查以 `Latest`（遞增 token）只套用**最新一次**輸入的結果，較慢回來的舊結果直接丟棄。測試：`connection.rs` 的亂序回應單元測試、`engine.rs` 對 `fake_engine.py`（背景方法延遲 0.3 秒）確認後送出的 `settings.get` 先回應且兩邊都拿到自己的結果、`combination.test.ts` 模擬兩個重疊請求反向完成。
 
 ### 設定頁
 
 | 區塊 | 欄位 | 寫入設定 |
 |---|---|---|
-| 翻譯服務 | 服務網址、API 金鑰的**環境變數名稱**、即時／完整翻譯模型 | `translation.*` |
+| 翻譯服務 | 服務網址、API 金鑰的**環境變數名稱** | `translation.{base_url, api_key_env}` |
+| 翻譯模型的授權地區 | 勾選框「我確認我不在歐盟、英國或南韓使用 kikitori，並同意遵守這些翻譯模型的授權條款。」（預設不勾） | `translation.allow_restricted` |
 | 語言 | 譯文語言（固定繁體中文，唯讀）、口譯對方的語言（日語／英語） | `partner_language` |
 | 字幕外觀 | 譯文字級（14–96 px）、背景不透明度（0–100%）、字幕位置（貼齊上緣／下緣）、同時顯示的句數（1–3），附即時預覽 | `subtitle.{font_size, background_opacity, position, max_lines}` |
-| 版本與更新 | 程式版本、引擎版本與協定版本（假引擎會註明）、「檢查更新」 | — |
+| 關於 | 程式版本、引擎版本與協定版本（假引擎會註明）、授權（`kikitori 以 MIT 授權發布`）、第三方元件聲明、第三方授權資料夾、「檢查更新」 | — |
 
+- 翻譯模型改在模型頁的「自訂組合」選擇（第一階段在設定頁），讓同一份表單涵蓋整個組合、一起經過 `models.validate`（授權、是否在伺服器上、記憶體）。
+- 授權地區說明：部分翻譯模型（例如騰訊 HY-MT）的授權不適用於歐盟、英國與南韓；kikitori 無法得知使用者所在地，所以預設不推薦。勾選後建議組合才會考慮這些模型；不勾選仍可在自訂組合手動選用，但檢查會顯示警告。改變這個勾選後，建議組合會在下次進入模型頁時重新計算。
+- **關於**：顯示「本程式內含的 Intel® OpenMP 等第三方元件依其各自授權條款提供；不得對其進行逆向工程。」（Intel EULA for Developer Tools 的再散布條件，見 `packaging-ci.md`）。正式版顯示 `<資源目錄>/kikitori-engine/THIRD_PARTY_LICENSES` 的完整路徑（可選取）與「開啟第三方授權資料夾」按鈕；開發版沒有內附引擎，改為說明正式版的位置。路徑由 Rust 的 `app_about` 指令算出；開啟由 `open_third_party_licenses` 指令完成——它不接受任何參數、只開這個資料夾，所以不需要給前端 opener 的路徑權限。
 - 只存環境變數名稱，金鑰本身不經過 UI、不寫入任何檔案。
-- 儲存前先在前端驗證（網址必須 http/https、變數名稱 `^[A-Za-z_][A-Za-z0-9_]*$`、模型名稱 1–200 字元、數值範圍），錯誤顯示在欄位下方。引擎回傳 `invalid_settings` 時依訊息中的欄位路徑（例如 `translation.base_url: …`）標到對應欄位。
+- 儲存前先在前端驗證（網址必須 http/https、變數名稱 `^[A-Za-z_][A-Za-z0-9_]*$`、數值範圍），錯誤顯示在欄位下方。引擎回傳 `invalid_settings` 時依訊息中的欄位路徑（例如 `translation.base_url: …`）標到對應欄位。
 - 字幕外觀存在設定檔的 `subtitle` 物件（引擎原樣保存、不解讀）；儲存後同時透過 `overlay_set_style` 推給字幕視窗。
+- 頁首顯示設定檔路徑（`settings.get` 的 `path`）。
+- 設定檔 schema 2 的欄位都會讀取（`asr.fast_compute_type`／`final_compute_type`／`fast_cpu_threads`／`final_cpu_threads`／`cuda_library_dirs`、`translation.allow_restricted`）；格式不對的欄位改用預設值並提示，不會擋住頁面。
 
 ### 訊息
 
-內容區上方的訊息列（最多三則、可關閉）：操作失敗的原因與下一步、引擎 `log` 事件的 warning／error、`status: error` 的 `code` 對應說明（例如 `model_not_downloaded` →「模型還沒下載。請到『模型』頁下載後再開始。」）、更新提示。
+內容區上方的訊息列（最多三則、可關閉）：操作失敗的原因與下一步、引擎 `log` 事件的 warning／error、`status: error` 的 `code` 對應說明（例如 `model_not_downloaded` →「模型還沒下載。請到『模型』頁下載後再開始。」）、引擎錯誤碼的說明（含 `license_not_accepted`、`gpu_runtime_unsupported`、`download_in_progress`）、下載完成或失敗、GPU 加速元件安裝後的重啟、更新提示。
 
 ## 字幕視窗 `overlay`
 
@@ -113,16 +134,16 @@
 | `protocol.rs` | 解析與驗證引擎每一行輸出：UTF-8、JSON 物件、`id` 為非負整數或 `null`、`result`／`error` 恰好一個、`result` 必須是物件、事件 `data` 必須是物件；`subtitle`／`status`／`download_progress`／`log` 依型別與範圍驗證（文字 ≤ 10 000 字、語言代碼只允許 BCP 47 字元、`end_sample ≥ start_sample`）。不認得的事件記錄後丟棄。 |
 | `line_reader.rs` | 有上限的逐行讀取（1 MiB，與引擎相同）；超長行丟棄並讀到行尾，串流不會失去同步。 |
 | `connection.rs` | 傳送請求（NDJSON）、以 `id` 配對回應、每個請求一個期限（涵蓋寫入與等待）。逾時的請求從等待表移除，晚到的回應記錄後丟棄。格式錯誤的行記錄 error（附截短的內容）後略過，不影響其他訊息。輸出關閉時所有等待中的請求立即失敗。 |
-| `engine.rs` | 引擎行程：選擇指令、spawn（不經 shell，Windows 加 `CREATE_NO_WINDOW`）、stderr 轉到 app 日誌、`engine.info` 握手並檢查 `protocol_version == 1`、意外結束時自動重啟（1 s、2 s、4 s 退避；60 秒內超過 3 次就停在「失敗」等使用者按重新啟動）、結束程式時先送 `engine.shutdown` 再於 3 秒後強制結束。 |
-| `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`），再依方法給不同期限：一般 10 s、`hardware.detect` 30 s、`models.list` 20 s、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status` 與字幕視窗指令。 |
+| `engine.rs` | 引擎行程：選擇指令（含正式版資源目錄的路徑）、spawn（不經 shell，Windows 加 `CREATE_NO_WINDOW`）、stderr 轉到 app 日誌、`engine.info` 握手並檢查 `protocol_version == 1`、意外結束時自動重啟（1 s、2 s、4 s 退避；60 秒內超過 3 次就停在「失敗」等使用者按重新啟動）、結束程式時先送 `engine.shutdown` 再於 3 秒後強制結束。 |
+| `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses` 與字幕視窗指令。 |
 | `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查）、穿透與可見狀態。 |
-| `lib.rs` | 外掛、狀態、事件轉發、全域快速鍵、生命週期（關閉主視窗即結束程式）。 |
+| `lib.rs` | 外掛（log、window-state、updater、process、opener、global-shortcut）、狀態、事件轉發、全域快速鍵、生命週期（關閉主視窗即結束程式）。 |
 
 ### 引擎指令的選擇
 
 1. 環境變數 `KIKITORI_ENGINE_CMD`：JSON 字串陣列（路徑有空白時用），或以空白分隔的指令。
 2. 除錯版（`debug_assertions`）：在 repo 根目錄執行 `uv run kikitori engine`。
-3. 正式版：與主程式同目錄的 `kikitori-engine[.exe]`（Tauri `externalBin` 去掉 target triple 後的檔名）。
+3. 正式版：`<資源目錄>/kikitori-engine/kikitori-engine[.exe]`（PyInstaller one-folder，以 `bundle.resources` 隨安裝檔散布；資源目錄為 Tauri `PathResolver::resource_dir()`：Windows 是安裝目錄、macOS 是 `Contents/Resources`、Linux deb／AppImage 是 `/usr/lib/<productName>/`），工作目錄是該資料夾。`KIKITORI_ENGINE_CMD`、`KIKITORI_ENGINE_CWD` 在正式版一樣可以覆寫。
 
 `KIKITORI_ENGINE_CWD`（絕對路徑）可覆寫工作目錄。子行程繼承程式的環境變數，所以 `KIKITORI_ENGINE_FAKE`、`KIKITORI_CONFIG_DIR` 會直接傳給引擎。
 
@@ -142,8 +163,10 @@
 
 | 視窗 | 權限 |
 |---|---|
-| `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、`updater:default`、`process:allow-restart`、全部引擎與字幕視窗指令（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
+| `main`（`capabilities/main.json`） | 事件 listen／unlisten、讀版本號、`updater:default`、`process:allow-restart`、`opener:allow-open-url`（scope 只有 `https://docs.nvidia.com/cuda/eula/index.html`）、全部引擎與字幕視窗指令、`app_about`、`open_third_party_licenses`（`engine_shutdown` 除外：只在程式結束時由 Rust 呼叫） |
 | `overlay`（`capabilities/overlay.json`） | 事件 listen／unlisten、`start-dragging`、`start-resize-dragging`、`overlay_get_state`、`overlay_set_visible` |
+
+opener 外掛（`tauri-plugin-opener` 2.7.2，Apache-2.0 OR MIT）只給前端開這一個網址；沒有 `allow-default-urls`、沒有 `open-path`／`reveal-item-in-dir`。第三方授權資料夾由 Rust 指令以 opener 的 Rust API 開啟（路徑在 Rust 端決定）。`combination.test.ts` 檢查 capability 裡的 opener 權限正好是這一筆。
 
 另設 CSP：`default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self'`；前端不使用 `innerHTML`，引擎傳來的文字一律以 `textContent` 顯示。
 
@@ -153,11 +176,13 @@
 - `bundle.createUpdaterArtifacts: true`（Tauri v2 格式）。打包時需要 `TAURI_SIGNING_PRIVATE_KEY`（與密碼）環境變數，只放在本機與 GitHub Secrets。
 - 正式版啟動時檢查一次（15 秒逾時，失敗不打擾）；設定頁可手動檢查。流程：「kikitori x.y.z 已經推出」→「下載並安裝」→ 下載進度 →「已安裝，重新啟動後生效」→「立即重新啟動」（`relaunch`）。Windows 安裝程式使用 `passive` 模式，通常會自行關閉並重開程式。
 
-## 打包與 sidecar
+## 打包與引擎資源
 
-- `tauri.conf.json` 不含 `externalBin`，所以開發與 CI 測試不需要先有引擎執行檔。打包時合併 `src-tauri/tauri.sidecar.conf.json`：`npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`，並把 PyInstaller 產物放在 `src-tauri/binaries/kikitori-engine-<target-triple>[.exe]`（此目錄已列入 `.gitignore`）。
-- PyInstaller one-folder 模式除了執行檔還有 `_internal/` 資料夾；`externalBin` 只會複製單一執行檔，release 工作流程需另外以 `bundle.resources` 帶上該資料夾，或改用 one-file。這部分在 CI/CD 里程碑決定。
-- 版本號 `0.1.0` 與 `pyproject.toml` 一致（`package.json`、`Cargo.toml`、`tauri.conf.json`）。
+- 引擎是 PyInstaller **one-folder**（`kikitori-engine[.exe]`、`_internal/`、`THIRD_PARTY_LICENSES/`），由 `uv run python packaging/engine/build.py` 放到 `src-tauri/binaries/kikitori-engine/`（已列入 `.gitignore`），以 Tauri `bundle.resources` 整個資料夾帶進安裝檔（決定與量測見 `packaging-ci.md`）。不用 `externalBin`（只能帶單一執行檔）。
+- **正式打包的設定另外放**：`src-tauri/tauri.sidecar.conf.json` 只有 `{"bundle": {"resources": {"binaries/kikitori-engine/": "kikitori-engine/"}}}`，打包時合併：`npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`。理由：`cargo build`（tauri-build）會檢查 resources 路徑存在；若寫進 `tauri.conf.json`，每個 `cargo test`、`cargo clippy`、`tauri dev`、除錯版建置都得先建置 170 MB 的引擎或放佔位目錄。分開之後，開發與 CI 的 Rust job 不需要引擎；正式打包若忘了先建置引擎，會在建置時就失敗，而不是做出沒有引擎的安裝檔。檔名沿用第一階段的 `tauri.sidecar.conf.json`，以免 CI／文件的引用失效。
+- 正式版從資源目錄啟動引擎（見「引擎指令的選擇」），設定頁「關於」顯示並可開啟 `kikitori-engine/THIRD_PARTY_LICENSES`。
+- 打包後要在各平台確認：Linux／macOS 安裝後的執行檔保有執行權限、macOS 簽章不破壞 PyInstaller 的 ad-hoc 簽章（`packaging-ci.md` 的 release 步驟）。
+- 版本號 `0.1.0` 與 `pyproject.toml` 一致（`package.json`、`Cargo.toml`、`tauri.conf.json`；由 `scripts/sync_version.py` 同步）。
 
 ## 開發
 
@@ -171,11 +196,15 @@ npm run menu          # 互動選單：選擇引擎後執行 tauri dev，或建�
 
 選單項目：
 
-1. 正式引擎的假模式（`KIKITORI_ENGINE_FAKE=1 uv run kikitori engine`，合成聲音、假辨識與翻譯；建議）
-2. `app/dev/fake_engine.py`（只用標準庫；字幕會不停產生，部分→完整的過程比較明顯）
-3. 假引擎加故障注入（每 3 句插入一行壞資料、25 秒後當機，用來看重啟與錯誤處理）
-4. 正式引擎（實際擷取聲音、載入模型）
-5. 建置除錯版執行檔（`tauri build --debug --no-bundle`）
+1. 正式引擎的假模式（`KIKITORI_ENGINE_FAKE=1 uv run kikitori engine`，合成聲音、假辨識與翻譯、假 8 GB NVIDIA 顯示卡缺 cuBLAS；GPU 加速元件以假 wheel 真的走一次安裝；建議）
+2. 正式引擎的假模式，假硬體 Apple Silicon（`KIKITORI_ENGINE_FAKE_HARDWARE=apple`：GPU 加速元件不支援）
+3. 正式引擎的假模式，GPU 加速元件下載失敗（`KIKITORI_ENGINE_FAKE_HARDWARE=broken-runtime`：雜湊不符）
+4. `app/dev/fake_engine.py`（只用標準庫；字幕會不停產生，部分→完整的過程比較明顯）
+5. 假引擎加故障注入（每 3 句插入一行壞資料、25 秒後當機，用來看重啟與錯誤處理）
+6. 正式引擎（實際擷取聲音、載入模型）
+7. 建置除錯版執行檔（`tauri build --debug --no-bundle`）
+
+正式引擎的假模式把 GPU 加速元件裝在行程專屬的暫存目錄，所以安裝後 UI 自動重啟引擎時，新的引擎又回到「未安裝」——這是假模式的限制，真的引擎裝在使用者資料目錄、重啟後仍在。`slow-runtime` 情境（下載很慢，用來看取消）可用環境變數自行指定。
 
 也可以直接設定環境變數：
 
@@ -184,7 +213,7 @@ KIKITORI_ENGINE_CMD='["uv","run","--no-project","python","app/dev/fake_engine.py
 npm run tauri dev
 ```
 
-`fake_engine.py` 參數：`--garbage-every N`（每 N 個字幕事件後輸出一行壞 JSON）、`--crash-after SECONDS`（以結束碼 3 模擬當機）。
+`fake_engine.py` 參數：`--garbage-every N`（每 N 個字幕事件後輸出一行壞 JSON）、`--crash-after SECONDS`（以結束碼 3 模擬當機）。它保留下來是因為正式引擎的假模式沒有故障注入、字幕也會結束；Milestone 6 的方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`gpu-runtime` 授權閘門）只做形狀正確的固定模仿，背景方法延遲 0.3 秒、在單一執行緒依序回應，以重現「回應晚於之後的請求」。推薦與驗證的規則以正式引擎為準。
 
 圖示：`uv run --no-project python app/dev/make_icon.py` 產生 `src-tauri/icons/source/icon.png`（藍色底、白色原文條與字幕黃譯文條，全為本專案原創），再執行 `npx tauri icon src-tauri/icons/source/icon.png`。
 
@@ -192,9 +221,9 @@ npm run tauri dev
 
 | 指令（在 `app/` 或 `app/src-tauri/`） | 內容 |
 |---|---|
-| `npm test` | vitest：字幕狀態規則、事件與結果驗證、設定表單驗證與 patch、格式化 |
+| `npm test` | vitest：字幕狀態規則、事件與結果驗證（`hardware.detect`／`models.list`／`settings.apply_recommendation` 用正式引擎假模式實際輸出的 `src/lib/testdata/engine-fake-nvidia.json`）、設定頁與自訂組合的表單驗證與 patch、schema 2 欄位、`models.validate` 結果、儲存條件、只套用最新的檢查結果、GPU 加速元件安裝後的重啟決定、opener 權限只開放 EULA 網址、格式化 |
 | `npm run build` | `tsc` 型別檢查 + `vite build` |
-| `cargo test` | 協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；另外三個端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）。需要 `uv` 在 PATH。 |
+| `cargo test` | 協定解析與驗證、有上限的逐行讀取、id 配對（亂序回應）、逾時與晚到回應、錯誤回應、壞行略過、輸出關閉時請求失敗、指令選擇、重啟退避、參數驗證；正式版資源目錄的引擎路徑與覆寫、`about_info`、`models.download`／`models.validate` 的參數（授權旗標只給 `gpu-runtime`）；另外的端到端測試以真的子行程執行：`fake_engine.py`（含壞資料注入）、`fake_engine.py`（背景方法的回應晚於之後的請求，仍各自配對）、`fake_engine.py --crash-after`（自動重啟）、正式引擎假模式（`KIKITORI_ENGINE_FAKE=1`、`KIKITORI_CONFIG_DIR` 指到暫存目錄）的基本協定，以及 Milestone 6：`hardware.detect` 與一般請求並行、`models.list`、`models.validate`（候選不存檔、`invalid_settings`）、`settings.apply_recommendation`（安裝前 CPU）、`gpu-runtime` 未同意 → `license_not_accepted`（訊息含 EULA 網址、沒有下載事件）、同意 → 安裝到 `done` → 推薦改為 CUDA；Apple Silicon 情境 → `gpu_runtime_unsupported`。需要 `uv` 在 PATH。 |
 | `cargo clippy --all-targets -- -D warnings` | lint |
 
 ## 各平台需要實機確認的地方

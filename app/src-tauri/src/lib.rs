@@ -1,7 +1,7 @@
 //! kikitori desktop app entry point.
 //!
 //! Role: assembles the Tauri app — plugins (log, window state, updater, process,
-//! global shortcut), managed state (the engine bridge and overlay state), command
+//! opener, global shortcut), managed state (the engine bridge and overlay state), command
 //! handlers and the app lifecycle (start the engine on launch, shut it down on
 //! exit, quit when the main window closes).
 
@@ -65,16 +65,17 @@ impl BridgeSink for TauriSink {
 fn build_bridge(app: &AppHandle) -> EngineBridge {
     let env_cmd = std::env::var(engine::ENGINE_CMD_ENV).ok();
     let env_cwd = std::env::var(engine::ENGINE_CWD_ENV).ok();
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| log::error!("cannot locate current executable: {e}"))
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| log::error!("cannot resolve the resource directory: {e}"))
+        .ok();
     let repo_root = engine::compile_time_repo_root();
     let command = engine::resolve_engine_command(&ResolveInput {
         env_cmd: env_cmd.as_deref(),
         env_cwd: env_cwd.as_deref(),
         debug_build: cfg!(debug_assertions),
-        exe_dir: exe_dir.as_deref(),
+        resource_dir: resource_dir.as_deref(),
         repo_root: &repo_root,
     });
     if let Err(e) = &command {
@@ -124,6 +125,9 @@ pub fn run() {
         )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Only opens the NVIDIA CUDA EULA page: the URL scope lives in
+        // capabilities/main.json, so the webview cannot open anything else.
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(OverlayState::default())
         .setup(|app| {
@@ -152,14 +156,18 @@ pub fn run() {
             commands::hardware_detect,
             commands::models_list,
             commands::models_download,
+            commands::models_validate,
             commands::devices_list,
             commands::settings_get,
             commands::settings_set,
+            commands::settings_apply_recommendation,
             commands::session_start,
             commands::session_stop,
             commands::engine_shutdown,
             commands::engine_restart,
             commands::bridge_status,
+            commands::app_about,
+            commands::open_third_party_licenses,
             commands::overlay_get_state,
             commands::overlay_set_style,
             commands::overlay_set_click_through,

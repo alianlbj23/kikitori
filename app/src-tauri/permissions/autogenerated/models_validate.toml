@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-models-validate"
+description = "Enables the models_validate command without any pre-configured scope."
+commands.allow = ["models_validate"]
+
+[[permission]]
+identifier = "deny-models-validate"
+description = "Denies the models_validate command without any pre-configured scope."
+commands.deny = ["models_validate"]

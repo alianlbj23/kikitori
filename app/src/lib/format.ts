@@ -131,3 +131,47 @@ export function describeStatusError(code: string | null, detail: string | null):
   if (known) return known;
   return detail ? `發生錯誤：${detail}` : "發生未知的錯誤。";
 }
+
+/** Memory reported in MiB (nvidia-smi, model tables) as GB with one decimal. */
+export function formatMiB(mb: number | null): string {
+  if (mb === null || !Number.isFinite(mb) || mb < 0) return "未知";
+  if (mb < 1024) return `${Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+const TIER: Record<string, string> = {
+  nvidia_8gb: "NVIDIA 顯示卡（8 GB 以上）",
+  nvidia_4gb: "NVIDIA 顯示卡（4–8 GB）",
+  nvidia_lt4gb: "NVIDIA 顯示卡（4 GB 以下）",
+  cpu: "CPU（記憶體 16 GB 以上）",
+  cpu_low: "CPU（輕量組合）",
+  apple_silicon: "Apple Silicon（CPU）",
+};
+
+/** Hardware tier id from the recommendation (hardware.md), in plain words. */
+export function tierLabel(tier: string): string {
+  return TIER[tier] ?? tier;
+}
+
+export function deviceLabel(device: string): string {
+  if (device === "cuda") return "NVIDIA GPU";
+  if (device === "cpu") return "CPU";
+  if (device === "auto") return "自動";
+  return device;
+}
+
+/** Thread count of a recommendation or setting; 0 / null mean automatic. */
+export function threadsLabel(threads: number | null): string {
+  return threads ? `${threads} 個執行緒` : "執行緒自動";
+}
+
+export function computeTypeLabel(computeType: string | null): string {
+  return computeType ?? "精度自動";
+}
+
+const REGION: Record<string, string> = { EU: "歐盟", UK: "英國", GB: "英國", KR: "南韓" };
+
+/** License-excluded region codes as names, e.g. ["EU", "KR"] → "歐盟、南韓". */
+export function regionNames(codes: readonly string[]): string {
+  return codes.map((c) => REGION[c] ?? c).join("、");
+}

@@ -8,9 +8,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { NVIDIA_EULA_URL } from "./combination";
 import type {
+  AboutInfo,
+  AppliedRecommendation,
   BridgeStatus,
+  CombinationCheck,
   DeviceInfo,
   DownloadProgressEvent,
   HardwareReport,
@@ -19,14 +24,15 @@ import type {
   ModelsList,
   OverlaySnapshot,
   OverlayStyle,
-  Settings,
   StatusEvent,
   SubtitleEvent,
 } from "./types";
-import { parseSettingsResult } from "./settings";
+import { parseAppliedRecommendation, parseSettingsResult, type SettingsResult } from "./settings";
 import {
   asCommandError,
+  parseAbout,
   parseBridgeStatus,
+  parseCombinationCheck,
   parseDevices,
   parseDownloadProgress,
   parseHardware,
@@ -46,11 +52,6 @@ export const EVENTS = {
   overlay: "overlay://state",
 } as const;
 
-export interface SettingsResult {
-  settings: Settings;
-  warnings: string[];
-}
-
 export const api = {
   async bridgeStatus(): Promise<BridgeStatus> {
     return parseBridgeStatus(await invoke("bridge_status"));
@@ -64,8 +65,20 @@ export const api = {
   async modelsList(): Promise<ModelsList> {
     return parseModels(await invoke("models_list"));
   },
-  async modelsDownload(model: string): Promise<void> {
-    await invoke("models_download", { model });
+  /**
+   * Starts a download. `acceptLicense` is only for the GPU runtime and must
+   * come from the user ticking the NVIDIA CUDA EULA box.
+   */
+  async modelsDownload(model: string, acceptLicense = false): Promise<void> {
+    await invoke("models_download", acceptLicense ? { model, acceptLicense } : { model });
+  },
+  /** Checks partial settings against this machine without saving them. */
+  async modelsValidate(settings: Record<string, unknown> | null): Promise<CombinationCheck> {
+    return parseCombinationCheck(await invoke("models_validate", settings ? { settings } : {}));
+  },
+  /** Writes the engine's recommendation into the settings (the engine owns the rules). */
+  async applyRecommendation(): Promise<AppliedRecommendation> {
+    return parseAppliedRecommendation(await invoke("settings_apply_recommendation"));
   },
   async devicesList(): Promise<DeviceInfo[]> {
     return parseDevices(await invoke("devices_list"));
@@ -83,6 +96,16 @@ export const api = {
   },
   async sessionStop(): Promise<void> {
     await invoke("session_stop");
+  },
+  async about(): Promise<AboutInfo> {
+    return parseAbout(await invoke("app_about"));
+  },
+  async openThirdPartyLicenses(): Promise<void> {
+    await invoke("open_third_party_licenses");
+  },
+  /** Opens the NVIDIA CUDA EULA; the opener permission allows no other URL. */
+  async openNvidiaEula(): Promise<void> {
+    await openUrl(NVIDIA_EULA_URL);
   },
   async overlayState(): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_get_state"));
@@ -132,7 +155,9 @@ const ENGINE_CODES: Record<string, string> = {
   capture_unavailable: "這台電腦無法擷取這種聲音來源",
   capture_error: "擷取聲音時發生錯誤",
   unknown_model: "引擎不認得這個模型",
-  download_in_progress: "這個模型已經在下載中",
+  download_in_progress: "這個項目已經在下載中，請等它完成",
+  license_not_accepted: "需要先勾選同意 NVIDIA CUDA EULA 才能下載 GPU 加速元件",
+  gpu_runtime_unsupported: "這台電腦的平台不支援 GPU 加速元件（只支援 Windows 與 Linux 的 x86-64）",
   unknown_method: "引擎版本與程式不相符，不支援這個操作",
   invalid_params: "傳給引擎的參數不正確",
   invalid_request: "傳給引擎的請求格式不正確",

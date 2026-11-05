@@ -87,6 +87,7 @@
           <section class="block" aria-labelledby="hw-heading">
             <h2 id="hw-heading">這台電腦</h2>
             <dl class="facts" id="hardware"></dl>
+            <ul class="notes" id="hardware-errors" hidden></ul>
           </section>
 
           <section class="block" aria-labelledby="rec-heading">
@@ -94,45 +95,110 @@
             <div id="recommendation"></div>
           </section>
 
+          <section class="block" aria-labelledby="gpu-heading">
+            <h2 id="gpu-heading">GPU 加速元件</h2>
+            <p class="block-lede">用 NVIDIA 顯示卡加速語音辨識，需要 NVIDIA 的 cuBLAS 函式庫。kikitori 不隨安裝檔附上它，由你同意授權後從 PyPI 下載。</p>
+            <div id="gpu-runtime"></div>
+          </section>
+
           <section class="block" aria-labelledby="asr-heading">
             <h2 id="asr-heading">語音辨識模型</h2>
             <p class="block-lede">即時字幕需要快，完整翻譯需要準；兩者可以用不同模型。</p>
             <table class="models">
               <thead>
-                <tr><th scope="col">模型</th><th scope="col">大小</th><th scope="col">速度</th><th scope="col">授權</th><th scope="col">狀態</th></tr>
+                <tr><th scope="col">模型</th><th scope="col">大小</th><th scope="col">速度</th><th scope="col">記憶體</th><th scope="col">授權</th><th scope="col">狀態</th></tr>
               </thead>
               <tbody id="asr-models"></tbody>
             </table>
-            <form class="choice" id="asr-choice">
-              <label>即時字幕用<select name="fast_model" id="asr-fast"></select></label>
-              <label>完整翻譯用<select name="final_model" id="asr-final"></select></label>
-              <label>運算裝置
-                <select name="device" id="asr-device">
-                  <option value="auto">自動</option>
-                  <option value="cpu">CPU</option>
-                  <option value="cuda">NVIDIA GPU（CUDA）</option>
-                </select>
-              </label>
-              <button type="submit" class="primary">套用</button>
-            </form>
-          </section>
-
-          <section class="block" aria-labelledby="gpu-heading">
-            <h2 id="gpu-heading">GPU 加速元件</h2>
-            <p class="block-lede">使用 NVIDIA 顯示卡加速辨識需要額外的執行元件。</p>
-            <button type="button" class="ghost" id="gpu-runtime" disabled>下載 GPU 加速元件</button>
-            <p class="rail-hint" id="gpu-note">之後的版本會提供這個下載。</p>
           </section>
 
           <section class="block" aria-labelledby="tr-heading">
             <h2 id="tr-heading">翻譯模型</h2>
             <p class="block-lede" id="tr-source"></p>
             <ul class="presets" id="tr-presets"></ul>
-            <form class="choice" id="tr-choice">
-              <label>即時字幕用<input name="fast_model" id="tr-fast" list="tr-names" autocomplete="off" /></label>
-              <label>完整翻譯用<input name="final_model" id="tr-final" list="tr-names" autocomplete="off" /></label>
+          </section>
+
+          <section class="block" aria-labelledby="combo-heading">
+            <h2 id="combo-heading">自訂組合</h2>
+            <p class="block-lede">修改時會立刻檢查這台電腦跑不跑得動；有錯誤時不能儲存。新的組合從下一次「開始」生效。</p>
+            <form id="combo-form" novalidate>
+              <div class="field-row">
+                <div class="field">
+                  <label for="c-fast-model">即時字幕的辨識模型</label>
+                  <select id="c-fast-model" name="fast_model"></select>
+                  <p class="field-error" data-error-for="fast_model"></p>
+                </div>
+                <div class="field">
+                  <label for="c-final-model">完整翻譯的辨識模型</label>
+                  <select id="c-final-model" name="final_model"></select>
+                  <p class="field-error" data-error-for="final_model"></p>
+                </div>
+              </div>
+              <div class="field">
+                <label for="c-device">運算裝置</label>
+                <select id="c-device" name="device">
+                  <option value="auto">自動（有可用的 NVIDIA GPU 就用，否則用 CPU）</option>
+                  <option value="cpu">CPU</option>
+                  <option value="cuda">NVIDIA GPU（CUDA）</option>
+                </select>
+                <p class="field-help">兩條路徑共用同一個裝置：GPU 在同一次執行中失敗過一次，就不會再嘗試。</p>
+                <p class="field-error" data-error-for="device"></p>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <label for="c-tr-fast">即時字幕的翻譯模型</label>
+                  <input id="c-tr-fast" name="translation_fast" list="tr-names" autocomplete="off" spellcheck="false" />
+                  <p class="field-error" data-error-for="translation_fast"></p>
+                </div>
+                <div class="field">
+                  <label for="c-tr-final">完整翻譯的翻譯模型</label>
+                  <input id="c-tr-final" name="translation_final" list="tr-names" autocomplete="off" spellcheck="false" />
+                  <p class="field-error" data-error-for="translation_final"></p>
+                </div>
+              </div>
               <datalist id="tr-names"></datalist>
-              <button type="submit" class="primary">套用</button>
+
+              <details class="advanced">
+                <summary>進階</summary>
+                <p class="field-help">精度與執行緒數通常交給建議組合決定。留空或選「自動」時，引擎依實際使用的裝置決定（CPU 用 int8、GPU 用 float16）。</p>
+                <div class="field-row">
+                  <div class="field">
+                    <label for="c-fast-ct">即時字幕的精度</label>
+                    <select id="c-fast-ct" name="fast_compute_type"></select>
+                    <p class="field-error" data-error-for="fast_compute_type"></p>
+                  </div>
+                  <div class="field">
+                    <label for="c-final-ct">完整翻譯的精度</label>
+                    <select id="c-final-ct" name="final_compute_type"></select>
+                    <p class="field-error" data-error-for="final_compute_type"></p>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label for="c-fast-threads">即時字幕的 CPU 執行緒數</label>
+                    <input id="c-fast-threads" name="fast_cpu_threads" inputmode="numeric" placeholder="自動" autocomplete="off" />
+                    <p class="field-error" data-error-for="fast_cpu_threads"></p>
+                  </div>
+                  <div class="field">
+                    <label for="c-final-threads">完整翻譯的 CPU 執行緒數</label>
+                    <input id="c-final-threads" name="final_cpu_threads" inputmode="numeric" placeholder="自動" autocomplete="off" />
+                    <p class="field-error" data-error-for="final_cpu_threads"></p>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="c-cuda-dirs">自行安裝的 cuBLAS 12 資料夾</label>
+                  <textarea id="c-cuda-dirs" name="cuda_library_dirs" rows="3" spellcheck="false" placeholder="每行一個完整路徑，例如 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"></textarea>
+                  <p class="field-help">只有自己安裝了 CUDA Toolkit 時才需要填。上面下載的 GPU 加速元件會自動使用，不必列在這裡。</p>
+                  <p class="field-error" data-error-for="cuda_library_dirs"></p>
+                </div>
+              </details>
+
+              <div class="check" id="combo-check" role="status" aria-live="polite"></div>
+              <div class="form-actions">
+                <button type="submit" class="primary" id="combo-save">儲存組合</button>
+                <button type="button" class="ghost" id="combo-reset">還原成目前設定</button>
+                <span class="form-status" id="combo-status" role="status"></span>
+              </div>
             </form>
           </section>
         </section>
@@ -160,17 +226,19 @@
                 <p class="field-help">只填變數名稱。金鑰本身請設在系統環境變數裡，kikitori 不會儲存金鑰。本機 Ollama 不需要金鑰。</p>
                 <p class="field-error" data-error-for="api_key_env"></p>
               </div>
-              <div class="field-row">
-                <div class="field">
-                  <label for="f-fast-model">即時字幕用的翻譯模型</label>
-                  <input id="f-fast-model" name="fast_model" list="tr-names" autocomplete="off" spellcheck="false" />
-                  <p class="field-error" data-error-for="fast_model"></p>
-                </div>
-                <div class="field">
-                  <label for="f-final-model">完整翻譯用的翻譯模型</label>
-                  <input id="f-final-model" name="final_model" list="tr-names" autocomplete="off" spellcheck="false" />
-                  <p class="field-error" data-error-for="final_model"></p>
-                </div>
+              <p class="field-help">翻譯模型在「模型」頁的「自訂組合」選擇，選擇時會一併檢查授權與這台電腦的負擔。</p>
+            </fieldset>
+
+            <fieldset class="block">
+              <legend>翻譯模型的授權地區</legend>
+              <p class="block-lede">部分翻譯模型（例如騰訊 HY-MT）的授權不適用於歐盟、英國與南韓。kikitori 無法得知你身在何處，所以預設不推薦這些模型。</p>
+              <div class="field">
+                <label class="consent" for="f-allow-restricted">
+                  <input id="f-allow-restricted" name="allow_restricted" type="checkbox" />
+                  <span>我確認我不在歐盟、英國或南韓使用 kikitori，並同意遵守這些翻譯模型的授權條款。</span>
+                </label>
+                <p class="field-help">勾選後，建議組合才會考慮有地區限制的模型。不勾選時仍可在「自訂組合」手動選用，但會顯示警告。</p>
+                <p class="field-error" data-error-for="allow_restricted"></p>
               </div>
             </fieldset>
 
@@ -242,11 +310,17 @@
           </form>
 
           <section class="block" aria-labelledby="about-heading">
-            <h2 id="about-heading">版本與更新</h2>
+            <h2 id="about-heading">關於</h2>
             <p id="about-version"></p>
             <p id="about-engine" class="rail-hint"></p>
-            <button type="button" class="ghost" id="check-update">檢查更新</button>
-            <span class="form-status" id="update-status" role="status"></span>
+            <p id="about-license"></p>
+            <p class="about-notice">本程式內含的 Intel® OpenMP 等第三方元件依其各自授權條款提供；不得對其進行逆向工程。</p>
+            <p id="about-third-party" class="rail-hint"></p>
+            <div class="form-actions">
+              <button type="button" class="ghost" id="open-licenses" hidden>開啟第三方授權資料夾</button>
+              <button type="button" class="ghost" id="check-update">檢查更新</button>
+              <span class="form-status" id="update-status" role="status"></span>
+            </div>
           </section>
         </section>
       </main>

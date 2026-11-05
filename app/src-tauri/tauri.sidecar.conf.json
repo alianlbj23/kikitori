@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "externalBin": ["binaries/kikitori-engine"]
+    "resources": { "binaries/kikitori-engine/": "kikitori-engine/" }
   }
 }

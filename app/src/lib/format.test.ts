@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { describeStatus, formatBytes, formatTimecode, htmlLang, percent } from "./format";
+import {
+  describeStatus,
+  formatBytes,
+  formatMiB,
+  formatTimecode,
+  htmlLang,
+  percent,
+  regionNames,
+  threadsLabel,
+  tierLabel,
+} from "./format";
 import type { BridgeStatus } from "./types";
 
 const bridge = (phase: BridgeStatus["phase"]): BridgeStatus => ({
@@ -39,5 +49,25 @@ describe("format", () => {
     expect(describeStatus(bridge("failed"), "running").tone).toBe("bad");
     expect(describeStatus(bridge("ready"), "running")).toEqual({ label: "正在聆聽", tone: "live" });
     expect(describeStatus(bridge("ready"), "idle").tone).toBe("quiet");
+  });
+});
+
+describe("hardware wording", () => {
+  it("formats MiB from nvidia-smi and the model table", () => {
+    expect(formatMiB(8188)).toBe("8.0 GB");
+    expect(formatMiB(600)).toBe("600 MB");
+    expect(formatMiB(null)).toBe("未知");
+  });
+
+  it("names tiers and regions, keeping unknown ids visible", () => {
+    expect(tierLabel("nvidia_8gb")).toContain("8 GB");
+    expect(tierLabel("future_tier")).toBe("future_tier");
+    expect(regionNames(["EU", "UK", "KR"])).toBe("歐盟、英國、南韓");
+    expect(regionNames(["XX"])).toBe("XX");
+  });
+
+  it("treats 0 threads as automatic", () => {
+    expect(threadsLabel(0)).toBe("執行緒自動");
+    expect(threadsLabel(4)).toBe("4 個執行緒");
   });
 });

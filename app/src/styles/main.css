@@ -660,11 +660,6 @@ input[type="range"] {
   user-select: all;
 }
 
-#gpu-note {
-  margin-top: 8px;
-  max-width: 70ch;
-}
-
 .progress {
   display: grid;
   grid-template-columns: 120px auto;
@@ -693,28 +688,6 @@ progress::-webkit-progress-value {
 
 progress::-moz-progress-bar {
   background: var(--ai-soft);
-}
-
-.choice {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  align-items: flex-end;
-  margin-top: 18px;
-}
-
-.choice label {
-  display: grid;
-  gap: 4px;
-  font-size: var(--t-sm);
-  color: var(--nezumi);
-  min-width: 170px;
-}
-
-.choice label select,
-.choice label input {
-  color: var(--sumi);
-  font-size: var(--t-md);
 }
 
 .presets {
@@ -858,6 +831,111 @@ output {
   color: #ffd84a;
   font-weight: 700;
   font-size: var(--fs);
+}
+
+/* ---------- Model combination, licences ---------- */
+
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  font: inherit;
+  font-family: var(--font-latin);
+  color: inherit;
+  resize: vertical;
+}
+
+.field.has-error textarea {
+  border-color: var(--beni);
+}
+
+/* A licence statement the user agrees to: the sentence itself is the label. */
+.consent {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-weight: 400;
+  cursor: pointer;
+  max-width: 70ch;
+}
+
+.field .consent {
+  font-weight: 400;
+}
+
+.consent input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 4px 0 0;
+  accent-color: var(--ai-soft);
+}
+
+.advanced {
+  margin: 4px 0 8px;
+}
+
+.advanced summary {
+  cursor: pointer;
+  color: var(--nezumi);
+  font-size: var(--t-sm);
+  width: max-content;
+  margin-bottom: 10px;
+}
+
+.advanced[open] summary {
+  color: var(--sumi);
+}
+
+/* Live result of models.validate, under the combination form. */
+.check {
+  font-size: var(--t-sm);
+  color: var(--nezumi);
+  max-width: 70ch;
+}
+
+.check:empty {
+  display: none;
+}
+
+.check ul {
+  margin: 4px 0 0;
+  padding-left: 1.2em;
+}
+
+.check .is-error {
+  color: var(--beni);
+}
+
+.tag-warn {
+  background: var(--beni-soft);
+  color: var(--beni);
+}
+
+.preset-meta.url,
+.eula-url {
+  font-family: var(--font-latin);
+  font-size: var(--t-xs);
+}
+
+.gpu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.gpu-state {
+  margin: 0;
+  max-width: 70ch;
+}
+
+.about-notice {
+  max-width: 70ch;
+  font-size: var(--t-sm);
 }
 
 @media (max-width: 980px) {
