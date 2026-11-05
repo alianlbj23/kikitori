@@ -4,6 +4,7 @@
 `engine` 子指令只給程式（Tauri）呼叫。
 """
 
+import io
 import sys
 from collections.abc import Callable, Sequence
 
@@ -73,6 +74,17 @@ def menu(
             out(f"無效的選項：{choice!r}")
 
 
+def _use_utf8_stdout() -> None:
+    """選單一律以 UTF-8 輸出。
+
+    stdout 不是 Windows 主控台時（Git Bash／mintty、管線），Python 用系統地區編碼：
+    日文 Windows 的 cp932 沒有「啟」，選單一印就 UnicodeEncodeError；裝置名稱「耳機」
+    在 UTF-8 終端機上則變成亂碼。真正的主控台本來就是 UTF-8，不受影響。
+    """
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """解析參數並執行；回傳結束碼。"""
     args = list(sys.argv[1:] if argv is None else argv)
@@ -81,4 +93,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args:
         sys.stderr.write(USAGE)
         return 2
+    _use_utf8_stdout()
     return menu()

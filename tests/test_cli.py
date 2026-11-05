@@ -2,6 +2,8 @@
 
 import io
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
@@ -90,6 +92,22 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(cli, "menu", return_value=0) as menu:
             self.assertEqual(cli.main([]), 0)
         menu.assert_called_once()
+
+    def test_menu_prints_utf8_whatever_the_locale(self) -> None:
+        # stdout 不是主控台時（Git Bash／mintty、管線），Python 用系統地區編碼：日文
+        # Windows 的 cp932 沒有「啟」，選單一印出來就 UnicodeEncodeError；裝置名稱
+        # 「耳機」則在 UTF-8 終端機上變成「���@」。以 cp932 模擬。
+        env = dict(os.environ, PYTHONIOENCODING="cp932")
+        proc = subprocess.run(
+            [sys.executable, "-m", "kikitori"],
+            check=False,
+            input=b"4\n",
+            capture_output=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.assertIn("啟動引擎", proc.stdout.decode("utf-8"))
 
 
 if __name__ == "__main__":
