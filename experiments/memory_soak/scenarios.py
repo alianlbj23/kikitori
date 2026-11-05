@@ -995,9 +995,17 @@ def _wait_download(
 
 
 def scenario_downloads(
-    repeats: int = 3, pulls: int = 5, which: str = "dev", model: str = "tiny"
+    repeats: int = 3,
+    pulls: int = 5,
+    which: str = "dev",
+    model: str = "tiny",
+    pull_model: str = "",
 ) -> int:
-    """5. ASR 模型下載的取消／續傳／重複下載（隔離的模型快取），與翻譯模型下載 × N。"""
+    """5. ASR 模型下載的取消／續傳／重複下載（隔離的模型快取），與翻譯模型下載 × N。
+
+    `pull_model`：要重新 pull 的**已安裝** Ollama 模型（空白＝已安裝的最小模型）；沒裝就拒絕，
+    不會下載新模型。pull 之後再測一次「pull 途中 engine.shutdown → 重啟再 pull」。
+    """
     with EngineSoak("s5-downloads", which, player=False, engine=False) as soak:
         report = soak.report
         local = soak.run_dir / "localappdata"
@@ -1005,7 +1013,12 @@ def scenario_downloads(
         cache = local / "kikitori" / "models"
         env = {"LOCALAPPDATA": str(local)}
         soak.extra_env = env
-        report.data["params"] = {"repeats": repeats, "pulls": pulls, "model": model}
+        report.data["params"] = {
+            "repeats": repeats,
+            "pulls": pulls,
+            "model": model,
+            "pull_model": pull_model,
+        }
 
         # --- 取消：下載途中 engine.shutdown
         client = soak.start_engine(configure=False)
@@ -1137,6 +1150,12 @@ def scenario_downloads(
             (m for m in _installed_ollama_models() if m["size"]),
             key=lambda m: m["size"],
         )
+        if pull_model:
+            installed = [m for m in installed if m["name"] == pull_model]
+            if not installed:
+                raise RuntimeError(
+                    f"{pull_model} is not installed in Ollama; refusing to pull a new model"
+                )
         if pulls <= 0:
             report.note("models.pull_translation skipped (pulls=0)")
         elif not installed:
@@ -1197,6 +1216,50 @@ def scenario_downloads(
                 <= 2.0,
                 f"states {[p['state'] for p in pulls_out]}; threads {p_base['threads']} → {th}; "
                 f"handles {p_base['handles']} → {hd}",
+            )
+
+            # --- pull 途中取消（engine.shutdown）→ 重啟引擎再 pull（重試）
+            since = len(client.events)
+            client.request(
+                "models.pull_translation", {"model": pick["name"]}, timeout=60
+            )
+            t_cancel = time.monotonic()
+            code = soak.close_engine()
+            exit_s = time.monotonic() - t_cancel
+            ends = [
+                r.msg["data"]
+                for r in client.events[since:]
+                if r.msg.get("event") == "download_progress"
+                and r.msg["data"]["state"] != "downloading"
+            ]
+            time.sleep(2)
+            left = soak.monitor.leftover("engine")
+            soak.monitor.forget("engine")
+            client = soak.start_engine(configure=False)
+            client.request(
+                "settings.set", {"translation": {"base_url": soak.proxy.base_url}}
+            )
+            since = len(client.events)
+            client.request(
+                "models.pull_translation", {"model": pick["name"]}, timeout=60
+            )
+            retry = _wait_download(
+                client, pick["name"], "translation", since, timeout=900
+            )
+            report.data["pull_cancel_retry"] = {
+                "exit_code": code,
+                "exit_s": round(exit_s, 2),
+                "end_events_before_exit": ends,
+                "left": left,
+                "retry": retry,
+            }
+            report.check(
+                f"pull {pick['name']}: engine.shutdown mid-pull exits 0 promptly with no "
+                "processes left; pulling again after restart finishes",
+                code == 0 and exit_s < 15 and not left and retry["state"] == "done",
+                f"exit {code} in {exit_s:.2f} s; events before exit "
+                f"{[(e['state'], str(e.get('error'))[:60]) for e in ends]}; left {left}; "
+                f"retry {retry['state']} {retry.get('error')}",
             )
         return 0 if report.passed else 1
 

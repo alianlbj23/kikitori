@@ -24,11 +24,11 @@ from scenarios import SCENARIOS
 logger = logging.getLogger("soak.menu")
 
 
-def _gui(minutes: float = 15.0) -> int:
+def _gui(minutes: float = 15.0, toggles: bool = True) -> int:
     # 延遲匯入：GUI 驗收的模組在匯入時就宣告 DPI 感知，只在需要時載入
     from gui_soak import scenario_gui
 
-    return scenario_gui(minutes=minutes)
+    return scenario_gui(minutes=minutes, toggles=toggles)
 
 
 ALL: dict[str, Callable[..., int]] = {**SCENARIOS, "gui": _gui}

@@ -61,6 +61,16 @@ return {
 """
 
 
+def js_click(wd: Any, css: str) -> None:
+    """切換開關：以 JS 的 click()（WebDriver 的原生點擊會被蓋在 checkbox 上的開關樣式或訊息列擋住，
+    `element click intercepted`），事件與使用者點擊相同（click → change）。"""
+    if not wd.script(
+        "const e = document.querySelector(arguments[0]); if (!e) return false; e.click(); return true;",
+        css,
+    ):
+        raise RuntimeError(f"no element {css}")
+
+
 def _tools_available() -> tuple[bool, str]:
     try:
         from gui_acceptance import DEFAULT_APP, tool_path
@@ -87,7 +97,9 @@ def _by_name(sample: dict[str, Any], name: str) -> tuple[float, int]:
 
 
 def scenario_gui(
-    minutes: float = 30.0, translation_model: str = DEFAULT_TRANSLATION_MODEL
+    minutes: float = 30.0,
+    translation_model: str = DEFAULT_TRANSLATION_MODEL,
+    toggles: bool = True,
 ) -> int:
     """長時間執行桌面程式（預設 30 分鐘：每分鐘約 13 句，約 23 分鐘到達 300 列上限）。"""
     ok, why = _tools_available()
@@ -164,6 +176,9 @@ def scenario_gui(
             next_toggle += 120
             next_overlay += 180
             next_locale += 300
+            if not toggles:
+                # 只讓字幕流動（診斷用）：不切換翻譯、字幕視窗與語系
+                next_toggle = next_overlay = next_locale = float("inf")
             locale_i = 0
             show_translation = True
             while time.monotonic() < end:
@@ -193,7 +208,7 @@ def scenario_gui(
                 if now >= next_toggle:
                     next_toggle = now + 120
                     wd.switch(main)
-                    wd.click("#show-translation")
+                    js_click(wd, "#show-translation")
                     show_translation = not show_translation
                     actions.append(
                         {
@@ -204,9 +219,9 @@ def scenario_gui(
                 if now >= next_overlay:
                     next_overlay = now + 180
                     wd.switch(main)
-                    wd.click("#overlay-visible")
+                    js_click(wd, "#overlay-visible")
                     time.sleep(5)
-                    wd.click("#overlay-visible")
+                    js_click(wd, "#overlay-visible")
                     actions.append(
                         {"t": round(monitor.now(), 1), "overlay": "hidden+shown"}
                     )
@@ -228,7 +243,7 @@ def scenario_gui(
             t_stop = monitor.now()
             wd.switch(main)
             if not show_translation:
-                wd.click("#show-translation")
+                js_click(wd, "#show-translation")
             wd.click("#start")
             wd.wait("idle", lambda: wd.script(DOM_JS)["start"] == "idle", timeout=60)
             player.stop()

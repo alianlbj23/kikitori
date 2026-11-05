@@ -464,6 +464,106 @@ def unload_ollama_model(model: str, base: str = "http://127.0.0.1:11434") -> str
         return json.loads(resp.read().decode("utf-8")).get("done_reason", "")
 
 
+# --------------------------------------------------------------------------- 資源（v0.2.0）
+
+
+def _soak_monitor_module() -> Any:
+    """沿用記憶體壓力測試的取樣器（每個行程的顯示記憶體來自 WDDM 效能計數器）。"""
+    soak = str(ROOT / "experiments" / "memory_soak")
+    if soak not in sys.path:
+        sys.path.insert(0, soak)
+    import monitor
+
+    return monitor
+
+
+def ollama_ps_raw(base: str = "http://127.0.0.1:11434") -> list[dict[str, Any]]:
+    """`/api/ps` 的原始內容：`size`（模型需要的總量）與 `size_vram`（實際在 GPU 上的量）。
+
+    兩者不同代表 Ollama 把部分層放到 CPU（offload），翻譯延遲會變差。
+    """
+    import urllib.request
+
+    with urllib.request.urlopen(f"{base}/api/ps", timeout=5) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return [
+        {
+            "name": m.get("name"),
+            "size": m.get("size"),
+            "size_vram": m.get("size_vram"),
+            "context_length": m.get("context_length"),
+        }
+        for m in data.get("models", [])
+    ]
+
+
+def vram_report(mon: Any, t0: float, t1: float) -> dict[str, Any]:
+    """[t0, t1]（monitor 時間）內引擎、Ollama 的顯示記憶體（dedicated + shared）與整張卡。"""
+
+    def stats(label: str, key: str) -> dict[str, float | None]:
+        values = [v for _, v in mon.series(label, key, t0, t1)]
+        return {
+            "median": round(statistics.median(values), 1) if values else None,
+            "max": round(max(values), 1) if values else None,
+        }
+
+    with mon._lock:
+        samples = [s for s in mon.samples if t0 <= s["t"] <= t1]
+    nvidia = [s["nvidia"]["used_mib"] for s in samples if s.get("nvidia")]
+    return {
+        "engine_gpu_mib": stats("engine", "gpu_mib"),
+        "engine_gpu_shared_mib": stats("engine", "gpu_shared_mib"),
+        "ollama_gpu_mib": stats("ollama", "gpu_mib"),
+        "ollama_gpu_shared_mib": stats("ollama", "gpu_shared_mib"),
+        "card_used_mib_max": max(nvidia) if nvidia else None,
+        "card_used_mib_median": statistics.median(nvidia) if nvidia else None,
+        "samples": len(samples),
+    }
+
+
+def metrics_report(events: list[Any], session_id: int) -> dict[str, Any]:
+    """`metrics` 事件（每秒）與完整字幕的 `latency_ms`、即時字幕的 `stable_chars`。"""
+
+    def of(kind: str) -> list[dict[str, Any]]:
+        return [
+            r.msg["data"]
+            for r in events
+            if r.msg.get("event") == kind
+            and r.msg["data"].get("session_id") == session_id
+        ]
+
+    mets = of("metrics")
+    subs = of("subtitle")
+    finals = [s for s in subs if s["is_final"] and s.get("original")]
+    partials = [s for s in subs if not s["is_final"]]
+    lat = [float(s["latency_ms"]) for s in finals if s.get("latency_ms") is not None]
+    med = [
+        m["latency_ms_median"] for m in mets if m.get("latency_ms_median") is not None
+    ]
+    levels = [m["level_dbfs"] for m in mets if m.get("level_dbfs") is not None]
+    return {
+        "metrics_events": len(mets),
+        "metrics_latency_ms_median_last": med[-1] if med else None,
+        "final_latency_ms": {
+            "n": len(lat),
+            "median": statistics.median(lat) if lat else None,
+            "p90": p90(lat),
+            "max": max(lat) if lat else None,
+        },
+        "backlog_max": max((m.get("backlog") or 0 for m in mets), default=None),
+        "level_dbfs_range": [min(levels), max(levels)] if levels else None,
+        "partials": len(partials),
+        "partials_with_stable_chars": sum(
+            1 for s in partials if isinstance(s.get("stable_chars"), int)
+        ),
+        "partials_stable_gt0": sum(
+            1 for s in partials if (s.get("stable_chars") or 0) > 0
+        ),
+        "finals": len(finals),
+        "finals_with_latency_ms": len(lat),
+    }
+
+
 def engine_command(which: str) -> tuple[list[str], Path]:
     if which == "release":
         if not RELEASE_ENGINE.exists():
@@ -537,7 +637,9 @@ def run_session(
     mode: str,
     device_id: str,
     clips: list[Clip],
+    during: Any = None,
 ) -> tuple[int, float, list[tuple[Clip, Playback]], dict[str, Any]]:
+    """`during`：播完、停止之前呼叫一次（例如在模型都還在顯示記憶體時讀 Ollama `/api/ps`）。"""
     since = len(client.events)
     sid = client.request(
         "session.start", {"mode": mode, "device_id": device_id}, timeout=30
@@ -565,6 +667,8 @@ def run_session(
         plays.append((clip, player.play(clip.label, clip.audio)))
         time.sleep(GAP_BETWEEN_TRACKS)
     time.sleep(SETTLE_SECS)
+    if during is not None:
+        during()
     t_stop = time.monotonic()
     client.request("session.stop", timeout=20)
     idle = client.wait_event(
@@ -593,6 +697,11 @@ def full_acceptance(which: str) -> int:
     player = Player()
     print(f"playback device: {player.device.name!r} (index {player.device.index})")
     exit_code: int | None = None
+    monitor = _soak_monitor_module()
+    mon = monitor.Monitor(run_dir / "samples.ndjson")
+    mon.track_root("engine", client.proc.pid)
+    mon.track_names("ollama", monitor.OLLAMA_NAMES)
+    mon.start()
     try:
         info = client.request("engine.info", timeout=120)
         check(
@@ -632,6 +741,20 @@ def full_acceptance(which: str) -> int:
             "settings.apply_recommendation",
             asr["device"] == "cuda",
             applied["applied"],
+        )
+        # v0.2.0（Milestone 16）：12 GB＋本機翻譯 → turbo int8 ／ large-v3 int8 ＋ qwen3.5:9b
+        check(
+            results,
+            "v0.2.0 recommended combination on this GPU",
+            asr["fast_model"] == "large-v3-turbo"
+            and asr["final_model"] == "large-v3"
+            and asr.get("fast_compute_type") == "int8_float16"
+            and asr.get("final_compute_type") == "int8_float16"
+            and applied["settings"]["translation"]["final_model"] == "qwen3.5:9b",
+            {
+                "asr": asr,
+                "translation": applied["settings"]["translation"]["final_model"],
+            },
         )
 
         models = client.request("models.list", timeout=90)
@@ -673,9 +796,52 @@ def full_acceptance(which: str) -> int:
         if bgm:
             clips.append(bgm)
         clips.append(load_track("synthetic"))
-        sid, t0, plays, stop = run_session(client, player, "media", device_id, clips)
+        ps_during: list[Any] = []
+        t_media_req = mon.now()
+        sid, t0, plays, stop = run_session(
+            client,
+            player,
+            "media",
+            device_id,
+            clips,
+            during=lambda: ps_during.append(ollama_ps_raw()),
+        )
+        t_media_stop = mon.now()
         rep = analyze_session(client.events, sid, t0, plays, "media")
+        rep["metrics"] = metrics_report(client.events, sid)
+        rep["vram"] = vram_report(mon, t0 - mon.t0, t_media_stop)
+        rep["vram"]["ollama_ps"] = ps_during[0] if ps_during else None
+        rep["vram"]["t_request_to_running_s"] = round(t0 - mon.t0 - t_media_req, 2)
         results["sessions"]["media"] = rep
+        loaded = [
+            m
+            for m in (ps_during[0] if ps_during else [])
+            if m["name"] == tr["final_model"]
+        ]
+        vr = rep["vram"]
+        # 「Shared Usage」計數器也包含 pinned（page-locked）主記憶體，CTranslate2 與 llama.cpp
+        # 本來就會配置，不代表顯示記憶體不夠；判定看 Ollama 有沒有把層放到 CPU（size ≠
+        # size_vram）與整張卡是否留有餘裕（WDDM 只在接近滿載時才把配置降到共用記憶體）。
+        total_mib = (monitor.nvidia_smi_total() or {}).get("total_mib")
+        vr["card_total_mib"] = total_mib
+        check(
+            results,
+            "VRAM fits (no Ollama CPU offload, card not full)",
+            bool(loaded)
+            and loaded[0]["size"] == loaded[0]["size_vram"]
+            and total_mib is not None
+            and (vr["card_used_mib_max"] or total_mib) <= total_mib - 512,
+            vr,
+        )
+        mr = rep["metrics"]
+        check(
+            results,
+            "metrics events, final latency_ms, partial stable_chars",
+            mr["metrics_events"] > 0
+            and mr["finals_with_latency_ms"] == mr["finals"]
+            and mr["partials_with_stable_chars"] == mr["partials"],
+            mr,
+        )
         check(results, "media session.stop → idle", stop["state"] == "idle", stop)
         check(
             results,
@@ -693,6 +859,7 @@ def full_acceptance(which: str) -> int:
             client, player, "interpret", device_id, [zh, en]
         )
         rep = analyze_session(client.events, sid, t0, plays, "interpret")
+        rep["metrics"] = metrics_report(client.events, sid)
         results["sessions"]["interpret"] = rep
         check(results, "interpret session.stop → idle", stop["state"] == "idle", stop)
         check(
@@ -708,6 +875,7 @@ def full_acceptance(which: str) -> int:
     finally:
         exit_code = client.close()
         player.close()
+        mon.stop()
     check(results, "engine.shutdown exit code", exit_code == 0, exit_code)
     check(
         results,

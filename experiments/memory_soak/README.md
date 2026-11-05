@@ -4,6 +4,8 @@
 > 測的是**當時的工作目錄**（含其他代理人尚未 commit 的修改，見 #2 的注意），不是 HEAD 的乾淨狀態。
 > 機器：Ryzen 7 5700X、64 GB、RTX 5070 12 GB（WDDM）、Windows 11 26200。翻譯：本機 Ollama 0.40.14、`qwen3.5:4b`。
 > **同機有另一個代理人在跑 Ollama 翻譯評測**（`experiments/translate_eval/`），數字的干擾見「干擾」。
+> **更新（v0.2.0 驗收，同日 03:23–04:27）**：#1–#3 已在 `47b0b2f`、`a6a93f5` 修正，完整規模回歸見「修正後的回歸」；
+> 回歸中另外找到並修正模型池上限太小（#5，本次驗收的修改，尚未 commit）。下面「結果（初步）」與「發現的問題」保留修正前的紀錄。
 
 ## 檔案
 
@@ -37,9 +39,9 @@ uv run python -X utf8 experiments/memory_soak/ct2_isolation.py        隔離測�
 | 2 | 每個 session 換語言／模型組合（4 組輪流） | `rounds=3` | 每輪 4 × 28 s |
 | 3 | 執行中切換翻譯 × N、只顯示原文的 session、保溫、Ollama 到期 | `toggles=20`、`quiet_secs=35` | 6 分＋ |
 | 4 | 長時間 session（人聲＋BGM 循環） | `minutes=20` | 21 分＋ |
-| 5 | ASR 下載取消／續傳／重複（隔離的模型快取）、`models.pull_translation` × N | `repeats=3`、`pulls=5`、`model=tiny` | 2–5 分 |
+| 5 | ASR 下載取消／續傳／重複（隔離的模型快取）、`models.pull_translation` × N、pull 途中關閉引擎再重試 | `repeats=3`、`pulls=5`、`model=tiny`、`pull_model=`（空白＝已安裝的最小模型；指定時必須已安裝，否則拒絕） | 2–5 分 |
 | 6 | 錯誤路徑、引擎重啟（shutdown／stdin EOF／強制結束） | `rounds=3` | 5 分 |
-| 7 | 桌面程式長時間執行（WebDriver） | `minutes=30` | 31 分＋ |
+| 7 | 桌面程式長時間執行（WebDriver） | `minutes=30`（選單預設 15）、`toggles=true`（false＝不切換翻譯／字幕視窗／語系，診斷用） | 31 分＋ |
 
 開發版引擎（目前的原始碼）用 `which=dev`（預設）；打包好的引擎用 `which=release`（`KIKITORI_SOAK_ENGINE` 可指到別的建置）。
 翻譯模型預設 `qwen3.5:4b`（`KIKITORI_SOAK_TRANSLATION_MODEL` 可改）：比推薦的 9B 小，與同機其他實驗搶顯示記憶體時較不會把別人的模型擠掉。
@@ -48,12 +50,12 @@ uv run python -X utf8 experiments/memory_soak/ct2_isolation.py        隔離測�
 
 需要 `KIKITORI_E2E_APP`（`kikitori-app.exe`，旁邊要有 `kikitori-engine/`）、`KIKITORI_E2E_TAURI_DRIVER`、`KIKITORI_E2E_EDGEDRIVER`；
 建置與工具取得方式見 `experiments/e2e_acceptance/README.md`（tauri-driver 2.1.0、與 WebView2 同版的 msedgedriver）。
-找不到時印出 `SKIP` 與原因、結束碼 2。**本次沒有跑**：這台機器目前沒有建置好的 app 與 driver（上次驗收的工具放在已清掉的暫存目錄）。
+找不到時印出 `SKIP` 與原因、結束碼 2。（第一次結果時沒有跑；v0.2.0 驗收時跑了 18 分鐘，見「修正後的回歸」。）
 它會預先寫好設定（翻譯經過計數代理）、選虛擬喇叭的 loopback、按「開始」，播放人聲＋BGM；每 20 秒記錄主視窗與字幕視窗的 DOM
 節點數、字幕紀錄列數與 JS heap，每 2 分鐘切換「顯示翻譯」、每 3 分鐘關閉再打開字幕視窗、每 5 分鐘切換介面語系（en → ja → zh-TW）。
 判定：字幕紀錄 ≤ 300 列；「與列數無關」的 DOM 成長（DOM 節點數對列數回歸後的殘差）≤ 2 節點／分；字幕視窗 DOM 變化範圍 ≤ 80；
 `kikitori-app.exe` 私有記憶體斜率 ≤ 1 MiB／分；到達 300 列上限之後 WebView2（所有子行程合計）斜率 ≤ 2 MiB／分；關閉後沒有殘留行程。
-每分鐘約 13 句，到 300 列約要 23 分鐘，所以預設 30 分鐘。**這段程式碼沒有實際執行過**，第一次跑時要先看它的輸出。
+每分鐘約 13 句，到 300 列約要 23 分鐘，所以預設 30 分鐘。v0.2.0 驗收時第一次實際執行（18 分鐘，沒有到 300 列）。
 
 ## 安全規則
 
@@ -96,7 +98,50 @@ uv run python -X utf8 experiments/memory_soak/ct2_isolation.py        隔離測�
 門檻調整的紀錄（都在看過資料後、理由寫在程式碼旁）：執行緒容許 +1 → +2；長時間 session 的私有記憶體由「斜率」改為「四分位中位數」；
 下載的 handle 基準由「下載前」改為「第一次下載後」（第一次 HTTPS 下載會一次性初始化 SSL／憑證存放區，305 → 344，之後持平）。
 
-## 結果（2026-11-06，初步、中等規模，開發版引擎）
+## 修正後的回歸（2026-11-06 03:23–04:27，v0.2.0 驗收，完整規模，開發版引擎）
+
+工作目錄＝HEAD `d6bbdaa`（含 `47b0b2f`、`a6a93f5` 的修正）＋本次驗收的修改。GPU 上沒有其他實驗（`contamination`：整張卡 4.8–9.7 GB、
+GPU 使用率中位數 1%、沒有其他 Ollama 模型；Ollama 只有本測試的 `qwen3.5:4b`）。指令：`menu.py --batch <情境> <參數>`。
+
+| 情境 | 結果 | 重點數字（修正前 → 修正後） |
+|---|---|---|
+| 1 start/stop × 20（`results/20261106-032320-s1-start-stop`） | 洩漏 PASS；執行緒一項 FAIL（暫時性，見下） | 顯示記憶體 **+16.8 → +0.41 MiB／輪**（結束後 239.5–277.5 MiB）；私有記憶體 **+18.4 → +3.35 MiB／輪**（門檻 4）；handle −0.11／輪；每輪 0.25–1.6 s 內回到底；20/20 有字幕 |
+| 1 重跑（`20261106-041754-s1-start-stop`） | **PASS（全部）** | 顯示記憶體 +1.47 MiB／輪（239.5–277.5）、私有 +3.08 MiB／輪、handle −0.14、執行緒 31–34 |
+| 2 換語言／模型 × 3 輪（`20261106-033236-s2-switch`） | FAIL → 找到 #5 | 顯示記憶體 +10.7 MiB／session（255 → 361 MiB 一路上升）；私有 +13.2 MiB／session |
+| 2 重跑（#5 修正後，`20261106-041219-s2-switch`） | 顯示記憶體 PASS；私有記憶體、執行緒 FAIL（見下） | 顯示記憶體 **+1.24 MiB／session**，第 4 個 session 起固定 275.5 MiB；私有 3–10 個 session 間 1558–1604 MiB 持平，最後一個 session +91（斜率 12.6 被最後一點主導）；執行緒 35–39 |
+| 2 再跑 `rounds=5`（`20261106-050607-s2-switch`，20 個 session） | 顯示記憶體 PASS；私有記憶體判定 FAIL（斜率 7.7）但**持平** | 私有 1489 → 1548 → 1590 → 第 12–20 個 session **1639–1646 MiB 不再上升**（換不同大小模型時的 heap 高水位）；顯示記憶體 255 → 275 → 307 → 311 MiB（兩次 32 MiB 跳階） |
+| 3 翻譯切換 × 20、只顯示原文、保溫（`20261106-033812-s3-translation`） | **PASS** | 保溫 8.1／18.4／28.6 s；關閉時、停止後、只顯示原文的 session 都是 0 個請求；重新開啟 0.02 s 預熱；session A、B 結束後顯示記憶體都是 273.5 MiB（修正前 B 比 A 多 16） |
+| 4 長時間 20 分鐘（`20261106-034307-s4-long`） | **PASS** | 217 句完整字幕全部有譯文、4299 則即時字幕；私有記憶體四分位中位數 4485／4517／4485／4485 MiB（Q4−Q2 = −32）；顯示記憶體四個四分位都是 2993.5 MiB（−0.09 MiB／分）；結束後私有 +45 MiB（門檻 64，**#4 不成立**）、顯示記憶體 271.5 → 273.5 |
+| 5 下載＋`pull_model=qwen3.5:4b`（`20261106-040411-s5-downloads`） | **PASS** | 下載 tiny 到 8.4 MB 時 shutdown：0.1 s 結束碼 0、保留 `.part`；續傳＋重複 4 次都 done、handle 344–345 持平；pull × 5 都 done（1.1–1.8 s，handle 348）、digest 不變；**pull 途中 shutdown**：0.05 s 結束碼 0、`PullCancelledError`、無殘留，重啟後再 pull → done |
+| 6 錯誤路徑 × 3、引擎重啟（`20261106-040541-s6-errors`） | **PASS** | **開裝置失敗**（`wasapi:loopback:999999`）之後顯示記憶體 0 → 239.5 MiB（只剩 CUDA context，修正前 0 → 3024）、私有 1406 MiB（修正前 4260）；每一步都在 +128 MiB 內；shutdown 0.33 s、EOF 0.23 s、強制結束都沒有殘留行程 |
+
+| 7 GUI 18 分鐘（`20261106-044743-s7-gui`、修正嘗試後 `20261106-054144-s7-gui`） | 腳本判定 PASS（300 列上限沒到，WebView2 不判定）；**主視窗 WebView2 renderer 沒有持平** | 字幕紀錄 ≤ 208 列；DOM 殘差 −0.8 節點／分；字幕視窗 18–27 節點；`kikitori-app.exe` 持平；WebView2 合計 318 → 802 MiB（+30.8 MiB／分），只讓 `setIfChanged()` 寫入改變的值後 321 → 658 MiB（+25.3）；幾乎全在主視窗 renderer，跳階出現在切換「顯示翻譯」／語系之後，停止 session 後 434 → 118 MiB（可回收）。根因未找到，見 `tasks/acceptance-report-v0.2.0.md` 第 6 節 |
+
+第一次 GUI 執行（`20261106-044107-s7-gui`）在 2 分鐘時中止：WebDriver 原生點擊開關被擋（`element click intercepted`），`gui_soak.py` 改用 JS `click()`；
+另外加了 `toggles=false`（只讓字幕流動的診斷：`20261106-051544-s7-gui`，renderer 99 → 193 MiB／12 分、停止後 89 MiB）。
+
+**三個舊問題的回歸結論**
+
+- **#1 開裝置失敗的 session 立即釋放 GPU**：已修正（`47b0b2f`：丟出新的例外複本、清除 traceback、一律釋放元件）。情境 6 三輪的 `missing_device` 之後都回到 239.5–241.5 MiB。
+- **#2 每個 session 的顯示記憶體／私有記憶體成長**：同一組合已修正（`47b0b2f` 的 `ModelPool`、`a6a93f5` 的借用歸還）：情境 1 兩次 +0.41／+1.47 MiB／輪。
+  換組合的情境 2 揭露 #5（池的上限 4 小於 6 個鍵），修正後顯示記憶體 +1.24 MiB／session。
+- **#3 `Connection: close`**：已修正（`47b0b2f`：socket 參照計數），單元測試涵蓋；計數代理（HTTP/1.1）下情境 3、5、6 的翻譯模型檢查與 pull 都正常。
+  本次沒有再用會關連線的代理跑一次。
+
+**#5（本次找到並修正）模型池上限 4 小於實際用到的鍵**：情境 2 的 4 組組合有 6 個不同的鍵（tiny、base、small、medium、large-v3、large-v3-turbo），
+池每次歸還都丟掉最久沒用的物件（引擎日誌 12 次「dropping 1 idle ASR model object(s)」），之後重建又漏 CTranslate2 的 8 MiB。
+丟掉的物件本來就漏掉它佔的量，所以保留不比丟掉貴：`MAX_IDLE_MODELS` 4 → 10（`src/kikitori/asr/whisper.py`；先加
+`tests/test_asr_model_pool.py::test_default_pool_keeps_every_model_of_a_language_switching_user`，在 4 時失敗：建立 18 個物件而不是 6 個）。
+重跑後日誌 0 次 dropping、顯示記憶體持平。
+
+**仍未定論（記錄、未修）**
+
+- 情境 2 的私有記憶體：修正後第 3–10 個 session 持平（1558–1604 MiB），最後一個 session（tiny/medium）+91 MiB，斜率被這一點主導。換不同大小的模型
+  載入／卸載時 Windows heap 的高水位可能還在上升；需要更多輪（`rounds=5` 以上）判斷會不會停在某個值。
+- 執行緒：情境 1 第一次有 4 輪是 35（中位數 32，門檻 +2），之後回到 31–32、handle 持平、斜率 −0.002；重跑最高 34（PASS）。情境 2 重跑 35–39
+  （6 個池中物件各有一條 CTranslate2 工作執行緒，池滿之前執行緒數會隨池成長；handle 持平 631）。都不像洩漏，但門檻沒有改。
+
+## 結果（2026-11-06，初步、中等規模，開發版引擎；修正前）
 
 設定：`asr.device=cuda`、即時 `small`／完整 `large-v3-turbo`（float16）、影片翻譯 ja → zh-TW、翻譯 `qwen3.5:4b`（經計數代理）。
 
@@ -214,9 +259,9 @@ HTTP/1.1 keep-alive。harness 也修正為：情境中途丟出例外時一定�
 
 ## 發現的問題
 
-依嚴重程度排列。都**沒有修改** `src/`（依指示只回報）；修正建議附在各項。
+依嚴重程度排列。當時**沒有修改** `src/`（依指示只回報）；#1–#3 之後已修正（`47b0b2f`、`a6a93f5`），回歸結果見「修正後的回歸」。
 
-### #1 開裝置失敗的 session 把整組模型留在 GPU（每次約 2.5–3 GB，直到循環垃圾回收）
+### #1 開裝置失敗的 session 把整組模型留在 GPU（每次約 2.5–3 GB，直到循環垃圾回收）— 已修正（`47b0b2f`）
 
 - **證據**：情境 6 每一步之後量測，只有「格式正確但不存在的裝置」這一步之後顯示記憶體不回落：第 1 輪 0 → 3024 MiB（私有記憶體 522 → 4260 MiB），
   第 2 輪再 3064 → 5545 MiB（4372 → 6911 MiB），之後的正常 session 結束也只回到這個新的底，直到引擎結束（約 150 s 內都沒有被回收）。其他錯誤路徑都正常回落。
@@ -239,7 +284,7 @@ HTTP/1.1 keep-alive。harness 也修正為：情境中途丟出例外時一定�
   ——但 `_buffer.fail()` 也存了一份，要一起處理）。回歸測試：把 `repro_open_error_cycle.py` 改成單元測試（`gc.disable()` + `weakref`，斷言 session 失敗後元件
   立即被釋放），先確認在目前的程式碼上失敗。之後以情境 6 驗證「missing_device」那一步之後顯示記憶體回落。
 
-### #2 每建立一個 CTranslate2 模型物件（並在 GPU 上推論過）就漏約 8 MiB 顯示記憶體與 8–10 MiB 主記憶體
+### #2 每建立一個 CTranslate2 模型物件（並在 GPU 上推論過）就漏約 8 MiB 顯示記憶體與 8–10 MiB 主記憶體 — 已以模型池繞過（`47b0b2f`、`a6a93f5`；池上限見 #5）
 
 - **證據**：情境 1 每個 session +16.8 MiB 顯示記憶體／+18.4 MiB 私有記憶體（每個 session 建立 2 個模型）；情境 2 不論模型大小都一樣；
   隔離測試證明**與 kikitori 的程式碼、執行緒、配置器都無關**：純 `ctranslate2.models.Whisper(...)` + 一次推論 + `del` 就有 +8.0 MiB／輪，
@@ -259,7 +304,7 @@ HTTP/1.1 keep-alive。harness 也修正為：情境中途丟出例外時一定�
   不同組合數（實務上 < 10）。同時建議把 `ct2_isolation.py` 的 `raw-infer` 回報給 CTranslate2 上游。
   修正後用情境 1（`cycles=20`）回歸：顯示記憶體斜率應 ≈ 0。
 
-### #3 翻譯伺服器回應帶 `Connection: close` 時，Ollama 檢查誤判「連不上」
+### #3 翻譯伺服器回應帶 `Connection: close` 時，Ollama 檢查誤判「連不上」— 已修正（`47b0b2f`）
 
 - **證據**：對一個合法的 HTTP/1.1 回應（`Content-Length` + `Connection: close`、內容 `{"version": "0.12.0"}`），`kikitori.hardware.ollama.ollama_version()`
   丟出 `OllamaUnreachableError: no response from 127.0.0.1:<port>: OSError`，原因 `OSError [WinError 10038]`（不是通訊端）；拿掉 `Connection: close` 就正常回傳。
@@ -271,7 +316,7 @@ HTTP/1.1 keep-alive。harness 也修正為：情境中途丟出例外時一定�
 - **建議修正**：`_PollingSocket.close()` 不要立刻關閉，改為等 `_PollingReader` 被關閉時才關（仿 `socket._io_refs`：reader 的 `close()` 負責關 socket，
   替身的 `close()` 只在沒有 reader 時關）。先加一個以 `Connection: close` 伺服器重現的單元測試（上面的 10 行就是）。
 
-### #4 長時間 session 結束後私有記憶體多留約 180 MiB（未定論）
+### #4 長時間 session 結束後私有記憶體多留約 180 MiB（未定論）— 乾淨環境的 20 分鐘回歸不成立（+45 MiB，門檻 64）
 
 情境 4（5 分鐘）結束後私有記憶體比暖機 session 結束後多 196 MiB（扣掉 #2 的 18 MiB 約 178 MiB），顯示記憶體多 50 MiB。執行中四分位中位數持平，
 所以不像每句累積的洩漏；可能是長時間推論後 CTranslate2／CUDA 的主機端快取、Python／Windows heap 保留，或 WDDM 在顯示記憶體壓力下把配置降到
@@ -289,7 +334,7 @@ HTTP/1.1 keep-alive。harness 也修正為：情境中途丟出例外時一定�
 
 ## 已知限制
 
-- 情境 7 沒有跑（沒有建置與 driver）；情境 5 的 `models.pull_translation` 沒有跑（同機有人在評測那些模型）。
+- （修正前）情境 7 沒有跑（沒有建置與 driver）；情境 5 的 `models.pull_translation` 沒有跑（同機有人在評測那些模型）。v0.2.0 驗收時都跑了，見「修正後的回歸」與情境 7 的結果。
 - 情境 4 只跑了 5 分鐘、而且受干擾；完整 20 分鐘留在選單。情境 1 只跑 12 輪、情境 2 兩輪、情境 3 切換 10 次、情境 6 兩輪（中等規模）；
   預設的完整規模留在選單。
 - 情境 1、2、4 是在代理修正（#3）之前跑的：引擎的「翻譯模型有沒有裝」檢查被略過，但翻譯本身正常（請求數有記錄），不影響記憶體的結論。
