@@ -22,7 +22,7 @@ type CmdResult<T> = Result<T, RequestError>;
 
 const QUICK: Duration = Duration::from_secs(10);
 /// Background methods (`hardware.detect`, `models.list`, `models.validate`,
-/// `settings.apply_recommendation`) run `nvidia-smi` and probe the translation
+/// `settings.apply_recommendation`, `settings.preview_recommendation`) run `nvidia-smi` and probe the translation
 /// server (2 s timeout per address), and the engine runs them one at a time in
 /// arrival order, so a request may first wait for the ones queued before it.
 const BACKGROUND: Duration = Duration::from_secs(45);
@@ -196,10 +196,33 @@ pub async fn settings_set(bridge: State<'_, EngineBridge>, patch: Value) -> CmdR
     bridge.request("settings.set", patch, QUICK).await
 }
 
+/// `only_if_new` is the first-run auto-apply: the engine writes only while no
+/// settings were saved yet, so a combination the user just saved is kept.
+pub fn apply_recommendation_params(only_if_new: bool) -> Value {
+    if only_if_new {
+        json!({ "only_if_new": true })
+    } else {
+        json!({})
+    }
+}
+
 #[tauri::command]
-pub async fn settings_apply_recommendation(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+pub async fn settings_apply_recommendation(
+    bridge: State<'_, EngineBridge>,
+    only_if_new: Option<bool>,
+) -> CmdResult<Value> {
+    let params = apply_recommendation_params(only_if_new.unwrap_or(false));
     bridge
-        .request("settings.apply_recommendation", json!({}), BACKGROUND)
+        .request("settings.apply_recommendation", params, BACKGROUND)
+        .await
+}
+
+/// What `settings_apply_recommendation` would write, without saving (`differs`
+/// tells the UI whether to offer it).
+#[tauri::command]
+pub async fn settings_preview_recommendation(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge
+        .request("settings.preview_recommendation", json!({}), BACKGROUND)
         .await
 }
 
@@ -461,6 +484,15 @@ mod tests {
             json!({"model": "gpu-runtime"})
         );
         assert!(models_download_params("../x", false).is_err());
+    }
+
+    #[test]
+    fn apply_params_send_only_if_new_only_when_asked() {
+        assert_eq!(apply_recommendation_params(false), json!({}));
+        assert_eq!(
+            apply_recommendation_params(true),
+            json!({"only_if_new": true})
+        );
     }
 
     #[test]

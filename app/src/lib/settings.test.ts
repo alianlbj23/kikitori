@@ -147,6 +147,24 @@ describe("parseSettingsResult", () => {
     );
   });
 
+  it("reports whether the settings file is new (first run)", () => {
+    expect(parseSettingsResult(engine["settings.get"]).isNew).toBe(true);
+    expect(parseSettingsResult(engine["settings.apply_recommendation"]).isNew).toBe(false);
+    // An older engine does not send is_new: never treat that as a first run.
+    expect(parseSettingsResult({ settings: {} }).isNew).toBe(false);
+    expect(parseSettingsResult({ settings: {}, is_new: "yes" }).isNew).toBe(false);
+  });
+
+  it("reads dismissed recommendations from the opaque ui object", () => {
+    expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({ dismissed_recommendations: [] });
+    const ok = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["0123456789abcdef"], other: 1 } } });
+    expect(ok.settings.ui.dismissed_recommendations).toEqual(["0123456789abcdef"]);
+    expect(ok.warnings).toEqual([]);
+    const bad = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["x", 3] } } });
+    expect(bad.settings.ui.dismissed_recommendations).toEqual([]);
+    expect(bad.warnings).toContain("ui.dismissed_recommendations");
+  });
+
   it("uses defaults for an empty subtitle object", () => {
     expect(overlayStyleFromSubtitle({})).toEqual(DEFAULT_OVERLAY_STYLE);
     expect(overlayStyleFromSubtitle(null)).toEqual(DEFAULT_OVERLAY_STYLE);
@@ -160,6 +178,11 @@ describe("parseAppliedRecommendation", () => {
     expect(r.settings.asr.device).toBe("cpu");
     expect(r.applied).toMatchObject({ asr: { device: "cpu", fast_cpu_threads: 4 } });
     expect(r.recommendation.tier).toBe("cpu");
+  });
+
+  it("accepts applied = null (only_if_new and settings were already saved)", () => {
+    const r = parseAppliedRecommendation({ ...engine["settings.apply_recommendation"], applied: null });
+    expect(r.applied).toBeNull();
   });
 
   it("rejects a result without applied or recommendation", () => {

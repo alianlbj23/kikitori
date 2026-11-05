@@ -28,6 +28,7 @@ import type {
   OverlaySnapshot,
   OverlayStyle,
   Recommendation,
+  RecommendationPreview,
   StatusEvent,
   SubtitleEvent,
   TranslationModel,
@@ -298,6 +299,23 @@ export function parseRecommendation(v: unknown, p = "recommendation"): Recommend
     gpu_runtime_missing: bool(o, "gpu_runtime_missing", p),
     reasons: strList(o.reasons),
     warnings: strList(o.warnings),
+  };
+}
+
+/**
+ * `settings.preview_recommendation`. The fingerprint ends up in the settings
+ * file (`ui.dismissed_recommendations`), so only short hex strings are accepted.
+ */
+export function parseRecommendationPreview(v: unknown): RecommendationPreview {
+  const p = "settings.preview_recommendation";
+  const o = obj(v, p);
+  const fingerprint = str(o, "fingerprint", p, 64);
+  if (!/^[0-9a-f]+$/.test(fingerprint)) throw new ValidationError(`${p}.fingerprint`, "expected a hex string");
+  return {
+    patch: obj(o.patch, `${p}.patch`),
+    recommendation: parseRecommendation(o.recommendation, `${p}.recommendation`),
+    differs: bool(o, "differs", p),
+    fingerprint,
   };
 }
 

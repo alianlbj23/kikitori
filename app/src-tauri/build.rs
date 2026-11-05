@@ -12,6 +12,7 @@ fn main() {
             "settings_get",
             "settings_set",
             "settings_apply_recommendation",
+            "settings_preview_recommendation",
             "session_start",
             "session_stop",
             "engine_shutdown",

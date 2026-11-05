@@ -1,5 +1,51 @@
 {
-  "_comment": "Responses of the real engine in fake mode (KIKITORI_ENGINE_FAKE=1, KIKITORI_ENGINE_FAKE_HARDWARE=nvidia), captured 2026-11-05 for parser tests. Regenerate when the protocol changes.",
+  "_comment": "Responses of the real engine in fake mode (KIKITORI_ENGINE_FAKE=1, KIKITORI_ENGINE_FAKE_HARDWARE=nvidia, empty KIKITORI_CONFIG_DIR, requests in this order), captured 2026-11-05 for parser tests. Regenerate when the protocol changes.",
+  "settings.get": {
+    "settings": {
+      "schema_version": 2,
+      "mode": "media",
+      "target_language": "zh-TW",
+      "partner_language": "ja",
+      "media": {
+        "pause_secs": 0.6,
+        "max_secs": 10.0,
+        "device_id": null
+      },
+      "interpret": {
+        "pause_secs": 0.5,
+        "max_secs": 8.0,
+        "device_id": null
+      },
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "auto",
+        "fast_compute_type": null,
+        "final_compute_type": null,
+        "fast_cpu_threads": null,
+        "final_cpu_threads": null,
+        "cuda_library_dirs": []
+      },
+      "translation": {
+        "base_url": "http://localhost:11434/v1",
+        "fast_model": "qwen3.5:4b",
+        "final_model": "qwen3.5:4b",
+        "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
+        "allow_restricted": false,
+        "keep_warm_secs": 240
+      },
+      "pipeline": {
+        "partial_interval_ms": 700,
+        "no_speech_threshold": 0.6,
+        "context_lines": 3,
+        "asr_prompt_context": true
+      },
+      "subtitle": {},
+      "ui": {}
+    },
+    "path": "C:/fake/settings.json",
+    "is_new": true
+  },
   "hardware.detect": {
     "hardware": {
       "os": "windows",
@@ -297,6 +343,53 @@
       ]
     }
   },
+  "settings.preview_recommendation": {
+    "patch": {
+      "asr": {
+        "fast_model": "base",
+        "final_model": "small",
+        "device": "cpu",
+        "fast_compute_type": "int8",
+        "final_compute_type": "int8",
+        "fast_cpu_threads": 4,
+        "final_cpu_threads": 4
+      },
+      "translation": {
+        "fast_model": "qwen3.5:4b",
+        "final_model": "qwen3.5:4b"
+      }
+    },
+    "recommendation": {
+      "tier": "cpu",
+      "fast_asr": {
+        "model": "base",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4
+      },
+      "final_asr": {
+        "model": "small",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4
+      },
+      "translation_fast": "qwen3.5:4b",
+      "translation_final": "qwen3.5:4b",
+      "translation_budget_gb": 7.0,
+      "gpu_runtime_missing": true,
+      "reasons": [
+        "ASR 在 CPU 執行（RAM ≥ 16 GB）：即時用 base（約 0.45 s）、完整用 small（約 1.3 s）",
+        "medium 以上在 CPU 每句要 3.6 s 以上，不適合即時字幕",
+        "扣掉 ASR 與 1 GB 保留後，約 7.0 GB VRAM 可給翻譯模型",
+        "即時與完整翻譯用同一個模型：GPU 上每句都在 0.3 s 內，Ollama 換模型要 1.5–18 s"
+      ],
+      "warnings": [
+        "cuBLAS 未安裝，GPU 加速需要先下載 GPU 執行環境（約 570 MB）；在那之前 ASR 使用 CPU"
+      ]
+    },
+    "differs": true,
+    "fingerprint": "c7a98aaa9f0c1cc5"
+  },
   "settings.apply_recommendation": {
     "settings": {
       "schema_version": 2,
@@ -328,7 +421,8 @@
         "fast_model": "qwen3.5:4b",
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
-        "allow_restricted": false
+        "allow_restricted": false,
+        "keep_warm_secs": 240
       },
       "pipeline": {
         "partial_interval_ms": 700,
@@ -336,9 +430,11 @@
         "context_lines": 3,
         "asr_prompt_context": true
       },
-      "subtitle": {}
+      "subtitle": {},
+      "ui": {}
     },
     "path": "C:/fake/settings.json",
+    "is_new": false,
     "applied": {
       "asr": {
         "fast_model": "base",

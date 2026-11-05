@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import platform
@@ -208,6 +209,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "asr_prompt_context": True,
     },
     "subtitle": {},
+    "ui": {},
 }
 
 DEVICES: list[dict[str, Any]] = [
@@ -346,8 +348,9 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise ProtocolError(
             "invalid_settings", "asr.cuda_library_dirs: at most 16 paths"
         )
-    if not isinstance(settings["subtitle"], dict):
-        raise ProtocolError("invalid_settings", "subtitle: expected an object")
+    for key in ("subtitle", "ui"):
+        if not isinstance(settings[key], dict):
+            raise ProtocolError("invalid_settings", f"{key}: expected an object")
 
 
 class Session(threading.Thread):
@@ -467,6 +470,8 @@ class FakeEngine:
         # answered, so the app has to fall back to killing the process.
         self.ignore_shutdown = ignore_shutdown
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
+        # Settings live in memory: "first run" until the first settings.set.
+        self.is_new = True
         self.downloaded = {"tiny", "base", "small"}
         self.downloading: set[str] = set()
         self.session: Session | None = None
@@ -490,6 +495,7 @@ class FakeEngine:
             "models.list": self.models_list,
             "models.validate": self.models_validate,
             "settings.apply_recommendation": self.settings_apply_recommendation,
+            "settings.preview_recommendation": self.settings_preview_recommendation,
         }
         self.jobs: queue.Queue[tuple[int, str, dict[str, Any]] | None] = queue.Queue()
         self.worker = threading.Thread(
@@ -687,10 +693,9 @@ class FakeEngine:
                 warnings.append(f"{name} 為非商用授權")
         return {"ok": not errors, "errors": errors, "warnings": warnings}
 
-    def settings_apply_recommendation(self, _params: dict[str, Any]) -> dict[str, Any]:
-        rec = self.recommendation()
+    def recommendation_patch(self, rec: dict[str, Any]) -> dict[str, Any]:
         fast, final = rec["fast_asr"], rec["final_asr"]
-        applied = {
+        return {
             "asr": {
                 "fast_model": fast["model"],
                 "final_model": final["model"],
@@ -705,8 +710,32 @@ class FakeEngine:
                 "final_model": rec["translation_final"],
             },
         }
+
+    def settings_apply_recommendation(self, params: dict[str, Any]) -> dict[str, Any]:
+        only_if_new = params.get("only_if_new", False)
+        if not isinstance(only_if_new, bool):
+            raise ProtocolError("invalid_params", "only_if_new must be a boolean")
+        rec = self.recommendation()
+        if only_if_new and not self.is_new:
+            return {**self.settings_result(), "applied": None, "recommendation": rec}
+        applied = self.recommendation_patch(rec)
         self.settings_set(applied)
         return {**self.settings_result(), "applied": applied, "recommendation": rec}
+
+    def settings_preview_recommendation(
+        self, _params: dict[str, Any]
+    ) -> dict[str, Any]:
+        rec = self.recommendation()
+        patch = self.recommendation_patch(rec)
+        text = json.dumps(
+            patch, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        return {
+            "patch": patch,
+            "recommendation": rec,
+            "differs": deep_merge(self.settings, patch) != self.settings,
+            "fingerprint": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        }
 
     def models_download(self, params: dict[str, Any]) -> dict[str, Any]:
         model = params.get("model")
@@ -774,12 +803,14 @@ class FakeEngine:
         return {
             "settings": copy.deepcopy(self.settings),
             "path": "<fake engine: in memory>",
+            "is_new": self.is_new,
         }
 
     def settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
         merged = deep_merge(self.settings, params)
         validate_settings(merged)
         self.settings = merged
+        self.is_new = False
         return self.settings_result()
 
     def session_start(self, params: dict[str, Any]) -> dict[str, Any]:

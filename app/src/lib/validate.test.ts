@@ -12,6 +12,7 @@ import {
   parseHardware,
   parseModels,
   parseOverlayStyle,
+  parseRecommendationPreview,
   parseStatus,
   parseSubtitle,
   parseUpdateDownloadEvent,
@@ -301,6 +302,24 @@ describe("models.validate", () => {
 
   it("rejects a missing ok flag", () => {
     expect(() => parseCombinationCheck({ errors: [] })).toThrow(ValidationError);
+  });
+});
+
+describe("settings.preview_recommendation (real engine, fake NVIDIA hardware)", () => {
+  it("parses the patch, recommendation, differs and fingerprint", () => {
+    const p = parseRecommendationPreview(engine["settings.preview_recommendation"]);
+    expect(p.differs).toBe(true);
+    expect(p.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(p.patch).toEqual(engine["settings.apply_recommendation"].applied);
+    expect(p.recommendation.tier).toBe("cpu");
+  });
+
+  it("rejects a missing differs flag, a malformed fingerprint or patch", () => {
+    const good = engine["settings.preview_recommendation"];
+    const { differs: _d, ...noDiffers } = good;
+    expect(() => parseRecommendationPreview(noDiffers)).toThrow(ValidationError);
+    expect(() => parseRecommendationPreview({ ...good, fingerprint: "<script>" })).toThrow(ValidationError);
+    expect(() => parseRecommendationPreview({ ...good, patch: [] })).toThrow(ValidationError);
   });
 });
 

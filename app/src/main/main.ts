@@ -37,7 +37,19 @@ import {
   tierLabel,
 } from "../lib/format";
 import {
+  FirstRunGate,
+  blockingDownloads,
+  dismissedWith,
+  missingModels,
+  missingModelsView,
+  offerText,
+  runFirstRun,
+  shouldOfferRecommendation,
+  type MissingModel,
+} from "../lib/recommend";
+import {
   COMPUTE_TYPES,
+  DEFAULT_SETTINGS,
   combinationFieldForEnginePath,
   combinationFormFromSettings,
   combinationPatch,
@@ -55,6 +67,7 @@ import {
 import { applySubtitle, emptySubtitles, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
 import type {
   AboutInfo,
+  AppliedRecommendation,
   AsrChoice,
   BridgeStatus,
   DeviceInfo,
@@ -65,6 +78,7 @@ import type {
   Mode,
   ModelsList,
   OverlaySnapshot,
+  RecommendationPreview,
   Settings,
 } from "../lib/types";
 import { asCommandError } from "../lib/validate";
@@ -100,6 +114,16 @@ interface State {
   /** The user ticked "I agree to the NVIDIA CUDA EULA" (per download, never stored). */
   gpuLicenseAccepted: boolean;
   about: AboutInfo | null;
+  /** The user saved a model combination in this window: first run must not override it. */
+  userChoseModels: boolean;
+  /** The first-run auto-apply is in progress; the offer waits for it. */
+  firstRunActive: boolean;
+  /** Latest `settings.preview_recommendation` answer. */
+  preview: RecommendationPreview | null;
+  /** Offers closed with 關閉 in this window (not stored; "不要再提醒" is). */
+  closedOffers: Set<string>;
+  /** Models the missing-models notice is about (null when it is not shown). */
+  missing: MissingModel[] | null;
 }
 
 const state: State = {
@@ -121,7 +145,14 @@ const state: State = {
   comboDirty: false,
   gpuLicenseAccepted: false,
   about: null,
+  userChoseModels: false,
+  firstRunActive: false,
+  preview: null,
+  closedOffers: new Set(),
+  missing: null,
 };
+
+const firstRunGate = new FirstRunGate();
 
 const el = {
   modes: Array.from(document.querySelectorAll<HTMLButtonElement>(".mode")),
@@ -186,12 +217,26 @@ interface NoticeAction {
   run: () => void;
 }
 
+interface NoticeOptions {
+  /** A keyed notice replaces the previous one with the same key (see `noticeFor`). */
+  key?: string;
+  /** Runs when the user closes the notice with 關閉. */
+  onClose?: () => void;
+}
+
 /** Shows a dismissible message at the top of the content area; returns it. */
-function notify(text: string, tone: "info" | "bad" | "update" = "info", actions: NoticeAction[] = []): HTMLElement {
+function notify(
+  text: string,
+  tone: "info" | "bad" | "update" = "info",
+  actions: NoticeAction[] = [],
+  options: NoticeOptions = {},
+): HTMLElement {
   for (const existing of Array.from(el.notices.children)) {
     if (existing.getAttribute("data-text") === text) existing.remove();
   }
+  if (options.key) noticeFor(options.key)?.remove();
   const notice = h("div", { class: "notice", "data-tone": tone, "data-text": text, role: tone === "bad" ? "alert" : "status" });
+  if (options.key) notice.dataset.key = options.key;
   const body = h("p", {}, text);
   const buttons = h("div", { class: "notice-actions" });
   for (const action of actions) {
@@ -200,12 +245,20 @@ function notify(text: string, tone: "info" | "bad" | "update" = "info", actions:
     buttons.appendChild(b);
   }
   const close = h("button", { type: "button", class: "ghost", "aria-label": "關閉這則訊息" }, "關閉");
-  close.addEventListener("click", () => notice.remove());
+  close.addEventListener("click", () => {
+    notice.remove();
+    options.onClose?.();
+  });
   buttons.appendChild(close);
   replace(notice, body, buttons);
   el.notices.prepend(notice);
   while (el.notices.children.length > 3) el.notices.lastElementChild?.remove();
   return notice;
+}
+
+/** The keyed notice currently shown, if any. */
+function noticeFor(key: string): HTMLElement | null {
+  return Array.from(el.notices.children).find((n): n is HTMLElement => n instanceof HTMLElement && n.dataset.key === key) ?? null;
 }
 
 function reportError(context: string, e: unknown): void {
@@ -313,6 +366,12 @@ async function toggleSession(): Promise<void> {
       await api.sessionStop();
       state.sessionState = "idle";
     } else {
+      const waiting = state.settings ? blockingDownloads(state.settings.asr, state.downloads) : [];
+      if (waiting.length) {
+        // Starting now would only fail with model_not_downloaded.
+        notify(`${waiting.join("、")} 還在下載，下載完成後再按「開始」。`);
+        return;
+      }
       const deviceId = el.device.value === "" ? null : el.device.value;
       const sessionId = await api.sessionStart(state.mode, deviceId);
       state.sessionId = sessionId;
@@ -535,27 +594,217 @@ function renderRecommendation(): void {
   );
 }
 
-async function applyRecommendation(button: HTMLButtonElement): Promise<void> {
-  button.disabled = true;
+async function applyRecommendation(button: HTMLButtonElement | null): Promise<void> {
+  if (button) button.disabled = true;
   try {
     const result = await api.applyRecommendation();
-    state.settings = result.settings;
-    if (state.hardware) state.hardware = { ...state.hardware, recommendation: result.recommendation };
-    if (result.warnings.length) console.warn("settings fields replaced by defaults:", result.warnings);
+    showAppliedSettings(result, true);
     const r = result.recommendation;
     notify(
       `已套用建議組合：即時字幕 ${r.fast_asr.model}、完整翻譯 ${r.final_asr.model}（${deviceLabel(r.fast_asr.device)}）。` +
         (sessionActive() ? "下一次開始時生效。" : ""),
     );
-    fillCombo(result.settings, true);
-    renderHardware();
-    renderModels();
-    scheduleCheck(0);
+    await offerMissingModels();
   } catch (e) {
     reportError("無法套用建議組合", e);
   } finally {
-    button.disabled = !engineReady();
+    if (button) button.disabled = !engineReady();
   }
+}
+
+/**
+ * Puts the result of `settings.apply_recommendation` on screen. `force`
+ * replaces unsaved edits in the combination form: right for the user's own
+ * "套用", not for the automatic first-run apply.
+ */
+function showAppliedSettings(result: AppliedRecommendation, force: boolean): void {
+  state.settings = result.settings;
+  if (state.hardware) state.hardware = { ...state.hardware, recommendation: result.recommendation };
+  if (result.warnings.length) console.warn("settings fields replaced by defaults:", result.warnings);
+  // The saved settings now equal the recommendation: drop the offer, and any
+  // preview still in flight (computed against the old settings).
+  forgetPreview();
+  fillCombo(result.settings, force);
+  renderHardware();
+  renderModels();
+  scheduleCheck(0);
+}
+
+// ---------------------------------------------------------------- automatic recommendation
+
+const FIRST_RUN_NOTICE = "first-run";
+const OFFER_NOTICE = "recommendation-offer";
+const MISSING_NOTICE = "missing-models";
+const previews = new Latest();
+
+/** Saved settings changed: hide the offer and ignore previews still in flight. */
+function forgetPreview(): void {
+  previews.invalidate();
+  state.preview = null;
+  noticeFor(OFFER_NOTICE)?.remove();
+}
+
+/**
+ * First run (no settings file yet): wait for detection, apply the engine's
+ * recommendation and say what was chosen. Never runs once the user has saved
+ * a combination; failures keep the engine's safe defaults and say so.
+ */
+async function firstRunFlow(): Promise<void> {
+  state.firstRunActive = true;
+  const reviewAction = { label: "到「模型」頁查看或修改", run: () => showPage("models") };
+  try {
+    const outcome = await runFirstRun(
+      {
+        detect: () => api.hardwareDetect(),
+        apply: () => api.applyRecommendation(true),
+        userChoseModels: () => state.userChoseModels,
+        describe: describeError,
+      },
+      state.settings ?? DEFAULT_SETTINGS,
+    );
+    switch (outcome.kind) {
+      case "applied":
+        state.hardware = outcome.report;
+        showAppliedSettings(outcome.applied, false);
+        notify(outcome.notice, "info", [reviewAction], { key: FIRST_RUN_NOTICE });
+        await offerMissingModels();
+        break;
+      case "kept_defaults":
+        if (outcome.report) state.hardware = outcome.report;
+        renderHardware();
+        notify(outcome.notice, "bad", [reviewAction], { key: FIRST_RUN_NOTICE });
+        // A timed-out apply may still have been written: show what is saved.
+        await reloadSettings();
+        break;
+      case "skipped":
+        break;
+    }
+  } finally {
+    state.firstRunActive = false;
+  }
+  await checkRecommendation();
+}
+
+/** Re-reads the saved settings into the UI (form edits are kept). */
+async function reloadSettings(): Promise<void> {
+  try {
+    const { settings } = await api.settingsGet();
+    state.settings = settings;
+    fillCombo(settings);
+    renderModels();
+  } catch (e) {
+    reportError("無法讀取設定", e);
+  }
+}
+
+/**
+ * Asks the engine whether applying its recommendation would change the saved
+ * settings, and shows or hides the offer. Background check: a failure is
+ * logged, not shown (the models page reports detection problems itself).
+ */
+async function checkRecommendation(): Promise<void> {
+  if (!engineReady() || state.firstRunActive) return;
+  const token = previews.next();
+  let preview: RecommendationPreview;
+  try {
+    preview = await api.previewRecommendation();
+  } catch (e) {
+    console.error("settings.preview_recommendation failed:", e);
+    return;
+  }
+  if (!previews.isCurrent(token)) return;
+  state.preview = preview;
+  renderOffer();
+}
+
+function renderOffer(): void {
+  const preview = state.preview;
+  const dismissed = state.settings?.ui.dismissed_recommendations ?? [];
+  if (!preview || !shouldOfferRecommendation(preview, dismissed) || state.closedOffers.has(preview.fingerprint)) {
+    noticeFor(OFFER_NOTICE)?.remove();
+    return;
+  }
+  // Already showing this one: leave it where it is.
+  if (noticeFor(OFFER_NOTICE)?.dataset.fingerprint === preview.fingerprint) return;
+  const notice = notify(
+    offerText(preview),
+    "update",
+    [
+      { label: "套用", run: () => void applyRecommendation(null) },
+      { label: "不要再提醒", run: () => void dismissOffer(preview.fingerprint) },
+    ],
+    { key: OFFER_NOTICE, onClose: () => state.closedOffers.add(preview.fingerprint) },
+  );
+  notice.dataset.fingerprint = preview.fingerprint;
+}
+
+/** "不要再提醒": remembered per recommendation in the settings' opaque `ui` object. */
+async function dismissOffer(fingerprint: string): Promise<void> {
+  noticeFor(OFFER_NOTICE)?.remove();
+  state.closedOffers.add(fingerprint);
+  const current = state.settings?.ui.dismissed_recommendations ?? [];
+  try {
+    const { settings } = await api.settingsSet({ ui: { dismissed_recommendations: dismissedWith(current, fingerprint) } });
+    state.settings = settings;
+  } catch (e) {
+    reportError("無法記住「不要再提醒」", e);
+  }
+}
+
+/**
+ * Refreshes the model list and, if a chosen ASR model is not downloaded yet,
+ * offers to download exactly those (never automatically: they are GB-sized).
+ * Returns whether anything is missing.
+ */
+async function offerMissingModels(): Promise<boolean> {
+  if (!state.settings || !engineReady()) return false;
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("無法讀取模型清單", e);
+    return false;
+  }
+  renderModels();
+  const missing = missingModels(state.settings.asr, state.models.asr);
+  state.missing = missing.length ? missing : null;
+  // An earlier prompt may be about models no longer chosen.
+  if (!state.missing) noticeFor(MISSING_NOTICE)?.remove();
+  renderMissingNotice();
+  return missing.length > 0;
+}
+
+function renderMissingNotice(): void {
+  if (!state.missing) return;
+  const view = missingModelsView(state.missing, state.models?.asr ?? null, state.downloads);
+  const shown = noticeFor(MISSING_NOTICE);
+  if (shown?.dataset.state === view.state) {
+    // Progress updates only change the text; keep the buttons (and focus) in place.
+    const p = shown.querySelector("p");
+    if (p) p.textContent = view.text;
+    // notify() matches duplicates by data-text; keep it in step with the text.
+    shown.dataset.text = view.text;
+    return;
+  }
+  const actions: NoticeAction[] = [];
+  if (view.state === "offer") actions.push({ label: "下載缺少的模型", run: downloadMissingModels });
+  if (view.state === "failed") actions.push({ label: "重新下載", run: downloadMissingModels });
+  const notice = notify(view.text, view.state === "failed" ? "bad" : "update", actions, {
+    key: MISSING_NOTICE,
+    onClose: () => {
+      state.missing = null;
+    },
+  });
+  notice.dataset.state = view.state;
+  if (view.state === "done") state.missing = null;
+}
+
+function downloadMissingModels(): void {
+  for (const m of state.missing ?? []) {
+    const known = state.models?.asr.find((x) => x.id === m.id);
+    if (known?.downloaded || state.downloads.get(m.id)?.state === "downloading") continue;
+    void downloadModel(m.id);
+  }
+  renderMissingNotice();
 }
 
 // ---------------------------------------------------------------- models page: GPU runtime
@@ -827,6 +1076,7 @@ async function loadModels(): Promise<void> {
   el.modelsRefresh.disabled = false;
   renderHardware();
   renderModels();
+  renderMissingNotice();
   scheduleCheck(0);
 }
 
@@ -842,6 +1092,7 @@ async function downloadModel(id: string): Promise<void> {
     }
     state.downloads.delete(id);
     renderModels();
+    renderMissingNotice();
     reportError(`無法下載 ${id}`, e);
   }
 }
@@ -1042,9 +1293,15 @@ async function submitCombo(): Promise<void> {
   try {
     const { settings } = await api.settingsSet(combinationPatch(form));
     state.settings = settings;
+    // A deliberate choice: never auto-applied over, and no offer right after saving
+    // (it comes back on the next start or visit to this page if still different).
+    state.userChoseModels = true;
+    forgetPreview();
     fillCombo(settings, true);
     renderModels();
     el.comboStatus.textContent = sessionActive() ? "已儲存，下一次開始時生效。" : "已儲存組合。";
+    // The new combination may need other models (and an old prompt may be stale).
+    void offerMissingModels();
   } catch (e) {
     const ce = asCommandError(e);
     const field =
@@ -1205,14 +1462,16 @@ function showPage(page: Page): void {
     if (item.dataset.page === page) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   }
-  if (page === "models") void loadModels();
+  if (page === "models") void loadModels().then(checkRecommendation);
 }
 
 // ---------------------------------------------------------------- engine data
 
 async function loadEngineData(): Promise<void> {
+  let isNew = false;
   try {
-    const { settings, path, warnings } = await api.settingsGet();
+    const { settings, path, warnings, isNew: fresh } = await api.settingsGet();
+    isNew = fresh;
     if (warnings.length) {
       notify(`設定檔中有 ${warnings.length} 個欄位無法讀取，暫時使用預設值：${warnings.join("、")}`, "bad");
     }
@@ -1235,6 +1494,9 @@ async function loadEngineData(): Promise<void> {
   renderDevices();
   renderStatus();
   if (state.page === "models") void loadModels();
+  // Runs on every engine (re)start, e.g. after the GPU runtime install restarts it.
+  if (firstRunGate.claim({ isNew, userChoseModels: state.userChoseModels })) void firstRunFlow();
+  else void checkRecommendation();
 }
 
 function onBridge(status: BridgeStatus): void {
@@ -1338,7 +1600,7 @@ function wire(): void {
     state.subtitles = emptySubtitles(state.subtitles.sessionId);
     renderTranscript();
   });
-  el.modelsRefresh.addEventListener("click", () => void loadModels());
+  el.modelsRefresh.addEventListener("click", () => void loadModels().then(checkRecommendation));
   el.comboForm.addEventListener("input", () => {
     state.comboDirty = true;
     el.comboStatus.textContent = "";
@@ -1373,7 +1635,14 @@ async function subscribe(): Promise<void> {
       if (s.session_id !== null && state.sessionId !== null && s.session_id < state.sessionId) return;
       if (s.session_id !== null) state.sessionId = s.session_id;
       state.sessionState = s.state;
-      if (s.state === "error") notify(describeStatusError(s.code, s.detail), "bad");
+      if (s.state === "error" && s.code === "model_not_downloaded") {
+        // Offer exactly the missing models; fall back to the generic message.
+        void offerMissingModels().then((found) => {
+          if (!found) notify(describeStatusError(s.code, s.detail), "bad");
+        });
+      } else if (s.state === "error") {
+        notify(describeStatusError(s.code, s.detail), "bad");
+      }
       renderStatus();
     }),
     events.subtitle((ev) => {
@@ -1387,6 +1656,10 @@ async function subscribe(): Promise<void> {
         if (p.model === GPU_RUNTIME_ID) {
           onGpuRuntimeInstalled();
         } else {
+          // Mark it now so the missing-models notice does not flash back to
+          // "still needed" while the list is being reloaded.
+          const listed = state.models?.asr.find((m) => m.id === p.model);
+          if (listed) listed.downloaded = true;
           notify(`${p.model} 下載完成。`);
           void loadModels();
         }
@@ -1395,6 +1668,7 @@ async function subscribe(): Promise<void> {
         notify(`${what}下載失敗：${p.error ?? "未知原因"}`, "bad");
       }
       if (state.page === "models") renderModels();
+      renderMissingNotice();
     }),
     events.log((l) => {
       if (l.level === "warning" || l.level === "error") {

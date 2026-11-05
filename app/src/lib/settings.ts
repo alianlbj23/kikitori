@@ -10,10 +10,20 @@
  * combination on the models page (ASR and translation models, device,
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
- * Overlay appearance lives in the engine's opaque `subtitle` object.
+ * Overlay appearance lives in the engine's opaque `subtitle` object, the UI's
+ * own state (dismissed recommendation offers) in the opaque `ui` object.
  */
 
-import type { AppliedRecommendation, AsrDevice, ComputeType, Mode, OverlayStyle, PartnerLanguage, Settings } from "./types";
+import type {
+  AppliedRecommendation,
+  AsrDevice,
+  ComputeType,
+  Mode,
+  OverlayStyle,
+  PartnerLanguage,
+  Settings,
+  UiState,
+} from "./types";
 import { FONT_SIZE_RANGE, MAX_LINES_RANGE, ValidationError, parseRecommendation } from "./validate";
 
 export const DEFAULT_OVERLAY_STYLE: OverlayStyle = {
@@ -64,7 +74,13 @@ export const DEFAULT_SETTINGS: Settings = {
     allow_restricted: false,
   },
   subtitle: DEFAULT_OVERLAY_STYLE,
+  ui: { dismissed_recommendations: [] },
 };
+
+/** Recommendation fingerprints are short hex strings (engine `recommendation_fingerprint`). */
+export const FINGERPRINT_PATTERN = /^[0-9a-f]{1,64}$/;
+/** How many dismissed recommendation fingerprints `ui` keeps. */
+export const MAX_DISMISSED = 10;
 
 type Obj = Record<string, unknown>;
 type Warn = (field: string) => void;
@@ -137,6 +153,19 @@ function clampInt(v: unknown, [lo, hi]: readonly [number, number], fallback: num
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
 
+/** The UI's state from the opaque `settings.ui`; malformed parts fall back to empty. */
+export function uiStateFromSettings(ui: unknown, warn: Warn): UiState {
+  const v = asObj(ui).dismissed_recommendations;
+  if (v === undefined) return { dismissed_recommendations: [] };
+  // Reading is more lenient than writing (MAX_DISMISSED): a list written by a later
+  // version that keeps more entries must not be reported as malformed.
+  if (Array.isArray(v) && v.length <= 100 && v.every((f) => typeof f === "string" && FINGERPRINT_PATTERN.test(f))) {
+    return { dismissed_recommendations: v as string[] };
+  }
+  warn("ui.dismissed_recommendations");
+  return { dismissed_recommendations: [] };
+}
+
 /** Overlay style from `settings.subtitle`, falling back field by field. */
 export function overlayStyleFromSubtitle(subtitle: unknown): OverlayStyle {
   const o = asObj(subtitle);
@@ -158,6 +187,11 @@ export interface SettingsResult {
   path: string | null;
   /** Fields that were malformed and replaced by defaults. */
   warnings: string[];
+  /**
+   * No settings file exists yet (first run). False when the engine does not
+   * report it (older engine): then the UI never changes settings on its own.
+   */
+  isNew: boolean;
 }
 
 /**
@@ -202,9 +236,11 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         allow_restricted: pickBool(tr, "allow_restricted", d.translation.allow_restricted, warn, "translation."),
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
+      ui: uiStateFromSettings(root.ui, warn),
     },
     path,
     warnings,
+    isNew: top.is_new === true,
   };
 }
 
@@ -215,15 +251,17 @@ export function parseSettingsResult(result: unknown): SettingsResult {
 export function parseAppliedRecommendation(result: unknown): AppliedRecommendation {
   const p = "settings.apply_recommendation";
   const o = asObj(result);
-  if (typeof o.applied !== "object" || o.applied === null || Array.isArray(o.applied)) {
-    throw new ValidationError(`${p}.applied`, "expected an object");
+  // null: `only_if_new` was sent and settings had already been saved, so nothing was written.
+  if (o.applied !== null && (typeof o.applied !== "object" || Array.isArray(o.applied))) {
+    throw new ValidationError(`${p}.applied`, "expected an object or null");
   }
-  const { settings, path, warnings } = parseSettingsResult(result);
+  const { settings, path, warnings, isNew } = parseSettingsResult(result);
   return {
     settings,
     path,
     warnings,
-    applied: o.applied as Record<string, unknown>,
+    isNew,
+    applied: o.applied as Record<string, unknown> | null,
     recommendation: parseRecommendation(o.recommendation, `${p}.recommendation`),
   };
 }

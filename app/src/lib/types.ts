@@ -277,6 +277,27 @@ export interface Settings {
     allow_restricted: boolean;
   };
   subtitle: OverlayStyle;
+  /** The UI's own state in the engine's opaque `ui` object (the engine never reads it). */
+  ui: UiState;
+}
+
+export interface UiState {
+  /**
+   * Fingerprints of recommendations the user answered with "don't remind me"
+   * (`settings.preview_recommendation`); a different recommendation prompts again.
+   */
+  dismissed_recommendations: string[];
+}
+
+/** `settings.preview_recommendation`: what applying would write, without saving. */
+export interface RecommendationPreview {
+  /** Exactly the partial settings `settings.apply_recommendation` would write. */
+  patch: Record<string, unknown>;
+  recommendation: Recommendation;
+  /** Saving the patch would change the current settings. */
+  differs: boolean;
+  /** Stable id of the patch, remembered when the user dismisses the offer. */
+  fingerprint: string;
 }
 
 /** `settings.apply_recommendation` result. */
@@ -285,8 +306,13 @@ export interface AppliedRecommendation {
   path: string | null;
   /** Settings fields that were malformed and replaced by defaults. */
   warnings: string[];
-  /** The partial settings the engine actually wrote. */
-  applied: Record<string, unknown>;
+  /** Always false after a save; kept so the shape matches `settings.get`. */
+  isNew: boolean;
+  /**
+   * The partial settings the engine actually wrote; null when `only_if_new`
+   * was sent and settings had already been saved (nothing written).
+   */
+  applied: Record<string, unknown> | null;
   recommendation: Recommendation;
 }
 

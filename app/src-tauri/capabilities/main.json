@@ -21,6 +21,7 @@
     "allow-settings-get",
     "allow-settings-set",
     "allow-settings-apply-recommendation",
+    "allow-settings-preview-recommendation",
     "allow-session-start",
     "allow-session-stop",
     "allow-engine-restart",

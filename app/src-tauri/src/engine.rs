@@ -824,7 +824,10 @@ mod tests {
     /// Needs `uv` on PATH (the project's Python toolchain, also present in CI).
     mod fake_engine {
         use super::*;
-        use crate::commands::{GPU_RUNTIME_ID, models_download_params, models_validate_params};
+        use crate::commands::{
+            GPU_RUNTIME_ID, apply_recommendation_params, models_download_params,
+            models_validate_params,
+        };
         use crate::protocol::{DownloadProgressPayload, DownloadState, SubtitlePayload};
 
         const EULA_URL: &str = "https://docs.nvidia.com/cuda/eula/index.html";
@@ -1247,6 +1250,22 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(saved["settings"]["asr"]["device"], json!("auto"));
+            // No settings file yet: the UI auto-applies the recommendation on first run.
+            assert_eq!(saved["is_new"], json!(true));
+
+            // The preview says what applying would write, without saving.
+            let preview = bridge
+                .request("settings.preview_recommendation", json!({}), SLOW)
+                .await
+                .unwrap();
+            assert_eq!(preview["differs"], json!(true));
+            assert_eq!(preview["patch"]["asr"]["device"], json!("cpu"));
+            assert!(preview["fingerprint"].is_string());
+            let still_new = bridge
+                .request("settings.get", json!({}), Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert_eq!(still_new["is_new"], json!(true));
 
             // Applying the recommendation is the engine's job; before cuBLAS it is CPU.
             let applied = bridge
@@ -1256,6 +1275,24 @@ mod tests {
             assert_eq!(applied["applied"]["asr"]["device"], json!("cpu"));
             assert_eq!(applied["settings"]["asr"]["device"], json!("cpu"));
             assert!(applied["recommendation"]["tier"].is_string());
+            assert_eq!(applied["applied"], preview["patch"]);
+            assert_eq!(applied["is_new"], json!(false));
+            let same = bridge
+                .request("settings.preview_recommendation", json!({}), SLOW)
+                .await
+                .unwrap();
+            assert_eq!(same["differs"], json!(false));
+            assert_eq!(same["fingerprint"], preview["fingerprint"]);
+            // The first-run auto-apply never overwrites settings saved meanwhile.
+            let first_run = bridge
+                .request(
+                    "settings.apply_recommendation",
+                    apply_recommendation_params(true),
+                    SLOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(first_run["applied"], Value::Null);
 
             // License gate: without the flag the engine refuses and names the EULA.
             let (code, message) = engine_code(
@@ -1288,6 +1325,15 @@ mod tests {
             .await;
             let last = downloads(&rec, GPU_RUNTIME_ID).pop().unwrap();
             assert_eq!(last.state, DownloadState::Done, "{:?}", last.error);
+
+            // cuBLAS changes the recommendation: the UI offers the GPU combination.
+            let changed = bridge
+                .request("settings.preview_recommendation", json!({}), SLOW)
+                .await
+                .unwrap();
+            assert_eq!(changed["differs"], json!(true));
+            assert_eq!(changed["patch"]["asr"]["device"], json!("cuda"));
+            assert_ne!(changed["fingerprint"], preview["fingerprint"]);
 
             let after = bridge
                 .request("settings.apply_recommendation", json!({}), SLOW)

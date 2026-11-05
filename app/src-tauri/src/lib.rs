@@ -164,6 +164,7 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::settings_apply_recommendation,
+            commands::settings_preview_recommendation,
             commands::session_start,
             commands::session_stop,
             commands::engine_shutdown,

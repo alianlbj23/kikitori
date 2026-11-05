@@ -25,6 +25,7 @@ import type {
   ModelsList,
   OverlaySnapshot,
   OverlayStyle,
+  RecommendationPreview,
   StatusEvent,
   SubtitleEvent,
   UpdateDownloadEvent,
@@ -42,6 +43,7 @@ import {
   parseLog,
   parseModels,
   parseOverlaySnapshot,
+  parseRecommendationPreview,
   parseStatus,
   parseSubtitle,
   parseUpdateDownloadEvent,
@@ -81,9 +83,22 @@ export const api = {
   async modelsValidate(settings: Record<string, unknown> | null): Promise<CombinationCheck> {
     return parseCombinationCheck(await invoke("models_validate", settings ? { settings } : {}));
   },
-  /** Writes the engine's recommendation into the settings (the engine owns the rules). */
-  async applyRecommendation(): Promise<AppliedRecommendation> {
-    return parseAppliedRecommendation(await invoke("settings_apply_recommendation"));
+  /**
+   * Writes the engine's recommendation into the settings (the engine owns the
+   * rules). `onlyIfNew` is the first-run auto-apply: the engine writes nothing
+   * (`applied: null`) if settings were saved in the meantime.
+   */
+  async applyRecommendation(onlyIfNew = false): Promise<AppliedRecommendation> {
+    return parseAppliedRecommendation(
+      await invoke("settings_apply_recommendation", onlyIfNew ? { onlyIfNew: true } : {}),
+    );
+  },
+  /**
+   * What `applyRecommendation` would write and whether it differs from the
+   * saved settings, without saving: the UI never compares settings itself.
+   */
+  async previewRecommendation(): Promise<RecommendationPreview> {
+    return parseRecommendationPreview(await invoke("settings_preview_recommendation"));
   },
   async devicesList(): Promise<DeviceInfo[]> {
     return parseDevices(await invoke("devices_list"));
