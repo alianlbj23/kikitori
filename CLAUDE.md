@@ -18,3 +18,15 @@
 - 每個模組開頭簡述它在架構中的角色。
 - 全面使用型別標註。
 - 修改程式碼時，同步更新相關註解。
+
+## Skill 使用時機
+
+`.claude/skills/` 的 skill 依下列情境主動使用，不必等使用者點名：
+
+- 新模組或跨多個檔案的功能開工前：`spec-driven-development` 寫規格，使用者確認後再用 `planning-and-task-breakdown` 拆任務。
+- 實作任務：`incremental-implementation`；寫邏輯、修 bug、改行為：`test-driven-development`。
+- 設計模組之間的介面或事件格式：`api-and-interface-design`。
+- 使用第三方函式庫（pipecat、onnxruntime 等）：`source-driven-development`，以官方文件與原始碼為準。
+- 測試失敗或行為不符預期：`debugging-and-error-recovery`。
+- 做出架構決策（例如選用哪個 VAD）：`documentation-and-adrs` 記錄決策。
+- skill 內容與本文件衝突時以本文件為準；skill 要求 commit 時先問使用者，不自動 commit。

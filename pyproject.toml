@@ -21,3 +21,6 @@ dev = [
     "pre-commit==4.6.2",
     "ruff==0.17.1",
 ]
+experiment-vad = [
+    "pipecat-ai==1.14.0",
+]
