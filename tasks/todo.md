@@ -169,9 +169,11 @@
   - 結果：Windows（PyAudioWPatch）loopback 與麥克風本機實測可錄；Linux（soundcard）、macOS（ScreenCaptureKit）只以假物件測試，待真機驗證。
 - [x] 里程碑 6：硬體偵測與模型組合
   - 結果：hardware 模組（標準庫偵測、推薦、手動組合驗證、使用者同意 NVIDIA EULA 後下載 cuBLAS）已接上引擎（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`models.download gpu-runtime`）；設定 schema v2；本機推薦 small／large-v3-turbo CUDA float16 + qwen3.5:9b。
-- [ ] 里程碑 7：Tauri 介面
+- [x] 里程碑 7：Tauri 介面（GUI 外觀與 Linux／macOS 視窗行為待實機確認）
   - 第一階段結果：Tauri v2 + Vite + TypeScript；主視窗（模式、裝置、字幕紀錄、模型頁、設定頁）與透明置頂字幕視窗（即時→完整原地取代、滑鼠穿透、Ctrl+Alt+K）；Rust 引擎橋接（逐行驗證、id 配對與逾時、自動重啟）；vitest 60、cargo test 44、clippy、debug build 通過；更新器公鑰已寫入。待做：sidecar 打包整合、Linux／macOS 實機確認。
   - 第二階段結果：對齊引擎協定（完整推薦組合、`settings.apply_recommendation`、`models.validate` 即時檢查、NVIDIA EULA 同意後才下載 GPU 元件、`allow_restricted` 確認）；引擎改以 resources 資料夾啟動；「關於」區含 MIT 與 Intel OpenMP 聲明；vitest 106、cargo test 52、clippy、debug build 通過。GUI 外觀尚未實際開啟確認。
-- [ ] 里程碑 8：CI/CD
+- [x] 里程碑 8：CI/CD
   - 前半結果：PyInstaller one-folder 引擎（Windows 170 MB、啟動 0.30 s；one-file 1.28 s 且會殘留暫存檔，故不採用），以 Tauri resources 散布；`--self-check` 與假模式協定 smoke test；THIRD_PARTY_LICENSES；`scripts/sync_version.py`；`test.yml`（三平台 Python 測試＋引擎打包 smoke test）。待做：Tauri CI job、`release.yml`。
-- [ ] 里程碑 9：自動更新
+  - 後半結果：`app.yml`（三平台前端／Rust 檢查、cargo-deny、第三方授權產生）；`release.yml`（main 上版本號為新才發布；測試、三平台打包、安裝後 smoke、minisign 驗簽全過才建立 Release；`[release-dry-run]` 在分支上完整演練）；Rust／npm 第三方授權聲明隨安裝檔散布；最後 CI（dde4c88）test／app／release dry run 全綠。
+- [x] 里程碑 9：自動更新
+  - 結果：tauri-plugin-updater 接 GitHub Releases `latest.json`（自行產生，含 deb 專用 key）；正式公鑰已寫入、私鑰只在本機；dry run 以拋棄式金鑰完整演練簽章與驗簽。真正的「v(n) → v(n+1)」自動更新需發布兩個版本後實機驗證。
