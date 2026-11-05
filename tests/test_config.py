@@ -214,6 +214,28 @@ class ValidationTest(unittest.TestCase):
         self.assertTrue(s.translation.allow_restricted)
         self.assertTrue(s.to_dict()["translation"]["allow_restricted"])
 
+    def test_translation_keep_warm_secs(self) -> None:
+        # 低於 Ollama 預設 keep_alive（5 分鐘）才有用；0 關閉。
+        self.assertEqual(Settings().translation.keep_warm_secs, 240)
+        self.assertEqual(Settings().to_dict()["translation"]["keep_warm_secs"], 240)
+        for ok in (0, 10, 3600):
+            s = Settings.from_dict(_with("translation.keep_warm_secs", ok))
+            self.assertEqual(s.translation.keep_warm_secs, ok)
+        for bad in (True, "240", 240.5, -1, 1, 9, 3601, None):
+            self.assertInvalid(
+                _with("translation.keep_warm_secs", bad), "translation.keep_warm_secs"
+            )
+
+    def test_keep_warm_secs_missing_uses_default_without_migration(self) -> None:
+        # 新欄位有預設值：沒有這個欄位的 schema 2 設定檔照樣讀得進來，不必升 schema。
+        data = Settings().to_dict()
+        del data["translation"]["keep_warm_secs"]
+        s = Settings.from_dict(data)
+        self.assertEqual(s.schema_version, SCHEMA_VERSION)
+        self.assertEqual(s.translation.keep_warm_secs, 240)
+        merged = Settings().merged({"translation": {"keep_warm_secs": 30}})
+        self.assertEqual(merged.translation.keep_warm_secs, 30)
+
     def test_translation_fields_use_translator_validation(self) -> None:
         self.assertInvalid(
             _with("translation.base_url", "ftp://example.com"), "translation.base_url"

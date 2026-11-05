@@ -157,6 +157,7 @@ class Pipeline:
         self._ended_id = 0
         self._source: AudioSource | None = None
         self._threads: list[threading.Thread] = []
+        self._keep_warm_started = False
 
     # --- 公開狀態 -------------------------------------------------------------
 
@@ -187,7 +188,8 @@ class Pipeline:
     # --- 執行緒模式 -----------------------------------------------------------
 
     def start(self, source: AudioSource) -> None:
-        """啟動音訊來源與三條 worker 執行緒，送出 "running"。
+        """啟動音訊來源與三條 worker 執行緒，送出 "running"；元件有 `keep_warm` 時一併啟動
+        （pipeline 結束時停止）。
 
         Raises:
             RuntimeError: 已經啟動過或用過逐步模式。
@@ -197,6 +199,9 @@ class Pipeline:
         source.start()
         self._source = source
         self._set_running()
+        # 在 worker 之前啟動：非即時來源可能一下就讀完，capture 執行緒在 start() 返回前就
+        # 呼叫 _finish()；保溫若在那之後才啟動，就沒有人停止它。
+        self._start_keep_warm()
         self._threads = [
             threading.Thread(
                 target=self._capture_loop, name="pipeline-capture", daemon=True
@@ -214,6 +219,21 @@ class Pipeline:
         # worker 在 _input_done 設定前不會自行結束，所以這個順序下 is_alive() 可靠。
         for thread in (*self._threads[1:], self._threads[0]):
             thread.start()
+
+    def _start_keep_warm(self) -> None:
+        keep_warm = self._components.keep_warm
+        if keep_warm is None:
+            return
+        # 先標記：start() 進行到一半失敗時，結束時仍會呼叫 stop() 收拾。
+        self._keep_warm_started = True
+        try:
+            keep_warm.start()
+        except Exception as exc:  # 保溫只是加速，失敗不能讓 session 停下；記錄並回報
+            logger.warning("cannot keep the translation model warm", exc_info=exc)
+            self._log(
+                "warning",
+                f"cannot keep the translation model warm: {type(exc).__name__}: {exc}",
+            )
 
     def stop(self, timeout: float = 5.0) -> None:
         """使用者主動中斷：停止擷取、丟棄尚未開始的工作，送出 "idle"。可重複呼叫。
@@ -612,7 +632,21 @@ class Pipeline:
             self._state = state
             self._error = error
             self._done.set()
+        self._stop_keep_warm()
         self._notify_status(state, detail)
+
+    def _stop_keep_warm(self) -> None:
+        keep_warm = self._components.keep_warm
+        if keep_warm is None or not self._keep_warm_started:
+            return
+        try:
+            keep_warm.stop()
+        except Exception as exc:  # 停止流程不能因背景工作的錯誤中斷；記錄並回報
+            logger.error("stopping the keep-warm task failed", exc_info=exc)
+            self._log(
+                "error",
+                f"stopping the keep-warm task failed: {type(exc).__name__}: {exc}",
+            )
 
     def _fail(self, exc: BaseException) -> None:
         logger.error("pipeline failed", exc_info=exc)

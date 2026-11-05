@@ -69,6 +69,7 @@
 - 簡體偵測以 Big5 判斷：用字是繁體、但是大陸用語的譯文（例如「視頻」）不會被改。
 - Ollama 偶爾在模型陷入重複輸出時異常結束串流；HY-MT 1.8B 在 39 句中有 1 句因此失敗。
 - 翻譯伺服器在遠端時，推薦不會自動選模型，要使用者自己在模型頁選。
+- **Ollama 閒置卸載模型**：OpenAI 相容 API 不能指定 `keep_alive`，Ollama 預設閒置 5 分鐘就卸載。session 開始時會預熱，執行中翻譯請求停了 `translation.keep_warm_secs`（預設 240 秒）也會再送一次短請求保溫（只對本機服務，見 `docs/specs/pipeline-engine.md`）。仍然存在的情況：沒有 session 時模型照樣被卸載（下次開始時重新預熱，載入多花幾秒）；伺服器把 `OLLAMA_KEEP_ALIVE` 設得比 240 秒短時，要把 `keep_warm_secs` 調低（目前只能改設定檔或 `settings.set`，設定頁沒有這個欄位）；保溫請求會讓 GPU 上的模型一直佔著顯示記憶體，直到 session 結束後 5 分鐘。
 
 ## 端到端與效能
 

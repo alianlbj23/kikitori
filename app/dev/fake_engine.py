@@ -199,6 +199,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "final_model": "qwen3.5:4b",
         "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
         "allow_restricted": False,
+        "keep_warm_secs": 240,
     },
     "pipeline": {
         "partial_interval_ms": 700,

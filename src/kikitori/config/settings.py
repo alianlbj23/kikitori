@@ -62,6 +62,8 @@ MAX_SUBTITLE_DEPTH = 5
 
 MAX_CUDA_DIRS = 16
 CPU_THREADS_RANGE = (1, 256)
+KEEP_WARM_RANGE = (10, 3600)
+"""`translation.keep_warm_secs` 的範圍（0 另外允許，表示關閉）。"""
 MAX_PATH_CHARS = 1024
 COMPUTE_TYPES: tuple[str, ...] = (
     "int8",
@@ -138,6 +140,9 @@ class TranslationSettings:
             歐盟、英國、南韓）。預設 False：引擎不知道使用者身在何處，用語系猜地區並不
             可靠，而推薦了不能用的授權會讓使用者在不知情下違約；使用者在設定頁確認
             自己不在這些地區後才打開。只影響推薦與驗證警告，不阻止使用者手動選用。
+        keep_warm_secs: session 執行中翻譯請求停了這麼多秒，就對本機翻譯伺服器送一次
+            預熱請求，讓模型不被卸載（Ollama 預設閒置 5 分鐘就卸載，OpenAI 相容端點
+            無法指定 keep_alive）。0 關閉；遠端服務一律不送。
     """
 
     base_url: str = DEFAULT_BASE_URL
@@ -145,6 +150,7 @@ class TranslationSettings:
     final_model: str = "qwen3.5:4b"
     api_key_env: str = DEFAULT_API_KEY_ENV
     allow_restricted: bool = False
+    keep_warm_secs: int = 240
 
 
 @dataclass(frozen=True)
@@ -224,6 +230,7 @@ class Settings:
                 "final_model": self.translation.final_model,
                 "api_key_env": self.translation.api_key_env,
                 "allow_restricted": self.translation.allow_restricted,
+                "keep_warm_secs": self.translation.keep_warm_secs,
             },
             "pipeline": {
                 "partial_interval_ms": self.pipeline.partial_interval_ms,
@@ -493,7 +500,14 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
     section = _section(
         data,
         "translation",
-        ("base_url", "fast_model", "final_model", "api_key_env", "allow_restricted"),
+        (
+            "base_url",
+            "fast_model",
+            "final_model",
+            "api_key_env",
+            "allow_restricted",
+            "keep_warm_secs",
+        ),
     )
     values: dict[str, str] = {}
     for name in ("base_url", "fast_model", "final_model", "api_key_env"):
@@ -517,7 +531,20 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
         section.get("allow_restricted", default.allow_restricted),
         "translation.allow_restricted",
     )
-    return TranslationSettings(**values, allow_restricted=allow_restricted)
+    keep_warm_secs = _integer(
+        section.get("keep_warm_secs", default.keep_warm_secs),
+        "translation.keep_warm_secs",
+        0,
+        KEEP_WARM_RANGE[1],
+    )
+    if 0 < keep_warm_secs < KEEP_WARM_RANGE[0]:
+        raise SettingsError(
+            f"translation.keep_warm_secs: must be 0 (off) or "
+            f"{KEEP_WARM_RANGE[0]}–{KEEP_WARM_RANGE[1]}, got {keep_warm_secs}"
+        )
+    return TranslationSettings(
+        **values, allow_restricted=allow_restricted, keep_warm_secs=keep_warm_secs
+    )
 
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:

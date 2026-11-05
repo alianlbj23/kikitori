@@ -166,7 +166,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
     "fast_model": "qwen3.5:4b",
     "final_model": "qwen3.5:4b",
     "api_key_env": "KIKITORI_TRANSLATE_API_KEY",
-    "allow_restricted": false
+    "allow_restricted": false,
+    "keep_warm_secs": 240
   },
   "pipeline": {"partial_interval_ms": 700, "no_speech_threshold": 0.6, "context_lines": 3, "asr_prompt_context": true},
   "subtitle": {}
@@ -188,6 +189,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `asr.cuda_library_dirs` | 最多 16 個絕對路徑（使用者自行指定的 cuBLAS 12 目錄）；kikitori 下載的 GPU 執行環境不必列入，factory 建立元件時自動加在後面 |
 | `translation.*` | 交給 `TranslatorConfig` 驗證（`base_url` 必須 http/https、模型名稱非空、`api_key_env` 是合法變數名稱）；模型名稱另限 200 字元 |
 | `translation.allow_restricted` | 布林，預設 **false**：是否推薦有地區限制授權的翻譯模型（HY-MT 的授權不適用於歐盟、英國、南韓）。引擎不知道使用者所在地、用語系猜地區不可靠，推薦了不能用的授權會讓使用者在不知情下違約，所以預設不推薦；UI 在設定頁讓使用者確認「我不在歐盟／英國／南韓」後再設為 true。只影響 `recommend()` 與 `models.validate` 的警告，不阻止手動選用 |
+| `translation.keep_warm_secs` | 整數，預設 **240**：0（關閉）或 [10, 3600]。session 執行中翻譯請求停了這麼多秒，就對本機翻譯服務送一次預熱請求，讓模型不被卸載（見「ASR 接縫」的 `attach_keep_warm()`）。預設值低於 Ollama 預設的 `keep_alive` 5 分鐘；伺服器改過 `OLLAMA_KEEP_ALIVE` 時要設得比它短。遠端服務一律不送。新欄位有預設值，舊的 schema 2 檔案照樣讀得進來，所以**不升 schema** |
 | `pipeline.partial_interval_ms` | 整數，[200, 5000] |
 | `pipeline.no_speech_threshold` | 數字，[0, 1] |
 | `pipeline.context_lines` | 整數，[0, 10] |
@@ -195,7 +197,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `subtitle` | 任意 JSON 物件，引擎不解讀、原樣保存給 UI（字型、位置、顏色…）；巢狀 ≤ 5 層、序列化後 ≤ 16 KiB、不得有 NaN／Infinity |
 
 - ASR 預設為「沒有 GPU 也跑得動」的組合（`asr.md` 的 CPU ≥ 16 GB 等級：即時 `base`、完整 `small`），hardware 偵測之後推薦覆寫。
-- 數字欄位不接受布林；整數欄位不接受小數。未知欄位一律報錯（打錯字要讓使用者知道）。缺少的欄位用預設值（舊檔案加新欄位時不必遷移）。
+- 數字欄位不接受布林；整數欄位不接受小數。未知欄位一律報錯（打錯字要讓使用者知道）。缺少的欄位用預設值（舊檔案加新欄位時不必遷移；例如 `translation.keep_warm_secs` 是 schema 2 之後新增、沒有升版的欄位。代價是舊版程式讀到新版寫的檔案會報「unknown setting」，`SettingsStore` 會保留原檔並用預設值）。
 - 錯誤訊息帶欄位路徑：`SettingsError("media.pause_secs: expected a number in [0.1, 5.0], got 'abc'")`。
 - 不存 API key 本身，只存環境變數名稱。
 
@@ -258,7 +260,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 - 會啟動背景工作的方法（`session.start`、`models.download`）在**回應寫出之後**才啟動背景執行緒，所以 UI 一定先拿到 `session_id`，才收到該 session 的事件。
 - `settings.set` 在 session 執行中也可呼叫，新設定從下一個 session 生效。
-- `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → 建立元件（載入模型可能要數秒；之後預熱翻譯模型，見 factory 的 `build_session_components()`）→ 開裝置 → `status running`。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
+- `session.start`：先同步驗證參數與 `open_source()`（只解析 id，不開裝置）。省略 `device_id` 時用設定檔該模式的 `device_id`；`null` 是預設裝置。回應後在背景：`status loading` → 建立元件（載入模型可能要數秒；之後預熱翻譯模型，見 factory 的 `build_session_components()`）→ 開裝置 → `status running`（本機翻譯服務在執行中另有保溫，見 `attach_keep_warm()`）。任一步失敗送 `status error`，session 結束。media 用 `loopback`、interpret 用 `microphone`（指定 `device_id` 時以 id 為準，見 `capture.md`）。
 - **背景方法**（表中標「背景」）：會執行 `nvidia-smi`、連線翻譯伺服器（最久數秒），所以不在讀 stdin 的主執行緒上處理，而是交給**一條**背景工作執行緒（`engine/deferred.py`），完成時才寫出回應。
   - 背景方法之間：依收到的順序執行與回應（不會同時跑兩次偵測）。
   - 與其他方法之間：以 `id` 對應，回應可能晚於之後送出的請求（例如 `hardware.detect` 進行中送 `session.stop`，`session.stop` 先回應）。
@@ -332,7 +334,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 - `no_speech_reliable(model_id)`：registry 的 `no_speech_reliable`，設定 `PipelineComponents.final_no_speech_reliable`。
 - `create_transcript_filter(no_speech_threshold)`：asr 的 `rejection_reason` + `FilterConfig`。
 - `asr_model_catalog()`、`download_asr_model(model_id, progress, cancel)`：asr 的 `MODELS`、`is_downloaded`、`download_model`、`default_cache_dir`。
-- `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`）。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
+- `build_session_components(settings, mode)`：engine 實際用的建立函式。先 `build_components()` 載入 ASR，再呼叫 `warm_up_translation()`，兩者都完成才回傳（session 維持 `loading`），最後 `attach_keep_warm()`。刻意不並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 估算的可用顯示記憶體會過時（驗收時 llama-server 以 CUDA 錯誤當掉）。`warm_up_translation()` 只對 loopback 位址的翻譯服務送一句短翻譯（完整路徑的模型先、即時路徑的模型若不同再送；`read_timeout` 60 秒、不重試），讓 Ollama 先把模型載入——它閒置 5 分鐘就卸載模型，冷啟動 4–10 秒，不預熱時第一句的即時翻譯會逾時、前幾句的完整字幕延後 8–16 秒（2026-11-05 端到端驗收實測）。失敗只記 warning。
+- `attach_keep_warm(components, settings, mode)`：**執行中的保溫**。開場預熱之後，影片長時間沒有對白時翻譯請求會停下來，Ollama 閒置 5 分鐘仍會卸載模型，下一句的即時翻譯又會逾時；OpenAI 相容端點不能指定 `keep_alive`，所以由引擎定期送請求。翻譯服務在 loopback 位址且 `translation.keep_warm_secs > 0` 時，兩個翻譯器包成 `keep_warm.ActivityTranslator`（每次 `translate`／`stream` 的開始與結束回報給 `KeepWarm.begin()`／`end()`；有請求進行中時不算閒置，所以不會和比間隔還久的翻譯並行送保溫），並在 `PipelineComponents.keep_warm` 放一個 `keep_warm.KeepWarm`：背景執行緒（daemon）在閒置滿 `keep_warm_secs` 秒時呼叫 `ping_translation_models()`——與開場預熱相同的請求（`read_timeout` 60 秒、不重試、`max_tokens` 32）——請求本身也算活動，所以安靜期間每 `keep_warm_secs` 秒一次。`Pipeline.start()` 開好來源後、啟動 worker 之前啟動（來源一下就讀完時 capture 執行緒可能在 `start()` 返回前就結束 pipeline，之後才啟動就沒人停止它）、pipeline 以任何方式結束（`stop()`、來源讀完、錯誤）時停止；`stop()` 不等進行中的請求（最多是它的讀取逾時，之後不再送）。失敗（`TranslationError`）記 warning、其他例外（程式錯誤）記 error 與 traceback，兩者共用限流：30 分鐘內重複的失敗只記 debug，恢復時記 info；都不影響 session。每次送出記一行 info（`translation idle for … s; sending a keep-warm request`）。遠端服務或設為 0 時原樣回傳，不包裝也不送請求。逐步模式（測試、smoke）不啟動。
 - `build_components(settings, mode) -> PipelineComponents`：`SileroVad`、兩個 transcriber（各自的 `*_compute_type`、`*_cpu_threads`，共用 `device` 與 cuBLAS 目錄）、兩個 `OpenAICompatibleTranslator`（即時路徑 `max_retries=0`、`read_timeout=10 s`：重試只會讓即時字幕更晚；完整路徑用翻譯模組預設值）、filter。
 
 ## Tech Stack
@@ -397,7 +400,8 @@ experiments/pipeline_smoke/
 - pipeline（逐步模式、假 VoiceModel／Transcriber／Translator）：即時→完整順序與取代、最新槽丟舊工作、句子結束後丟即時工作、完整結果不丟且依序（含佇列背壓）、兩種模式的語言路由、中文不翻譯、不支援組合、非語音過濾與「清除」完整結果、前文與 ASR prompt、尾巴裁切、翻譯錯誤為 warning、ASR 錯誤為 error 狀態、完整模型 no_speech 不可靠時改用即時模型的值、即時辨識慢時自動拉長間隔（假時鐘）；執行緒模式：`ArraySource` 跑完送 `idle`、`stop()` 乾淨結束（以事件等待，不用 sleep 判斷）、worker 例外變 `error`。
 - engine：子行程（假模式、`KIKITORI_CONFIG_DIR` 指到暫存目錄）交換 NDJSON：`engine.info`、`unknown_method`、壞 JSON／非物件／錯型別 id／超長行、`settings.get`／`set`（成功、驗證錯誤）、`devices.list`、`hardware.detect`、`models.list`、`models.download` 進度事件、session 產生字幕事件與 `idle`、`session.stop`、`session_active`、`engine.shutdown` 與 stdin EOF 結束碼 0、stdout 每一行都是合法 JSON；另以同行程測 `MessageWriter`、請求解析。
 - engine（Milestone 6）：子行程測 `hardware.detect`（假 GPU、缺 cuBLAS 的推薦）、`models.list`（新舊欄位）、背景請求的回應順序、`gpu-runtime` 授權閘門（缺少／false／非布林、ASR 帶 `accept_license`）、安裝進度與安裝後推薦改為 GPU、雜湊不符的 `error` 事件、不支援的平台、`engine.shutdown` 取消下載與 `download_in_progress`、`models.validate`（目前設定、候選設定不存檔、參數錯誤）、`settings.apply_recommendation`（安裝前 CPU、安裝後 CUDA、存檔）、v1 設定檔遷移；同行程測背景工作執行緒（FIFO、錯誤碼、結束時丟棄）、偵測快取（假時鐘、設定改變、清除）、`allow_restricted`、設定與推薦組合的轉換。
-- factory：兩條路徑各自的 `compute_type`／`cpu_threads`、cuBLAS 目錄（設定 + GPU 執行環境、不重複、檢查失敗只記 warning）、自動執行緒（mock `load_transcriber` 與 hardware）。
+- factory：兩條路徑各自的 `compute_type`／`cpu_threads`、cuBLAS 目錄（設定 + GPU 執行環境、不重複、檢查失敗只記 warning）、自動執行緒（mock `load_transcriber` 與 hardware）；預熱的順序（ASR → 預熱 → 保溫）、保溫只給本機服務、`keep_warm_secs = 0` 關閉、保溫請求與預熱相同且失敗時丟出帶模型名稱的 `WarmUpError`。
+- keep_warm（`tests/test_keep_warm.py`，假時鐘，背景執行緒的等待注入成「推進假時鐘」，不真的睡）：閒置未滿不送、滿了才送且之後每個間隔一次、翻譯活動延後下一次、`stop()` 後不再送、失敗的 warning 限流與恢復的 info、`stop()` 立即喚醒等待且不等進行中的請求、`ActivityTranslator` 在 `translate`／`stream` 的開始與結束（含例外）回報 `begin`／`end`、請求進行中不送保溫、程式錯誤也限流。pipeline：保溫在 worker 之前啟動，`stop()`、讀完、錯誤都會停止，擷取開不起來時不啟動，啟動失敗只是 warning，逐步模式不啟動。
 - 不連網、不開真實裝置、不載入真模型。
 
 ## Boundaries

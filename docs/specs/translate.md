@@ -283,3 +283,4 @@ experiments/translate_benchmark/
 - 串流在第一個片段之後中斷不會重試。
 - 簡體偵測以 Big5 判斷，`斗`、`范` 這類在 Big5 內且兩岸都用的字不會被當成簡體；只有大陸用語、但字是繁體的譯文（例如「視頻」）不會被轉換。
 - 提示詞與推薦只在 RTX 5070（12 GB）上實測；CPU 與 Apple Silicon 未實測。
+- OpenAI 相容 API 不能指定 Ollama 的 `keep_alive`，模型閒置 5 分鐘（Ollama 預設）就被卸載。本模組不處理；由 pipeline 在 session 開始時預熱、執行中每 `translation.keep_warm_secs`（預設 240）秒沒有翻譯請求就再送一次同樣的短請求（只對本機服務，見 `pipeline-engine.md`「ASR 接縫」）。沒有 session 時模型仍會被卸載，下一次 session 開始時重新預熱。

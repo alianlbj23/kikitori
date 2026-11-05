@@ -8,6 +8,7 @@ ASR 的公開 API 若改變，只需要修改本檔。
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 from kikitori.asr.types import Transcriber, Transcript
 from kikitori.config import Settings
 from kikitori.config.settings import AsrDevice
+from kikitori.pipeline.keep_warm import ActivityTranslator, KeepWarm
 from kikitori.pipeline.types import (
     Mode,
     PipelineComponents,
@@ -46,6 +48,14 @@ _WARM_UP_TEXT = {"ja": "はい。", "en": "Okay."}
 
 class UnknownModelError(ValueError):
     """設定或請求中的 ASR 模型 id 不在模型清單中。"""
+
+
+class WarmUpError(TranslationError):
+    """預熱／保溫請求失敗；訊息帶模型名稱，`__cause__` 是原本的翻譯錯誤。"""
+
+    def __init__(self, model: str, cause: TranslationError) -> None:
+        super().__init__(f"{model}: {cause}")
+        self.model = model
 
 
 @dataclass(frozen=True)
@@ -296,7 +306,14 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
     )
 
 
-def warm_up_translation(
+def _is_local_server(settings: Settings) -> bool:
+    """翻譯服務在 loopback 位址（本機 Ollama 等）；遠端（可能付費）服務不預熱、不保溫。"""
+    from kikitori.hardware.translation_server import is_loopback_host
+
+    return is_loopback_host(urlsplit(settings.translation.base_url).hostname or "")
+
+
+def ping_translation_models(
     settings: Settings,
     mode: Mode,
     *,
@@ -304,18 +321,15 @@ def warm_up_translation(
         OpenAICompatibleTranslator
     ),
 ) -> None:
-    """讓本機翻譯伺服器先載入這個 session 要用的模型（完整路徑的先，再即時路徑）。
+    """對翻譯服務送一句很短的翻譯，完整路徑的模型先，即時路徑的模型不同時再送。
 
-    Ollama 閒置 5 分鐘就卸載模型，下一次請求才從磁碟載入。不預熱的話，第一句的即時翻譯
-    會逾時（即時路徑只等 10 秒），完整字幕也會整批延後。遠端服務不需要載入，也不該為此
-    多花一次請求，所以只預熱 loopback 位址。失敗只記 warning，不中斷 session。
+    session 開始時的預熱與執行中的保溫共用這個請求（60 秒讀取逾時、不重試、最多 32
+    token）。不檢查服務在不在本機，呼叫端負責。
+
+    Raises:
+        TranslationError: 第一個失敗的模型（訊息帶模型名稱）；後面的模型不再送。
     """
     t = settings.translation
-    host = urlsplit(t.base_url).hostname or ""
-    from kikitori.hardware.translation_server import is_loopback_host
-
-    if not is_loopback_host(host):
-        return
     source = settings.partner_language if mode == "interpret" else "ja"
     request = TranslationRequest(
         text=_WARM_UP_TEXT.get(source, _WARM_UP_TEXT["ja"]),
@@ -337,12 +351,69 @@ def warm_up_translation(
             translator.translate(request)
         except TranslationError as exc:
             # 伺服器沒開或模型不在：之後每句翻譯也會失敗並由 pipeline 回報，不必再試下一個。
-            logger.warning("cannot warm up translation model %s: %s", model, exc)
-            return
+            raise WarmUpError(model, exc) from exc
+
+
+def warm_up_translation(
+    settings: Settings,
+    mode: Mode,
+    *,
+    make_translator: Callable[[TranslatorConfig], Translator] = (
+        OpenAICompatibleTranslator
+    ),
+) -> None:
+    """讓本機翻譯伺服器先載入這個 session 要用的模型（完整路徑的先，再即時路徑）。
+
+    Ollama 閒置 5 分鐘就卸載模型，下一次請求才從磁碟載入。不預熱的話，第一句的即時翻譯
+    會逾時（即時路徑只等 10 秒），完整字幕也會整批延後。遠端服務不需要載入，也不該為此
+    多花一次請求，所以只預熱 loopback 位址。失敗只記 warning，不中斷 session。
+    """
+    if not _is_local_server(settings):
+        return
+    try:
+        ping_translation_models(settings, mode, make_translator=make_translator)
+    except WarmUpError as exc:
+        logger.warning("cannot warm up translation model %s", exc)
+
+
+def attach_keep_warm(
+    components: PipelineComponents,
+    settings: Settings,
+    mode: Mode,
+    *,
+    make_translator: Callable[[TranslatorConfig], Translator] = (
+        OpenAICompatibleTranslator
+    ),
+    clock: Callable[[], float] = time.monotonic,
+) -> PipelineComponents:
+    """本機翻譯服務：加上保溫工作，並把兩個翻譯器包成會回報活動的版本。
+
+    session 執行中翻譯請求停了 `translation.keep_warm_secs` 秒（例如影片長時間沒有對白），
+    就送一次與開場預熱相同的請求，模型才不會被 Ollama 卸載（OpenAI 相容端點不能指定
+    `keep_alive`）。遠端服務或設定為 0 時原樣回傳：不對可能付費的 API 多送請求。保溫在
+    `Pipeline.start()` 啟動、pipeline 結束時停止。
+    """
+    interval = settings.translation.keep_warm_secs
+    if interval == 0 or not _is_local_server(settings):
+        return components
+    keep_warm = KeepWarm(
+        lambda: ping_translation_models(
+            settings, mode, make_translator=make_translator
+        ),
+        float(interval),
+        clock=clock,
+    )
+    return replace(
+        components,
+        fast_translator=ActivityTranslator(components.fast_translator, keep_warm),
+        final_translator=ActivityTranslator(components.final_translator, keep_warm),
+        keep_warm=keep_warm,
+    )
 
 
 def build_session_components(settings: Settings, mode: Mode) -> PipelineComponents:
-    """engine 用的元件建立：先載入 ASR，再預熱翻譯模型，兩者都完成才回傳。
+    """engine 用的元件建立：先載入 ASR，再預熱翻譯模型，兩者都完成才回傳；本機翻譯服務
+    另外加上執行中的保溫（`attach_keep_warm()`）。
 
     session 在這段期間維持 `loading`，`running` 時第一句就能即時翻譯。刻意不並行：兩個
     行程同時在 GPU 上配置記憶體時，Ollama 載入模型前估算的可用顯示記憶體會過時，
@@ -354,4 +425,4 @@ def build_session_components(settings: Settings, mode: Mode) -> PipelineComponen
     """
     components = build_components(settings, mode)
     warm_up_translation(settings, mode)
-    return components
+    return attach_keep_warm(components, settings, mode)

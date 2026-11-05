@@ -5,6 +5,7 @@
 不用 sleep 判斷時序。
 """
 
+import dataclasses
 import logging
 import threading
 import unittest
@@ -146,6 +147,7 @@ class Harness:
         *,
         clock: Callable[[], float] | None = None,
         final_no_speech_reliable: bool = True,
+        keep_warm: "RecordingKeepWarm | None" = None,
         **config: object,
     ) -> None:
         self.fast = FakeTranscriber("fast")
@@ -174,6 +176,7 @@ class Harness:
                 final_translator=self.final_tr,
                 transcript_filter=default_transcript_filter(0.6),
                 final_no_speech_reliable=final_no_speech_reliable,
+                keep_warm=keep_warm,
             ),
             self.config,
             clock=clock or (lambda: 0.0),
@@ -779,6 +782,106 @@ class ThreadedTest(unittest.TestCase):
         with self.assertRaises(DeviceLostError):
             h.pipeline.start(Failing())
         self.assertEqual(h.statuses, [])
+
+
+class RecordingKeepWarm:
+    """記錄 pipeline 對背景保溫工作的 start／stop。"""
+
+    def __init__(self, fail_start: bool = False) -> None:
+        self.calls: list[str] = []
+        self.fail_start = fail_start
+
+    def start(self) -> None:
+        self.calls.append("start")
+        if self.fail_start:
+            raise RuntimeError("can't start new thread")
+
+    def stop(self, timeout: float = 0.5) -> None:
+        self.calls.append("stop")
+
+
+class KeepWarmLifecycleTest(unittest.TestCase):
+    """本機翻譯模型的保溫只在 session 執行中進行，任何結束方式都會停止。"""
+
+    def test_started_with_the_session_and_stopped_by_stop(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep)
+        h.pipeline.start(StoppableSource())
+        self.assertEqual(keep.calls, ["start"])
+        h.pipeline.stop(timeout=WAIT)
+        self.assertEqual(keep.calls, ["start", "stop"])
+        h.pipeline.stop(timeout=WAIT)
+        self.assertEqual(keep.calls, ["start", "stop"])
+
+    def test_started_before_the_workers_so_an_early_end_still_stops_it(self) -> None:
+        # 來源一下就讀完時，capture 執行緒可能在 start() 返回前就結束 pipeline；保溫若在
+        # 那之後才啟動，就沒有人停止它，會一直送到引擎結束。
+        h = Harness()
+        order: list[str] = []
+        keep = RecordingKeepWarm()
+        keep.start = lambda: order.append("keep_warm")  # type: ignore[method-assign]
+        h.pipeline = Pipeline(
+            dataclasses.replace(h.pipeline._components, keep_warm=keep),
+            h.config,
+            on_subtitle=lambda u: None,
+        )
+        real_start = threading.Thread.start
+
+        def record_start(thread: threading.Thread) -> None:
+            if thread.name.startswith("pipeline-"):
+                order.append(thread.name)
+            real_start(thread)
+
+        with mock.patch.object(threading.Thread, "start", record_start):
+            h.pipeline.start(ArraySource(ONE_UTTERANCE))
+        self.assertTrue(h.pipeline.wait(WAIT))
+        self.assertEqual(order[0], "keep_warm")
+
+    def test_stopped_when_the_source_ends(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep)
+        h.pipeline.start(ArraySource(ONE_UTTERANCE))
+        self.assertTrue(h.pipeline.wait(WAIT))
+        self.assertEqual(keep.calls, ["start", "stop"])
+
+    def test_stopped_on_error(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep)
+        source = StoppableSource(fail_after_start=DeviceLostError("device unplugged"))
+        with self.assertLogs("kikitori.pipeline.pipeline", "ERROR"):
+            h.pipeline.start(source)
+            self.assertTrue(h.pipeline.wait(WAIT))
+        self.assertEqual(keep.calls, ["start", "stop"])
+
+    def test_not_started_when_capture_fails_to_start(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep)
+
+        class Failing(StoppableSource):
+            def start(self) -> None:
+                raise DeviceLostError("no device")
+
+        with self.assertRaises(DeviceLostError):
+            h.pipeline.start(Failing())
+        self.assertEqual(keep.calls, [])
+
+    def test_start_failure_is_a_warning_not_fatal(self) -> None:
+        keep = RecordingKeepWarm(fail_start=True)
+        h = Harness(keep_warm=keep)
+        with self.assertLogs("kikitori.pipeline.pipeline", "WARNING"):
+            h.pipeline.start(StoppableSource())
+        self.assertEqual(h.pipeline.state, "running")
+        self.assertTrue(any(lvl == "warning" for lvl, _ in h.logs))
+        h.pipeline.stop(timeout=WAIT)
+        self.assertEqual(h.pipeline.state, "idle")
+
+    def test_stepped_mode_never_starts_it(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep)
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        h.pipeline.end_of_stream()
+        self.assertEqual(keep.calls, [])
 
 
 class _Chain:

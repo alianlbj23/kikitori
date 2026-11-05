@@ -8,7 +8,7 @@ factory 依設定組出 `PipelineComponents`。`SubtitleUpdate` 照抄
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from kikitori.asr.types import Transcriber, Transcript
 from kikitori.translate.types import Translator
@@ -21,6 +21,19 @@ PipelineState = Literal["idle", "running", "error"]
 
 TranscriptFilter = Callable[[Transcript], str | None]
 """回傳 None 表示保留這個辨識結果；否則回傳丟掉的原因（供 log）。"""
+
+
+class BackgroundTask(Protocol):
+    """跟著 session 執行的背景工作（例如 `keep_warm.KeepWarm`）。"""
+
+    def start(self) -> None:
+        """`Pipeline.start()` 成功後呼叫；失敗時丟例外（只記 warning，不中斷 session）。"""
+        ...
+
+    def stop(self, timeout: float = ...) -> None:
+        """pipeline 結束（停止、讀完或錯誤）時呼叫；不可長時間阻塞。"""
+        ...
+
 
 StatusCallback = Callable[[PipelineState, str | None], None]
 LogCallback = Callable[[str, str], None]
@@ -121,3 +134,5 @@ class PipelineComponents:
     transcript_filter: TranscriptFilter
     final_no_speech_reliable: bool = True
     """完整模型的 `no_speech_probability` 是否可用；False 時改用即時模型的值過濾。"""
+    keep_warm: BackgroundTask | None = None
+    """執行緒模式的 session 執行期間讓本機翻譯模型保持載入；None 表示不需要。"""

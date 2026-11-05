@@ -154,7 +154,7 @@ npm run tauri build -- --no-bundle --config <conf.json>
 ## 已知限制（未修）
 
 - 極短的感嘆詞（0.86 s 的「ふん」）會被 Whisper 判成 `en`，介面標「英」，譯文仍正確。可在 pipeline 加「含假名就是日文」的規則，但屬於 asr／pipeline 行為變更，未做。
-- Ollama 在 session 中閒置超過 5 分鐘仍會卸載模型，之後第一句要等模型載入（OpenAI 相容 API 無法指定 `keep_alive`）。
+- Ollama 在 session 中閒置超過 5 分鐘仍會卸載模型，之後第一句要等模型載入（OpenAI 相容 API 無法指定 `keep_alive`）。（之後已改善：session 執行中翻譯請求停了 `translation.keep_warm_secs`（預設 240）秒就對本機服務再送一次預熱請求，見 `docs/specs/pipeline-engine.md`「ASR 接縫」的 `attach_keep_warm()`。）
 - 自動化時 msedgedriver 會為 WebView2 開一個主控台視窗；截圖前把它縮小（只在測試時出現）。
 - 驗收期間另一個代理人在同機建置 Rust 與跑安裝檔測試；延遲數字取 CPU 負載約 20% 時的那一次。CPU 被占滿時曾看到第 1 句沒有即時字幕。
 

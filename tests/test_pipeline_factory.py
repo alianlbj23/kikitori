@@ -11,7 +11,9 @@ from unittest import mock
 
 from kikitori.config import Settings
 from kikitori.pipeline import factory
+from kikitori.pipeline.types import PipelineComponents
 from kikitori.translate import (
+    TranslationError,
     TranslationRequest,
     TranslationTimeoutError,
     TranslatorConfig,
@@ -285,12 +287,18 @@ class WarmUpTranslationTest(unittest.TestCase):
                 "warm_up_translation",
                 side_effect=lambda *a: order.append("translation"),
             ) as warm,
+            mock.patch.object(
+                factory,
+                "attach_keep_warm",
+                side_effect=lambda c, *a: order.append("keep_warm") or c,
+            ) as attach,
         ):
             result = factory.build_session_components(Settings(), "interpret")
         self.assertIs(result, components)
-        self.assertEqual(order, ["asr", "translation"])
+        self.assertEqual(order, ["asr", "translation", "keep_warm"])
         build.assert_called_once_with(Settings(), "interpret")
         warm.assert_called_once_with(Settings(), "interpret")
+        attach.assert_called_once_with(components, Settings(), "interpret")
 
     def test_build_errors_propagate_without_warming(self) -> None:
         with (
@@ -312,6 +320,95 @@ class WarmUpTranslationTest(unittest.TestCase):
         ):
             services = default_services()
         self.assertIs(services.build_components, factory.build_session_components)
+
+
+def _components() -> PipelineComponents:
+    """attach_keep_warm 只換翻譯器與 keep_warm；其他元件不必是真的。"""
+    return PipelineComponents(
+        voice_model=mock.Mock(),
+        fast_transcriber=mock.Mock(),
+        final_transcriber=mock.Mock(),
+        fast_translator=_RecordingTranslator(TranslatorConfig(model="fast"), [], False),
+        final_translator=_RecordingTranslator(
+            TranslatorConfig(model="final"), [], False
+        ),
+        transcript_filter=lambda t: None,
+    )
+
+
+class KeepWarmTest(unittest.TestCase):
+    """長時間 session 中翻譯請求停了一陣子（例如影片沒有對白）時，定期對本機翻譯伺服器
+    送一次預熱請求：Ollama 閒置 5 分鐘就卸載模型，OpenAI 相容端點又不能設 keep_alive。"""
+
+    def test_local_server_gets_a_keep_warm_task_and_tracked_translators(self) -> None:
+        components = _components()
+        result = factory.attach_keep_warm(components, Settings(), "media")
+        keep = result.keep_warm
+        self.assertIsNotNone(keep)
+        self.assertEqual(keep.interval, 240.0)
+        self.assertFalse(keep.is_running)  # pipeline.start() 才啟動
+        before = keep.idle_for()
+        request = TranslationRequest("はい。", "ja", "zh-TW")
+        self.assertEqual(result.final_translator.translate(request), "好")
+        self.assertLessEqual(keep.idle_for(), before)
+        # 其他元件原樣保留
+        self.assertIs(result.voice_model, components.voice_model)
+
+    def test_ping_uses_the_warm_up_request_and_raises_on_failure(self) -> None:
+        log: list = []
+        configs: list[TranslatorConfig] = []
+
+        def make(config: TranslatorConfig) -> _RecordingTranslator:
+            configs.append(config)
+            return _RecordingTranslator(config, log, fail=False)
+
+        settings = Settings().merged(
+            {"translation": {"fast_model": "a", "final_model": "b"}}
+        )
+        factory.ping_translation_models(settings, "media", make_translator=make)
+        self.assertEqual([m for m, _ in log], ["b", "a"])
+        self.assertTrue(
+            all(c.read_timeout == factory.WARM_UP_READ_TIMEOUT for c in configs)
+        )
+        self.assertTrue(all(c.max_retries == 0 for c in configs))
+
+        def failing(config: TranslatorConfig) -> _RecordingTranslator:
+            return _RecordingTranslator(config, log, fail=True)
+
+        with self.assertRaisesRegex(factory.WarmUpError, "b: no response") as caught:
+            factory.ping_translation_models(settings, "media", make_translator=failing)
+        # 保溫的背景工作以 TranslationError 判斷是「伺服器的問題」（限流的 warning）。
+        self.assertIsInstance(caught.exception, TranslationError)
+        self.assertIsInstance(caught.exception.__cause__, TranslationTimeoutError)
+
+    def test_keep_warm_pings_through_the_factory(self) -> None:
+        log: list = []
+        result = factory.attach_keep_warm(
+            _components(),
+            Settings(),
+            "media",
+            make_translator=lambda c: _RecordingTranslator(c, log, fail=False),
+        )
+        assert result.keep_warm is not None
+        result.keep_warm.ping_now()
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0][0], Settings().translation.final_model)
+
+    def test_remote_server_is_never_pinged(self) -> None:
+        components = _components()
+        settings = Settings().merged(
+            {"translation": {"base_url": "https://api.example.com/v1"}}
+        )
+        self.assertIs(
+            factory.attach_keep_warm(components, settings, "media"), components
+        )
+
+    def test_disabled_by_zero(self) -> None:
+        components = _components()
+        settings = Settings().merged({"translation": {"keep_warm_secs": 0}})
+        self.assertIs(
+            factory.attach_keep_warm(components, settings, "media"), components
+        )
 
 
 if __name__ == "__main__":
