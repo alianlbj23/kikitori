@@ -20,6 +20,7 @@ from kikitori.config.settings import (
     Settings,
     SettingsError,
     TranslationSettings,
+    check_interpret_languages,
     migrate,
 )
 from kikitori.config.store import (
@@ -41,6 +42,7 @@ __all__ = [
     "SettingsError",
     "SettingsStore",
     "TranslationSettings",
+    "check_interpret_languages",
     "config_dir_for",
     "default_settings_path",
     "load_settings",

@@ -42,8 +42,10 @@ class DefaultsTest(unittest.TestCase):
         s = Settings()
         self.assertEqual(s.schema_version, SCHEMA_VERSION)
         self.assertEqual(s.mode, "media")
+        self.assertEqual(s.source_language, "ja")
         self.assertEqual(s.target_language, "zh-TW")
         self.assertEqual(s.partner_language, "ja")
+        self.assertTrue(s.translation.enabled)
         self.assertEqual((s.media.pause_secs, s.media.max_secs), (0.6, 10.0))
         self.assertEqual((s.interpret.pause_secs, s.interpret.max_secs), (0.5, 8.0))
         self.assertIsNone(s.media.device_id)
@@ -112,8 +114,8 @@ class ValidationTest(unittest.TestCase):
 
     def test_mode_choices(self) -> None:
         self.assertInvalid(_with("mode", "karaoke"), "mode")
-        self.assertInvalid(_with("partner_language", "ko"), "partner_language")
-        self.assertInvalid(_with("target_language", "ja"), "target_language")
+        self.assertInvalid(_with("partner_language", "sv"), "partner_language")
+        self.assertInvalid(_with("target_language", "zh"), "target_language")
         self.assertInvalid(_with("asr.device", "tpu"), "asr.device")
 
     def test_number_ranges_and_types(self) -> None:
@@ -293,7 +295,94 @@ class ValidationTest(unittest.TestCase):
         data = Settings().to_dict()
         del data["ui"]
         self.assertEqual(Settings.from_dict(data).ui, {})
-        self.assertEqual(Settings.from_dict(data).schema_version, 2)
+        self.assertEqual(Settings.from_dict(data).schema_version, SCHEMA_VERSION)
+
+    def test_any_catalog_language_for_source_target_and_partner(self) -> None:
+        s = Settings.from_dict(
+            {
+                **_with("source_language", "ko"),
+                "target_language": "es",
+                "partner_language": "zh-CN",
+            }
+        )
+        self.assertEqual(
+            (s.source_language, s.target_language, s.partner_language),
+            ("ko", "es", "zh-CN"),
+        )
+        self.assertEqual(s.to_dict()["source_language"], "ko")
+
+    def test_source_language_auto(self) -> None:
+        s = Settings.from_dict(_with("source_language", "auto"))
+        self.assertEqual(s.source_language, "auto")
+        # auto 只用於收聽語言；字幕語言與對方語言必須是具體語言
+        self.assertInvalid(_with("target_language", "auto"), "target_language")
+        self.assertInvalid(_with("partner_language", "auto"), "partner_language")
+
+    def test_language_codes_are_validated_and_normalized(self) -> None:
+        for path in ("source_language", "target_language", "partner_language"):
+            for bad in ("", "xx", 3, None, "zh", "x" * 100):
+                with self.subTest(path=path, value=bad):
+                    self.assertInvalid(_with(path, bad), path)
+        # 手改設定檔的常見寫法與舊別名正規化成清單語言碼
+        s = Settings.from_dict(_with("target_language", "zh_hans"))
+        self.assertEqual(s.target_language, "zh-CN")
+        self.assertEqual(
+            Settings.from_dict(_with("source_language", "EN")).source_language, "en"
+        )
+
+    def test_source_may_equal_target(self) -> None:
+        # 只做字形轉換或原樣顯示（例如學語言的人聽中文看中文）
+        s = Settings.from_dict(
+            {**_with("source_language", "zh-CN"), "target_language": "zh-TW"}
+        )
+        self.assertEqual((s.source_language, s.target_language), ("zh-CN", "zh-TW"))
+
+    def test_interpret_partner_whisper_language_must_differ_from_target(self) -> None:
+        interpret = _with("mode", "interpret")
+        self.assertInvalid(
+            {**interpret, "target_language": "ja", "partner_language": "ja"},
+            "partner_language",
+        )
+        self.assertInvalid(
+            {**interpret, "target_language": "zh-CN", "partner_language": "zh-TW"},
+            "partner_language",
+        )
+        with self.assertRaises(SettingsError):
+            Settings().merged({"mode": "interpret", "partner_language": "zh-CN"})
+        s = Settings().merged(
+            {"mode": "interpret", "target_language": "ja", "partner_language": "en"}
+        )
+        self.assertEqual((s.target_language, s.partner_language), ("ja", "en"))
+
+    def test_media_mode_accepts_partner_equal_to_target(self) -> None:
+        # 影片翻譯不用對方語言；日語使用者把字幕語言設成 ja 時，預設的對方語言 ja
+        # 不該讓設定無法儲存。
+        s = Settings.from_dict(_with("target_language", "ja"))
+        self.assertEqual(
+            (s.mode, s.target_language, s.partner_language), ("media", "ja", "ja")
+        )
+        s = Settings().merged({"target_language": "zh-CN", "partner_language": "zh-TW"})
+        self.assertEqual((s.target_language, s.partner_language), ("zh-CN", "zh-TW"))
+
+    def test_switching_to_interpret_revalidates_the_language_pair(self) -> None:
+        s = Settings().merged({"target_language": "ja"})
+        with self.assertRaises(SettingsError) as ctx:
+            s.merged({"mode": "interpret"})
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith("partner_language"), message)
+        self.assertIn("interpret", message)
+        self.assertIn("'ja'", message)
+        # 同時改對方語言就可以切換
+        s = s.merged({"mode": "interpret", "partner_language": "en"})
+        self.assertEqual((s.mode, s.partner_language), ("interpret", "en"))
+
+    def test_translation_enabled(self) -> None:
+        self.assertInvalid(_with("translation.enabled", 1), "translation.enabled")
+        self.assertInvalid(_with("translation.enabled", None), "translation.enabled")
+        s = Settings().merged({"translation": {"enabled": False}})
+        self.assertFalse(s.translation.enabled)
+        self.assertFalse(s.to_dict()["translation"]["enabled"])
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
 
     def test_error_message_shows_received_value(self) -> None:
         with self.assertRaises(SettingsError) as ctx:
@@ -386,6 +475,59 @@ class MigrationTest(unittest.TestCase):
             assert s is not None
             self.assertEqual(s.asr.fast_compute_type, "int8")
             self.assertEqual(s.to_dict()["schema_version"], SCHEMA_VERSION)
+
+    def test_v2_gets_source_language_and_translation_enabled(self) -> None:
+        v2 = {
+            "schema_version": 2,
+            "mode": "interpret",
+            "target_language": "zh-TW",
+            "partner_language": "en",
+            "translation": {"fast_model": "qwen3.5:9b", "keep_warm_secs": 0},
+            "subtitle": {"font_size": 30},
+            "ui": {"dismissed": ["x"]},
+        }
+        migrated = migrate(v2)
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated["source_language"], "ja")
+        self.assertIs(migrated["translation"]["enabled"], True)
+        # 其他欄位原樣保留，呼叫端的 dict 不被改動
+        self.assertEqual(migrated["translation"]["fast_model"], "qwen3.5:9b")
+        self.assertEqual(migrated["partner_language"], "en")
+        self.assertEqual(migrated["subtitle"], {"font_size": 30})
+        self.assertNotIn("enabled", v2["translation"])  # type: ignore[operator]
+        s = Settings.from_dict(v2)
+        self.assertEqual((s.source_language, s.translation.enabled), ("ja", True))
+        self.assertEqual(s.translation.keep_warm_secs, 0)
+
+    def test_v2_without_translation_or_with_invalid_translation(self) -> None:
+        self.assertEqual(
+            migrate({"schema_version": 2}),
+            {
+                "schema_version": 3,
+                "source_language": "ja",
+                "translation": {"enabled": True},
+            },
+        )
+        with self.assertRaises(SettingsError) as ctx:
+            Settings.from_dict({"schema_version": 2, "translation": "ollama"})
+        self.assertTrue(str(ctx.exception).startswith("translation"))
+
+    def test_v2_keeps_existing_v3_fields(self) -> None:
+        migrated = migrate(
+            {
+                "schema_version": 2,
+                "source_language": "en",
+                "translation": {"enabled": False},
+            }
+        )
+        self.assertEqual(migrated["source_language"], "en")
+        self.assertIs(migrated["translation"]["enabled"], False)
+
+    def test_v1_migrates_all_the_way(self) -> None:
+        s = Settings.from_dict({"schema_version": 1, "asr": {"compute_type": "int8"}})
+        self.assertEqual(s.schema_version, 3)
+        self.assertEqual(s.source_language, "ja")
+        self.assertTrue(s.translation.enabled)
 
     def test_missing_migration_step(self) -> None:
         with self.assertRaises(SettingsError):

@@ -15,10 +15,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import PurePath
 from typing import Any, Literal, cast
 
+from kikitori.languages import UnknownLanguageError, get_language, normalize_language
 from kikitori.pipeline.types import MODES, Mode
 from kikitori.translate import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TranslatorConfig
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """目前的設定檔版本；改變結構時加一並在 `MIGRATIONS` 補上轉換。"""
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
@@ -42,13 +43,30 @@ def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-MIGRATIONS: dict[int, Migration] = {1: _migrate_v1_to_v2}
+def _migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
+    """v2 → v3：多國語言。補上 `source_language: "ja"` 與 `translation.enabled: true`。
+
+    v2 的影片翻譯只聽日／英，v3 起收聽語言由使用者指定（不再預設自動偵測），規格選定
+    日語為遷移後的值。其他欄位原樣保留；`target_language`、`partner_language` 的 v2
+    值（zh-TW、ja／en）在 v3 仍然合法。`translation` 不是物件時原樣保留，交給驗證報錯。
+    """
+    result = dict(data)
+    result.setdefault("source_language", "ja")
+    translation = result.get("translation", {})
+    if isinstance(translation, Mapping):
+        section = dict(translation)
+        section.setdefault("enabled", True)
+        result["translation"] = section
+    return result
+
+
+MIGRATIONS: dict[int, Migration] = {1: _migrate_v1_to_v2, 2: _migrate_v2_to_v3}
 """`MIGRATIONS[n]` 把版本 n 的設定 dict 轉成版本 n + 1。"""
 
 AsrDevice = Literal["auto", "cpu", "cuda"]
 ASR_DEVICES: tuple[AsrDevice, ...] = ("auto", "cpu", "cuda")
-TARGET_LANGUAGES: tuple[str, ...] = ("zh-TW",)
-PARTNER_LANGUAGES: tuple[str, ...] = ("ja", "en")
+AUTO_LANGUAGE = "auto"
+"""`source_language` 的「自動偵測」（範圍限語言清單內的 Whisper 語言）。"""
 
 PAUSE_RANGE = (0.1, 5.0)
 MAX_RANGE = (1.0, 30.0)
@@ -144,8 +162,10 @@ class TranslationSettings:
         keep_warm_secs: session 執行中翻譯請求停了這麼多秒，就對本機翻譯伺服器送一次
             預熱請求，讓模型不被卸載（Ollama 預設閒置 5 分鐘就卸載，OpenAI 相容端點
             無法指定 keep_alive）。0 關閉；遠端服務一律不送。
+        enabled: False 時只顯示原文：pipeline 不呼叫翻譯伺服器，也不預熱、不保溫。
     """
 
+    enabled: bool = True
     base_url: str = DEFAULT_BASE_URL
     fast_model: str = "qwen3.5:4b"
     final_model: str = "qwen3.5:4b"
@@ -190,8 +210,12 @@ class Settings:
 
     schema_version: int = SCHEMA_VERSION
     mode: Mode = "media"
+    source_language: str = "ja"
+    """影片翻譯的收聽語言（語言清單的語言碼）或 "auto"。"""
     target_language: str = "zh-TW"
+    """影片翻譯的字幕語言；即時口譯時是「我的語言」。"""
     partner_language: str = "ja"
+    """即時口譯的對方語言；Whisper 語言必須和 `target_language` 不同。"""
     media: ModeSettings = field(default_factory=_default_media)
     interpret: ModeSettings = field(default_factory=_default_interpret)
     asr: AsrSettings = field(default_factory=AsrSettings)
@@ -213,6 +237,7 @@ class Settings:
         return {
             "schema_version": self.schema_version,
             "mode": self.mode,
+            "source_language": self.source_language,
             "target_language": self.target_language,
             "partner_language": self.partner_language,
             "media": _mode_to_dict(self.media),
@@ -228,6 +253,7 @@ class Settings:
                 "cuda_library_dirs": list(self.asr.cuda_library_dirs),
             },
             "translation": {
+                "enabled": self.translation.enabled,
                 "base_url": self.translation.base_url,
                 "fast_model": self.translation.fast_model,
                 "final_model": self.translation.final_model,
@@ -505,6 +531,7 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
         data,
         "translation",
         (
+            "enabled",
             "base_url",
             "fast_model",
             "final_model",
@@ -546,8 +573,12 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
             f"translation.keep_warm_secs: must be 0 (off) or "
             f"{KEEP_WARM_RANGE[0]}–{KEEP_WARM_RANGE[1]}, got {keep_warm_secs}"
         )
+    enabled = _boolean(section.get("enabled", default.enabled), "translation.enabled")
     return TranslationSettings(
-        **values, allow_restricted=allow_restricted, keep_warm_secs=keep_warm_secs
+        **values,
+        enabled=enabled,
+        allow_restricted=allow_restricted,
+        keep_warm_secs=keep_warm_secs,
     )
 
 
@@ -623,9 +654,71 @@ def _parse_opaque(data: Mapping[str, Any], key: str) -> dict[str, Any]:
     return copy.deepcopy(dict(value))
 
 
+def _language(value: object, path: str, *, allow_auto: bool = False) -> str:
+    """語言清單的語言碼（不分大小寫、接受舊別名，正規化後儲存）；可選擇允許 "auto"。"""
+    if allow_auto and value == AUTO_LANGUAGE:
+        return AUTO_LANGUAGE
+    try:
+        return normalize_language(value)  # type: ignore[arg-type]
+    except UnknownLanguageError as exc:
+        hint = f"{AUTO_LANGUAGE!r} or " if allow_auto else ""
+        raise SettingsError(
+            f"{path}: {exc} (expected {hint}a code from the language list)"
+        ) from None
+
+
+def check_interpret_languages(target_language: str, partner_language: str) -> None:
+    """確認兩個語言能用於即時口譯：Whisper 語言必須不同。
+
+    口譯靠 Whisper 的語言偵測分辨誰在說話；兩邊是同一個 Whisper 語言（例如 ja 與 ja、
+    繁中與簡中）就無法分辨要翻往哪個方向。影片翻譯不用對方語言，所以只有口譯要檢查。
+
+    Args:
+        target_language: 我的語言（正規化後的清單語言碼）。
+        partner_language: 對方語言（正規化後的清單語言碼）。
+
+    Raises:
+        SettingsError: 兩者 Whisper 語言相同；訊息以 `partner_language` 開頭。
+    """
+    if (
+        get_language(partner_language).whisper_code
+        == get_language(target_language).whisper_code
+    ):
+        raise SettingsError(
+            "partner_language: interpret mode needs a different language from "
+            f"target_language ({target_language!r}), got {partner_language!r}"
+        )
+
+
+def _parse_languages(
+    data: Mapping[str, Any], default: "Settings", mode: Mode
+) -> dict[str, str]:
+    source = _language(
+        data.get("source_language", default.source_language),
+        "source_language",
+        allow_auto=True,
+    )
+    target = _language(
+        data.get("target_language", default.target_language), "target_language"
+    )
+    partner = _language(
+        data.get("partner_language", default.partner_language), "partner_language"
+    )
+    # 只在口譯模式檢查：影片翻譯時日語使用者把字幕語言設成 ja，預設的對方語言 ja 不該讓
+    # 設定無法儲存。切換到口譯時 `merged()` 會重新驗證；`session.start` 另外檢查。
+    if mode == "interpret":
+        check_interpret_languages(target, partner)
+    return {
+        "source_language": source,
+        "target_language": target,
+        "partner_language": partner,
+    }
+
+
 _TOP_LEVEL = (
     "schema_version",
     "mode",
+    "source_language",
     "target_language",
     "partner_language",
     "media",
@@ -641,20 +734,12 @@ _TOP_LEVEL = (
 def _parse(data: Mapping[str, Any]) -> Settings:
     _reject_unknown(data, _TOP_LEVEL)
     default = Settings()
+    mode = cast(Mode, _choice(data.get("mode", default.mode), "mode", MODES))
     return replace(
         default,
         schema_version=SCHEMA_VERSION,
-        mode=cast(Mode, _choice(data.get("mode", default.mode), "mode", MODES)),
-        target_language=_choice(
-            data.get("target_language", default.target_language),
-            "target_language",
-            TARGET_LANGUAGES,
-        ),
-        partner_language=_choice(
-            data.get("partner_language", default.partner_language),
-            "partner_language",
-            PARTNER_LANGUAGES,
-        ),
+        mode=mode,
+        **_parse_languages(data, default, mode),
         media=_parse_mode(data, "media", default.media),
         interpret=_parse_mode(data, "interpret", default.interpret),
         asr=_parse_asr(data),

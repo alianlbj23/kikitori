@@ -1113,7 +1113,7 @@ mod tests {
             let bad = bridge
                 .request(
                     "settings.set",
-                    json!({"partner_language": "ko"}),
+                    json!({"partner_language": "xx"}),
                     Duration::from_secs(10),
                 )
                 .await

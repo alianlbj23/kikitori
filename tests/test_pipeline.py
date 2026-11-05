@@ -228,11 +228,42 @@ class RouteTest(unittest.TestCase):
         self.assertEqual((r.target, r.action), ("zh-TW", "translate"))
 
     def test_unsupported_language(self) -> None:
-        r = route("media", "ko", "zh-TW", "ja")
+        # 不在語言清單內的 Whisper 語言（例如挪威語的幻覺）不送翻譯
+        r = route("media", "nn", "zh-TW", "ja")
         self.assertEqual((r.target, r.action), ("zh-TW", "unsupported"))
 
     def test_language_code_normalization(self) -> None:
         self.assertEqual(route("interpret", "ZH_tw", "zh-TW", "en").target, "en")
+
+    def test_media_any_catalog_pair(self) -> None:
+        r = route("media", "ko", "es", "ja")
+        self.assertEqual((r.source, r.target, r.action), ("ko", "es", "translate"))
+
+    def test_same_whisper_language_is_copied_for_both_chinese_scripts(self) -> None:
+        for target in ("zh-TW", "zh-CN"):
+            with self.subTest(target=target):
+                r = route("media", "zh", target, "ja")
+                self.assertEqual((r.target, r.action), (target, "copy"))
+        self.assertEqual(route("media", "ja", "ja", "en").action, "copy")
+
+    def test_interpret_between_any_two_languages(self) -> None:
+        # 我的語言 ja、對方語言 ko
+        r = route("interpret", "ja", "ja", "ko")
+        self.assertEqual((r.source, r.target, r.action), ("ja", "ko", "translate"))
+        r = route("interpret", "ko", "ja", "ko")
+        self.assertEqual((r.source, r.target, r.action), ("ko", "ja", "translate"))
+
+    def test_interpret_simplified_chinese_user(self) -> None:
+        r = route("interpret", "zh", "zh-CN", "en")
+        self.assertEqual((r.target, r.action), ("en", "translate"))
+        r = route("interpret", "en", "zh-CN", "en")
+        self.assertEqual((r.target, r.action), ("zh-CN", "translate"))
+
+    def test_translation_disabled_never_translates(self) -> None:
+        for mode, detected in (("media", "ja"), ("media", "zh"), ("interpret", "zh")):
+            with self.subTest(mode=mode, detected=detected):
+                r = route(mode, detected, "zh-TW", "ja", translation_enabled=False)  # type: ignore[arg-type]
+                self.assertEqual(r.action, "off")
 
 
 class FilterTest(unittest.TestCase):
@@ -256,10 +287,21 @@ class ConfigValidationTest(unittest.TestCase):
             {"partial_interval_ms": 0},
             {"final_queue_size": 0},
             {"context_lines": -1},
+            {"target_language": "zh"},
+            {"target_language": "zh-tw"},  # 必須是正規化後的語言碼
+            {"partner_language": "sv"},
+            {"source_language": "xx"},
         ):
             params = {"mode": "media", "pause_secs": 0.6, "max_secs": 10.0, **kwargs}
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 PipelineConfig(**params)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            PipelineConfig(
+                mode="media",
+                pause_secs=0.6,
+                max_secs=10.0,
+                translation_enabled=1,  # type: ignore[arg-type]
+            )
 
 
 class SteppedSchedulingTest(unittest.TestCase):
@@ -408,13 +450,73 @@ class LanguageRoutingTest(unittest.TestCase):
         h.pipeline.run_pending()
         self.assertEqual(h.finals()[0].original, "駅の天気が気になる")
 
+    def test_media_korean_to_spanish(self) -> None:
+        h = Harness("media", target_language="es", source_language="ko")
+        h.final.language = "ko"
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        req = h.final_tr.requests[0]
+        self.assertEqual((req.source_language, req.target_language), ("ko", "es"))
+        self.assertEqual(h.finals()[0].translation, "<es>final1")
+        self.assertEqual(h.finals()[0].target_language, "es")
+
+    def test_chinese_to_simplified_target_is_converted_not_translated(self) -> None:
+        h = Harness("media", target_language="zh-CN")
+        h.final.script = lambda n: transcript("這個軟體很好用", "zh")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(h.final_tr.requests, [])
+        final = h.finals()[0]
+        self.assertEqual(final.original, "这个软体很好用")
+        self.assertEqual(final.translation, "这个软体很好用")
+
+    def test_traditional_source_simplified_target_keeps_original_script(self) -> None:
+        # 聽繁中、看簡中：原文照收聽語言顯示正體，譯文是簡體
+        h = Harness("media", source_language="zh-TW", target_language="zh-CN")
+        h.final.script = lambda n: transcript("这个视频", "zh")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        final = h.finals()[0]
+        self.assertEqual((final.original, final.translation), ("這個影片", "这个视频"))
+        self.assertEqual(h.final_tr.requests, [])
+
+    def test_interpret_partner_chinese_shown_in_partner_script(self) -> None:
+        h = Harness("interpret", target_language="ja", partner_language="zh-TW")
+        h.final.script = lambda n: transcript("请问附近有便利商店吗", "zh")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(h.finals()[0].original, "請問附近有便利商店嗎")
+        self.assertEqual(h.final_tr.requests[0].target_language, "ja")
+
     def test_unsupported_language_shows_original(self) -> None:
-        h = self.run_final("media", "ko")
+        h = self.run_final("media", "nn")
         self.assertEqual(h.final_tr.requests, [])
         self.assertEqual(
             (h.finals()[0].original, h.finals()[0].translation), ("final1", "")
         )
         self.assertEqual([lvl for lvl, _ in h.logs], ["warning"])
+
+
+class TranslationDisabledTest(unittest.TestCase):
+    """只顯示原文：不呼叫翻譯器（以計數的假翻譯器確認），譯文為空字串。"""
+
+    def test_no_translator_calls_and_empty_translation(self) -> None:
+        for mode, language in (("media", "ja"), ("media", "zh"), ("interpret", "zh")):
+            with self.subTest(mode=mode, language=language):
+                h = Harness(mode, translation_enabled=False)
+                h.fast.language = h.final.language = language
+                h.pipeline.feed(ONE_UTTERANCE[: 2 * SR])
+                h.pipeline.run_pending()
+                h.pipeline.feed(ONE_UTTERANCE[2 * SR :])
+                h.pipeline.run_pending()
+                self.assertTrue(h.partials())
+                self.assertEqual(h.fast_tr.requests, [])
+                self.assertEqual(h.final_tr.requests, [])
+                for update in h.updates:
+                    self.assertEqual(update.translation, "")
+                    self.assertTrue(update.original)
+                # 關閉翻譯是使用者的選擇，不是錯誤：不發警告
+                self.assertEqual(h.logs, [])
 
 
 class ContextTest(unittest.TestCase):

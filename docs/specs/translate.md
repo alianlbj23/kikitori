@@ -14,16 +14,14 @@
 
 ## Objective
 
-把一句原文翻成字幕用的譯文：短、自然、忠實、不解釋、不加引號。支援的語言組合（對應兩種模式）：
+把一句原文翻成字幕用的譯文：短、自然、忠實、不解釋、不加引號。語言來自語言清單
+（`src/kikitori/languages/catalog.py`，20 種，見 `languages-i18n.md`）：
 
-| 模式 | 原文 → 譯文 |
-|---|---|
-| `media` | `ja` → `zh-TW`、`en` → `zh-TW` |
-| `interpret` | 對方說 `ja`／`en` → `zh-TW`；使用者說 `zh` → `ja` 或 `en` |
-
-- 原文語言碼來自 ASR（ISO 639-1，中文為 `zh`）；`zh-TW` 當原文時視同 `zh`。語言碼不分大小寫，`zh_TW`、`zh-Hant` 視同 `zh-TW`。
-- 目標為 `zh-TW` 時，輸出必須是繁體中文、台灣用語。
-- 其他組合（例如 `ja` → `en`、`ko` → `zh-TW`）一律以 `InvalidRequestError`（同時是 `ValueError`）拒絕，不送出請求。
+- 原文語言是 Whisper 語言碼（中文為 `zh`），也接受清單語言碼（`zh-TW`、`zh-CN` 視同 `zh`）；請求驗證後一律換成 Whisper 語言碼。
+- 譯文語言是清單語言碼，必須分繁簡：`zh` 不能當譯文語言。不分大小寫、底線視同連字號，`zh-Hant`→`zh-TW`、`zh-Hans`→`zh-CN`。
+- 清單內任兩個 **Whisper 語言不同** 的語言之間都可以翻（再受模型預設組的 `languages`／`pairs` 限制）。Whisper 語言相同（例如 `zh` → `zh-TW`、`ja` → `ja`）不送翻譯模型，由 pipeline 只做字形轉換。
+- 目標為 `zh-TW` 時輸出繁體中文、台灣用語；目標為 `zh-CN` 時輸出簡體中文。
+- 清單外的語言、不分繁簡的譯文、同語言或模型不支援的組合一律以 `InvalidRequestError`（同時是 `ValueError`）拒絕，不送出請求。
 
 ## 介面
 
@@ -66,7 +64,7 @@ class TranslatorConfig:
     retry_backoff: float = 0.5           # 秒；指數退避的基數
     max_tokens: int = 256                # 防止模型失控輸出長文
     max_context_lines: int = 3           # 只取最後幾句前文
-    convert_to_traditional: bool = True  # 目標為 zh-TW 時做簡轉繁（見「後處理」）
+    convert_script: bool = True          # 依譯文語言做字形轉換（見「後處理」）
 
 translator = OpenAICompatibleTranslator(TranslatorConfig(model="qwen3.5:9b"))
 translator.translate(TranslationRequest("おはよう", "ja"))
@@ -101,7 +99,7 @@ translator.translate(TranslationRequest("おはよう", "ja"))
 
 ### `hunyuan_mt`（Tencent HY-MT1.5）
 
-依官方 model card 的範本，**不使用 system prompt**（*"our model does not have the default system_prompt"*），只送一則 user 訊息。本專案的組合都含中文，所以用 ZH⇔XX 範本；目標語言名稱用 model card 語言表的中文名稱：`繁体中文`（zh-Hant）、`日语`、`英语`。
+依官方 model card（[tencent/HY-MT1.5-7B](https://huggingface.co/tencent/HY-MT1.5-7B)）的範本，**不使用 system prompt**（*"our model does not have the default system_prompt"*），只送一則 user 訊息。原文是中文或譯文是 `zh-TW`／`zh-CN` 時用 ZH⇔XX 範本，目標語言名稱用語言表的中文名稱（`繁体中文`＝zh-Hant、`中文`、`日语`、`韩语`…）；其他組合用 XX⇔XX 範本，名稱用語言表的英文名稱（`Korean`、`Spanish`…）。model card 的 38 種語言涵蓋語言清單的全部 20 種。
 
 ```text
 将以下文本翻译为{target_language}，注意只需要输出翻译后的结果，不要额外解释：
@@ -109,19 +107,25 @@ translator.translate(TranslationRequest("おはよう", "ja"))
 {source_text}
 ```
 
-官方另有 contextual 範本（`{context}\n参考上面的信息，把下面的文本翻译成{target_language}，注意不需要翻译上文，也不要额外解释：\n{source_text}`），`prompts.py` 有實作，但兩個 HY-MT 預設組都**關閉前文**（`supports_context=False`）：實測 1.8B 有 11/12 次把前文或指令一起輸出，7B 在實測句組中也會把前一句一起翻出來。
+```text
+Translate the following segment into {target_language}, without additional explanation.
+
+{source_text}
+```
+
+官方另有 contextual 範本（`{context}\n参考上面的信息，把下面的文本翻译成{target_language}，注意不需要翻译上文，也不要额外解释：\n{source_text}`），`prompts.py` 有實作（官方只有這個中文版，任何組合帶前文時都用它），但兩個 HY-MT 預設組都**關閉前文**（`supports_context=False`）：實測 1.8B 有 11/12 次把前文或指令一起輸出，7B 在實測句組中也會把前一句一起翻出來。
 
 ### `sakura`（SakuraLLM Sakura-GalTransl-7B-v3）
 
-依官方 model card 的 v3 範本（system prompt 原文照用，含「翻译成简体中文」）。只支援 `ja → zh-TW`；模型輸出簡體，靠 OpenCC 轉成繁體。
+依官方 model card 的 v3 範本（system prompt 原文照用，含「翻译成简体中文」）。只支援 `ja → zh-TW`、`ja → zh-CN`；模型輸出簡體，zh-TW 靠 OpenCC 轉成繁體。
 
 - 官方的 `[History]` 欄位是「上一輪的**譯文**」，而本模組的 `context` 是前文**原文**，格式不合，因此不使用前文；術語表（`[Glossary]`）留空。
 
 ### `generic`（Qwen3.5 與未知模型）
 
-system 訊息寫規則、user 訊息放前文與待翻句子，**指示一律用譯文語言撰寫**。實測英文指示下 `qwen3.5:9b` 翻日文時 11/18 次直接輸出日文（沒翻），改用繁體中文指示後 0/18。
+system 訊息寫規則、user 訊息放前文與待翻句子。目標 `zh-TW`、`zh-CN`、`ja`、`en` 的**指示用譯文語言撰寫**：實測英文指示下 `qwen3.5:9b` 翻日文時 11/18 次直接輸出日文（沒翻），改用繁體中文指示後 0/18。其他 16 種目標語言用英文指示，並同時寫出目標語言的英文名與原生名（例如 `Korean (한국어)`）、要求只輸出該語言；輸出語言是否正確由 `experiments/translate_benchmark/` 實測確認。`{source}` 是原文語言在指示語言中的名稱（19 個 Whisper 語言都有）。
 
-目標 `zh-TW`（`{source}` 為「日文」或「英文」）：
+目標 `zh-TW`（`{source}` 例如「日文」「韓文」）：
 
 ```text
 [system]
@@ -141,7 +145,7 @@ system 訊息寫規則、user 訊息放前文與待翻句子，**指示一律用
 {source_text}
 ```
 
-目標 `ja`、`en` 用同樣結構的日文／英文版本（見 `prompts.py`）。沒有前文時省略前文段落。
+目標 `zh-CN`、`ja`、`en` 用同樣結構的簡體中文／日文／英文版本，其他目標用英文版本加上目標語言名稱（見 `prompts.py`）。沒有前文時省略前文段落。
 
 ### 前文處理
 
@@ -153,8 +157,8 @@ system 訊息寫規則、user 訊息放前文與待翻句子，**指示一律用
 依序：
 
 1. **去掉思考內容**：移除 `<think>…</think>`（也接受 `<thinking>`，不分大小寫）；只有開頭標籤而尚未結束（串流中）時，從標籤起全部丟掉；只出現結束標籤（聊天範本已預先放入開頭標籤）時，丟掉結束標籤之前的內容；結尾是不完整的開頭標籤（例如串流剛好切在 `<thi`）時先藏起來。OpenAI 相容串流中另外放在 `delta.reasoning`／`reasoning_content` 的推理內容一律不讀。
-2. **整理字幕**：移除漏出來的特殊 token（`<|eos|>`、`<|extra_0|>` 等，以及結尾的 `<|` 碎片；實測 HY-MT 1.8B 會出現）；去頭尾空白；去掉開頭的「譯文：」「翻譯：」「Translation:」等標籤；整句被同一對引號（`"…"`、`「…」`、`『…』`、`“…”` 等）包住、且內部沒有同種引號時去掉外層引號。
-3. **簡轉繁**（目標 `zh-TW` 且 `convert_to_traditional=True`）：
+2. **整理字幕**：移除漏出來的特殊 token（`<|eos|>`、`<|extra_0|>` 等，以及結尾的 `<|` 碎片；實測 HY-MT 1.8B 會出現）；去頭尾空白；去掉開頭的「譯文：」「翻譯：」「翻訳：」「번역:」「Translation:」「Traducción:」「Перевод:」等「標籤＋冒號」；整句被同一對引號（`"…"`、`「…」`、`『…』`、`“…”` 等）包住、且內部沒有同種引號時去掉外層引號。
+3. **字形轉換**（`convert_script=True`，依語言清單的 `script_conversion`）：目標 `zh-CN` 整句以 OpenCC `t2s` 轉簡體；目標 `zh-TW` 做以下選擇性簡轉繁：
    - 先找「簡體專用字」：OpenCC `s2tw` 會改掉、且不在 Big5 字集內的漢字，另加 `么于网扰`（在 Big5 內但台灣文字幾乎只以簡體身分出現）。Big5 用來排除「才、吃、伙、台、里、后」這類兩岸通用、OpenCC 卻會改寫的字。
    - **有簡體專用字才轉**，用 OpenCC `s2twp`（台灣正體＋台灣慣用詞，例如 视频→影片、软件→軟體）。沒有就原樣回傳：實測 `s2twp` 會把正確的「那個傢伙」改成「那個傢夥」、「台灣」改成「臺灣」。
    - OpenCC 的 Python 綁定沒有說明執行緒安全性，轉換時加鎖。
@@ -190,11 +194,11 @@ system 訊息寫規則、user 訊息放前文與待翻句子，**指示一律用
 
 | 預設組（Ollama 名稱） | 格式 | 語言組合 | 前文 | 取樣參數（來源） | 權重 | 授權 |
 |---|---|---|---|---|---|---|
-| `qwen3.5:9b`（Q4_K_M） | `generic`，`reasoning_effort: none` | 全部 4 組 | 是 | 非思考模式：temperature 0.7、top_p 0.8、presence_penalty 1.5（model card） | 6.6 GB | Apache-2.0 |
-| `qwen3.5:4b`（Q4_K_M） | 同上 | 全部 4 組 | 是 | 同上 | 3.3 GB | Apache-2.0 |
-| `hy-mt1.5-7b:latest`（Q4_K_M） | `hunyuan_mt` | 全部 4 組 | 否 | temperature 0.7、top_p 0.6（model card） | 4.6 GB | Tencent HY Community License ⚠ |
-| `hy-mt1.5-1.8b:latest`（Q8_0） | `hunyuan_mt` | 全部 4 組 | 否 | 同上 | 1.9 GB | Tencent HY Community License ⚠ |
-| `hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS` | `sakura` | 只有 `ja → zh-TW` | 否 | temperature 0.3、top_p 0.8（model card） | 4.3 GB | CC BY-NC-SA 4.0 ⚠ |
+| `qwen3.5:9b`（Q4_K_M） | `generic`，`reasoning_effort: none` | 清單 20 種任意方向 | 是 | 非思考模式：temperature 0.7、top_p 0.8、presence_penalty 1.5（model card） | 6.6 GB | Apache-2.0 |
+| `qwen3.5:4b`（Q4_K_M） | 同上 | 清單 20 種任意方向 | 是 | 同上 | 3.3 GB | Apache-2.0 |
+| `hy-mt1.5-7b:latest`（Q4_K_M） | `hunyuan_mt` | 清單 20 種任意方向 | 否 | temperature 0.7、top_p 0.6（model card） | 4.6 GB | Tencent HY Community License ⚠ |
+| `hy-mt1.5-1.8b:latest`（Q8_0） | `hunyuan_mt` | 清單 20 種任意方向 | 否 | 同上 | 1.9 GB | Tencent HY Community License ⚠ |
+| `hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS` | `sakura` | 只有 `ja → zh-TW`／`zh-CN` | 否 | temperature 0.3、top_p 0.8（model card） | 4.3 GB | CC BY-NC-SA 4.0 ⚠ |
 
 授權限制（UI 選模型時要顯示）：
 
@@ -203,6 +207,8 @@ system 訊息寫規則、user 訊息放前文與待翻句子，**指示一律用
 - **CC BY-NC-SA 4.0（Sakura-GalTransl）**：**禁止商業用途**（model card：禁止付費翻譯介面、付費補丁、商用翻譯等）。不列入任何硬體等級的推薦，只在使用者自行選擇時使用。
 
 `ModelPreset` 帶有 `license`、`license_url`、`commercial_use`、`excluded_regions` 欄位，供 UI 顯示與 `recommend` 過濾。
+
+語言支援：`languages`（支援的清單語言碼）＋選用的 `pairs`（只支援特定方向時的（Whisper 原文, 清單譯文）組合，例如 Sakura；其方向清單 `SAKURA_PAIRS` 定義在 `translate/languages.py`，預設組與提示詞共用同一份）。`supports(preset, source, target)` 回傳能否翻譯；語言碼不合法或 Whisper 語言相同時回傳 False。Qwen3.5 的 model card 只寫「201 languages and dialects」而沒有列表，清單的 20 種主流語言視為全部支援；HY-MT 依 model card 語言表。
 
 ### 依 VRAM 的推薦順序（給 hardware 模組使用）
 
@@ -242,7 +248,7 @@ src/kikitori/translate/
   __init__.py      → 對外匯出
   types.py         → TranslationRequest、Translator（架構合約）
   errors.py        → 例外階層
-  languages.py     → 語言碼正規化、支援組合、請求驗證
+  languages.py     → 語言碼正規化、組合驗證（依語言清單）、請求驗證
   presets.py       → ModelPreset、各模型預設組、VRAM 推薦
   prompts.py       → 依 PromptStyle 組 messages
   postprocess.py   → 去思考內容、整理字幕、簡體偵測與簡轉繁

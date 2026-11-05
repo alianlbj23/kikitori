@@ -53,6 +53,7 @@ from kikitori.hardware.gpu_runtime import (
     RuntimeWheel,
     WheelMember,
 )
+from kikitori.languages import WHISPER_CODES, get_language
 from kikitori.pipeline import (
     Mode,
     PipelineComponents,
@@ -460,6 +461,20 @@ def _fake_hardware_profile() -> str:
     return value
 
 
+def _fake_spoken_language(settings: Settings, mode: Mode) -> str:
+    """假辨識結果的語言（Whisper 語言碼），讓字幕依設定的語言組合走真的路由。
+
+    口譯模擬使用者說自己的語言（會譯成對方語言）；影片翻譯用收聽語言，"auto" 時挑
+    第一個和字幕語言不同的語言，才看得到翻譯。
+    """
+    target = get_language(settings.target_language).whisper_code
+    if mode == "interpret":
+        return target
+    if settings.source_language != "auto":
+        return get_language(settings.source_language).whisper_code
+    return next(code for code in WHISPER_CODES if code != target)
+
+
 def fake_services() -> EngineServices:
     """假模式的完整服務（硬體情境由 `KIKITORI_ENGINE_FAKE_HARDWARE` 選擇）。"""
     catalog = FakeModelCatalog()
@@ -467,7 +482,7 @@ def fake_services() -> EngineServices:
     def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
         catalog.check_loadable(settings.asr.fast_model)
         catalog.check_loadable(settings.asr.final_model)
-        language = "zh" if mode == "interpret" else "ja"
+        language = _fake_spoken_language(settings, mode)
         translator = FakeTranslator()
         return PipelineComponents(
             voice_model=AmplitudeVoiceModel(),

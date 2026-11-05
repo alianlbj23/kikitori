@@ -34,8 +34,10 @@ class PipelineConfig:
     mode: Mode
     pause_secs: float                 # media 0.6、interpret 0.5
     max_secs: float                   # media 10、interpret 8
-    target_language: str = "zh-TW"
-    partner_language: str = "ja"      # interpret 模式的對方語言（ja | en）
+    target_language: str = "zh-TW"    # 字幕語言；口譯時是「我的語言」（語言清單的語言碼）
+    partner_language: str = "ja"      # interpret 模式的對方語言（語言清單的語言碼）
+    source_language: str = "auto"     # media 的收聽語言或 "auto"；只影響原文的字形顯示
+    translation_enabled: bool = True  # False = 只顯示原文，完全不呼叫翻譯器
     partial_interval_ms: int = 700
     context_lines: int = 3            # 完整路徑帶幾句前文（翻譯 context 與 ASR prompt）
     asr_prompt_context: bool = True   # 完整路徑是否以前文原文當 ASR prompt（只在 media 模式生效）
@@ -94,17 +96,21 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 語言規則
 
-| 模式 | 辨識出的語言 | 譯文語言 |
-|---|---|---|
-| `media` | 任何 | `target_language`（zh-TW） |
-| `interpret` | `zh`（含 zh-TW 等） | `partner_language` |
-| `interpret` | 其他 | `target_language`（zh-TW） |
+語言資料來自 `kikitori.languages`（20 種，見 `languages-i18n.md`）。`route()` 的規則：
 
-- 原文語言與譯文同為中文（例如 media 模式聽到中文）→ 不翻譯，譯文 = 原文。
-- 原文是中文、`target_language` 為 `zh-TW` 時，原文先以 `translate.postprocess.to_taiwan_traditional()` 轉成台灣正體（`languages.display_original()`；即時與完整路徑相同）。Whisper 的中文結果通常是簡體：口譯時那是使用者自己說的話，media 模式聽到中文時它還直接當譯文。只轉中文——日文新字體（気、駅）不是簡體。
-- 組合不在 translate 的 `SUPPORTED_PAIRS` 內（例如偵測到 `ko`）→ 譯文為空字串，送一筆 warning。
-- 語言偵測的候選範圍由 factory 設定（`DecodeOptions.candidate_languages`）：media 為 `("ja", "en")`，interpret 為 `("zh", partner_language)`。
-- `SubtitleUpdate.source_language` 是 ASR 給的 ISO 639-1；`target_language` 是實際譯文語言（`zh-TW`、`ja`、`en`）。
+| 模式 | 辨識出的語言 | 譯文語言 | 動作（`Route.action`） |
+|---|---|---|---|
+| `media` | 任何 | `target_language` | `translate` |
+| `interpret` | 我的語言（`target_language` 的 Whisper 語言） | `partner_language` | `translate` |
+| `interpret` | 其他 | `target_language` | `translate` |
+| 任何 | 與譯文語言同一個 Whisper 語言（例如 `zh` → `zh-CN`） | 同上 | `copy`：不翻譯，譯文 = 原文轉成譯文語言的字形（`zh-TW` → `s2twp` 選擇性轉換、`zh-CN` → `t2s`；其他語言原樣） |
+| 任何 | 不在語言清單內（例如 `nn`） | 同上 | `unsupported`：譯文空字串，送一筆 warning |
+| 任何 | `translation_enabled=False` | 同上 | `off`：不呼叫翻譯器，譯文空字串，不發 warning |
+
+- 原文的顯示字形（`languages.display_original()`；即時與完整路徑相同）：依序找設定中第一個與辨識語言同 Whisper 語言的語言，套用它的轉換——口譯為（我的語言, 對方語言），影片翻譯為（收聽語言, 字幕語言）（收聽語言為 `auto` 時只有字幕語言）。Whisper 的中文結果通常是簡體：口譯時那是使用者自己說的話；聽繁中看簡中時原文仍顯示繁體。只有中文有轉換規則——日文新字體（気、駅）不是簡體。
+- 模型不支援的組合（例如 Sakura 遇到 `en`）由翻譯器以 `InvalidRequestError` 拒絕，沿用「翻譯失敗只顯示原文＋warning」。
+- ASR 的語言由 factory 設定（`asr_languages()`）：media 指定收聽語言時以 `DecodeOptions.forced_language` 固定（不做語言偵測，避免短句誤判）；`auto` 時偵測範圍 `candidate_languages` 限語言清單的 Whisper 語言；interpret 的偵測範圍為（我的語言, 對方語言）的 Whisper 語言。
+- `SubtitleUpdate.source_language` 是 ASR 給的 Whisper 語言碼（中文為 `zh`）；`target_language` 是譯文語言（語言清單的語言碼）。
 
 ### 前文
 
@@ -145,12 +151,13 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 - 環境變數 `KIKITORI_CONFIG_DIR`（絕對路徑）可覆寫目錄，給測試與可攜版使用；不是絕對路徑就忽略並記 warning。
 
-### 結構（`schema_version = 2`）
+### 結構（`schema_version = 3`）
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "mode": "media",
+  "source_language": "ja",
   "target_language": "zh-TW",
   "partner_language": "ja",
   "media":     {"pause_secs": 0.6, "max_secs": 10.0, "device_id": null},
@@ -162,6 +169,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
     "cuda_library_dirs": []
   },
   "translation": {
+    "enabled": true,
     "base_url": "http://localhost:11434/v1",
     "fast_model": "qwen3.5:4b",
     "final_model": "qwen3.5:4b",
@@ -178,8 +186,10 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | 欄位 | 驗證 |
 |---|---|
 | `mode` | `media` \| `interpret`（上次選的模式，給 UI 用） |
-| `target_language` | 目前只有 `zh-TW` |
-| `partner_language` | `ja` \| `en` |
+| `source_language` | 語言清單的語言碼或 `auto`（影片翻譯的收聽語言；`auto` = 在清單的 Whisper 語言中自動偵測）。可與字幕語言相同（只做字形轉換或原樣顯示） |
+| `target_language` | 語言清單的語言碼（影片翻譯的字幕語言；口譯時是「我的語言」） |
+| `partner_language` | 語言清單的語言碼。`mode` 為 `interpret` 時 Whisper 語言不能和 `target_language` 相同（口譯靠語言偵測分辨說話者；例如 zh-TW 與 zh-CN 不能配對）；影片翻譯模式不檢查（例如字幕語言 ja、預設對方語言 ja 也能儲存），切換到口譯時重新驗證。`session.start {mode: "interpret"}` 也會檢查（回 `invalid_settings`）。UI 改字幕語言時若會衝突要一併改對方語言 |
+| 語言碼共通 | 不分大小寫、底線視同連字號、接受舊別名（`zh-Hant`→`zh-TW`、`zh-Hans`→`zh-CN`），存成正規化後的語言碼；`zh` 不分繁簡，不接受 |
 | `*.pause_secs` | 數字，[0.1, 5.0] |
 | `*.max_secs` | 數字，[1, 30]，且大於 `pause_secs` |
 | `*.device_id` | `null`（預設裝置）或 1–512 字元的字串 |
@@ -189,6 +199,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `asr.fast_cpu_threads`／`final_cpu_threads` | `null`（自動：`device="cuda"` 時 0＝CTranslate2 預設；否則 `hardware.auto_cpu_threads()`＝`min(8, 實體核心 // 2)`，兩條路徑同時在 CPU 上也不超過實體核心數）或整數 [1, 256] |
 | `asr.cuda_library_dirs` | 最多 16 個絕對路徑（使用者自行指定的 cuBLAS 12 目錄）；kikitori 下載的 GPU 執行環境不必列入，factory 建立元件時自動加在後面 |
 | `translation.*` | 交給 `TranslatorConfig` 驗證（`base_url` 必須 http/https、模型名稱非空、`api_key_env` 是合法變數名稱）；模型名稱另限 200 字元 |
+| `translation.enabled` | 布林，預設 **true**；false = 只顯示原文：pipeline 不呼叫翻譯器、factory 不預熱也不保溫 |
 | `translation.allow_restricted` | 布林，預設 **false**：是否推薦有地區限制授權的翻譯模型（HY-MT 的授權不適用於歐盟、英國、南韓）。引擎不知道使用者所在地、用語系猜地區不可靠，推薦了不能用的授權會讓使用者在不知情下違約，所以預設不推薦；UI 在設定頁讓使用者確認「我不在歐盟／英國／南韓」後再設為 true。只影響 `recommend()` 與 `models.validate` 的警告，不阻止手動選用 |
 | `translation.keep_warm_secs` | 整數，預設 **240**：0（關閉）或 [10, 3600]。session 執行中翻譯請求停了這麼多秒，就對本機翻譯服務送一次預熱請求，讓模型不被卸載（見「ASR 接縫」的 `attach_keep_warm()`）。預設值低於 Ollama 預設的 `keep_alive` 5 分鐘；伺服器改過 `OLLAMA_KEEP_ALIVE` 時要設得比它短。遠端服務一律不送。新欄位有預設值，舊的 schema 2 檔案照樣讀得進來，所以**不升 schema** |
 | `pipeline.partial_interval_ms` | 整數，[200, 5000] |
@@ -207,6 +218,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 - 讀：檔案不存在 → 預設值（不寫檔）。不是 UTF-8 JSON、不是物件、驗證失敗 → `SettingsError`。檔案大於 1 MiB → `SettingsError`（避免讀進異常大的檔案）。
 - **遷移**：`schema_version` 必須是正整數；小於目前版本時依序套用 `MIGRATIONS[n]`（n → n+1）；大於目前版本 → `SettingsError`（新版程式寫的檔案，不覆寫）。遷移只在記憶體中進行，檔案在下一次 `settings.set`／`settings.apply_recommendation` 時才以新版格式寫回。
+  - **2 → 3**（多國語言）：補 `source_language: "ja"`、`translation.enabled: true`（已有時保留），其他欄位原樣保留；v2 的 `target_language`（zh-TW）與 `partner_language`（ja／en）在 v3 仍合法。注意 v2 的影片翻譯會在 ja／en 間自動偵測，遷移後固定聽日語；聽英文的使用者要改成 `en` 或 `auto`。
   - **1 → 2**（Milestone 6）：`asr.compute_type` 拆成 `asr.fast_compute_type` 與 `asr.final_compute_type`（v1 的值複製到兩邊）。新增的 `asr.fast_cpu_threads`、`asr.final_cpu_threads`（null）與 `translation.allow_restricted`（false）用預設值。v1 的欄位名稱在 v2 是未知欄位（`settings.set {"asr": {"compute_type": …}}` 回 `invalid_settings`）。
 - 寫：先寫同目錄的暫存檔（UTF-8、縮排 2、`ensure_ascii=False`）、`flush` + `fsync`，再 `os.replace` 成正式檔名，中途失敗刪掉暫存檔並往上拋 `OSError`。
 - `SettingsStore.is_new`：`load()` 時檔案不存在、且之後沒有成功的 `update()` → True（第一次執行）；檔案存在但無效 → False（那是使用者存過的設定，不自動覆寫）；`load()` 之前 → False。`update_if_new(patch)`：只在 `is_new` 時寫入，否則不動並回傳 None——檢查與寫入在同一把鎖內。
@@ -230,7 +242,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `invalid_request` | 不是物件；`id` 不是整數（布林不算，絕對值 ≤ 2^53−1）；`method` 不是非空字串；`params` 不是物件或 null；有 `id`／`method`／`params` 以外的欄位；行太長 |
 | `unknown_method` | 不認得的方法（架構規格） |
 | `invalid_params` | 參數缺少、型別或值不對、有未知參數 |
-| `invalid_settings` | `settings.set` 驗證失敗，`message` 帶欄位路徑 |
+| `invalid_settings` | `settings.set` 驗證失敗，`message` 帶欄位路徑；`session.start {mode: "interpret"}` 時設定的 `partner_language` 與 `target_language` 是同一個 Whisper 語言 |
 | `settings_io_error` | 設定檔無法寫入 |
 | `session_active` | 已有 session 在載入或執行中又 `session.start` |
 | `device_not_found` | 裝置 id 格式錯誤或不存在 |
@@ -346,6 +358,14 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 UI 流程見 `ui.md`「自動推薦」。
 
+### 協定變更（多國語言核心，Milestone 10）
+
+`protocol_version` 維持 1；**設定 schema 升為 3**（見「設定檔」）：
+
+1. 設定新增 `source_language`（預設 `"ja"`，可為 `"auto"`）與 `translation.enabled`（預設 true）；`target_language`、`partner_language` 可為語言清單內任一語言（口譯模式下 `partner_language` 的 Whisper 語言不能和 `target_language` 相同）。`settings.set` 的 patch 帶 `schema_version` 時必須是 3。
+2. `subtitle` 事件的 `target_language` 可能是清單內任一語言；只顯示原文時 `translation` 為空字串。
+3. 尚未實作（後續 milestone）：`languages.list`、`settings.preview_languages`、`models.pull_translation`、`session.set_translation`、推薦依語言。
+
 ## 入口
 
 - `kikitori engine`：啟動 stdio 引擎（給 Tauri；開發時 `uv run kikitori engine`）。`python -m kikitori engine` 相同。
@@ -356,7 +376,9 @@ UI 流程見 `ui.md`「自動推薦」。
 
 只有這個檔案匯入 `kikitori.asr`（除了 `asr.types`），而且在函式內延遲匯入：
 
-- `create_transcriber(model_id, *, device, role, languages, compute_type, cpu_threads, cuda_library_dirs) -> Transcriber`：`load_transcriber(spec, device=..., compute_type=..., cpu_threads=..., options=FAST_DECODE/FINAL_DECODE + candidate_languages, cuda_library_dirs=..., download=False)`；模型未下載 → `FileNotFoundError`（引擎轉成 `model_not_downloaded`）。
+- `create_transcriber(model_id, *, device, role, candidate_languages, forced_language=None, compute_type, cpu_threads, cuda_library_dirs) -> Transcriber`：`load_transcriber(spec, device=..., compute_type=..., cpu_threads=..., options=FAST_DECODE/FINAL_DECODE + candidate_languages + forced_language, cuda_library_dirs=..., download=False)`；模型未下載 → `FileNotFoundError`（引擎轉成 `model_not_downloaded`）。
+- `asr_languages(settings, mode) -> AsrLanguages(forced_language, candidate_languages)`：見「語言規則」。
+- `warm_up_request(settings, mode)`：預熱／保溫的請求，方向與 session 相同（口譯：對方語言 → 我的語言；影片：收聽語言 → 字幕語言，`auto` 時取完整路徑模型支援的第一個語言），短句取自 19 個 Whisper 語言各一句的表。關閉翻譯或收聽與字幕語言同一個 Whisper 語言時為 None：`warm_up_translation()` 不預熱、`attach_keep_warm()` 不加保溫。
 - `asr_cuda_library_dirs(settings)`：`asr.cuda_library_dirs` 在前，再加上 `hardware.installed_runtime_dir()`（已安裝時、不重複）；檢查失敗只記 warning。
 - `resolve_cpu_threads(value, device)`：設定值；null 時 `device="cuda"` 回 0，否則 `hardware.auto_cpu_threads()`。
 - `no_speech_reliable(model_id)`：registry 的 `no_speech_reliable`，設定 `PipelineComponents.final_no_speech_reliable`。

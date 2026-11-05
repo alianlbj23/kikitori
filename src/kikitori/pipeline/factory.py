@@ -12,12 +12,13 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import urlsplit
 
 from kikitori.asr.types import Transcriber, Transcript
 from kikitori.config import Settings
-from kikitori.config.settings import AsrDevice
+from kikitori.config.settings import AUTO_LANGUAGE, AsrDevice
+from kikitori.languages import WHISPER_CODES, get_language
 from kikitori.pipeline.keep_warm import ActivityTranslator, KeepWarm
 from kikitori.pipeline.types import (
     Mode,
@@ -31,6 +32,8 @@ from kikitori.translate import (
     TranslationRequest,
     Translator,
     TranslatorConfig,
+    preset_for_model,
+    supports,
 )
 
 TranscriberRole = Literal["fast", "final"]
@@ -43,7 +46,29 @@ FAST_TRANSLATE_RETRIES = 0
 # 預熱時翻譯伺服器可能要從磁碟載入模型（實測 qwen3.5:9b 冷啟動 4–10 秒）；不重試，
 # 失敗只記 warning，字幕照樣開始。
 WARM_UP_READ_TIMEOUT = 60.0
-_WARM_UP_TEXT = {"ja": "はい。", "en": "Okay."}
+# 預熱只是讓伺服器載入模型，譯文不重要；用原文語言的短句，請求的語言方向才與 session
+# 一致（只支援特定方向的模型，例如 Sakura，才不會拒絕）。
+_WARM_UP_TEXT = {
+    "ja": "はい。",
+    "en": "Okay.",
+    "zh": "好的。",
+    "ko": "네.",
+    "es": "Sí.",
+    "fr": "Oui.",
+    "de": "Ja.",
+    "pt": "Sim.",
+    "ru": "Да.",
+    "it": "Sì.",
+    "ar": "نعم.",
+    "hi": "हाँ।",
+    "id": "Ya.",
+    "vi": "Vâng.",
+    "th": "ใช่",
+    "tr": "Evet.",
+    "pl": "Tak.",
+    "nl": "Ja.",
+    "uk": "Так.",
+}
 
 
 class UnknownModelError(ValueError):
@@ -69,11 +94,42 @@ class AsrModelInfo:
     downloaded: bool
 
 
-def candidate_languages(mode: Mode, partner_language: str) -> tuple[str, ...]:
-    """ASR 自動偵測語言時的候選範圍：media 為 ja／en，interpret 為 zh 與對方語言。"""
+class AsrLanguages(NamedTuple):
+    """ASR 的語言設定，都是 Whisper 語言碼。
+
+    Attributes:
+        forced_language: 固定的辨識語言（不做語言偵測）；None 表示自動偵測。
+        candidate_languages: 自動偵測的範圍。
+    """
+
+    forced_language: str | None
+    candidate_languages: tuple[str, ...]
+
+
+def asr_languages(settings: Settings, mode: Mode) -> AsrLanguages:
+    """依模式與設定決定 ASR 的固定辨識語言與偵測範圍。
+
+    - media、指定收聽語言：固定為該語言，不做語言偵測（短句的偵測容易誤判）。
+    - media、"auto"：偵測範圍限語言清單涵蓋的 Whisper 語言。
+    - interpret：偵測範圍限我的語言與對方語言（靠偵測分辨誰在說話）。
+    """
     if mode == "interpret":
-        return ("zh", partner_language)
-    return ("ja", "en")
+        return AsrLanguages(
+            forced_language=None,
+            candidate_languages=(
+                get_language(settings.target_language).whisper_code,
+                get_language(settings.partner_language).whisper_code,
+            ),
+        )
+    if settings.source_language == AUTO_LANGUAGE:
+        return AsrLanguages(forced_language=None, candidate_languages=WHISPER_CODES)
+    forced = get_language(settings.source_language).whisper_code
+    return AsrLanguages(forced_language=forced, candidate_languages=(forced,))
+
+
+def warm_up_text(whisper_code: str) -> str:
+    """預熱用的短句；清單外的語言用英文。"""
+    return _WARM_UP_TEXT.get(whisper_code, _WARM_UP_TEXT["en"])
 
 
 def pipeline_config(settings: Settings, mode: Mode) -> PipelineConfig:
@@ -85,6 +141,8 @@ def pipeline_config(settings: Settings, mode: Mode) -> PipelineConfig:
         max_secs=mode_settings.max_secs,
         target_language=settings.target_language,
         partner_language=settings.partner_language,
+        source_language=settings.source_language,
+        translation_enabled=settings.translation.enabled,
         partial_interval_ms=settings.pipeline.partial_interval_ms,
         context_lines=settings.pipeline.context_lines,
         asr_prompt_context=settings.pipeline.asr_prompt_context,
@@ -96,7 +154,8 @@ def create_transcriber(
     *,
     device: AsrDevice,
     role: TranscriberRole,
-    languages: tuple[str, ...] | None,
+    candidate_languages: tuple[str, ...] | None,
+    forced_language: str | None = None,
     compute_type: str | None = None,
     cpu_threads: int = 0,
     cuda_library_dirs: Sequence[str | Path] = (),
@@ -107,7 +166,8 @@ def create_transcriber(
         model_id: asr registry 的模型 id。
         device: "auto"、"cpu" 或 "cuda"。
         role: "fast" 用 greedy 解碼（延遲低）；"final" 用 beam search 與溫度 fallback。
-        languages: 自動偵測時的候選語言；None 表示不限制。
+        candidate_languages: 自動偵測的範圍；None 表示不限制。
+        forced_language: 固定的辨識語言（不做偵測）；None 表示自動偵測。
         compute_type: CTranslate2 精度；None 用 asr 模組依裝置的預設值。
         cpu_threads: CPU 執行緒數；0 表示 CTranslate2 預設值。
         cuda_library_dirs: cuBLAS 12 所在目錄（見 `asr_cuda_library_dirs()`）。
@@ -125,7 +185,9 @@ def create_transcriber(
     except KeyError as exc:
         raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
     base = FAST_DECODE if role == "fast" else FINAL_DECODE
-    options = replace(base, candidate_languages=languages)
+    options = replace(
+        base, candidate_languages=candidate_languages, forced_language=forced_language
+    )
     return load_transcriber(
         spec,
         device=device,
@@ -273,7 +335,7 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
     """
     from kikitori.vad import SileroVad
 
-    languages = candidate_languages(mode, settings.partner_language)
+    forced_language, candidate_languages = asr_languages(settings, mode)
     fast_translator, final_translator = create_translators(settings)
     asr = settings.asr
     cuda_dirs = asr_cuda_library_dirs(settings)
@@ -283,7 +345,8 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
             asr.fast_model,
             device=asr.device,
             role="fast",
-            languages=languages,
+            candidate_languages=candidate_languages,
+            forced_language=forced_language,
             compute_type=asr.fast_compute_type,
             cpu_threads=resolve_cpu_threads(asr.fast_cpu_threads, asr.device),
             cuda_library_dirs=cuda_dirs,
@@ -292,7 +355,8 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
             asr.final_model,
             device=asr.device,
             role="final",
-            languages=languages,
+            candidate_languages=candidate_languages,
+            forced_language=forced_language,
             compute_type=asr.final_compute_type,
             cpu_threads=resolve_cpu_threads(asr.final_cpu_threads, asr.device),
             cuda_library_dirs=cuda_dirs,
@@ -313,6 +377,33 @@ def _is_local_server(settings: Settings) -> bool:
     return is_loopback_host(urlsplit(settings.translation.base_url).hostname or "")
 
 
+def warm_up_request(settings: Settings, mode: Mode) -> TranslationRequest | None:
+    """預熱／保溫用的翻譯請求；這個 session 不會用到翻譯模型時回傳 None。
+
+    方向與 session 一致：口譯為對方語言 → 我的語言，影片翻譯為收聽語言 → 字幕語言。
+    收聽語言是 "auto" 時挑完整路徑模型支援的第一個語言。關閉翻譯、收聽語言與字幕
+    語言是同一個 Whisper 語言（只做字形轉換），或完整路徑模型不支援這個方向（例如
+    Sakura 只做日 → 中）時回傳 None：送出去只會被拒絕。
+    """
+    if not settings.translation.enabled:
+        return None
+    target = settings.target_language
+    preset = preset_for_model(settings.translation.final_model)
+    if mode == "interpret":
+        sources: Sequence[str] = (get_language(settings.partner_language).whisper_code,)
+    elif settings.source_language != AUTO_LANGUAGE:
+        sources = (get_language(settings.source_language).whisper_code,)
+    else:
+        sources = WHISPER_CODES
+    # 三種情況共用同一個判斷；`supports()` 也涵蓋同一個 Whisper 語言（不需翻譯）的情況。
+    source = next((c for c in sources if supports(preset, c, target)), None)
+    if source is None:
+        return None
+    return TranslationRequest(
+        text=warm_up_text(source), source_language=source, target_language=target
+    )
+
+
 def ping_translation_models(
     settings: Settings,
     mode: Mode,
@@ -324,18 +415,16 @@ def ping_translation_models(
     """對翻譯服務送一句很短的翻譯，完整路徑的模型先，即時路徑的模型不同時再送。
 
     session 開始時的預熱與執行中的保溫共用這個請求（60 秒讀取逾時、不重試、最多 32
-    token）。不檢查服務在不在本機，呼叫端負責。
+    token）。不檢查服務在不在本機，呼叫端負責。`warm_up_request()` 為 None（不需要
+    翻譯模型）時什麼都不送。
 
     Raises:
         TranslationError: 第一個失敗的模型（訊息帶模型名稱）；後面的模型不再送。
     """
     t = settings.translation
-    source = settings.partner_language if mode == "interpret" else "ja"
-    request = TranslationRequest(
-        text=_WARM_UP_TEXT.get(source, _WARM_UP_TEXT["ja"]),
-        source_language=source if source in _WARM_UP_TEXT else "ja",
-        target_language=settings.target_language,
-    )
+    request = warm_up_request(settings, mode)
+    if request is None:
+        return
     for model in dict.fromkeys((t.final_model, t.fast_model)):
         translator = make_translator(
             TranslatorConfig(
@@ -367,8 +456,9 @@ def warm_up_translation(
     Ollama 閒置 5 分鐘就卸載模型，下一次請求才從磁碟載入。不預熱的話，第一句的即時翻譯
     會逾時（即時路徑只等 10 秒），完整字幕也會整批延後。遠端服務不需要載入，也不該為此
     多花一次請求，所以只預熱 loopback 位址。失敗只記 warning，不中斷 session。
+    只顯示原文（`translation.enabled=false`）或不需要翻譯的語言組合不預熱。
     """
-    if not _is_local_server(settings):
+    if warm_up_request(settings, mode) is None or not _is_local_server(settings):
         return
     try:
         ping_translation_models(settings, mode, make_translator=make_translator)
@@ -391,10 +481,15 @@ def attach_keep_warm(
     session 執行中翻譯請求停了 `translation.keep_warm_secs` 秒（例如影片長時間沒有對白），
     就送一次與開場預熱相同的請求，模型才不會被 Ollama 卸載（OpenAI 相容端點不能指定
     `keep_alive`）。遠端服務或設定為 0 時原樣回傳：不對可能付費的 API 多送請求。保溫在
-    `Pipeline.start()` 啟動、pipeline 結束時停止。
+    `Pipeline.start()` 啟動、pipeline 結束時停止。只顯示原文或不需要翻譯的語言組合
+    也原樣回傳。
     """
     interval = settings.translation.keep_warm_secs
-    if interval == 0 or not _is_local_server(settings):
+    if (
+        interval == 0
+        or warm_up_request(settings, mode) is None
+        or not _is_local_server(settings)
+    ):
         return components
     keep_warm = KeepWarm(
         lambda: ping_translation_models(

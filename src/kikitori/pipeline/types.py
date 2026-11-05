@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from kikitori.asr.types import Transcriber, Transcript
+from kikitori.languages import UnknownLanguageError, get_language
 from kikitori.translate.types import Translator
 from kikitori.vad.model import VoiceModel
 
@@ -47,9 +48,9 @@ class SubtitleUpdate:
     Attributes:
         utterance_id: 句子編號（每個 session 從 1 開始）。
         original: 原文。
-        translation: 譯文；翻譯失敗或語言組合不支援時為空字串。
-        source_language: ASR 偵測的 ISO 639-1 語言碼。
-        target_language: 譯文語言（"zh-TW"、"ja"、"en"）。
+        translation: 譯文；翻譯失敗、語言組合不支援或關閉翻譯時為空字串。
+        source_language: ASR 偵測的語言碼（Whisper 語言碼，中文為 "zh"）。
+        target_language: 譯文語言（語言清單的語言碼，例如 "zh-TW"、"ko"）。
         is_final: False 為即時字幕（之後會被取代）；True 為完整翻譯（最終版）。
             原文與譯文皆為空的完整結果表示「這句其實不是語音，清掉即時字幕」。
         start_sample: 句子起點（16 kHz 樣本，以串流開頭為 0）。
@@ -74,8 +75,11 @@ class PipelineConfig:
         mode: "media"（影片翻譯）或 "interpret"（即時口譯）。
         pause_secs: 靜音多久算一句結束。
         max_secs: 句長上限。
-        target_language: 使用者的語言（譯文語言），目前只有 "zh-TW"。
-        partner_language: interpret 模式的對方語言（"ja" 或 "en"）。
+        target_language: 字幕語言；口譯時是使用者的語言（語言清單的語言碼）。
+        partner_language: interpret 模式的對方語言（語言清單的語言碼）。
+        source_language: media 模式的收聽語言（語言清單的語言碼）或 "auto"；只影響
+            原文的字形顯示，辨識語言由 factory 設定給 ASR。
+        translation_enabled: False 時只顯示原文，完全不呼叫翻譯器。
         partial_interval_ms: 每隔多少毫秒的新音訊做一次即時辨識。
         context_lines: 完整路徑保留幾句前文。
         asr_prompt_context: 完整路徑是否以前文當 ASR prompt。
@@ -83,7 +87,8 @@ class PipelineConfig:
         read_timeout: 每次 `AudioSource.read()` 的等待上限（秒）。
 
     Raises:
-        ValueError: 參數超出範圍。
+        ValueError: 參數超出範圍或語言碼不在語言清單內。
+        TypeError: `translation_enabled` 不是 bool。
     """
 
     mode: Mode
@@ -91,6 +96,8 @@ class PipelineConfig:
     max_secs: float
     target_language: str = "zh-TW"
     partner_language: str = "ja"
+    source_language: str = "auto"
+    translation_enabled: bool = True
     partial_interval_ms: int = 700
     context_lines: int = 3
     asr_prompt_context: bool = True
@@ -117,6 +124,20 @@ class PipelineConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < low:
                 raise ValueError(f"{name} must be an integer >= {low}, got {value!r}")
+        for name in ("target_language", "partner_language", "source_language"):
+            value = getattr(self, name)
+            if name == "source_language" and value == "auto":
+                continue
+            try:
+                normalized = get_language(value).code
+            except UnknownLanguageError as exc:
+                raise ValueError(f"{name}: {exc}") from None
+            if normalized != value:
+                raise ValueError(
+                    f"{name}: expected the normalized code {normalized!r}, got {value!r}"
+                )
+        if not isinstance(self.translation_enabled, bool):
+            raise TypeError("translation_enabled must be bool")
 
 
 @dataclass(frozen=True)

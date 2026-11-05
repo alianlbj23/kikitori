@@ -86,8 +86,11 @@ class DecodeOptions:
         compression_ratio_threshold: 壓縮比高於此值就用下一個溫度重試。
         log_prob_threshold: 平均對數機率低於此值就用下一個溫度重試。
         no_speech_threshold: no_speech 高於此值且 logprob 過低時視為靜音，不重試。
-        candidate_languages: 自動偵測時只在這些語言中選（例如口譯模式 ("zh", "ja")）。
+        candidate_languages: 偵測範圍：自動偵測時只在這些語言中選（例如口譯模式
+            ("zh", "ja")）。None 表示不限制。
         max_new_tokens: 最多產生的 token 數；None 表示到 448 為止。
+        forced_language: 固定的辨識語言（Whisper 語言碼）；設定時不做語言偵測，
+            `transcribe(language=...)` 另外指定時以呼叫端為準。None 表示自動偵測。
     """
 
     beam_size: int = 5
@@ -102,6 +105,7 @@ class DecodeOptions:
     no_speech_threshold: float | None = 0.6
     candidate_languages: tuple[str, ...] | None = None
     max_new_tokens: int | None = None
+    forced_language: str | None = None
 
     def __post_init__(self) -> None:
         if self.beam_size < 1 or self.best_of < 1:
@@ -112,6 +116,10 @@ class DecodeOptions:
             raise ValueError("candidate_languages must be None or non-empty")
         if self.max_new_tokens is not None and self.max_new_tokens < 1:
             raise ValueError("max_new_tokens must be >= 1")
+        if self.forced_language is not None and (
+            not isinstance(self.forced_language, str) or not self.forced_language
+        ):
+            raise ValueError("forced_language must be None or a non-empty str")
 
 
 FAST_DECODE = DecodeOptions(beam_size=1, max_new_tokens=128)
@@ -178,6 +186,8 @@ class WhisperTranscriber:
         if self.options.candidate_languages is not None:
             for code in self.options.candidate_languages:
                 self._check_language(code)
+        if self.options.forced_language is not None:
+            self._check_language(self.options.forced_language)
 
     @property
     def languages(self) -> tuple[str, ...]:
@@ -217,6 +227,8 @@ class WhisperTranscriber:
             RuntimeError: CTranslate2 推論失敗（原樣往上拋）。
         """
         samples = validate_audio(audio)
+        if language is None:
+            language = self.options.forced_language
         if language is not None:
             self._check_language(language)
         prompt_tokens = self._prompt_tokens(prompt)

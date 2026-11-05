@@ -77,6 +77,33 @@ INTERPRET_LINES: list[tuple[str, str, str]] = [
     ("ja", "五分くらいだと思います。", "我想大概五分鐘左右。"),
 ]
 
+# Subtitle language code -> Whisper language code. Mirrors the language list in
+# src/kikitori/languages/catalog.py (this script is stdlib-only and cannot import it).
+LANGUAGE_WHISPER: dict[str, str] = {
+    "ja": "ja",
+    "en": "en",
+    "zh-TW": "zh",
+    "zh-CN": "zh",
+    "ko": "ko",
+    "es": "es",
+    "fr": "fr",
+    "de": "de",
+    "pt": "pt",
+    "ru": "ru",
+    "it": "it",
+    "ar": "ar",
+    "hi": "hi",
+    "id": "id",
+    "vi": "vi",
+    "th": "th",
+    "tr": "tr",
+    "pl": "pl",
+    "nl": "nl",
+    "uk": "uk",
+}
+# The canned lines above are translated for the default languages only.
+CANNED_TARGETS = ("zh-TW", "ja")
+
 ASR_MODELS: list[dict[str, Any]] = [
     {"id": "tiny", "size_bytes": 77_000_000, "license": "MIT", "speed_tier": "fastest"},
     {"id": "base", "size_bytes": 145_000_000, "license": "MIT", "speed_tier": "fast"},
@@ -178,8 +205,9 @@ COMPUTE_TYPES = (
 )
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "schema_version": 2,
+    "schema_version": 3,
     "mode": "media",
+    "source_language": "ja",
     "target_language": "zh-TW",
     "partner_language": "ja",
     "media": {"pause_secs": 0.6, "max_secs": 10.0, "device_id": None},
@@ -195,6 +223,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "cuda_library_dirs": [],
     },
     "translation": {
+        "enabled": True,
         "base_url": "http://localhost:11434/v1",
         "fast_model": "qwen3.5:4b",
         "final_model": "qwen3.5:4b",
@@ -293,9 +322,28 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise ProtocolError("invalid_settings", f"{min(unknown)}: unknown field")
     if settings["mode"] not in ("media", "interpret"):
         raise ProtocolError("invalid_settings", "mode: expected 'media' or 'interpret'")
-    if settings["partner_language"] not in ("ja", "en"):
+    if settings["source_language"] != "auto" and (
+        settings["source_language"] not in LANGUAGE_WHISPER
+    ):
         raise ProtocolError(
-            "invalid_settings", "partner_language: expected 'ja' or 'en'"
+            "invalid_settings", "source_language: unsupported language code"
+        )
+    for key in ("target_language", "partner_language"):
+        if settings[key] not in LANGUAGE_WHISPER:
+            raise ProtocolError("invalid_settings", f"{key}: unsupported language code")
+    # Same rule as the real engine: only interpret mode needs distinct languages.
+    if settings["mode"] == "interpret" and (
+        LANGUAGE_WHISPER[settings["partner_language"]]
+        == LANGUAGE_WHISPER[settings["target_language"]]
+    ):
+        raise ProtocolError(
+            "invalid_settings",
+            "partner_language: interpret mode needs a different language from "
+            "target_language",
+        )
+    if not isinstance(settings["translation"].get("enabled"), bool):
+        raise ProtocolError(
+            "invalid_settings", "translation.enabled: expected a boolean"
         )
     base_url = settings["translation"].get("base_url")
     if not isinstance(base_url, str) or not base_url.startswith(
@@ -356,11 +404,21 @@ def validate_settings(settings: dict[str, Any]) -> None:
 class Session(threading.Thread):
     """Emits loading → running → subtitle stream until stopped."""
 
-    def __init__(self, session_id: int, mode: str, writer: Writer) -> None:
+    def __init__(
+        self,
+        session_id: int,
+        mode: str,
+        writer: Writer,
+        settings: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(name=f"session-{session_id}", daemon=True)
         self.session_id = session_id
         self.mode = mode
         self.writer = writer
+        settings = settings or DEFAULT_SETTINGS
+        self.target = settings["target_language"]
+        self.partner = settings["partner_language"]
+        self.translation_enabled = settings["translation"]["enabled"]
         self.stop_event = threading.Event()
 
     def status(self, state: str, detail: str | None = None) -> None:
@@ -393,7 +451,8 @@ class Session(threading.Thread):
         position = SAMPLE_RATE  # first utterance starts after 1 s
         utterance_id = 0
         while not self.stop_event.is_set():
-            source, original, translation = lines[utterance_id % len(lines)]
+            source, original, canned = lines[utterance_id % len(lines)]
+            translation = self._translation(source, original, canned)
             utterance_id += 1
             start = position
             if not self._speak(utterance_id, source, original, translation, start):
@@ -404,9 +463,20 @@ class Session(threading.Thread):
         self.status("idle")
 
     def _target_language(self, source: str) -> str:
-        if self.mode == "interpret" and source == "zh":
-            return "ja"
-        return "zh-TW"
+        if self.mode == "interpret" and source == LANGUAGE_WHISPER[self.target]:
+            return self.partner
+        return self.target
+
+    def _translation(self, source: str, original: str, canned: str) -> str:
+        """Canned text for the default languages; a labelled echo otherwise."""
+        if not self.translation_enabled:
+            return ""
+        target = self._target_language(source)
+        if LANGUAGE_WHISPER[target] == source:
+            return original
+        if target in CANNED_TARGETS:
+            return canned
+        return f"[{target}] {original}"
 
     def _speak(
         self,
@@ -422,7 +492,8 @@ class Session(threading.Thread):
             if self.stop_event.wait(0.55):
                 return False
             cut_o = max(1, len(original) * i // (steps + 1))
-            cut_t = max(1, len(translation) * i // (steps + 1))
+            cut_t = len(translation) * i // (steps + 1)
+            cut_t = max(1, cut_t) if translation else 0
             self._emit(
                 utterance_id,
                 source,
@@ -819,13 +890,18 @@ class FakeEngine:
             raise ProtocolError(
                 "invalid_params", "mode: expected 'media' or 'interpret'"
             )
+        if mode == "interpret":
+            # The saved settings may come from media mode, where this is allowed.
+            validate_settings({**self.settings, "mode": "interpret"})
         device_id = params.get("device_id")
         if device_id is not None and device_id not in {d["id"] for d in DEVICES}:
             raise ProtocolError("device_not_found", f"no such device: {device_id!r}")
         with self.lock:
             if self.session is not None and self.session.is_alive():
                 raise ProtocolError("session_active", "a session is already running")
-            session = Session(self.next_session_id, mode, self.writer)
+            session = Session(
+                self.next_session_id, mode, self.writer, copy.deepcopy(self.settings)
+            )
             self.next_session_id += 1
             self.session = session
         self.after_response.append(session.start)

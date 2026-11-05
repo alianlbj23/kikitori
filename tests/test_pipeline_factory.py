@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from kikitori.config import Settings
+from kikitori.languages import WHISPER_CODES
 from kikitori.pipeline import factory
 from kikitori.pipeline.types import PipelineComponents
 from kikitori.translate import (
@@ -21,9 +22,34 @@ from kikitori.translate import (
 
 
 class FactoryTest(unittest.TestCase):
-    def test_candidate_languages(self) -> None:
-        self.assertEqual(factory.candidate_languages("media", "ja"), ("ja", "en"))
-        self.assertEqual(factory.candidate_languages("interpret", "en"), ("zh", "en"))
+    def test_asr_languages_media_with_explicit_source(self) -> None:
+        # 指定收聽語言：直接告訴 Whisper，不做語言偵測
+        s = Settings().merged({"source_language": "ko"})
+        self.assertEqual(factory.asr_languages(s, "media"), ("ko", ("ko",)))
+        s = Settings().merged({"source_language": "zh-CN"})
+        self.assertEqual(factory.asr_languages(s, "media"), ("zh", ("zh",)))
+
+    def test_asr_languages_media_auto_is_limited_to_the_catalog(self) -> None:
+        s = Settings().merged({"source_language": "auto"})
+        self.assertEqual(factory.asr_languages(s, "media"), (None, WHISPER_CODES))
+
+    def test_asr_languages_interpret_is_target_and_partner(self) -> None:
+        s = Settings().merged({"partner_language": "en"})
+        self.assertEqual(factory.asr_languages(s, "interpret"), (None, ("zh", "en")))
+        s = Settings().merged({"target_language": "ko", "partner_language": "zh-CN"})
+        self.assertEqual(factory.asr_languages(s, "interpret"), (None, ("ko", "zh")))
+        # 收聽語言只影響影片翻譯
+        s = Settings().merged({"source_language": "fr"})
+        self.assertEqual(factory.asr_languages(s, "interpret"), (None, ("zh", "ja")))
+
+    def test_asr_languages_names_forced_and_candidate_languages(self) -> None:
+        media = factory.asr_languages(Settings(), "media")
+        self.assertEqual(
+            (media.forced_language, media.candidate_languages), ("ja", ("ja",))
+        )
+        interpret = factory.asr_languages(Settings(), "interpret")
+        self.assertIsNone(interpret.forced_language)
+        self.assertEqual(interpret.candidate_languages, ("zh", "ja"))
 
     def test_pipeline_config_per_mode(self) -> None:
         s = Settings().merged(
@@ -35,6 +61,35 @@ class FactoryTest(unittest.TestCase):
         self.assertEqual((interpret.pause_secs, interpret.max_secs), (0.5, 8.0))
         self.assertEqual(interpret.partner_language, "en")
         self.assertEqual(media.partial_interval_ms, 900)
+        self.assertEqual(media.source_language, "ja")
+        self.assertTrue(media.translation_enabled)
+        off = factory.pipeline_config(
+            Settings().merged(
+                {"source_language": "auto", "translation": {"enabled": False}}
+            ),
+            "media",
+        )
+        self.assertEqual(off.source_language, "auto")
+        self.assertFalse(off.translation_enabled)
+
+    def test_create_transcriber_passes_forced_language(self) -> None:
+        with mock.patch("kikitori.asr.load_transcriber") as load:
+            factory.create_transcriber(
+                "base",
+                device="cpu",
+                role="final",
+                candidate_languages=("ko",),
+                forced_language="ko",
+            )
+        options = load.call_args.kwargs["options"]
+        self.assertEqual(
+            (options.forced_language, options.candidate_languages), ("ko", ("ko",))
+        )
+        with mock.patch("kikitori.asr.load_transcriber") as load:
+            factory.create_transcriber(
+                "base", device="cpu", role="fast", candidate_languages=None
+            )
+        self.assertIsNone(load.call_args.kwargs["options"].forced_language)
 
     def test_create_transcriber_passes_settings_to_asr(self) -> None:
         cuda_dir = str(Path(tempfile.gettempdir()).resolve())
@@ -43,7 +98,7 @@ class FactoryTest(unittest.TestCase):
                 "small",
                 device="cuda",
                 role="fast",
-                languages=("zh", "ja"),
+                candidate_languages=("zh", "ja"),
                 compute_type="int8_float16",
                 cuda_library_dirs=(cuda_dir,),
             )
@@ -59,25 +114,29 @@ class FactoryTest(unittest.TestCase):
     def test_create_transcriber_cpu_threads_default_and_explicit(self) -> None:
         with mock.patch("kikitori.asr.load_transcriber") as load:
             factory.create_transcriber(
-                "base", device="cpu", role="fast", languages=None
+                "base", device="cpu", role="fast", candidate_languages=None
             )
             self.assertEqual(load.call_args.kwargs["cpu_threads"], 0)
             factory.create_transcriber(
-                "base", device="cpu", role="fast", languages=None, cpu_threads=3
+                "base",
+                device="cpu",
+                role="fast",
+                candidate_languages=None,
+                cpu_threads=3,
             )
             self.assertEqual(load.call_args.kwargs["cpu_threads"], 3)
 
     def test_final_role_uses_beam_search(self) -> None:
         with mock.patch("kikitori.asr.load_transcriber") as load:
             factory.create_transcriber(
-                "base", device="cpu", role="final", languages=None
+                "base", device="cpu", role="final", candidate_languages=None
             )
         self.assertGreater(load.call_args.kwargs["options"].beam_size, 1)
 
     def test_unknown_model(self) -> None:
         with self.assertRaises(factory.UnknownModelError):
             factory.create_transcriber(
-                "huge-v9", device="cpu", role="fast", languages=None
+                "huge-v9", device="cpu", role="fast", candidate_languages=None
             )
         with self.assertRaises(factory.UnknownModelError):
             factory.no_speech_reliable("huge-v9")
@@ -190,6 +249,20 @@ class BuildComponentsAsrTest(unittest.TestCase):
         calls = self._calls(settings)
         self.assertEqual(calls["fast"]["cuda_library_dirs"], [self.runtime])
 
+    def test_media_source_language_is_forced_on_both_paths(self) -> None:
+        calls = self._calls(Settings().merged({"source_language": "es"}))
+        for role in ("fast", "final"):
+            options = calls[role]["options"]
+            self.assertEqual(options.forced_language, "es")  # type: ignore[attr-defined]
+            self.assertEqual(options.candidate_languages, ("es",))  # type: ignore[attr-defined]
+
+    def test_media_auto_detects_within_catalog(self) -> None:
+        calls = self._calls(Settings().merged({"source_language": "auto"}))
+        for role in ("fast", "final"):
+            options = calls[role]["options"]
+            self.assertIsNone(options.forced_language)  # type: ignore[attr-defined]
+            self.assertEqual(options.candidate_languages, WHISPER_CODES)  # type: ignore[attr-defined]
+
     def test_runtime_check_failure_is_logged_not_fatal(self) -> None:
         self.runtime_dir.side_effect = OSError("disk unplugged")
         with self.assertLogs("kikitori.pipeline.factory", "WARNING"):
@@ -254,6 +327,80 @@ class WarmUpTranslationTest(unittest.TestCase):
         self.assertEqual([m for m, _ in log], ["qwen3.5:9b", "qwen3.5:4b"])
         self.assertEqual(log[0][1].source_language, "en")
         self.assertEqual(log[0][1].target_language, "zh-TW")
+
+    def test_media_uses_the_source_language_direction(self) -> None:
+        settings = Settings().merged({"source_language": "ko", "target_language": "es"})
+        ((_, request),) = self._warm(settings, "media")
+        self.assertEqual(
+            (request.source_language, request.target_language), ("ko", "es")
+        )
+        self.assertTrue(request.text.strip())
+
+    def test_media_auto_picks_a_source_different_from_the_target(self) -> None:
+        settings = Settings().merged(
+            {
+                "source_language": "auto",
+                "target_language": "ja",
+                "partner_language": "en",
+            }
+        )
+        ((_, request),) = self._warm(settings, "media")
+        self.assertNotEqual(request.source_language, "ja")
+        self.assertEqual(request.target_language, "ja")
+
+    def test_auto_source_respects_direction_limited_models(self) -> None:
+        settings = Settings().merged(
+            {
+                "source_language": "auto",
+                "translation": {
+                    "fast_model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+                    "final_model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+                },
+            }
+        )
+        ((_, request),) = self._warm(settings, "media")
+        self.assertEqual(
+            (request.source_language, request.target_language), ("ja", "zh-TW")
+        )
+
+    def test_unsupported_direction_is_not_warmed(self) -> None:
+        # Sakura 只做日 → 中：不論哪個分支，模型不支援的方向都不送預熱（送了只會被拒絕）
+        sakura = "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"
+        models = {"fast_model": sakura, "final_model": sakura}
+        media_en = Settings().merged({"source_language": "en", "translation": models})
+        self.assertIsNone(factory.warm_up_request(media_en, "media"))
+        self.assertEqual(self._warm(media_en, "media"), [])
+        interpret_en = Settings().merged(
+            {"partner_language": "en", "translation": models}
+        )
+        self.assertIsNone(factory.warm_up_request(interpret_en, "interpret"))
+        # 支援的方向照常預熱
+        interpret_ja = Settings().merged({"translation": models})
+        request = factory.warm_up_request(interpret_ja, "interpret")
+        assert request is not None
+        self.assertEqual(
+            (request.source_language, request.target_language), ("ja", "zh-TW")
+        )
+
+    def test_every_language_has_warm_up_text(self) -> None:
+        for code in WHISPER_CODES:
+            with self.subTest(code=code):
+                self.assertTrue(factory.warm_up_text(code).strip())
+        # 清單外的語言退回英文，不丟例外
+        self.assertEqual(factory.warm_up_text("nn"), factory.warm_up_text("en"))
+
+    def test_same_language_media_needs_no_warm_up(self) -> None:
+        # 聽中文、看中文字幕只做字形轉換，不會用到翻譯模型
+        settings = Settings().merged(
+            {"source_language": "zh-CN", "target_language": "zh-TW"}
+        )
+        self.assertEqual(self._warm(settings, "media"), [])
+
+    def test_translation_disabled_is_never_warmed(self) -> None:
+        settings = Settings().merged({"translation": {"enabled": False}})
+        for mode in ("media", "interpret"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self._warm(settings, mode), [])
 
     def test_remote_server_is_not_warmed(self) -> None:
         settings = Settings().merged(
@@ -402,6 +549,28 @@ class KeepWarmTest(unittest.TestCase):
         self.assertIs(
             factory.attach_keep_warm(components, settings, "media"), components
         )
+
+    def test_translation_disabled_gets_no_keep_warm(self) -> None:
+        components = _components()
+        settings = Settings().merged({"translation": {"enabled": False}})
+        self.assertIs(
+            factory.attach_keep_warm(components, settings, "media"), components
+        )
+
+    def test_translation_disabled_session_never_calls_the_translator(self) -> None:
+        # 只顯示原文：預熱、保溫、pipeline 都不呼叫翻譯器（以計數的假翻譯器確認）
+        calls: list = []
+        settings = Settings().merged({"translation": {"enabled": False}})
+
+        def make(config: TranslatorConfig) -> _RecordingTranslator:
+            return _RecordingTranslator(config, calls, fail=False)
+
+        factory.warm_up_translation(settings, "media", make_translator=make)
+        components = factory.attach_keep_warm(
+            _components(), settings, "media", make_translator=make
+        )
+        self.assertIsNone(components.keep_warm)
+        self.assertEqual(calls, [])
 
     def test_disabled_by_zero(self) -> None:
         components = _components()

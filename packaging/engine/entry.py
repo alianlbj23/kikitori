@@ -86,7 +86,11 @@ def _check_opencc() -> str:
     converted = opencc.OpenCC("s2twp.json").convert("软件")
     if converted != "軟體":
         raise RuntimeError(f"OpenCC s2twp converted '软件' to {converted!r}")
-    return "opencc s2twp ok"
+    # 字幕語言 zh-CN 用 t2s（kikitori.languages 的 script_conversion）。
+    converted = opencc.OpenCC("t2s.json").convert("軟體")
+    if converted != "软体":
+        raise RuntimeError(f"OpenCC t2s converted '軟體' to {converted!r}")
+    return "opencc s2twp, t2s ok"
 
 
 def _module_dir(name: str) -> Path:

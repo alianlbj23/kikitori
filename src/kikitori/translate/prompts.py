@@ -1,25 +1,73 @@
 """依模型的提示詞格式組出 Chat Completions 的 messages。
 
 翻譯專用模型（HY-MT、Sakura）是用固定範本訓練的，偏離範本品質會掉，所以照
-官方 model card 逐字使用；通用模型（Qwen 等）則用 system 規則 + user 內容，
-指示以譯文語言撰寫。輸入的請求必須已經過 `languages.validate_request` 正規化。
+官方 model card 逐字使用；通用模型（Qwen 等）則用 system 規則 + user 內容。
+輸入的請求必須已經過 `languages.validate_request` 正規化：原文語言是 Whisper
+語言碼（中文為 "zh"），譯文語言是語言清單的語言碼。
 """
 
 from dataclasses import dataclass
 from typing import Literal
 
+from kikitori.languages import (
+    LANGUAGES,
+    WHISPER_CODES,
+    get_language,
+    whisper_language_name,
+)
 from kikitori.translate.errors import InvalidRequestError
+from kikitori.translate.languages import SAKURA_PAIRS
 from kikitori.translate.types import TranslationRequest
 
 PromptStyle = Literal["generic", "hunyuan_mt", "sakura"]
 Message = dict[str, str]
 
-# HY-MT1.5 model card 語言表的「Chinese Names」欄；zh-TW 對應 zh-Hant。
-_HUNYUAN_LANGUAGE_NAMES = {
+# HY-MT1.5 model card 語言表（https://huggingface.co/tencent/HY-MT1.5-7B）只取語言清單
+# 內的語言。ZH<=>XX 範本用「Chinese Names」欄、XX<=>XX 範本用「Languages」欄；
+# zh-TW 對應表中的 zh-Hant（Traditional Chinese），zh-CN 對應 zh（Chinese）。
+_HUNYUAN_CHINESE_NAMES = {
+    "zh-CN": "中文",
     "zh-TW": "繁体中文",
-    "ja": "日语",
     "en": "英语",
-    "zh": "中文",
+    "fr": "法语",
+    "pt": "葡萄牙语",
+    "es": "西班牙语",
+    "ja": "日语",
+    "tr": "土耳其语",
+    "ru": "俄语",
+    "ar": "阿拉伯语",
+    "ko": "韩语",
+    "th": "泰语",
+    "it": "意大利语",
+    "de": "德语",
+    "vi": "越南语",
+    "id": "印尼语",
+    "hi": "印地语",
+    "pl": "波兰语",
+    "nl": "荷兰语",
+    "uk": "乌克兰语",
+}
+_HUNYUAN_ENGLISH_NAMES = {
+    "zh-CN": "Chinese",
+    "zh-TW": "Traditional Chinese",
+    "en": "English",
+    "fr": "French",
+    "pt": "Portuguese",
+    "es": "Spanish",
+    "ja": "Japanese",
+    "tr": "Turkish",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "ko": "Korean",
+    "th": "Thai",
+    "it": "Italian",
+    "de": "German",
+    "vi": "Vietnamese",
+    "id": "Indonesian",
+    "hi": "Hindi",
+    "pl": "Polish",
+    "nl": "Dutch",
+    "uk": "Ukrainian",
 }
 
 
@@ -31,8 +79,74 @@ class _GenericTemplate:
     instruction: str
 
 
-# 指示一律用「譯文語言」寫：實測英文指示下 qwen3.5:9b 翻日文時有 11/18 次直接輸出
-# 日文，改用繁體中文指示後為 0/18（experiments/translate_benchmark/README.md）。
+# 原文語言（Whisper 語言碼）在各指示語言中的名稱。
+_SOURCE_NAMES_ZH_TW = {
+    "ja": "日文",
+    "en": "英文",
+    "zh": "中文",
+    "ko": "韓文",
+    "es": "西班牙文",
+    "fr": "法文",
+    "de": "德文",
+    "pt": "葡萄牙文",
+    "ru": "俄文",
+    "it": "義大利文",
+    "ar": "阿拉伯文",
+    "hi": "印地文",
+    "id": "印尼文",
+    "vi": "越南文",
+    "th": "泰文",
+    "tr": "土耳其文",
+    "pl": "波蘭文",
+    "nl": "荷蘭文",
+    "uk": "烏克蘭文",
+}
+_SOURCE_NAMES_ZH_CN = {
+    "ja": "日语",
+    "en": "英语",
+    "zh": "中文",
+    "ko": "韩语",
+    "es": "西班牙语",
+    "fr": "法语",
+    "de": "德语",
+    "pt": "葡萄牙语",
+    "ru": "俄语",
+    "it": "意大利语",
+    "ar": "阿拉伯语",
+    "hi": "印地语",
+    "id": "印尼语",
+    "vi": "越南语",
+    "th": "泰语",
+    "tr": "土耳其语",
+    "pl": "波兰语",
+    "nl": "荷兰语",
+    "uk": "乌克兰语",
+}
+_SOURCE_NAMES_JA = {
+    "ja": "日本語",
+    "en": "英語",
+    "zh": "中国語",
+    "ko": "韓国語",
+    "es": "スペイン語",
+    "fr": "フランス語",
+    "de": "ドイツ語",
+    "pt": "ポルトガル語",
+    "ru": "ロシア語",
+    "it": "イタリア語",
+    "ar": "アラビア語",
+    "hi": "ヒンディー語",
+    "id": "インドネシア語",
+    "vi": "ベトナム語",
+    "th": "タイ語",
+    "tr": "トルコ語",
+    "pl": "ポーランド語",
+    "nl": "オランダ語",
+    "uk": "ウクライナ語",
+}
+_SOURCE_NAMES_EN = {code: whisper_language_name(code) for code in WHISPER_CODES}
+
+# zh-TW、zh-CN、ja、en 的指示用「譯文語言」寫：實測英文指示下 qwen3.5:9b 翻日文時有
+# 11/18 次直接輸出日文，改用繁體中文指示後為 0/18（experiments/translate_benchmark/README.md）。
 _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
     "zh-TW": _GenericTemplate(
         system_lines=(
@@ -44,9 +158,23 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
             "- 前文只供參考，不要翻譯前文。",
             "- 一律使用繁體中文與台灣用語，不要用簡體字。",
         ),
-        source_names={"ja": "日文", "en": "英文"},
+        source_names=_SOURCE_NAMES_ZH_TW,
         context_header="前文（只供參考，不要翻譯）：",
         instruction="請翻譯成繁體中文：",
+    ),
+    "zh-CN": _GenericTemplate(
+        system_lines=(
+            "你是字幕翻译员，把用户给的{source}句子翻译成简体中文。",
+            "规则：",
+            "- 只输出一行译文。",
+            "- 简短、自然、忠于原意与语气。",
+            "- 不要解释、注释、引号或拼音，不要保留原文。",
+            "- 前文只供参考，不要翻译前文。",
+            "- 一律使用简体中文，不要用繁体字。",
+        ),
+        source_names=_SOURCE_NAMES_ZH_CN,
+        context_header="前文（只供参考，不要翻译）：",
+        instruction="请翻译成简体中文：",
     ),
     "ja": _GenericTemplate(
         system_lines=(
@@ -57,7 +185,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
             "- 説明、注釈、引用符、ふりがなは付けない。原文を残さない。",
             "- 前の文は参考用なので翻訳しない。",
         ),
-        source_names={"zh": "中国語"},
+        source_names=_SOURCE_NAMES_JA,
         context_header="前の文（参考用、翻訳しない）：",
         instruction="日本語に翻訳してください：",
     ),
@@ -70,11 +198,41 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
             "- No explanations, notes, romanization, or quotation marks.",
             "- Earlier lines are for reference only; do not translate them.",
         ),
-        source_names={"zh": "Chinese"},
+        source_names=_SOURCE_NAMES_EN,
         context_header="Earlier lines (reference only, do not translate):",
         instruction="Translate into English:",
     ),
 }
+
+
+def _english_template(target_code: str) -> _GenericTemplate:
+    # 其他譯文語言沒有實測過用該語言寫的指示，改用英文指示，並同時寫出英文名與原生名、
+    # 明確要求只輸出該語言，降低模型回到原文語言或英文的機率。
+    lang = get_language(target_code)
+    name = f"{lang.english_name} ({lang.native_name})"
+    return _GenericTemplate(
+        system_lines=(
+            (
+                "You are a subtitle translator. Translate the user's {source} line "
+                f"into {name}."
+            ),
+            "Rules:",
+            f"- Output only the translation as a single line, written in {name}.",
+            "- Keep it short, natural and faithful to the meaning and tone.",
+            "- No explanations, notes, romanization, or quotation marks.",
+            "- Earlier lines are for reference only; do not translate them.",
+            f"- Never answer in any language other than {lang.english_name}.",
+        ),
+        source_names=_SOURCE_NAMES_EN,
+        context_header="Earlier lines (reference only, do not translate):",
+        instruction=f"Translate into {name}:",
+    )
+
+
+for _lang in LANGUAGES:
+    if _lang.code not in _GENERIC_TEMPLATES:
+        _GENERIC_TEMPLATES[_lang.code] = _english_template(_lang.code)
+del _lang
 
 # Sakura-GalTransl v3 官方 system prompt（含「简体中文」：模型就是這樣訓練的，
 # 繁體由後處理的 OpenCC 轉換負責）。
@@ -106,27 +264,39 @@ def build_messages(style: PromptStyle, request: TranslationRequest) -> list[Mess
 
 
 def _hunyuan(request: TranslationRequest) -> list[Message]:
-    # 官方說模型沒有預設 system prompt，範本整段放在 user 訊息。本專案的語言組合
-    # 都含中文，所以用 ZH<=>XX 範本，不用英文的 XX<=>XX 範本。
-    target = _HUNYUAN_LANGUAGE_NAMES[request.target_language]
+    # 官方說模型沒有預設 system prompt，範本整段放在 user 訊息。原文或譯文是中文時用
+    # ZH<=>XX 範本（中文指示、中文語言名），其他組合用 XX<=>XX 範本（英文）。
+    target_code = request.target_language
+    if target_code not in _HUNYUAN_CHINESE_NAMES:
+        raise InvalidRequestError(f"HY-MT does not support target {target_code!r}")
+    chinese = request.source_language == "zh" or target_code in ("zh-TW", "zh-CN")
     if request.context:
+        # 官方只有一個（中文的）前文範本，所以任何組合帶前文時都用它。
+        target = _HUNYUAN_CHINESE_NAMES[target_code]
         content = (
             "\n".join(request.context)
             + f"\n参考上面的信息，把下面的文本翻译成{target}，"
             "注意不需要翻译上文，也不要额外解释：\n" + request.text
         )
-    else:
+    elif chinese:
+        target = _HUNYUAN_CHINESE_NAMES[target_code]
         content = (
             f"将以下文本翻译为{target}，注意只需要输出翻译后的结果，不要额外解释：\n\n"
             + request.text
+        )
+    else:
+        target = _HUNYUAN_ENGLISH_NAMES[target_code]
+        content = (
+            f"Translate the following segment into {target}, "
+            "without additional explanation.\n\n" + request.text
         )
     return [{"role": "user", "content": content}]
 
 
 def _sakura(request: TranslationRequest) -> list[Message]:
-    if (request.source_language, request.target_language) != ("ja", "zh-TW"):
-        raise InvalidRequestError("Sakura models only translate ja -> zh-TW")
-    # 官方的 [History] 是「上一輪的譯文」，而 request.context 是前文原文，格式不合，
+    if (request.source_language, request.target_language) not in SAKURA_PAIRS:
+        raise InvalidRequestError("Sakura models only translate ja -> zh-TW / zh-CN")
+    # 模型只輸出簡體中文；zh-TW 由後處理的 OpenCC 轉成台灣正體。官方的 [History] 是「上一輪的譯文」，而 request.context 是前文原文，格式不合，
     # 硬塞進去可能讓模型把前文也翻出來，所以不放前文；術語表目前留空。
     content = (
         "参考以下术语表（可为空，格式为src->dst #备注）：\n\n"
@@ -140,7 +310,12 @@ def _sakura(request: TranslationRequest) -> list[Message]:
 
 
 def _generic(request: TranslationRequest) -> list[Message]:
-    template = _GENERIC_TEMPLATES[request.target_language]
+    template = _GENERIC_TEMPLATES.get(request.target_language)
+    if template is None or request.source_language not in template.source_names:
+        raise InvalidRequestError(
+            "unsupported language pair: "
+            f"{request.source_language!r} -> {request.target_language!r}"
+        )
     source = template.source_names[request.source_language]
     system = "\n".join(template.system_lines).format(source=source)
     user = ""

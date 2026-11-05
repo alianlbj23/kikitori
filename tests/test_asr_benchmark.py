@@ -151,14 +151,16 @@ class MenuInputTest(unittest.TestCase):
 
 class RescoreTest(unittest.TestCase):
     def test_rescore_uses_current_filter(self) -> None:
-        def row(clip: str, kind: str, text: str, no_speech: float) -> dict[str, object]:
+        def row(
+            clip: str, kind: str, text: str, no_speech: float, language: str = "en"
+        ) -> dict[str, object]:
             return {
                 "clip": clip,
                 "kind": kind,
                 "text": text,
                 "no_speech": no_speech,
                 "avg_logprob": -0.3,
-                "detected_language": "en",
+                "detected_language": language,
                 "rejected": None,
             }
 
@@ -166,7 +168,8 @@ class RescoreTest(unittest.TestCase):
             "label": "x",
             "rows": [
                 row("a", "speech", "こんにちは", 0.01),
-                row("n1", "noise", "ご視聴ありがとうございました", 0.01),
+                # 幻覺片語只比對辨識出的語言：日文套話是以 ja 的語言 token 輸出的
+                row("n1", "noise", "ご視聴ありがとうございました", 0.01, "ja"),
                 row("n2", "noise", "", 0.9),
             ],
         }

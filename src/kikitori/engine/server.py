@@ -23,7 +23,7 @@ from kikitori.capture.errors import (
     PermissionDeniedError,
 )
 from kikitori.capture.types import AudioSource, DeviceKind
-from kikitori.config import SettingsError
+from kikitori.config import SettingsError, check_interpret_languages
 from kikitori.engine import protocol as p
 from kikitori.engine.deferred import Deferred, DeferredRunner
 from kikitori.engine.hardware_service import HardwareService, recommendation_patch
@@ -525,6 +525,15 @@ class EngineServer:
                 p.INVALID_PARAMS, f"mode must be one of {list(MODES)}, got {mode!r}"
             )
         settings = self._services.settings_store.get()
+        if mode == "interpret":
+            # 設定只在 `mode` 為 interpret 時檢查對方語言；這裡的 mode 由請求決定、不經過
+            # 設定驗證，所以要再檢查一次，否則口譯無法靠語言偵測分辨說話者。
+            try:
+                check_interpret_languages(
+                    settings.target_language, settings.partner_language
+                )
+            except SettingsError as exc:
+                raise p.ProtocolError(p.INVALID_SETTINGS, str(exc)) from exc
         if "device_id" in params:
             device_id = params["device_id"]
             if device_id is not None and (

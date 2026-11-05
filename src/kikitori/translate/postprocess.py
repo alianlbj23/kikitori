@@ -1,6 +1,7 @@
 """把模型的原始輸出整理成可以直接上字幕的譯文。
 
-模型偶爾會輸出思考過程、加引號或「譯文：」標籤，或（尤其是 Sakura）輸出簡體字；
+模型偶爾會輸出思考過程、加引號或「譯文：」標籤，或輸出與譯文語言不符的字形（尤其是
+Sakura 一律輸出簡體）；
 這些都在這裡統一處理，讓 `translate()` 與 `stream()` 得到一致的結果。
 """
 
@@ -9,6 +10,8 @@ import re
 import threading
 
 import opencc
+
+from kikitori.languages import UnknownLanguageError, get_language
 
 _THINK_BLOCK = re.compile(r"<(think|thinking)>.*?</\1>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN = re.compile(r"<(?:think|thinking)>", re.IGNORECASE)
@@ -23,8 +26,11 @@ _PARTIAL_OPEN_AT_END = re.compile(
 _SPECIAL_TOKEN = re.compile(r"<\|[A-Za-z0-9_]*\|>")
 _PARTIAL_SPECIAL_AT_END = re.compile(r"<\|[A-Za-z0-9_]*\|?$")
 
+# 只列「標籤 + 冒號」的形式；正常字幕以這些詞加冒號開頭的情況極少。
 _LEADING_LABEL = re.compile(
-    r"^(?:譯文|译文|翻譯|翻译|中文翻譯|中文翻译|translation)\s*[:：]\s*", re.IGNORECASE
+    r"^(?:譯文|译文|翻譯|翻译|中文翻譯|中文翻译|翻訳|訳文|번역|translation|traducción"
+    r"|traduction|übersetzung|tradução|traduzione|перевод)\s*[:：]\s*",
+    re.IGNORECASE,
 )
 _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 
@@ -111,15 +117,32 @@ def to_taiwan_traditional(text: str) -> str:
     return _convert("s2twp.json", text)
 
 
+def to_script(text: str, language: str) -> str:
+    """依語言清單的 `script_conversion` 轉換字形：zh-TW → 台灣正體、zh-CN → 簡體。
+
+    沒有轉換規則或不在清單內的語言原樣回傳。zh-TW 沿用選擇性轉換
+    （`to_taiwan_traditional`），簡體則整句 `t2s`：已是簡體的文字轉了也不變。
+    """
+    try:
+        conversion = get_language(language).script_conversion
+    except UnknownLanguageError:
+        return text
+    if conversion is None:
+        return text
+    if conversion == "s2twp":
+        return to_taiwan_traditional(text)
+    return _convert(f"{conversion}.json", text)
+
+
 def finalize_translation(raw: str, target_language: str, convert: bool) -> str:
     """把模型原始輸出整理成字幕譯文。
 
     Args:
         raw: 模型輸出（可以是串流到一半的累積內容）。
         target_language: 正規化後的譯文語言碼。
-        convert: 目標為 "zh-TW" 時是否做簡轉繁。
+        convert: 是否依譯文語言做字形轉換（見 `to_script()`）。
     """
     text = clean_subtitle(strip_thinking(raw))
-    if convert and target_language == "zh-TW":
-        text = to_taiwan_traditional(text)
+    if convert:
+        text = to_script(text, target_language)
     return text

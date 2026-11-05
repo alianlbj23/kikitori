@@ -84,11 +84,12 @@ class TranslatorConfig:
         retry_backoff: 指數退避的基數（秒）。
         max_tokens: 回應長度上限，避免模型失控輸出長文。
         max_context_lines: 前文最多帶幾句。
-        convert_to_traditional: 目標為 zh-TW 時是否以 OpenCC 轉成台灣正體。
+        convert_script: 是否依譯文語言做 OpenCC 字形轉換（zh-TW 轉台灣正體、
+            zh-CN 轉簡體）。
 
     Raises:
         ValueError: 欄位值超出範圍或格式不對（數值欄位型別不對也算）。
-        TypeError: `base_url` 不是字串或 `convert_to_traditional` 不是 bool。
+        TypeError: `base_url` 不是字串或 `convert_script` 不是 bool。
     """
 
     model: str
@@ -101,7 +102,7 @@ class TranslatorConfig:
     retry_backoff: float = 0.5
     max_tokens: int = 256
     max_context_lines: int = DEFAULT_MAX_CONTEXT_LINES
-    convert_to_traditional: bool = True
+    convert_script: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -136,8 +137,8 @@ class TranslatorConfig:
             )
         _check_int("max_tokens", self.max_tokens, 1, 8192)
         _check_int("max_context_lines", self.max_context_lines, 0, 20)
-        if not isinstance(self.convert_to_traditional, bool):
-            raise TypeError("convert_to_traditional must be bool")
+        if not isinstance(self.convert_script, bool):
+            raise TypeError("convert_script must be bool")
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,7 @@ class OpenAICompatibleTranslator:
                 "translation truncated by max_tokens=%d", self.config.max_tokens
             )
         text = finalize_translation(
-            content, req.target_language, self.config.convert_to_traditional
+            content, req.target_language, self.config.convert_script
         )
         if not text:
             raise TranslationResponseError("model returned an empty translation")
@@ -254,7 +255,9 @@ class OpenAICompatibleTranslator:
         context_lines = (
             self.config.max_context_lines if self.preset.supports_context else 0
         )
-        req = validate_request(request, self.preset.language_pairs, context_lines)
+        req = validate_request(
+            request, self.preset.languages, self.preset.pairs, context_lines
+        )
         return req, build_messages(self.preset.prompt_style, req)
 
     def _payload(
@@ -301,7 +304,7 @@ class OpenAICompatibleTranslator:
                 if len(raw) > MAX_RESPONSE_BYTES:
                     raise TranslationResponseError("streamed response too large")
                 text = finalize_translation(
-                    raw, req.target_language, self.config.convert_to_traditional
+                    raw, req.target_language, self.config.convert_script
                 )
                 if text and text != last:
                     last = text

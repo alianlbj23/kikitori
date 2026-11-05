@@ -2,9 +2,11 @@
 
 import unittest
 
+from kikitori.languages import WHISPER_CODES, get_language, language_codes
 from kikitori.translate.errors import InvalidRequestError
 from kikitori.translate.languages import (
-    SUPPORTED_PAIRS,
+    ALL_LANGUAGE_CODES,
+    SAKURA_PAIRS,
     normalize_language,
     validate_request,
 )
@@ -20,6 +22,7 @@ from kikitori.translate.presets import (
     TranslationModelChoice,
     preset_for_model,
     recommend_translation_models,
+    supports,
 )
 from kikitori.translate.prompts import build_messages
 from kikitori.translate.types import TranslationRequest
@@ -29,12 +32,14 @@ class NormalizeLanguageTest(unittest.TestCase):
     def test_accepts_known_codes_case_insensitively(self) -> None:
         self.assertEqual(normalize_language("JA"), "ja")
         self.assertEqual(normalize_language(" en "), "en")
-        self.assertEqual(normalize_language("zh"), "zh")
         self.assertEqual(normalize_language("zh_tw"), "zh-TW")
         self.assertEqual(normalize_language("zh-Hant"), "zh-TW")
+        self.assertEqual(normalize_language("zh-cn"), "zh-CN")
+        self.assertEqual(normalize_language("KO"), "ko")
 
     def test_rejects_unknown_codes(self) -> None:
-        for code in ["ko", "", "japanese", "zh-CN", "x" * 50]:
+        # "zh" 不分繁簡，不能當譯文語言（原文語言另由 Whisper 語言碼處理）。
+        for code in ["xx", "", "japanese", "zh", "nn", "x" * 50]:
             with self.subTest(code=code), self.assertRaises(InvalidRequestError):
                 normalize_language(code)
 
@@ -56,11 +61,22 @@ class ValidateRequestTest(unittest.TestCase):
         req = validate_request(TranslationRequest("你好", "zh-TW", "ja"))
         self.assertEqual((req.source_language, req.target_language), ("zh", "ja"))
 
-    def test_all_mode_pairs_supported(self) -> None:
-        self.assertEqual(
-            SUPPORTED_PAIRS,
-            {("ja", "zh-TW"), ("en", "zh-TW"), ("zh", "ja"), ("zh", "en")},
-        )
+    def test_any_catalog_pair_with_different_whisper_languages(self) -> None:
+        for source in WHISPER_CODES:
+            for target in language_codes():
+                if get_language(target).whisper_code == source:
+                    continue
+                with self.subTest(pair=(source, target)):
+                    req = validate_request(TranslationRequest("x", source, target))
+                    self.assertEqual(
+                        (req.source_language, req.target_language), (source, target)
+                    )
+
+    def test_catalog_source_codes_become_whisper_codes(self) -> None:
+        req = validate_request(TranslationRequest("你好", "zh-CN", "ko"))
+        self.assertEqual((req.source_language, req.target_language), ("zh", "ko"))
+        req = validate_request(TranslationRequest("hola", "ES", "zh_cn"))
+        self.assertEqual((req.source_language, req.target_language), ("es", "zh-CN"))
 
     def test_rejects_empty_or_blank_text(self) -> None:
         for text in ["", "   ", "\n\t"]:
@@ -71,20 +87,46 @@ class ValidateRequestTest(unittest.TestCase):
         with self.assertRaises(InvalidRequestError):
             validate_request(TranslationRequest("あ" * 2001, "ja"))
 
-    def test_rejects_unsupported_pairs(self) -> None:
-        for src, tgt in [("ja", "en"), ("en", "ja"), ("zh", "zh-TW"), ("ja", "ja")]:
+    def test_rejects_same_whisper_language(self) -> None:
+        # 同一個 Whisper 語言（含繁↔簡）不送翻譯模型，由 pipeline 只做字形轉換。
+        for src, tgt in [
+            ("zh", "zh-TW"),
+            ("zh-CN", "zh-TW"),
+            ("ja", "ja"),
+            ("en", "en"),
+        ]:
             with self.subTest(pair=(src, tgt)), self.assertRaises(InvalidRequestError):
                 validate_request(TranslationRequest("x", src, tgt))
 
     def test_rejects_unsupported_language_code(self) -> None:
-        with self.assertRaises(InvalidRequestError):
-            validate_request(TranslationRequest("안녕", "ko"))
+        for src, tgt in [("nn", "zh-TW"), ("ja", "zh"), ("ja", "sw"), (None, "en")]:
+            with self.subTest(pair=(src, tgt)), self.assertRaises(InvalidRequestError):
+                validate_request(TranslationRequest("x", src, tgt))  # type: ignore[arg-type]
 
     def test_respects_restricted_pairs(self) -> None:
         with self.assertRaises(InvalidRequestError):
             validate_request(
                 TranslationRequest("hello", "en"), pairs=frozenset({("ja", "zh-TW")})
             )
+        req = validate_request(
+            TranslationRequest("はい", "ja", "zh-CN"),
+            pairs=frozenset({("ja", "zh-TW"), ("ja", "zh-CN")}),
+        )
+        self.assertEqual(req.target_language, "zh-CN")
+
+    def test_respects_restricted_languages(self) -> None:
+        languages = frozenset({"ja", "zh-TW", "zh-CN"})
+        for src, tgt in [("en", "zh-TW"), ("ja", "ko")]:
+            with self.subTest(pair=(src, tgt)), self.assertRaises(InvalidRequestError):
+                validate_request(TranslationRequest("x", src, tgt), languages=languages)
+        # 原文 "zh" 只要清單中有任一個中文就算支援
+        req = validate_request(
+            TranslationRequest("你好", "zh", "ja"), languages=languages
+        )
+        self.assertEqual(req.source_language, "zh")
+
+    def test_all_languages_is_the_catalog(self) -> None:
+        self.assertEqual(ALL_LANGUAGE_CODES, frozenset(language_codes()))
 
     def test_rejects_wrong_types(self) -> None:
         bad = [
@@ -193,6 +235,92 @@ class BuildMessagesTest(unittest.TestCase):
         self.assertIn("do not translate", msgs[1]["content"])
         self.assertTrue(msgs[1]["content"].endswith("Translate into English:\n你好"))
 
+    def test_generic_zh_cn_instructions_are_in_simplified_chinese(self) -> None:
+        msgs = build_messages(
+            "generic", TranslationRequest("Hello", "en", "zh-CN", ("Hi",))
+        )
+        system = msgs[0]["content"]
+        for phrase in ["英语", "简体中文", "不要用繁体字"]:
+            self.assertIn(phrase, system)
+        self.assertNotIn("台灣", system)
+        self.assertIn("不要翻译", msgs[1]["content"])
+        self.assertTrue(msgs[1]["content"].endswith("请翻译成简体中文：\nHello"))
+
+    def test_generic_other_targets_use_english_with_both_names(self) -> None:
+        msgs = build_messages("generic", TranslationRequest("おはよう", "ja", "ko"))
+        system, user = msgs[0]["content"], msgs[1]["content"]
+        self.assertIn("Japanese", system)
+        self.assertIn("Korean (한국어)", system)
+        self.assertIn("only", system)
+        self.assertTrue(user.endswith("Translate into Korean (한국어):\nおはよう"))
+        msgs = build_messages("generic", TranslationRequest("你好", "zh", "ar"))
+        self.assertIn("Chinese", msgs[0]["content"])
+        self.assertIn("Arabic (العربية)", msgs[0]["content"])
+
+    def test_generic_source_names_in_target_language(self) -> None:
+        cases = [
+            (TranslationRequest("안녕", "ko", "zh-TW"), "韓文"),
+            (TranslationRequest("Hola", "es", "zh-CN"), "西班牙语"),
+            (TranslationRequest("Привет", "ru", "ja"), "ロシア語"),
+            (TranslationRequest("Hallo", "nl", "en"), "Dutch"),
+        ]
+        for request, name in cases:
+            with self.subTest(request=request):
+                self.assertIn(name, build_messages("generic", request)[0]["content"])
+
+    def test_every_catalog_pair_builds_prompts_for_supporting_presets(self) -> None:
+        for preset in PRESETS.values():
+            for source in WHISPER_CODES:
+                for target in language_codes():
+                    if not supports(preset, source, target):
+                        continue
+                    with self.subTest(model=preset.model, pair=(source, target)):
+                        request = validate_request(
+                            TranslationRequest("x", source, target, ("y",))
+                        )
+                        msgs = build_messages(preset.prompt_style, request)
+                        self.assertTrue(msgs[-1]["content"].endswith("x"))
+
+    def test_hunyuan_non_chinese_pair_uses_english_template(self) -> None:
+        msgs = build_messages("hunyuan_mt", TranslationRequest("おはよう", "ja", "ko"))
+        self.assertEqual(
+            msgs,
+            [
+                {
+                    "role": "user",
+                    "content": "Translate the following segment into Korean, "
+                    "without additional explanation.\n\nおはよう",
+                }
+            ],
+        )
+
+    def test_hunyuan_chinese_pairs_use_chinese_template_and_names(self) -> None:
+        cases = [
+            (TranslationRequest("hola", "es", "zh-CN"), "翻译为中文"),
+            (TranslationRequest("hola", "es", "zh-TW"), "翻译为繁体中文"),
+            (TranslationRequest("你好", "zh", "uk"), "翻译为乌克兰语"),
+            (TranslationRequest("你好", "zh", "id"), "翻译为印尼语"),
+        ]
+        for request, phrase in cases:
+            with self.subTest(request=request):
+                content = build_messages("hunyuan_mt", request)[0]["content"]
+                self.assertTrue(content.startswith("将以下文本翻译为"))
+                self.assertIn(phrase, content)
+
+    def test_sakura_also_translates_to_simplified(self) -> None:
+        msgs = build_messages("sakura", TranslationRequest("はい", "ja", "zh-CN"))
+        self.assertTrue(msgs[1]["content"].endswith("翻译成简体中文：\nはい"))
+        with self.assertRaises(InvalidRequestError):
+            build_messages("sakura", TranslationRequest("はい", "ja", "ko"))
+
+    def test_sakura_prompt_and_preset_share_one_pair_list(self) -> None:
+        # 提示詞與預設組必須用同一份方向清單，改一邊不會讓另一邊悄悄不一致
+        sakura = preset_for_model("hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS")
+        self.assertIs(sakura.pairs, SAKURA_PAIRS)
+        for source, target in SAKURA_PAIRS:
+            with self.subTest(pair=(source, target)):
+                build_messages("sakura", TranslationRequest("はい", source, target))
+
     def test_unknown_style_rejected(self) -> None:
         with self.assertRaises(ValueError):
             build_messages("nope", TranslationRequest("x", "ja"))  # type: ignore[arg-type]
@@ -237,7 +365,16 @@ class CleanSubtitleTest(unittest.TestCase):
         self.assertEqual(clean_subtitle("「走吧」他說「快點」"), "「走吧」他說「快點」")
 
     def test_strips_leading_labels(self) -> None:
-        for raw in ["譯文：早安", "翻譯: 早安", "Translation: 早安", "译文：早安"]:
+        for raw in [
+            "譯文：早安",
+            "翻譯: 早安",
+            "Translation: 早安",
+            "译文：早安",
+            "翻訳：早安",
+            "번역: 早安",
+            "Traducción: 早安",
+            "Перевод: 早安",
+        ]:
             with self.subTest(raw=raw):
                 self.assertEqual(clean_subtitle(raw), "早安")
 
@@ -285,6 +422,11 @@ class TraditionalConversionTest(unittest.TestCase):
         self.assertEqual(simplified_characters("Hello, こんにちは"), [])
         self.assertEqual(simplified_characters("那么，由于"), ["么", "于"])
 
+    def test_finalize_converts_zh_cn_to_simplified(self) -> None:
+        raw = "這個軟體"
+        self.assertEqual(finalize_translation(raw, "zh-CN", convert=True), "这个软体")
+        self.assertEqual(finalize_translation(raw, "zh-CN", convert=False), raw)
+
     def test_finalize_converts_only_for_zh_tw(self) -> None:
         raw = "<think>x</think>「这个」"
         self.assertEqual(finalize_translation(raw, "zh-TW", convert=True), "這個")
@@ -312,7 +454,8 @@ class PresetsTest(unittest.TestCase):
         self.assertEqual(preset.model, "llama3.2:3b")
         self.assertEqual(preset.prompt_style, "generic")
         self.assertIsNone(preset.reasoning_effort)
-        self.assertEqual(preset.language_pairs, SUPPORTED_PAIRS)
+        self.assertEqual(preset.languages, ALL_LANGUAGE_CODES)
+        self.assertIsNone(preset.pairs)
 
     def test_qwen_disables_thinking(self) -> None:
         self.assertEqual(preset_for_model("qwen3.5:4b").reasoning_effort, "none")
@@ -333,7 +476,7 @@ class PresetsTest(unittest.TestCase):
     def test_license_flags(self) -> None:
         sakura = preset_for_model("hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS")
         self.assertFalse(sakura.commercial_use)
-        self.assertEqual(sakura.language_pairs, frozenset({("ja", "zh-TW")}))
+        self.assertEqual(sakura.pairs, frozenset({("ja", "zh-TW"), ("ja", "zh-CN")}))
         hy = preset_for_model("hy-mt1.5-7b:latest")
         self.assertEqual(hy.excluded_regions, ("EU", "UK", "KR"))
         self.assertTrue(preset_for_model("qwen3.5:9b").commercial_use)
@@ -341,6 +484,35 @@ class PresetsTest(unittest.TestCase):
             self.assertTrue(
                 preset.license and preset.license_url.startswith("https://")
             )
+
+
+class SupportsTest(unittest.TestCase):
+    def test_general_models_support_every_catalog_pair(self) -> None:
+        for model in ["qwen3.5:4b", "hy-mt1.5-7b:latest", "unknown:1b"]:
+            preset = preset_for_model(model)
+            with self.subTest(model=model):
+                self.assertTrue(supports(preset, "ko", "es"))
+                self.assertTrue(supports(preset, "zh", "uk"))
+                self.assertTrue(supports(preset, "ar", "zh-CN"))
+
+    def test_sakura_only_japanese_to_chinese(self) -> None:
+        sakura = preset_for_model("hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS")
+        self.assertTrue(supports(sakura, "ja", "zh-TW"))
+        self.assertTrue(supports(sakura, "ja", "zh-CN"))
+        self.assertFalse(supports(sakura, "en", "zh-TW"))
+        self.assertFalse(supports(sakura, "zh", "ja"))
+
+    def test_same_whisper_language_or_unknown_codes_are_not_translatable(self) -> None:
+        preset = preset_for_model("qwen3.5:4b")
+        for source, target in [
+            ("zh-CN", "zh-TW"),
+            ("ja", "ja"),
+            ("nn", "en"),
+            ("ja", "zh"),
+            ("ja", None),
+        ]:
+            with self.subTest(pair=(source, target)):
+                self.assertFalse(supports(preset, source, target))  # type: ignore[arg-type]
 
 
 class RecommendTest(unittest.TestCase):

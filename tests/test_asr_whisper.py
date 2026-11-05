@@ -156,6 +156,26 @@ class TranscribeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make(FakeWhisper(), DecodeOptions(candidate_languages=("fr",)))
 
+    def test_forced_language_option_skips_detection(self) -> None:
+        # 影片翻譯指定收聽語言時不偵測：短句的語言偵測容易誤判。
+        model = FakeWhisper([result(" hi")])
+        out = make(model, DecodeOptions(forced_language="en")).transcribe(AUDIO)
+        self.assertEqual((out.language, out.language_probability), ("en", 1.0))
+        self.assertEqual(model.detect_calls, 0)
+        prompts, _ = model.generate_calls[0]
+        self.assertEqual(prompts[0][1], T.language_token("en"))
+
+    def test_call_language_overrides_forced_option(self) -> None:
+        model = FakeWhisper([result(" こんにちは")])
+        out = make(model, DecodeOptions(forced_language="en")).transcribe(
+            AUDIO, language="ja"
+        )
+        self.assertEqual(out.language, "ja")
+
+    def test_unsupported_forced_language_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            make(FakeWhisper(), DecodeOptions(forced_language="fr"))
+
     def test_prompt_is_prefixed_with_startofprev(self) -> None:
         model = FakeWhisper()
         make(model).transcribe(AUDIO, language="ja", prompt="  前の文  ")
@@ -312,6 +332,8 @@ class ValidationTest(unittest.TestCase):
             {"temperatures": (-0.1,)},
             {"candidate_languages": ()},
             {"max_new_tokens": 0},
+            {"forced_language": ""},
+            {"forced_language": 3},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 DecodeOptions(**kwargs)  # type: ignore[arg-type]

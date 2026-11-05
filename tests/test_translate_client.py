@@ -286,7 +286,7 @@ class TranslateTest(ClientTestCase):
 
     def test_conversion_can_be_disabled(self) -> None:
         self.server.script.append(completion("这个"))
-        out = self.make(SAKURA, convert_to_traditional=False).translate(
+        out = self.make(SAKURA, convert_script=False).translate(
             TranslationRequest("これ", "ja")
         )
         self.assertEqual(out, "这个")
@@ -600,9 +600,9 @@ class ValidationTest(ClientTestCase):
         bad = [
             TranslationRequest("", "ja"),
             TranslationRequest("   ", "ja"),
-            TranslationRequest("hola", "es"),
-            TranslationRequest("おはよう", "ja", "fr"),
-            TranslationRequest("你好", "zh", "zh-TW"),
+            TranslationRequest("hej", "sv"),  # 不在語言清單內
+            TranslationRequest("おはよう", "ja", "zh"),  # 譯文要分繁簡
+            TranslationRequest("你好", "zh", "zh-TW"),  # 同一個 Whisper 語言
         ]
         for req in bad:
             with self.subTest(req=req):
@@ -658,7 +658,7 @@ class ConfigValidationTest(unittest.TestCase):
             {"model": "m", "retry_backoff": -1},
             {"model": "m", "max_tokens": 0},
             {"model": "m", "max_context_lines": -1},
-            {"model": "m", "convert_to_traditional": "yes"},
+            {"model": "m", "convert_script": "yes"},
         ]
         for kwargs in bad:
             with (

@@ -103,6 +103,7 @@ class Transcriber(Protocol):
 - **輸入驗證**：必須是 `np.ndarray`、`dtype == int16`、一維、長度 > 0；否則 `ValueError`（型別錯誤為 `TypeError`）。int16 ÷ 32768 轉 float32（同 faster-whisper `decode_audio`）。
 - **language**：`None` 時自動偵測；否則必須是 Whisper 支援的 ISO 639-1 代碼（例如 `"ja"`、`"en"`、`"zh"`），不支援就 `ValueError`。指定語言時 `language_probability = 1.0`（同 faster-whisper）。
 - **候選語言**：`DecodeOptions.candidate_languages`（例如口譯模式 `("zh", "ja")`）把偵測限制在候選中，機率在候選間重新正規化。偵測只看第一個 30 s 視窗。
+- **固定語言**：`DecodeOptions.language`（影片翻譯指定收聽語言時由 factory 設定）讓每次 `transcribe()` 都用這個語言、不做偵測；呼叫端另外傳 `language` 時以呼叫端為準。建構時檢查模型支援，不支援就 `ValueError`。
 - **prompt**：前文提示（前幾句原文）。編碼 `" " + prompt.strip()`，只保留最後 223 個 token（`448 // 2 - 1`），放在 `<|startofprev|>` 之後；空白字串視為沒有。
 - **解碼**：`<|startoftranscript|><|lang|><|transcribe|><|notimestamps|>`；預設 beam 5、`suppress_blank`、`suppress_tokens=[-1]` 加上 task／sot 類特殊 token（同 faster-whisper `get_suppressed_tokens`）。溫度 fallback 依 `DecodeOptions.temperatures`（預設只有 0.0，避免即時路徑耗時倍增）；觸發條件同 faster-whisper：壓縮比 > 2.4 或 avg_logprob < −1.0，但「no_speech > 0.6 且 avg_logprob < −1.0」視為靜音不 fallback。
 - **預設組合**：`FAST_DECODE`（greedy、`max_new_tokens=128`，避免 greedy 陷入重複迴圈時延遲暴增）與 `FINAL_DECODE`（beam 5、溫度 0.0／0.2／0.4）。
@@ -159,8 +160,10 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 | 壓縮比 > `compression_ratio_threshold` | 2.4 | Whisper 的重複迴圈判斷 |
 | 正規化後完全等於已知幻覺句 | 內建清單（可擴充） | Whisper 在無語音時的常見輸出 |
 
-- 已知幻覺句清單（NFKC、去標點、小寫後**整句相等**才算）：日文「ご視聴ありがとうございました」「チャンネル登録よろしくお願いします」等；英文「Thank you.」「Thanks for watching!」等；中文「字幕由Amara.org社区提供」「请不吝点赞 订阅 转发 打赏支持明镜与点点栏目」等。整句相等才過濾，避免誤刪真的說了「ありがとう」的句子；但「Thank you.」單獨一句只有在 `no_speech_probability > 0.3` 時才過濾（真人也常說）。
-- 清單另含 large-v3 的「Teksting av Nicolai Winther」；「おやすみなさい」「ありがとうございました」等真人常說的短句歸在 soft 清單。
+- 已知幻覺句清單**依 Whisper 語言碼分表**（`DEFAULT_HALLUCINATIONS`，`{語言碼: {"hard": frozenset, "soft": frozenset}}`，格式與 `experiments/hallucination_lexicon/` 的 `lexicon.json` 相同）。NFKC、去標點、小寫後**整句相等**才算：
+  - **hard**（整句字幕套話，例如日文「ご視聴ありがとうございました」「チャンネル登録よろしくお願いします」、英文「Thanks for watching!」「Please subscribe.」、中文「谢谢观看」「请不吝点赞 订阅 转发 打赏支持明镜与点点栏目」）：**所有語言的 hard 片語不論 `Transcript.language` 都套用**。這些句子幾乎不可能是另一個語言的正常語音，而 Whisper 常把它們標成別的語言（英文套話標成 `nl`、中文套話標成 `ja`）。
+  - **soft**（真人也常單獨說的短句，例如「Thank you.」「you」「ありがとうございました」「おやすみなさい」「谢谢」）：只比對 `Transcript.language` 那一張表加上不分語言的 `ANY_LANGUAGE`（`"*"`）表，而且 `no_speech_probability > soft_no_speech_threshold`（0.3）時才過濾，避免把其他語言的正常句子濾掉。
+- `"*"` 表放字幕署名（Amara.org 的英／中文署名、large-v3 在靜音上輸出的挪威語署名「Teksting av Nicolai Winther」，其語言標籤不會是 `no`）。新增語言的資料只要編輯 `DEFAULT_HALLUCINATIONS`；`FilterConfig(hallucinations=...)` 也接受單一集合（視為不分語言的 hard 片語），hard／soft 以外的鍵視為錯誤。
 - **large-v3-turbo 的 no_speech 不可用**（`ModelSpec.no_speech_reliable = False`）：實測靜音、噪音也是 0.00，前三條規則對它無效。實測在指定語言（`ja`）或候選語言（`("zh", "ja")`）時，turbo 對非語音輸出「ご視聴ありがとうございました」而被清單擋下；只有完全不指定語言時會輸出「you」「Thank you.」漏網。因此：(1) VAD 是第一道防線；(2) pipeline 用 turbo 當完整模型時應指定語言或候選語言；(3) 建議 pipeline 以即時路徑模型（no_speech 可用）對同一句的結果作為輔助判斷。
 - 所有門檻都在 `FilterConfig`，由設定頁覆寫。
 
@@ -187,7 +190,7 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
 | Apple Silicon | macOS arm64 | `base` CPU int8 | `small` CPU int8 | **未量測**（CTranslate2 在 macOS 只有 CPU：Accelerate + Ruy） | 暫比照「CPU ≥ 16 GB」；需在 M 系列實機跑 `experiments/asr_benchmark` 後修正 |
 
 - `cpu_threads`：小模型用預設值即可；small 以上設為實體核心數（上限 8）約快 8%。即時與完整模型同時在 CPU 執行時，建議兩者合計不超過實體核心數（例如 4＋4）。
-- 語言：所有建議模型都是多語模型，ja／en／zh 共用；口譯模式以 `DecodeOptions(candidate_languages=("zh", "ja"))`（或 `("zh", "en")`）限制偵測範圍。
+- 語言：所有建議模型都是多語模型，語言清單的 20 種語言共用；影片翻譯指定收聽語言時以 `DecodeOptions(forced_language=...)` 固定，`auto` 時以 `candidate_languages` 限在語言清單的 Whisper 語言；口譯模式限在（我的語言, 對方語言），例如 `("zh", "ja")`。
 
 ## 測試策略
 

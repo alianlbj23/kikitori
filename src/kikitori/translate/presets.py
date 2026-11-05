@@ -10,7 +10,12 @@ import math
 from collections.abc import Collection
 from dataclasses import dataclass
 
-from kikitori.translate.languages import SUPPORTED_PAIRS
+from kikitori.translate.errors import InvalidRequestError
+from kikitori.translate.languages import (
+    ALL_LANGUAGE_CODES,
+    SAKURA_PAIRS,
+    normalize_pair,
+)
 from kikitori.translate.prompts import PromptStyle
 
 
@@ -26,7 +31,7 @@ class ModelPreset:
         top_p: 建議 top_p；None 表示不送，用伺服器預設。
         presence_penalty: 建議 presence_penalty；None 表示不送。
         reasoning_effort: 送給 Ollama 的 `reasoning_effort`；"none" 關閉思考。
-        language_pairs: 支援的（原文, 譯文）組合。
+        languages: 支援的清單語言碼（原文與譯文都要在內）。
         outputs_simplified: 模型本身輸出簡體（靠 OpenCC 轉繁體）。
         supports_context: 是否把前文放進提示詞；小模型會把前文一起翻出來時設 False。
         approx_vram_gb: 權重大小（GB），推估 VRAM 用；KV cache 另計。
@@ -34,6 +39,8 @@ class ModelPreset:
         license_url: 授權全文網址。
         commercial_use: 授權是否允許商業用途。
         excluded_regions: 授權不適用的地區（"EU"、"UK"、"KR"）。
+        pairs: 只支援特定方向時的（Whisper 原文, 清單譯文）組合（例如 Sakura 只做
+            日 → 中）；None 表示 `languages` 內任兩個不同語言之間都可以翻。
     """
 
     model: str
@@ -43,7 +50,7 @@ class ModelPreset:
     top_p: float | None
     presence_penalty: float | None
     reasoning_effort: str | None
-    language_pairs: frozenset[tuple[str, str]]
+    languages: frozenset[str]
     outputs_simplified: bool
     supports_context: bool
     approx_vram_gb: float
@@ -51,7 +58,40 @@ class ModelPreset:
     license_url: str
     commercial_use: bool
     excluded_regions: tuple[str, ...] = ()
+    pairs: frozenset[tuple[str, str]] | None = None
 
+
+# HY-MT1.5 model card（https://huggingface.co/tencent/HY-MT1.5-7B，2026-11-05 查閱）的
+# 支援語言表共 38 種（含繁體中文、粵語等）；這裡只列語言清單內的語言，20 種全部涵蓋。
+_HY_LANGUAGES = frozenset(
+    {
+        "zh-CN",  # Chinese
+        "zh-TW",  # Traditional Chinese (zh-Hant)
+        "en",
+        "fr",
+        "pt",
+        "es",
+        "ja",
+        "tr",
+        "ru",
+        "ar",
+        "ko",
+        "th",
+        "it",
+        "de",
+        "vi",
+        "id",
+        "hi",
+        "pl",
+        "nl",
+        "uk",
+    }
+)
+
+# Qwen3.5 model card（https://huggingface.co/Qwen/Qwen3.5-9B，2026-11-05 查閱）寫明
+# 「Expanded support to 201 languages and dialects」，但沒有列出清單；本專案的 20 種都是
+# 主流語言，視為全部支援。實際輸出語言是否正確由 experiments/translate_benchmark 驗證。
+_QWEN_LANGUAGES = ALL_LANGUAGE_CODES
 
 _HY_LICENSE = "Tencent HY Community License"
 _HY_REGIONS = ("EU", "UK", "KR")
@@ -70,7 +110,7 @@ def _hunyuan(
         top_p=0.6,
         presence_penalty=None,
         reasoning_effort=None,
-        language_pairs=SUPPORTED_PAIRS,
+        languages=_HY_LANGUAGES,
         outputs_simplified=False,
         supports_context=supports_context,
         approx_vram_gb=vram,
@@ -92,7 +132,7 @@ def _qwen(model: str, label: str, vram: float, repo: str) -> ModelPreset:
         top_p=0.8,
         presence_penalty=1.5,
         reasoning_effort="none",
-        language_pairs=SUPPORTED_PAIRS,
+        languages=_QWEN_LANGUAGES,
         outputs_simplified=False,
         supports_context=True,
         approx_vram_gb=vram,
@@ -119,7 +159,9 @@ PRESETS: dict[str, ModelPreset] = {
             top_p=0.8,
             presence_penalty=None,
             reasoning_effort=None,
-            language_pairs=frozenset({("ja", "zh-TW")}),
+            # 官方只訓練日翻簡中；繁中由 OpenCC 轉換，所以兩種中文都能當譯文。
+            languages=frozenset({"ja", "zh-TW", "zh-CN"}),
+            pairs=SAKURA_PAIRS,
             outputs_simplified=True,
             supports_context=False,  # 官方 [History] 要的是前文譯文，格式不合
             approx_vram_gb=4.3,
@@ -150,7 +192,7 @@ def preset_for_model(model: str) -> ModelPreset:
         top_p=None,
         presence_penalty=None,
         reasoning_effort=None,
-        language_pairs=SUPPORTED_PAIRS,
+        languages=ALL_LANGUAGE_CODES,
         outputs_simplified=False,
         supports_context=True,
         approx_vram_gb=0.0,
@@ -158,6 +200,19 @@ def preset_for_model(model: str) -> ModelPreset:
         license_url="",
         commercial_use=False,
     )
+
+
+def supports(preset: ModelPreset, source_language: str, target_language: str) -> bool:
+    """這個模型能否把 `source_language` 翻成 `target_language`。
+
+    原文可以是 Whisper 或清單語言碼，譯文是清單語言碼。語言碼不合法、或兩者 Whisper
+    語言相同（不需要翻譯模型，例如 zh-CN → zh-TW）時回傳 False，不丟例外。
+    """
+    try:
+        normalize_pair(source_language, target_language, preset.languages, preset.pairs)
+    except InvalidRequestError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)

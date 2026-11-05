@@ -352,7 +352,9 @@ class BasicProtocolTest(EngineTestCase):
 class SettingsProtocolTest(EngineTestCase):
     def test_get_defaults_and_path(self) -> None:
         result = self.engine.request("settings.get")["result"]
-        self.assertEqual(result["settings"]["schema_version"], 2)
+        self.assertEqual(result["settings"]["schema_version"], 3)
+        self.assertEqual(result["settings"]["source_language"], "ja")
+        self.assertTrue(result["settings"]["translation"]["enabled"])
         self.assertFalse(result["settings"]["translation"]["allow_restricted"])
         self.assertIsNone(result["settings"]["asr"]["fast_cpu_threads"])
         self.assertEqual(result["settings"]["media"]["pause_secs"], 0.6)
@@ -646,7 +648,7 @@ class ApplyRecommendationTest(EngineTestCase):
             (self.config_dir / "settings.json").read_text(encoding="utf-8")
         )
         self.assertEqual(saved["asr"]["device"], "cpu")
-        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(saved["schema_version"], 3)
         self.assertEqual(Path(result["path"]), self.config_dir / "settings.json")
 
     def test_after_gpu_runtime_install_switches_to_cuda(self) -> None:
@@ -739,13 +741,14 @@ class PreviewRecommendationTest(EngineTestCase):
 
 
 class SettingsMigrationProtocolTest(EngineTestCase):
-    def test_v1_file_is_read_as_v2(self) -> None:
+    def test_v1_file_is_read_as_current_version(self) -> None:
         self.engine.dispose()
         v1 = {"schema_version": 1, "asr": {"device": "cuda", "compute_type": "int8"}}
         (self.config_dir / "settings.json").write_text(json.dumps(v1), encoding="utf-8")
         self.engine = EngineProcess(str(self.config_dir))
         settings = self.engine.request("settings.get")["result"]["settings"]
-        self.assertEqual(settings["schema_version"], 2)
+        self.assertEqual(settings["schema_version"], 3)
+        self.assertEqual(settings["source_language"], "ja")
         self.assertEqual(
             (
                 settings["asr"]["fast_compute_type"],
@@ -763,7 +766,7 @@ class SettingsMigrationProtocolTest(EngineTestCase):
         saved = json.loads(
             (self.config_dir / "settings.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(saved["schema_version"], 3)
         self.assertEqual(saved["asr"]["fast_compute_type"], "int8")
 
 
@@ -878,6 +881,18 @@ class SessionProtocolTest(EngineTestCase):
             self.engine.request("session.start", {"mode": "media", "speed": 2}),
             "invalid_params",
         )
+
+    def test_interpret_start_rejects_same_whisper_language_pair(self) -> None:
+        # 影片翻譯模式允許對方語言等於字幕語言；session.start 的 mode 不經過設定驗證，
+        # 所以口譯要在這裡擋下（否則無法靠語言偵測分辨說話者）。
+        self.assertIn(
+            "result", self.engine.request("settings.set", {"target_language": "ja"})
+        )
+        response = self.engine.request("session.start", {"mode": "interpret"})
+        self.assertError(response, "invalid_settings")
+        self.assertIn("partner_language", response["error"]["message"])
+        # 沒有建立 session：影片翻譯仍可開始
+        self.assertIn("result", self.engine.request("session.start", {"mode": "media"}))
 
     def test_missing_model_is_an_error_status(self) -> None:
         self.engine.request("settings.set", {"asr": {"final_model": "fake-missing"}})

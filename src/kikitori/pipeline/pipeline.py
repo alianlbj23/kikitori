@@ -26,6 +26,7 @@ from kikitori.capture.types import AudioSource
 from kikitori.pipeline.languages import (
     Route,
     base_language,
+    copy_translation,
     display_original,
     route,
 )
@@ -428,7 +429,7 @@ class Pipeline:
         original = self._original(transcript)
         decision = self._route(transcript.language)
         if decision.action != "translate":
-            text = original if decision.action == "copy" else ""
+            text = self._copied(transcript, decision)
             self._emit(job, original, text, transcript.language, decision, final=False)
             return
         request = TranslationRequest(
@@ -484,10 +485,8 @@ class Pipeline:
             return
         original = self._original(transcript)
         decision = self._route(transcript.language)
-        translation = ""
-        if decision.action == "copy":
-            translation = original
-        elif decision.action == "translate":
+        translation = self._copied(transcript, decision)
+        if decision.action == "translate":
             request = TranslationRequest(
                 original,
                 decision.source,
@@ -535,9 +534,23 @@ class Pipeline:
             return tuple(text for lang, text in self._history if lang == source)
 
     def _original(self, transcript: Transcript) -> str:
-        return display_original(
-            transcript.text.strip(), transcript.language, self._config.target_language
-        )
+        config = self._config
+        # 原文用「說這個語言的人」設定的字形：口譯時先看我的語言、再看對方語言；
+        # 影片翻譯時先看收聽語言（例如聽繁中、字幕簡中時原文仍顯示繁體）。
+        if config.mode == "interpret":
+            languages = (config.target_language, config.partner_language)
+        elif config.source_language != "auto":
+            languages = (config.source_language, config.target_language)
+        else:
+            languages = (config.target_language,)
+        return display_original(transcript.text.strip(), transcript.language, languages)
+
+    @staticmethod
+    def _copied(transcript: Transcript, decision: Route) -> str:
+        """不送翻譯器的譯文："copy" 是原文轉成譯文語言的字形，其他為空字串。"""
+        if decision.action != "copy":
+            return ""
+        return copy_translation(transcript.text.strip(), decision.target)
 
     def _route(self, detected: str) -> Route:
         decision = route(
@@ -545,6 +558,7 @@ class Pipeline:
             detected,
             self._config.target_language,
             self._config.partner_language,
+            self._config.translation_enabled,
         )
         if decision.action == "unsupported":
             self._warn(

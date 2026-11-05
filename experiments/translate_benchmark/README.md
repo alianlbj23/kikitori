@@ -6,7 +6,7 @@
 
 - GPU：NVIDIA GeForce RTX 5070（12 GB）；同時有其他工作佔用部分 VRAM（量測時 VRAM 用量 10–11.6 GB），因此**換模型的載入時間**會偏長，但每句的推論延遲不受影響。
 - Ollama 0.40.14，OpenAI 相容 API（`/v1/chat/completions`，SSE 串流）。
-- 用 `kikitori.translate.OpenAICompatibleTranslator`（正式程式碼）送請求；`convert_to_traditional=False` 以量到模型原始輸出，再另外套用簡轉繁。
+- 用 `kikitori.translate.OpenAICompatibleTranslator`（正式程式碼）送請求；`convert_script=False` 以量到模型原始輸出，再另外套用簡轉繁。
 
 ## 怎麼重跑
 

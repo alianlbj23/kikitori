@@ -177,3 +177,15 @@
   - 後半結果：`app.yml`（三平台前端／Rust 檢查、cargo-deny、第三方授權產生）；`release.yml`（main 上版本號為新才發布；測試、三平台打包、安裝後 smoke、minisign 驗簽全過才建立 Release；`[release-dry-run]` 在分支上完整演練）；Rust／npm 第三方授權聲明隨安裝檔散布；最後 CI（dde4c88）test／app／release dry run 全綠。
 - [x] 里程碑 9：自動更新
   - 結果：tauri-plugin-updater 接 GitHub Releases `latest.json`（自行產生，含 deb 專用 key）；正式公鑰已寫入、私鑰只在本機；dry run 以拋棄式金鑰完整演練簽章與驗簽。真正的「v(n) → v(n+1)」自動更新需發布兩個版本後實機驗證。
+
+## v0.2：多國語言、介面多語系、只顯示原文、VTuber 特化（規格：`docs/specs/languages-i18n.md`；VTuber 規格待調查報告完成後撰寫）
+
+- [x] 里程碑 10：語言核心（語言清單、設定檔 v3、辨識語言指定、翻譯路由、提示詞、繁簡轉換、依語言的幻覺過濾架構）
+  - 結果：20 語言清單（`kikitori.languages`）、設定檔 v3（`source_language`、`translation.enabled`、遷移）、指定辨識語言、路由 translate／copy／off、20 種目標語言提示詞、zh-CN `t2s`；幻覺過濾 hard 不分語言、soft 依語言；code review 1 高 1 中 2 低＋命名已修；Python 1125、vitest 135、cargo 61 通過。
+- [ ] 里程碑 11：各語言非語音幻覺片語實測（`experiments/hallucination_lexicon/`）
+- [ ] 里程碑 12：依語言推薦＋引擎訊息改為 `{code, params}`＋`languages.list`／`settings.preview_languages`
+- [ ] 里程碑 13：延後下載（Ollama `/api/pull`、開始字幕時自動下載缺少的模型）
+- [ ] 里程碑 14：只顯示原文（`translation.enabled`、`session.set_translation`、字幕視窗樣式）
+- [ ] 里程碑 15：介面多語系（i18n 機制、13 語系字典、語言選單）
+- [ ] 里程碑 16：VTuber 直播特化（依調查報告：模型、過濾、評測）
+- [ ] 里程碑 17：文件、CI、端到端驗收、驗收報告

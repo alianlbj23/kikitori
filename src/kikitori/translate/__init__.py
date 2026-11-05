@@ -20,7 +20,7 @@ from kikitori.translate.errors import (
     TranslationResponseError,
     TranslationTimeoutError,
 )
-from kikitori.translate.languages import SUPPORTED_PAIRS
+from kikitori.translate.languages import ALL_LANGUAGE_CODES
 from kikitori.translate.presets import (
     PRESETS,
     RECOMMENDATION_TIERS,
@@ -29,15 +29,16 @@ from kikitori.translate.presets import (
     TranslationModelChoice,
     preset_for_model,
     recommend_translation_models,
+    supports,
 )
 from kikitori.translate.types import TranslationRequest, Translator
 
 __all__ = [
+    "ALL_LANGUAGE_CODES",
     "DEFAULT_API_KEY_ENV",
     "DEFAULT_BASE_URL",
     "PRESETS",
     "RECOMMENDATION_TIERS",
-    "SUPPORTED_PAIRS",
     "InvalidRequestError",
     "ModelPreset",
     "OpenAICompatibleTranslator",
@@ -53,4 +54,5 @@ __all__ = [
     "TranslatorConfig",
     "preset_for_model",
     "recommend_translation_models",
+    "supports",
 ]
