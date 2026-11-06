@@ -18,6 +18,7 @@ dependencies = [
     "pyobjc-framework-libdispatch==13.0 ; sys_platform == 'darwin'",
     "pyobjc-framework-screencapturekit==13.0 ; sys_platform == 'darwin'",
     "soundcard==0.4.6 ; sys_platform != 'win32'",
+    "sudachipy==0.6.11",
 ]
 
 [project.scripts]

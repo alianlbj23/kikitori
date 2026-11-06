@@ -156,6 +156,17 @@ body {
   color: var(--sub-white);
 }
 
+/* Furigana: small readings over the kanji; the line grows to make room for them. */
+.orig rt {
+  font-size: 0.5em;
+  font-weight: 500;
+  user-select: none;
+}
+
+.orig:has(ruby) {
+  line-height: 1.9;
+}
+
 .tr {
   font-size: var(--fs);
   font-weight: 700;

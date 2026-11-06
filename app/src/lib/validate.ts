@@ -19,6 +19,7 @@ import type {
   DownloadKind,
   DownloadProgressEvent,
   EngineInfo,
+  FuriganaDictionary,
   GpuInfo,
   GpuRuntime,
   HardwareInfo,
@@ -44,6 +45,7 @@ import type {
   UpdateInfo,
 } from "./types";
 import { parseEngineMessages } from "./messages";
+import { validRuby, type RubySpan } from "./ruby";
 
 export class ValidationError extends Error {
   constructor(path: string, problem: string) {
@@ -149,11 +151,29 @@ export function parseSubtitle(v: unknown): SubtitleEvent {
     // the renderers never have to second-guess them.
     stable_chars: o.is_final === false ? optUint(o, "stable_chars", p) : null,
     latency_ms: o.is_final === true ? optUint(o, "latency_ms", p) : null,
+    ruby: null,
   };
+  ev.ruby = parseRuby(o.ruby, ev.original);
   if (ev.end_sample < ev.start_sample) {
     throw new ValidationError(`${p}.end_sample`, "before start_sample");
   }
   return ev;
+}
+
+/**
+ * `subtitle.ruby` (furigana). Like Rust, an invalid list only loses the
+ * annotation, never the subtitle: it is a display hint.
+ */
+function parseRuby(v: unknown, original: string): RubySpan[] | null {
+  if (!Array.isArray(v)) return null;
+  const spans: RubySpan[] = [];
+  for (const item of v) {
+    if (!Array.isArray(item) || item.length !== 3) return null;
+    const [start, end, reading] = item as unknown[];
+    if (typeof start !== "number" || typeof end !== "number" || typeof reading !== "string") return null;
+    spans.push([start, end, reading]);
+  }
+  return validRuby(spans, Array.from(original).length) ? spans : null;
 }
 
 /** Translation model names as the engine accepts them (`models.pull_translation`). */
@@ -178,7 +198,7 @@ export function parseStatus(v: unknown): StatusEvent {
   };
 }
 
-const DOWNLOAD_KINDS: readonly DownloadKind[] = ["asr", "gpu_runtime", "translation"];
+const DOWNLOAD_KINDS: readonly DownloadKind[] = ["asr", "gpu_runtime", "translation", "furigana"];
 
 export function parseDownloadProgress(v: unknown): DownloadProgressEvent {
   const p = "download_progress";
@@ -568,6 +588,26 @@ function parseTranslationModel(v: unknown, path: string): TranslationModel {
   };
 }
 
+/** `models.list.furigana` (docs/specs/furigana.md). */
+function parseFuriganaDictionary(v: unknown, p: string): FuriganaDictionary | null {
+  // Engines without furigana send nothing; the models page then hides the section.
+  if (v === undefined || v === null) return null;
+  const o = obj(v, p);
+  return {
+    id: str(o, "id", p, 100),
+    installed: bool(o, "installed", p),
+    edition: str(o, "edition", p, 32),
+    version: str(o, "version", p, 32),
+    download_bytes: uint(o, "download_bytes", p),
+    installed_bytes: uint(o, "installed_bytes", p),
+    disk_bytes: optUint(o, "disk_bytes", p),
+    path: optStr(o, "path", p),
+    license: str(o, "license", p, 500),
+    license_url: str(o, "license_url", p, 500),
+    in_use: optBool(o, "in_use", p) ?? false,
+  };
+}
+
 /**
  * `models.list` (hardware.md `models_overview()`). The first-version fields the
  * engine still sends (`translation.base_url/installed/error/presets`) are
@@ -583,6 +623,7 @@ export function parseModels(v: unknown): ModelsList {
   return {
     asr: arr(o, "asr", p).map((m, i) => parseAsrModel(m, `${p}.asr[${i}]`)),
     gpu_runtime: parseGpuRuntime(o.gpu_runtime, `${p}.gpu_runtime`),
+    furigana: parseFuriganaDictionary(o.furigana, `${p}.furigana`),
     translation: {
       server: {
         base_url: str(server, "base_url", sp, 2000),

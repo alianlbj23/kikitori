@@ -179,6 +179,12 @@
 - 繪製：字幕紀錄的原文 `<p dir="auto">` 裡兩個沒有自己 `dir` 的 `<span>`（`.utt-stable`、`.utt-unstable`），由段落的方向排列，所以阿拉伯語等由右到左的文字順序正確；只有 `.utt-unstable` 與譯文淡色。字幕視窗同樣在 `.orig` 裡放 `.stable`／`.unstable`，只淡化不穩定的尾巴。
 - Rust 端把超過原文長度的 `stable_chars` 夾到原文的字元數，不合理的 `latency_ms`（超過一天）改成 `null`——輔助欄位出錯不應讓整句字幕被丟掉；型別錯誤（負數、字串）仍然整行拒絕。前端只在即時字幕讀 `stable_chars`、只在完整字幕讀 `latency_ms`。
 
+### 振假名
+
+規格見 `furigana.md`。設定頁「在日文原文上標振假名」開關（立即生效，`session_set_furigana`；第一次打開時先下載辭典並顯示進度，
+`lib/furigana.ts`）；字幕紀錄與字幕視窗以 `lib/ruby.ts` 的 `rubyParts()`／`segmentNodes()` 畫 `<ruby>`（DOM 呼叫，不用 innerHTML），
+與穩定前綴共存（跨過切點的詞整個淡化）；模型頁「振假名辭典」區塊顯示用量與刪除。匯出字幕不變。
+
 ### 術語表
 
 規格見 `competitive-features.md` F3、資料形狀見 `vtuber-profile.md`。邏輯在 `app/src/lib/glossary.ts`（純函式、可測），`main.ts` 只畫表格。
@@ -361,7 +367,7 @@
 
 ### 權限（最小權限）
 
-Milestone 12–14 新增的指令：`languages_list`、`settings_preview_languages {languages: {mode?, source_language?, target_language?, partner_language?}}`（`deny_unknown_fields`；語言碼只檢查格式：1–16 個英數、`-`、`_`，清單由引擎決定；背景期限）、`models_pull_translation {model}`（名稱規則同引擎：1–200 字、英數與 `._:/-`、英數開頭、不含 `..`；背景期限）、`session_set_translation {enabled}`（一般期限）、`overlay_set_show_translation {enabled}`。`protocol.rs` 另外轉發 `status.data`（物件，序列化後最多 10 000 bytes，沒有時不出現）與 `download_progress.kind`（小寫字母與底線、最多 32 字元；不認得的值照樣轉發，由前端當作沒有 kind）。
+Milestone 12–14 新增的指令：`languages_list`、`settings_preview_languages {languages: {mode?, source_language?, target_language?, partner_language?}}`（`deny_unknown_fields`；語言碼只檢查格式：1–16 個英數、`-`、`_`，清單由引擎決定；背景期限）、`models_pull_translation {model}`（名稱規則同引擎：1–200 字、英數與 `._:/-`、英數開頭、不含 `..`；背景期限）、`session_set_translation {enabled}`（一般期限）、`overlay_set_show_translation {enabled}`；振假名（`furigana.md`）新增 `session_set_furigana {enabled}`（一般期限），`protocol.rs` 驗證 `subtitle.ruby`（不合法只丟掉 `ruby`）。`protocol.rs` 另外轉發 `status.data`（物件，序列化後最多 10 000 bytes，沒有時不出現）與 `download_progress.kind`（小寫字母與底線、最多 32 字元；不認得的值照樣轉發，由前端當作沒有 kind）。
 
 競品補強新增的指令：`models_delete {model}`（模型 id 規則同 `models_download`，`gpu-runtime` 直接拒絕；背景期限）。
 

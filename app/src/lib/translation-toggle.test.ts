@@ -94,6 +94,7 @@ describe("original-only lines", () => {
       session_id: 1,
       stable_chars: null,
       latency_ms: 700,
+      ruby: null,
     },
     3,
   );
@@ -103,6 +104,7 @@ describe("original-only lines", () => {
     expect(lineDisplay(line, true)).toEqual({
       original: "次の駅で降りましょう。",
       originalParts: { stable: "次の駅で降りましょう。", unstable: "" },
+      originalRuby: null,
       translation: "我們在下一站下車吧。",
       originalOnly: false,
     });
@@ -112,6 +114,7 @@ describe("original-only lines", () => {
     expect(lineDisplay(line, false)).toEqual({
       original: "次の駅で降りましょう。",
       originalParts: { stable: "次の駅で降りましょう。", unstable: "" },
+      originalRuby: null,
       translation: "",
       originalOnly: true,
     });

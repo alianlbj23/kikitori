@@ -117,6 +117,16 @@ import {
 } from "../lib/metrics";
 import { deleteBlockedText, deleteConfirmText, deleteOffer } from "../lib/model-delete";
 import {
+  FURIGANA_DICTIONARY_ID,
+  afterFuriganaDownload,
+  furiganaBlockView,
+  furiganaEnableAction,
+  furiganaSwitchView,
+  isFuriganaDownload,
+  type StatusLine,
+} from "../lib/furigana";
+import { rubyKey, segmentNodes } from "../lib/ruby";
+import {
   FirstRunGate,
   dismissedWith,
   missingModels,
@@ -259,6 +269,14 @@ interface State {
   deleting: Set<string>;
   /** The model whose delete confirmation is open (one at a time). */
   confirmDelete: string | null;
+  /** Furigana (lib/furigana.ts): a `session.set_furigana` is in flight. */
+  furiganaBusy: boolean;
+  /** The user turned furigana on and the dictionary is downloading for it. */
+  furiganaPendingEnable: boolean;
+  /** Last `download_progress` of the dictionary (cleared when it is done). */
+  furiganaDownload: DownloadProgressEvent | null;
+  furiganaDeleting: boolean;
+  furiganaConfirmDelete: boolean;
 }
 
 /** One table row; `id` keeps the row's elements when others are added or removed. */
@@ -332,6 +350,11 @@ const state: State = {
   glossary: { builtin: true, rows: [], dirty: false, engineError: null, saving: false, revision: 0 },
   deleting: new Set(),
   confirmDelete: null,
+  furiganaBusy: false,
+  furiganaPendingEnable: false,
+  furiganaDownload: null,
+  furiganaDeleting: false,
+  furiganaConfirmDelete: false,
 };
 
 /** Last engine messages for "複製診斷資訊". */
@@ -369,6 +392,10 @@ const el = {
   overlayClick: byId<HTMLInputElement>("overlay-click-through"),
   showTranslation: byId<HTMLInputElement>("show-translation"),
   settingsShowTranslation: byId<HTMLInputElement>("f-show-translation"),
+  furiganaSwitch: byId<HTMLInputElement>("f-furigana"),
+  furiganaStatus: byId("furigana-status"),
+  furiganaHelp: byId("furigana-help"),
+  furiganaBlock: byId("furigana-dictionary"),
   startDownloads: byId("start-downloads"),
   startDownloadsItems: byId("startdl-items"),
   startDownloadsMessage: byId("startdl-message"),
@@ -861,8 +888,24 @@ function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
   const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
   // Settled prefix at normal emphasis, the tail that may still change faded (F2).
   const [stable, unstable] = orig.children as unknown as [HTMLElement, HTMLElement];
-  setIfChanged(stable, "textContent", shown.originalParts.stable);
-  setIfChanged(unstable, "textContent", shown.originalParts.unstable);
+  if (shown.originalRuby) {
+    // Furigana: rebuilt only when the words, readings or the cut changed (same reason as setIfChanged).
+    const key = rubyKey(shown.originalRuby);
+    if (stable.dataset.ruby !== key) {
+      replace(stable, ...segmentNodes(shown.originalRuby.stable));
+      replace(unstable, ...segmentNodes(shown.originalRuby.unstable));
+      stable.dataset.ruby = key;
+    }
+  } else {
+    if (stable.dataset.ruby !== undefined) {
+      // Was drawn with furigana: textContent below replaces the <ruby> children.
+      delete stable.dataset.ruby;
+      stable.textContent = null;
+      unstable.textContent = null;
+    }
+    setIfChanged(stable, "textContent", shown.originalParts.stable);
+    setIfChanged(unstable, "textContent", shown.originalParts.unstable);
+  }
   setIfChanged(orig, "lang", htmlLang(line.sourceLanguage));
   setIfChanged(tr, "textContent", shown.translation);
   setIfChanged(tr, "lang", htmlLang(line.targetLanguage));
@@ -1128,6 +1171,207 @@ async function pushOverlayShowTranslation(): Promise<void> {
   } catch (e) {
     reportError("error.setTranslation", e);
   }
+}
+
+// ---------------------------------------------------------------- furigana (settings + models page)
+
+function statusText(line: StatusLine): string {
+  return t(line.key, line.params);
+}
+
+/** The settings-page switch and its status line (download progress, errors). */
+function renderFuriganaSwitch(): void {
+  const view = furiganaSwitchView({
+    enabled: state.settings?.furigana.enabled ?? false,
+    dictionary: state.models?.furigana ?? null,
+    modelsLoaded: state.models !== null,
+    download: state.furiganaDownload,
+    pendingEnable: state.furiganaPendingEnable,
+    busy: state.furiganaBusy,
+    engineReady: engineReady(),
+  });
+  el.furiganaSwitch.checked = view.checked;
+  el.furiganaSwitch.disabled = view.disabled;
+  const size = state.models?.furigana?.download_bytes ?? null;
+  setIfChanged(el.furiganaHelp, "textContent", t("settings.furiganaHelp", { size: formatBytes(size) }));
+  if (!view.status) {
+    replace(el.furiganaStatus);
+    el.furiganaStatus.hidden = true;
+    return;
+  }
+  el.furiganaStatus.hidden = false;
+  el.furiganaStatus.classList.toggle("field-error", view.status.error);
+  replace(
+    el.furiganaStatus,
+    view.percent === null
+      ? null
+      : h("progress", { max: 100, value: view.percent, "aria-label": t("furigana.progressLabel") }),
+    h("span", {}, statusText(view.status)),
+  );
+}
+
+/** Models page: version, disk use, license and Delete with an in-page confirmation. */
+function renderFuriganaBlock(): void {
+  const dictionary = state.models?.furigana ?? null;
+  const section = el.furiganaBlock.closest("section");
+  if (section) section.hidden = state.models !== null && dictionary === null;
+  if (!dictionary) {
+    replace(el.furiganaBlock, h("p", { class: "rail-hint" }, t("common.loading")));
+    return;
+  }
+  const view = furiganaBlockView(dictionary, {
+    downloading: state.furiganaDownload?.state === "downloading",
+    deleting: state.furiganaDeleting,
+    engineReady: engineReady(),
+  });
+  const lines = view.lines.map((line) => h("p", { class: "gpu-state" }, statusText(line)));
+  const deletable = view.deletable;
+  if (!deletable) {
+    replace(el.furiganaBlock, ...lines);
+    return;
+  }
+  if (state.furiganaConfirmDelete && !deletable.enabled) state.furiganaConfirmDelete = false;
+  if (state.furiganaConfirmDelete) {
+    const yes = h("button", { type: "button", class: "danger" }, t("asr.deleteYes"));
+    yes.addEventListener("click", () => void deleteFuriganaDictionary());
+    const no = h("button", { type: "button", class: "ghost" }, t("asr.deleteNo"));
+    no.addEventListener("click", () => {
+      state.furiganaConfirmDelete = false;
+      renderFuriganaBlock();
+    });
+    const size = formatBytes(dictionary.disk_bytes ?? dictionary.installed_bytes);
+    replace(
+      el.furiganaBlock,
+      ...lines,
+      h(
+        "div",
+        { class: "delete-confirm", role: "group" },
+        h("p", {}, t("furigana.deleteConfirm", { size })),
+        h("div", { class: "gpu-actions" }, yes, no),
+      ),
+    );
+    return;
+  }
+  const del = h(
+    "button",
+    { type: "button", class: "ghost", title: deletable.reason ? statusText(deletable.reason) : null },
+    state.furiganaDeleting ? t("asr.deleting") : t("furigana.delete"),
+  );
+  del.disabled = !deletable.enabled;
+  del.addEventListener("click", () => {
+    state.furiganaConfirmDelete = true;
+    renderFuriganaBlock();
+    // Keyboard users land on the safe choice (only when it opens, not on every redraw).
+    el.furiganaBlock.querySelector<HTMLButtonElement>(".delete-confirm .ghost")?.focus();
+  });
+  replace(
+    el.furiganaBlock,
+    ...lines,
+    deletable.reason ? h("p", { class: "gpu-state" }, statusText(deletable.reason)) : null,
+    h("div", { class: "gpu-actions" }, del),
+  );
+}
+
+function renderFurigana(): void {
+  renderFuriganaSwitch();
+  renderFuriganaBlock();
+}
+
+/** Re-reads `models.list` (the dictionary's state lives there). */
+async function refreshFuriganaState(): Promise<void> {
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("error.readModels", e);
+  }
+  renderModels();
+}
+
+/** `session.set_furigana`; the running session switches at once. */
+async function setFurigana(enabled: boolean): Promise<void> {
+  state.furiganaBusy = true;
+  renderFuriganaSwitch();
+  try {
+    const result = await api.sessionSetFurigana(enabled);
+    state.settings = result.settings;
+  } catch (e) {
+    reportError("error.setFurigana", e);
+    if (engineCode(e) === "model_not_downloaded") void refreshFuriganaState();
+  } finally {
+    state.furiganaBusy = false;
+    renderFuriganaSwitch();
+  }
+}
+
+/** The settings switch: turning it on downloads the dictionary first when it is missing. */
+async function changeFurigana(enabled: boolean): Promise<void> {
+  if (!enabled) {
+    state.furiganaPendingEnable = false;
+    await setFurigana(false);
+    return;
+  }
+  const action = furiganaEnableAction(state.models?.furigana ?? null);
+  if (action === "enable") {
+    await setFurigana(true);
+    return;
+  }
+  if (action === "unsupported") {
+    renderFuriganaSwitch();
+    return;
+  }
+  state.furiganaPendingEnable = true;
+  state.furiganaDownload = {
+    model: FURIGANA_DICTIONARY_ID,
+    kind: "furigana",
+    downloaded_bytes: 0,
+    total_bytes: state.models?.furigana?.download_bytes ?? 0,
+    state: "downloading",
+    error: null,
+  };
+  renderFurigana();
+  try {
+    await api.modelsDownload(FURIGANA_DICTIONARY_ID);
+  } catch (e) {
+    if (engineCode(e) === "download_in_progress") return; // progress events follow
+    state.furiganaPendingEnable = false;
+    state.furiganaDownload = null;
+    reportError("error.setFurigana", e);
+    renderFurigana();
+  }
+}
+
+/** `download_progress` of the dictionary: progress, then furigana on (if asked) or the error. */
+function onFuriganaDownload(p: DownloadProgressEvent): void {
+  state.furiganaDownload = p.state === "done" ? null : p;
+  const next = afterFuriganaDownload(p, state.furiganaPendingEnable);
+  if (p.state !== "downloading") state.furiganaPendingEnable = false;
+  if (next === "failed") {
+    notify(t("furigana.downloadFailed", { error: p.error ?? t("common.unknownReason") }), "bad");
+  }
+  if (p.state === "done") {
+    void refreshFuriganaState().then(async () => {
+      if (next !== "enable") return;
+      await setFurigana(true);
+      if (state.settings?.furigana.enabled) notify(t("furigana.ready"));
+    });
+  }
+  renderFurigana();
+}
+
+/** `models.delete` of the dictionary after the user confirmed. */
+async function deleteFuriganaDictionary(): Promise<void> {
+  state.furiganaConfirmDelete = false;
+  state.furiganaDeleting = true;
+  renderFuriganaBlock();
+  try {
+    const result = await api.modelsDelete(FURIGANA_DICTIONARY_ID);
+    notify(t("furigana.deleted", { size: formatBytes(result.freed_bytes) }));
+  } catch (e) {
+    reportError("error.deleteFurigana", e);
+  } finally {
+    state.furiganaDeleting = false;
+  }
+  await refreshFuriganaState();
 }
 
 // ---------------------------------------------------------------- models page: hardware
@@ -1767,6 +2011,7 @@ function renderModels(): void {
   const m = state.models;
   const s = state.settings;
   renderGpuRuntime();
+  renderFurigana();
   if (!m) {
     replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, t("common.loading"))));
     return;
@@ -2913,6 +3158,7 @@ function onLocaleChanged(): void {
   renderTranscript();
   renderOverlay();
   renderTranslationSwitches();
+  renderFurigana();
   renderLanguages();
   renderStartDownloads();
   renderHardware();
@@ -2988,6 +3234,7 @@ async function loadEngineData(): Promise<void> {
     fillGlossary(settings);
     renderSettingsPath();
     renderTranslationSwitches();
+    renderFuriganaSwitch();
     await pushOverlayStyle();
     await pushOverlayShowTranslation();
     await pushObsOutput();
@@ -3017,10 +3264,13 @@ function onBridge(status: BridgeStatus): void {
     // A restarted engine has no session and no downloads in flight.
     setSessionState("idle", true);
     for (const [id, d] of state.downloads) if (d.state === "downloading") state.downloads.delete(id);
+    if (state.furiganaDownload?.state === "downloading") state.furiganaDownload = null;
+    state.furiganaPendingEnable = false;
   }
   renderStatus();
   renderCheck();
   renderTranslationSwitches();
+  renderFurigana();
   renderGlossaryErrors();
   if (status.phase !== "ready") {
     // A restarted engine has no downloads for the start in flight any more.
@@ -3162,6 +3412,7 @@ function wire(): void {
   for (const input of [el.showTranslation, el.settingsShowTranslation]) {
     input.addEventListener("change", () => void changeShowTranslation(input.checked));
   }
+  el.furiganaSwitch.addEventListener("change", () => void changeFurigana(el.furiganaSwitch.checked));
   el.startDownloadsRetry.addEventListener("click", () => startFlow.retry());
   el.startDownloadsCancel.addEventListener("click", () => startFlow.cancel());
   for (const f of LANGUAGE_FIELDS) {
@@ -3286,6 +3537,11 @@ async function subscribe(): Promise<void> {
       renderTranscript();
     }),
     events.download((p) => {
+      // The furigana dictionary has its own switch and block; it is not an ASR model.
+      if (isFuriganaDownload(p)) {
+        onFuriganaDownload(p);
+        return;
+      }
       startFlow.onProgress(p);
       // Translation pulls only matter to the start flow; the models page lists
       // ASR models and the GPU runtime by name.

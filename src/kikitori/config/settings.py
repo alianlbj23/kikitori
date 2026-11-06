@@ -207,6 +207,18 @@ class PipelineSettings:
     asr_prompt_context: bool = True
 
 
+@dataclass(frozen=True)
+class FuriganaSettings:
+    """日文原文字幕的振假名（`docs/specs/furigana.md`）。
+
+    Attributes:
+        enabled: 是否在原文是日文的字幕上標振假名。需要先下載辭典（`models.download
+            {"model": "furigana-dictionary"}`）；執行中以 `session.set_furigana` 切換。
+    """
+
+    enabled: bool = False
+
+
 def _default_media() -> ModeSettings:
     return ModeSettings(pause_secs=0.6, max_secs=10.0)
 
@@ -237,6 +249,7 @@ class Settings:
     asr: AsrSettings = field(default_factory=AsrSettings)
     translation: TranslationSettings = field(default_factory=TranslationSettings)
     pipeline: PipelineSettings = field(default_factory=PipelineSettings)
+    furigana: FuriganaSettings = field(default_factory=FuriganaSettings)
     subtitle: dict[str, Any] = field(default_factory=dict)
     ui: dict[str, Any] = field(default_factory=dict)
 
@@ -294,6 +307,7 @@ class Settings:
                 "context_lines": self.pipeline.context_lines,
                 "asr_prompt_context": self.pipeline.asr_prompt_context,
             },
+            "furigana": {"enabled": self.furigana.enabled},
             "subtitle": copy.deepcopy(self.subtitle),
             "ui": copy.deepcopy(self.ui),
         }
@@ -703,6 +717,15 @@ def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:
     )
 
 
+def _parse_furigana(data: Mapping[str, Any]) -> FuriganaSettings:
+    """`furigana`：缺少時用預設值（關閉）。新欄位有預設值，不升 schema（與 `translation.glossary` 相同）。"""
+    default = FuriganaSettings()
+    section = _section(data, "furigana", ("enabled",))
+    return FuriganaSettings(
+        enabled=_boolean(section.get("enabled", default.enabled), "furigana.enabled")
+    )
+
+
 def _check_json(value: object, path: str, depth: int) -> None:
     if depth > MAX_OPAQUE_DEPTH:
         raise SettingsError(f"{path}: nested deeper than {MAX_OPAQUE_DEPTH} levels")
@@ -811,6 +834,7 @@ _TOP_LEVEL = (
     "asr",
     "translation",
     "pipeline",
+    "furigana",
     "subtitle",
     "ui",
 )
@@ -830,6 +854,7 @@ def _parse(data: Mapping[str, Any]) -> Settings:
         asr=_parse_asr(data),
         translation=_parse_translation(data),
         pipeline=_parse_pipeline(data),
+        furigana=_parse_furigana(data),
         subtitle=_parse_opaque(data, "subtitle"),
         ui=_parse_opaque(data, "ui"),
     )

@@ -11,6 +11,7 @@
 | `acceptance.py` | A：以 stdio 協定驅動**真的**引擎（開發版 `uv run kikitori engine` 或打包好的 `kikitori-engine.exe`），真擷取、真 Whisper（GPU）、真 Ollama |
 | `gui_acceptance.py` | B／B2／B3／C：以 W3C WebDriver（tauri-driver + msedgedriver，只用標準庫的 HTTP）操作正式版建置或 CI 安裝檔安裝的桌面程式 |
 | `gui_v020.py` | v0.2.0 的 GUI 情境（由 `gui_acceptance.py --batch v020-*` 或選單 6–9 呼叫）：13 個介面語系、術語表、語言預覽與開始前下載、刪除模型、只顯示原文、匯出／自動存檔、OBS 文字檔、穩定前綴、音量與延遲、全域快速鍵 |
+| `furigana_cdp.mjs` | 振假名（`docs/specs/furigana.md`）：以 WebView2 的 DevTools 協定（不需 tauri-driver）操作建置好的 `kikitori-app.exe`＋`app/dev/fake_engine.py`：設定頁打開振假名（先下載辭典並顯示進度）→ 模型頁辭典區塊 → 開始，字幕紀錄與字幕視窗出現 `<ruby>`、即時字幕的淡化尾巴不拆開詞 → 執行中關閉後新句子沒有讀音。`node experiments/e2e_acceptance/furigana_cdp.mjs <kikitori-app.exe>`；截圖 29–33 |
 | `e2e_common.py` | 共用：NDJSON 客戶端、WAV、Windows TTS、播放到指定裝置 |
 | `screenshots/` | 可以提交的截圖（只有本專案自己寫的句子）；`screenshots/private/` 含動畫台詞，git 忽略 |
 | `data/`、`results/` | TTS 音檔、建置副本、每次執行的結果（含台詞），git 忽略 |

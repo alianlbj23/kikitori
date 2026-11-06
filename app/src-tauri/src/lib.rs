@@ -237,6 +237,7 @@ pub fn run() {
             commands::session_start,
             commands::session_stop,
             commands::session_set_translation,
+            commands::session_set_furigana,
             commands::engine_shutdown,
             commands::engine_restart,
             commands::bridge_status,

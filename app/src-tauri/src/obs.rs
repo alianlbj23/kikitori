@@ -463,6 +463,7 @@ mod tests {
             session_id: Some(1),
             stable_chars: None,
             latency_ms: None,
+            ruby: None,
         }
     }
 

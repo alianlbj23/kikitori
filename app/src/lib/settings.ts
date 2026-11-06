@@ -97,6 +97,7 @@ export const DEFAULT_SETTINGS: Settings = {
     allow_restricted: false,
     glossary: DEFAULT_GLOSSARY,
   },
+  furigana: { enabled: false },
   subtitle: DEFAULT_OVERLAY_STYLE,
   obs_output: "off",
   ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false },
@@ -297,6 +298,9 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         api_key_env: pickStr(tr, "api_key_env", d.translation.api_key_env, warn, "translation."),
         allow_restricted: pickBool(tr, "allow_restricted", d.translation.allow_restricted, warn, "translation."),
         glossary: glossaryFromSettings(tr.glossary, warn),
+      },
+      furigana: {
+        enabled: pickBool(asObj(root.furigana), "enabled", d.furigana.enabled, warn, "furigana."),
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
       obs_output: pickEnum(asObj(root.subtitle), "obs_output", OBS_CONTENTS, d.obs_output, warn, "subtitle."),

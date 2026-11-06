@@ -220,7 +220,8 @@ pub fn models_download_params(model: &str, accept_license: bool) -> Result<Value
 }
 
 /// `models.delete` parameters (competitive-features.md F7). Only downloaded
-/// speech recognition models can be deleted; the GPU runtime is refused here so
+/// speech recognition models and the furigana dictionary (`furigana-dictionary`,
+/// docs/specs/furigana.md) can be deleted; the GPU runtime is refused here so
 /// a misbehaving webview cannot even ask, and the engine re-checks the rest
 /// (registry id, not in use, path inside the model cache).
 pub fn models_delete_params(model: &str) -> Result<Value, RequestError> {
@@ -394,6 +395,19 @@ pub async fn session_set_translation(
             json!({ "enabled": enabled }),
             QUICK,
         )
+        .await
+}
+
+/// Turns furigana on or off (saved as `furigana.enabled`, applied to the
+/// running session). The engine answers `model_not_downloaded` when turning it
+/// on before the dictionary is downloaded.
+#[tauri::command]
+pub async fn session_set_furigana(
+    bridge: State<'_, EngineBridge>,
+    enabled: bool,
+) -> CmdResult<Value> {
+    bridge
+        .request("session.set_furigana", json!({ "enabled": enabled }), QUICK)
         .await
 }
 

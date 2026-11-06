@@ -15,6 +15,7 @@ function ev(id: number, text: string, isFinal: boolean, session: number | null =
     end_sample: id * 16000 + 8000,
     session_id: session,
     stable_chars: null,
+    ruby: null,
     latency_ms: null,
   };
 }
@@ -123,5 +124,32 @@ describe("stable prefix of live lines (F2)", () => {
   it("shows a partial without stable_chars entirely as unstable", () => {
     const s = run([ev(1, "abc", false)]);
     expect(lineDisplay(s.lines[0]!, true).originalParts).toEqual({ stable: "", unstable: "abc" });
+  });
+});
+
+describe("furigana on live and final lines", () => {
+  it("keeps the newest ruby with the stable prefix, and none without it", () => {
+    const ruby = [
+      [0, 2, "きょう"],
+      [3, 4, "さむ"],
+    ] as const;
+    let s = run([{ ...ev(1, "今日は寒い", false), stable_chars: 3, ruby }]);
+    expect(s.lines[0]!.ruby).toEqual(ruby);
+    expect(lineDisplay(s.lines[0]!, true).originalRuby).toEqual({
+      stable: [
+        { text: "今日", reading: "きょう" },
+        { text: "は", reading: null },
+      ],
+      unstable: [
+        { text: "寒", reading: "さむ" },
+        { text: "い", reading: null },
+      ],
+    });
+    // The plain split is still there for the renderers' plain path.
+    expect(lineDisplay(s.lines[0]!, true).originalParts).toEqual({ stable: "今日は", unstable: "寒い" });
+    // Furigana turned off mid-sentence: the final has no ruby and is drawn as plain text.
+    s = applySubtitle(s, ev(1, "今日は寒いね。", true), 10);
+    expect(s.lines[0]!.ruby).toBeNull();
+    expect(lineDisplay(s.lines[0]!, true).originalRuby).toBeNull();
   });
 });

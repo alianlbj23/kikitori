@@ -277,6 +277,33 @@ class ValidationTest(unittest.TestCase):
         merged = Settings().merged({"translation": {"glossary": {"builtin": False}}})
         self.assertFalse(merged.translation.glossary.builtin)
 
+    def test_furigana_defaults_round_trip_and_missing(self) -> None:
+        # 振假名：預設關閉；新欄位有預設值，沒有 furigana 的 schema 3 檔案照樣讀得進來（不升 schema）
+        s = Settings()
+        self.assertFalse(s.furigana.enabled)
+        self.assertEqual(s.to_dict()["furigana"], {"enabled": False})
+        data = s.to_dict()
+        del data["furigana"]
+        self.assertEqual(Settings.from_dict(data), Settings())
+        on = Settings.from_dict(_with("furigana", {"enabled": True}))
+        self.assertTrue(on.furigana.enabled)
+        self.assertEqual(Settings.from_dict(on.to_dict()), on)
+        self.assertTrue(
+            Settings().merged({"furigana": {"enabled": True}}).furigana.enabled
+        )
+
+    def test_furigana_validation(self) -> None:
+        for value, path in (
+            ({"enabled": "yes"}, "furigana.enabled"),
+            ({"enabled": 1}, "furigana.enabled"),
+            ({"edition": "full"}, "furigana.edition"),
+            ([], "furigana"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as ctx:
+                    Settings.from_dict(_with("furigana", value))
+                self.assertIn(path, str(ctx.exception))
+
     def test_glossary_entry_language_is_normalized(self) -> None:
         data = _with(
             "translation.glossary",
