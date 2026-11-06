@@ -151,6 +151,11 @@
             </table>
           </section>
 
+          <section class="block" aria-labelledby="furigana-heading">
+            <h2 id="furigana-heading" data-i18n="furigana.title"></h2>
+            <div id="furigana-dictionary"></div>
+          </section>
+
           <section class="block" aria-labelledby="tr-heading">
             <h2 id="tr-heading" data-i18n="tr.title"></h2>
             <p class="block-lede" id="tr-source"></p>
@@ -355,6 +360,15 @@
                   <span data-i18n="settings.showTranslation"></span>
                 </label>
                 <p class="field-help" data-i18n="settings.showTranslationHelp"></p>
+              </div>
+              <!-- No name: applied at once (session.set_furigana); the first time it downloads the dictionary (lib/furigana.ts). -->
+              <div class="field">
+                <label class="switch" for="f-furigana">
+                  <input id="f-furigana" type="checkbox" />
+                  <span data-i18n="settings.furigana"></span>
+                </label>
+                <p class="field-help" id="furigana-help"></p>
+                <p class="field-help furigana-status progress" id="furigana-status" role="status" aria-live="polite" hidden></p>
               </div>
               <div class="preview" id="style-preview" aria-hidden="true">
                 <div class="preview-line">

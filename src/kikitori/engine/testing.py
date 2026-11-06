@@ -26,11 +26,18 @@ from kikitori.capture import ArraySource, DeviceInfo, DeviceKind
 from kikitori.capture.errors import DeviceNotFoundError
 from kikitori.capture.types import AudioSource
 from kikitori.config import Settings, SettingsStore, default_settings_path
+from kikitori.engine.furigana_service import RubyAnalyzer
 from kikitori.engine.services import (
     EngineServices,
     ProgressCallback,
     TranslationServerState,
 )
+from kikitori.furigana.dictionary import (
+    DICTIONARY_ID,
+    SUDACHIDICT_CORE,
+    DictionaryStatus,
+)
+from kikitori.furigana.ruby import RubySpan, Token, ruby_for_tokens
 from kikitori.hardware import (
     CUBLAS_VERSION,
     CpuInfo,
@@ -244,6 +251,107 @@ class FakeModelCatalog:
                 raise UnknownModelError(f"unknown ASR model {model_id!r}")
             if not self._downloaded[model_id]:
                 raise FileNotFoundError(f"ASR model {model_id} is not downloaded")
+
+
+FAKE_FURIGANA_SIZE = 4 * 1024 * 1024
+FAKE_FURIGANA_LEXICON: dict[str, str] = {
+    "今日": "キョウ",
+    "天気": "テンキ",
+    "食べる": "タベル",
+    "日本語": "ニホンゴ",
+    "字幕": "ジマク",
+    "勉強": "ベンキョウ",
+    "お腹": "オナカ",
+    "取り扱い": "トリアツカイ",
+}
+"""假分析器認得的詞（最長比對）；其他字元一個字一個詞、沒有讀音。"""
+
+
+class FakeRubyAnalyzer:
+    """以 `FAKE_FURIGANA_LEXICON` 最長比對的假分析器，走真的對齊演算法。"""
+
+    def __init__(self, opened: list["FakeRubyAnalyzer"]) -> None:
+        self.closed = False
+        opened.append(self)
+
+    def ruby(self, text: str) -> list[RubySpan]:
+        """`text` 的振假名。"""
+        tokens: list[Token] = []
+        i = 0
+        while i < len(text):
+            word = next(
+                (
+                    w
+                    for w in sorted(FAKE_FURIGANA_LEXICON, key=len, reverse=True)
+                    if text.startswith(w, i)
+                ),
+                None,
+            )
+            if word is None:
+                tokens.append(Token(text[i], ""))
+                i += 1
+            else:
+                tokens.append(Token(word, FAKE_FURIGANA_LEXICON[word]))
+                i += len(word)
+        return ruby_for_tokens(text, tokens)
+
+    def close(self) -> None:
+        """標記為已關閉。"""
+        self.closed = True
+
+
+class FakeFurigana:
+    """振假名辭典：預設未安裝；`install` 分四段回報 4 MiB 後標成已安裝（不碰磁碟）。
+
+    `opened` 記下每個開啟過的分析器（測試檢查「關閉時不載入」「結束時釋放」）。
+    """
+
+    def __init__(self, installed: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._installed = installed
+        self.opened: list[FakeRubyAnalyzer] = []
+
+    def status(self) -> DictionaryStatus:
+        """固定的大小與真的授權資訊。"""
+        with self._lock:
+            installed = self._installed
+        return DictionaryStatus(
+            id=DICTIONARY_ID,
+            installed=installed,
+            edition=SUDACHIDICT_CORE.edition,
+            version=SUDACHIDICT_CORE.version,
+            download_bytes=FAKE_FURIGANA_SIZE,
+            installed_bytes=FAKE_FURIGANA_SIZE,
+            disk_bytes=FAKE_FURIGANA_SIZE if installed else None,
+            path="/fake/furigana/system_core.dic" if installed else None,
+            license=SUDACHIDICT_CORE.license,
+            license_url=SUDACHIDICT_CORE.license_url,
+        )
+
+    def install(self, progress: ProgressCallback, cancel: threading.Event) -> None:
+        """分四段回報進度後標成已安裝。"""
+        step = FAKE_FURIGANA_SIZE // 4
+        for i in range(1, 5):
+            if cancel.is_set():
+                raise RuntimeError("download cancelled")
+            progress(step * i, FAKE_FURIGANA_SIZE)
+        with self._lock:
+            self._installed = True
+
+    def delete(self) -> int:
+        """標成未安裝，回傳 `FAKE_FURIGANA_SIZE`（沒安裝時 `FileNotFoundError`）。"""
+        with self._lock:
+            if not self._installed:
+                raise FileNotFoundError("the furigana dictionary is not installed")
+            self._installed = False
+        return FAKE_FURIGANA_SIZE
+
+    def open(self) -> RubyAnalyzer:
+        """開啟假分析器（沒安裝時 `FileNotFoundError`）。"""
+        with self._lock:
+            if not self._installed:
+                raise FileNotFoundError("the furigana dictionary is not installed")
+        return FakeRubyAnalyzer(self.opened)
 
 
 class _FakeWheelResponse:
@@ -660,4 +768,5 @@ def fake_services() -> EngineServices:
         models=catalog,
         translation_models=server,
         fake=True,
+        furigana=FakeFurigana(),
     )

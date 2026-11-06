@@ -27,6 +27,11 @@ from kikitori.capture.types import AudioSource, DeviceKind
 from kikitori.config import Settings, SettingsError, check_interpret_languages
 from kikitori.engine import protocol as p
 from kikitori.engine.deferred import Deferred, DeferredRunner
+from kikitori.engine.furigana_service import (
+    DefaultFuriganaProvider,
+    DictionaryInUseError,
+    FuriganaService,
+)
 from kikitori.engine.hardware_service import HardwareService, recommendation_patch
 from kikitori.engine.io import (
     LINE_TOO_LONG,
@@ -40,6 +45,7 @@ from kikitori.engine.services import (
     ProgressCallback,
     platform_name,
 )
+from kikitori.furigana.dictionary import DICTIONARY_ID
 from kikitori.hardware import GPU_RUNTIME_ID
 from kikitori.hardware.ollama import validate_pull_model_name
 from kikitori.languages import LANGUAGES
@@ -80,7 +86,7 @@ PREVIEW_LANGUAGE_PARAMS = (
     "mode",
 )
 
-DownloadKind = Literal["asr", "gpu_runtime", "translation"]
+DownloadKind = Literal["asr", "gpu_runtime", "translation", "furigana"]
 """`download_progress` 的 `kind`。"""
 
 logger = logging.getLogger(__name__)
@@ -300,6 +306,12 @@ class EngineServer:
         # 偵測硬體可能要數秒：在背景工作執行緒上處理，stdin 仍能立即處理 session.stop 等。
         self._deferred = DeferredRunner(self._send)
         self._hardware = HardwareService(services.hardware, services.models)
+        # 振假名辭典：第一句日文字幕時才載入、session 結束或關閉時釋放（見 furigana_service）
+        self._furigana = FuriganaService(
+            services.furigana
+            if services.furigana is not None
+            else DefaultFuriganaProvider()
+        )
         # 回應寫出後才執行的動作：讓 UI 先拿到 session_id，再收到該 session 的事件。
         self._after_response: list[Callable[[], None]] = []
         # 回應沒寫出去時撤銷處理函式預先做的事（對應 `Deferred.unsent`）
@@ -327,6 +339,7 @@ class EngineServer:
             "session.start": self._session_start,
             "session.stop": self._session_stop,
             "session.set_translation": self._session_set_translation,
+            "session.set_furigana": self._session_set_furigana,
             "engine.shutdown": self._engine_shutdown,
         }
 
@@ -438,6 +451,7 @@ class EngineServer:
                     logger.warning(
                         "download of %s did not stop in time", download.model
                     )
+        self._furigana.close()
         release = self._services.release_models
         if release is not None:
             try:
@@ -616,7 +630,20 @@ class EngineServer:
     def _models_list(self, params: dict[str, Any]) -> Deferred:
         p.reject_unknown_params(params)
         settings = self._services.settings_store.get()
-        return Deferred(lambda: self._hardware.models_list(settings))
+
+        def job() -> Mapping[str, Any]:
+            return {
+                **self._hardware.models_list(settings),
+                "furigana": self._furigana_status(),
+            }
+
+        return Deferred(job)
+
+    def _furigana_status(self) -> dict[str, Any]:
+        """`models.list` 的 `furigana`：辭典的狀態加上 `in_use`（正被開啟）。"""
+        status = self._furigana.provider.status().to_dict()
+        status["in_use"] = self._furigana.in_use
+        return status
 
     def _models_validate(self, params: dict[str, Any]) -> Deferred:
         p.reject_unknown_params(params, ("settings",))
@@ -649,9 +676,11 @@ class EngineServer:
                 p.INVALID_PARAMS,
                 f"accept_license only applies to {GPU_RUNTIME_ID!r}",
             )
+        if model == DICTIONARY_ID:
+            return self._download_furigana()
         known = {m.id: m for m in self._services.models.asr_models()}
         if model not in known:
-            available = ", ".join([*known, GPU_RUNTIME_ID])
+            available = ", ".join([*known, GPU_RUNTIME_ID, DICTIONARY_ID])
             raise p.ProtocolError(
                 p.UNKNOWN_MODEL,
                 f"unknown model {model[:100]!r}; available: {available}",
@@ -707,6 +736,53 @@ class EngineServer:
             lambda: self._unregister_download("gpu_runtime", GPU_RUNTIME_ID)
         )
         return {"model": GPU_RUNTIME_ID, "started": True}
+
+    def _download_furigana(self) -> Mapping[str, Any]:
+        """振假名辭典（SudachiDict core，約 69 MiB）：使用者打開振假名時才下載。"""
+        provider = self._furigana.provider
+
+        def install(progress: ProgressCallback, cancel: threading.Event) -> None:
+            try:
+                provider.install(progress, cancel)
+            finally:
+                # 成功時，之前因為沒有辭典而停用的 session 下一句就會載入
+                self._furigana.dictionary_changed()
+
+        thread = self._register_download(
+            "furigana", DICTIONARY_ID, provider.status().download_bytes, install
+        )
+        self._after_response.append(thread.start)
+        self._unsent_response.append(
+            lambda: self._unregister_download("furigana", DICTIONARY_ID)
+        )
+        return {"model": DICTIONARY_ID, "started": True}
+
+    def _delete_furigana(self) -> Mapping[str, Any]:
+        """刪除振假名辭典；開啟中（session 執行中且振假名開啟）或下載中回 `model_in_use`。"""
+        with self._downloads_lock:
+            downloading = ("furigana", DICTIONARY_ID) in self._downloads
+        if downloading:
+            raise p.ProtocolError(
+                p.MODEL_IN_USE, "the furigana dictionary is in use by a download"
+            )
+        try:
+            freed = self._furigana.delete_dictionary()
+        except DictionaryInUseError as exc:
+            raise p.ProtocolError(
+                p.MODEL_IN_USE, f"{exc}; turn furigana off first"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise p.ProtocolError(p.MODEL_NOT_DOWNLOADED, str(exc)) from exc
+        logger.info("deleted the furigana dictionary (%d bytes)", freed)
+        # 沒有辭典的振假名只會每個 session 記一次 warning：一併關閉，設定與畫面才一致
+        # （開關打開時會再下載）。存檔失敗不影響已完成的刪除，只記錄。
+        if self._services.settings_store.get().furigana.enabled:
+            self._furigana.set_enabled(False)
+            try:
+                self._services.settings_store.update({"furigana": {"enabled": False}})
+            except (SettingsError, OSError) as exc:
+                logger.error("cannot turn furigana off after deleting it: %s", exc)
+        return {"model": DICTIONARY_ID, "freed_bytes": freed}
 
     def _models_pull_translation(self, params: dict[str, Any]) -> Deferred:
         """Ollama 的 `/api/pull`：替使用者下載翻譯模型（進度同 `download_progress`）。"""
@@ -779,6 +855,8 @@ class EngineServer:
                 f"model must be a non-empty string of at most {MAX_MODEL_ID_CHARS} "
                 f"characters, got {str(model)[:MAX_MODEL_ID_CHARS]!r}",
             )
+        if model == DICTIONARY_ID:
+            return self._delete_furigana()
         catalog = self._services.models
         known = {m.id: m for m in catalog.asr_models()}
         if model not in known:
@@ -964,6 +1042,8 @@ class EngineServer:
             )
             self._next_session_id += 1
             self._session = session
+            # 之後只替這個 session 的日文字幕標振假名；辭典等第一句需要時才載入
+            self._furigana.begin_session(session.id, settings.furigana.enabled)
             # 順便清掉舊的紀錄：開關很多次 session 時清單不會一直變長
             self._prune_live_sessions()
             self._live_sessions.append(session)
@@ -1137,7 +1217,13 @@ class EngineServer:
         return not session.cancelled.is_set()
 
     def _on_subtitle(self, session: _Session, update: SubtitleUpdate) -> None:
-        self._send_event("subtitle", subtitle_event(update, session.id))
+        data = subtitle_event(update, session.id)
+        ruby = self._furigana.annotate(
+            session.id, update.original, update.source_language
+        )
+        if ruby is not None:
+            data["ruby"] = [[start, end, reading] for start, end, reading in ruby]
+        self._send_event("subtitle", data)
 
     def _on_pipeline_status(
         self, session: _Session, state: PipelineState, detail: str | None
@@ -1233,6 +1319,42 @@ class EngineServer:
             applied_to = session.id
         return {**self._settings_result(), "session_id": applied_to}
 
+    def _session_set_furigana(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        """執行中切換振假名，並存進設定的 `furigana.enabled`。
+
+        開啟時辭典必須已下載（否則 `model_not_downloaded`，設定不變）：UI 先以
+        `models.download {"model": "furigana-dictionary"}` 下載，完成後再開啟。
+        """
+        p.reject_unknown_params(params, ("enabled",))
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            raise p.ProtocolError(
+                p.INVALID_PARAMS, f"enabled must be true or false, got {enabled!r}"
+            )
+        if enabled and not self._furigana.provider.status().installed:
+            raise p.ProtocolError(
+                p.MODEL_NOT_DOWNLOADED,
+                "the furigana dictionary is not downloaded; download it with "
+                f"models.download (model {DICTIONARY_ID}) first",
+            )
+        # 先存設定：存不進去就回錯誤、不切換，畫面與設定才不會不一致
+        try:
+            self._services.settings_store.update({"furigana": {"enabled": enabled}})
+        except SettingsError as exc:
+            raise p.ProtocolError(p.INVALID_SETTINGS, str(exc)) from exc
+        except OSError as exc:
+            logger.error("cannot save settings: %s", exc)
+            raise p.ProtocolError(
+                p.SETTINGS_IO_ERROR, f"cannot save settings: {exc}"
+            ) from exc
+        self._furigana.set_enabled(enabled)
+        with self._session_lock:
+            session = self._session
+        return {
+            **self._settings_result(),
+            "session_id": None if session is None else session.id,
+        }
+
     def _session_failed(
         self,
         session: _Session,
@@ -1285,6 +1407,8 @@ class EngineServer:
         if reporter is not None:
             reporter.stop()
         self._release_components(session)
+        # 辭典與 ASR 模型一樣在送出結束狀態之前釋放
+        self._furigana.end_session(session.id)
         self._send_status(state, detail, session.id, code, data)
 
     def _release_components(self, session: _Session) -> None:

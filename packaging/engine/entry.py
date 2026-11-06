@@ -4,7 +4,7 @@
 
 - 不帶參數：啟動 stdio 引擎，等同 `kikitori engine`（Tauri 以這種方式啟動 sidecar）。
 - `--self-check`：在打包好的執行環境裡確認原生函式庫與資料檔都在、真的載得起來
-  （Silero VAD 模型、onnxruntime、CTranslate2、OpenCC、平台音訊後端），把結果以一行
+  （Silero VAD 模型、onnxruntime、CTranslate2、OpenCC、SudachiPy、平台音訊後端），把結果以一行
   JSON 寫到 stdout。CI 與 `smoke_test.py` 用它驗證打包內容，不屬於引擎協定。
 
 `kikitori` 的互動選單不放進執行檔：sidecar 只給程式呼叫。
@@ -93,6 +93,49 @@ def _check_opencc() -> str:
     return "opencc s2twp, t2s ok"
 
 
+SUDACHI_RESOURCES = ("char.def", "unk.def", "rewrite.def", "sudachi.json")
+
+
+def _check_sudachipy() -> str:
+    """振假名的 SudachiPy：Rust 擴充、`resources/` 與 `sudachipy.errors` 都要打包進來。
+
+    辭典不打包（使用者打開振假名時才下載）。這台機器已下載辭典時真的分析一句；否則給它一個
+    不是辭典的檔案，確認 Rust 擴充讀了設定與檔案、以 `SudachiError` 回報格式錯誤。
+    """
+    import tempfile
+
+    import sudachipy
+
+    from kikitori.furigana.analyzer import FuriganaAnalyzer
+    from kikitori.furigana.dictionary import default_root, dictionary_path, is_installed
+
+    resource_dir = _module_dir("sudachipy") / "resources"
+    missing = [n for n in SUDACHI_RESOURCES if not (resource_dir / n).is_file()]
+    if missing:
+        raise FileNotFoundError(f"sudachipy/resources is missing {missing}")
+    root = default_root()
+    if is_installed(root):
+        analyzer = FuriganaAnalyzer(dictionary_path(root))
+        try:
+            ruby = analyzer.ruby("今日は食べる")
+        finally:
+            analyzer.close()
+        if ruby != [(0, 2, "きょう"), (3, 4, "た")]:
+            raise RuntimeError(f"unexpected furigana for a test sentence: {ruby}")
+        return f"sudachipy {sudachipy.__version__}, installed dictionary ok"
+    with tempfile.TemporaryDirectory() as tmp:
+        junk = Path(tmp) / "not-a-dictionary.dic"
+        junk.write_bytes(b"\0" * 4096)
+        try:
+            sudachipy.Dictionary(dict=str(junk))
+        except sudachipy.errors.SudachiError as exc:
+            if "header" not in str(exc).lower():
+                raise RuntimeError(f"unexpected SudachiError: {exc}") from exc
+        else:
+            raise RuntimeError("sudachipy accepted a file that is not a dictionary")
+    return f"sudachipy {sudachipy.__version__}, resources ok (no dictionary downloaded)"
+
+
 def _module_dir(name: str) -> Path:
     spec = importlib.util.find_spec(name)
     if spec is None or not spec.submodule_search_locations:
@@ -138,6 +181,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("onnxruntime", _check_onnxruntime),
     ("ctranslate2", _check_ctranslate2),
     ("opencc", _check_opencc),
+    ("sudachipy", _check_sudachipy),
     ("audio_backend", _check_audio_backend),
 )
 

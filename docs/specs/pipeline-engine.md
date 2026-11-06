@@ -3,6 +3,7 @@
 > 狀態：已採用（2026-11-05，Milestone 4，使用者授權自主實作）；Milestone 6（2026-11-05）接上 hardware 模組，變更列在「協定變更（Milestone 6）」；
 > Milestone 12–14（多國語言：依語言推薦、訊息碼、延後下載翻譯模型、只顯示原文）的變更列在「協定變更（Milestone 12–14）」。
 > 競品補強 F2／F4／F7（穩定的即時字幕、延遲與音量、模型管理，2026-11-06）列在「協定變更（F2／F4／F7）」。
+> 振假名（2026-11-06）列在「協定變更（振假名）」，細節見 `furigana.md`。
 > 上層約定：`docs/specs/app-architecture.md` 的 pipeline、config、engine 協定各節；本文件不得與之矛盾，只補充架構規格沒寫死的細節。
 > 依賴的模組：`vad-segmenter.md`、`translate.md`、`capture.md`、`asr.md`（只透過 `kikitori.asr.types` 與 `pipeline/factory.py` 的接縫）。
 
@@ -260,6 +261,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `translation.allow_restricted` | 布林，預設 **false**：是否推薦有地區限制授權的翻譯模型（HY-MT 的授權不適用於歐盟、英國、南韓）。引擎不知道使用者所在地、用語系猜地區不可靠，推薦了不能用的授權會讓使用者在不知情下違約，所以預設不推薦；UI 在設定頁讓使用者確認「我不在歐盟／英國／南韓」後再設為 true。只影響 `recommend()` 與 `models.validate` 的警告，不阻止手動選用 |
 | `translation.keep_warm_secs` | 整數，預設 **240**：0（關閉定期保溫；執行中開啟翻譯時仍在背景預熱一次）或 [10, 3600]。session 執行中翻譯請求停了這麼多秒，就對本機翻譯服務送一次預熱請求，讓模型不被卸載（見「ASR 接縫」的 `attach_keep_warm()`）。預設值低於 Ollama 預設的 `keep_alive` 5 分鐘；伺服器改過 `OLLAMA_KEEP_ALIVE` 時要設得比它短。遠端服務一律不送。新欄位有預設值，舊的 schema 2 檔案照樣讀得進來，所以**不升 schema** |
 | `translation.glossary` | 物件，只能有 `builtin`、`entries`（Milestone 16，`translate.md`「術語表」）。缺少時用預設值 `{"builtin": true, "entries": []}`；新欄位有預設值，**不升 schema**（與 `keep_warm_secs` 相同） |
+| `furigana` | 物件，只能有 `enabled`（布林，預設 **false**）：日文原文字幕標振假名（`furigana.md`）。缺少時用預設值，**不升 schema**（與 `translation.glossary` 相同）；執行中切換用 `session.set_furigana` |
 | `translation.glossary.builtin` | 布林，預設 **true**：原文是日語、譯文是 zh-TW／zh-CN／en／ko 時，使用內建的直播用語術語表（53 個詞條） |
 | `translation.glossary.entries` | 陣列，最多 **500** 筆，預設 `[]`；每筆是只有 `source`、`target`、`target_language` 三個鍵的物件（`target_language` 可省略）。錯誤路徑形如 `translation.glossary.entries[3].source` |
 | `entries[].source` | 字串，1–100 字元，不可有頭尾空白、換行或控制字元（原文寫法；比對時不分大小寫與全半形） |
@@ -345,6 +347,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `settings.preview_languages`（背景） | `{"source_language"?, "target_language"?, "partner_language"?, "mode"?}` | 這組語言的推薦組合、每個模型是否已安裝與下載大小（不存檔、不下載），見下方 |
 | `session.start` | `{"mode": "media"\|"interpret", "device_id"?: str \| null}` | `{"session_id": int}` |
 | `session.stop` | — | `{}`（沒有 session 也回 `{}`） |
+| `session.set_furigana` | `{"enabled": bool}` | 同 `session.set_translation`；存進 `furigana.enabled`，執行中立即套用；打開時辭典沒下載 → `model_not_downloaded`（`furigana.md`） |
 | `session.set_translation` | `{"enabled": bool}` | `{"settings", "path", "is_new", "session_id": 套用到的 session id \| null}`；存進設定 `translation.enabled`，執行中的 session 立即切換 |
 | `engine.shutdown` | — | `{}`，之後結束 |
 
@@ -428,7 +431,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `subtitle` | `SubtitleUpdate` 的全部欄位 + `session_id`；即時字幕（`is_final=false`）另有 `stable_chars: int`、**沒有** `latency_ms`；完整字幕另有 `latency_ms: int \| null`、**沒有** `stable_chars`（F2／F4） |
 | `metrics`（F4） | `{"session_id": int, "level_dbfs": float, "backlog": int, "latency_ms_median": int \| null}`，session 執行中約每秒一則（見下方） |
 | `status` | `{"state": "idle"\|"loading"\|"running"\|"error", "detail": 字串 \| null, "session_id": int \| null, "code": 字串 \| null, "data"?: 物件}`（`data` 只在有內容時出現：`translation_model_missing` 的 `{"models"}`，與 `loading` 的載入進度 `{"step", "done", "total"}`） |
-| `download_progress` | `{"model", "kind": "asr"\|"gpu_runtime"\|"translation", "downloaded_bytes", "total_bytes", "state": "downloading"\|"done"\|"error", "error": 字串 \| null}` |
+| `download_progress` | `{"model", "kind": "asr"\|"gpu_runtime"\|"translation"\|"furigana", "downloaded_bytes", "total_bytes", "state": "downloading"\|"done"\|"error", "error": 字串 \| null}` |
 | `log` | `{"level": "debug"\|"info"\|"warning"\|"error", "message"}` |
 
 - 引擎啟動完成後先送一筆 `status idle`。
@@ -557,6 +560,21 @@ UI 流程見 `ui.md`「自動推薦」。
 偏離：無（欄位名稱與形狀照 F2／F4／F7 的約定）。補充的決定：`stable_chars` 以 Python 字元數計；`backlog` 不含正在辨識的那一句；
 `latency_ms_median` 不含被濾掉的「清除」結果；`models.delete` 的錯誤檢查順序是 `invalid_params` → `unknown_model` → `model_in_use` → `model_not_downloaded`，
 路徑不安全或刪除失敗走 `internal_error`。
+
+### 協定變更（振假名，2026-11-06）
+
+`protocol_version` 維持 1；設定 schema 維持 3（新欄位 `furigana.enabled` 有預設值）。全部是新增（細節與理由見 `furigana.md`）：
+
+1. **`subtitle`** 新增選填 `ruby: [[start, end, "よみ"], ...]`：設定開啟、辭典已下載、`source_language` 是 ja、屬於目前 session 時才有
+   （即時與完整字幕都有）；位置是 `original` 的 code point，依序不重疊，讀音只含平假名與「ー」。
+2. **`download_progress.kind`** 新增 `furigana`（`model` 為 `furigana-dictionary`）。
+3. **`models.list`** 新增 `furigana {id, installed, edition, version, download_bytes, installed_bytes, disk_bytes, path, license, license_url, in_use}`
+   （由伺服器在 `hardware_service` 的結果外加上，`models.list` 其他部分不變）。
+4. **`models.download`／`models.delete`** 接受 `{"model": "furigana-dictionary"}`；刪除時辭典開啟中或下載中 → `model_in_use`。
+5. **新方法 `session.set_furigana {"enabled"}`**。
+
+辭典在第一句需要標的字幕時才開啟，session 結束（送出結束狀態之前）、執行中關閉、引擎結束時釋放；沒有辭典或分析失敗時該句不帶 `ruby`、
+記一次 warning，字幕照常送出（`engine/furigana_service.py`）。
 
 ## 入口
 

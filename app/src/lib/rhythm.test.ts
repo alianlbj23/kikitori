@@ -14,6 +14,7 @@ function line(id: number, original: string, translation = "", isFinal = true): S
     startSample: id * 16_000,
     endSample: id * 16_000 + 8000,
     stableChars: null,
+    ruby: null,
   };
 }
 

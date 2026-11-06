@@ -468,6 +468,68 @@ describe("update_check / update_install", () => {
   });
 });
 
+describe("furigana (docs/specs/furigana.md)", () => {
+  const japanese = { ...subtitle, original: "今日は食べる" };
+
+  it("keeps a valid ruby list and drops an invalid one without losing the subtitle", () => {
+    const ruby = [
+      [0, 2, "きょう"],
+      [3, 4, "た"],
+    ];
+    expect(parseSubtitle({ ...japanese, ruby }).ruby).toEqual(ruby);
+    expect(parseSubtitle({ ...japanese, ruby: [] }).ruby).toEqual([]);
+    expect(parseSubtitle(japanese).ruby).toBeNull();
+    for (const bad of [
+      "x",
+      [[0, 2]],
+      [[0, 2, 3]],
+      [[0, 9, "きょう"]],
+      [
+        [3, 4, "た"],
+        [0, 2, "きょう"],
+      ],
+      [[0, 2, "キョウ"]],
+      [[0, 2, "<b>"]],
+    ]) {
+      const parsed = parseSubtitle({ ...japanese, ruby: bad });
+      expect(parsed.ruby, JSON.stringify(bad)).toBeNull();
+      expect(parsed.original).toBe("今日は食べる");
+    }
+  });
+
+  it("recognises the dictionary download kind", () => {
+    const p = parseDownloadProgress({
+      model: "furigana-dictionary",
+      kind: "furigana",
+      downloaded_bytes: 0,
+      total_bytes: 72238136,
+      state: "downloading",
+      error: null,
+    });
+    expect(p.kind).toBe("furigana");
+  });
+
+  it("reads models.list.furigana and tolerates engines without it", () => {
+    const furigana = {
+      id: "furigana-dictionary",
+      installed: true,
+      edition: "core",
+      version: "20260428",
+      download_bytes: 72238136,
+      installed_bytes: 217391698,
+      disk_bytes: 217392119,
+      path: "C:/fake/furigana/system_core.dic",
+      license: "Apache-2.0",
+      license_url: "https://example.invalid/LEGAL",
+      in_use: false,
+    };
+    const list = engine["models.list"];
+    expect(parseModels({ ...list, furigana }).furigana).toEqual(furigana);
+    expect(parseModels(list).furigana).toBeNull();
+    expect(() => parseModels({ ...list, furigana: { ...furigana, installed: "yes" } })).toThrow(ValidationError);
+  });
+});
+
 describe("competitive features: subtitle hints, metrics, model deletion", () => {
   it("keeps stable_chars on partials and latency_ms on finals only", () => {
     const partial = { ...subtitle, is_final: false, stable_chars: 2, latency_ms: 900 };

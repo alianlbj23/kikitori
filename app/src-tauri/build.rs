@@ -20,6 +20,7 @@ fn main() {
             "session_start",
             "session_stop",
             "session_set_translation",
+            "session_set_furigana",
             "engine_shutdown",
             "engine_restart",
             "bridge_status",

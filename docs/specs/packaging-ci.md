@@ -22,7 +22,7 @@
 | `kikitori-engine.spec` | PyInstaller 規格：收集內容、過濾、產生授權目錄 |
 | `policy.py` | 打包規則（名稱、排除的模組、禁止打包的檔名、系統提供的檔名），spec 與 build.py 共用 |
 | `licenses.py` | 產生 `THIRD_PARTY_LICENSES/` |
-| `license_overrides/` | wheel 沒附授權檔的套件的授權全文（`ctranslate2/`，以及 macOS 才打包的 `pyobjc-core/`、`pyobjc-framework-coremedia/`、`pyobjc-framework-libdispatch/`、`pyobjc-framework-screencapturekit/`；來源見各目錄的 `SOURCE.md`） |
+| `license_overrides/` | wheel 沒附授權檔的套件的授權全文（`ctranslate2/`、`sudachipy/`（含編譯進擴充模組的 Rust crate），以及 macOS 才打包的 `pyobjc-core/`、`pyobjc-framework-coremedia/`、`pyobjc-framework-libdispatch/`、`pyobjc-framework-screencapturekit/`；來源見各目錄的 `SOURCE.md`） |
 | `build.py` | 建置腳本：人用的編號選單；CI 用參數或 `KIKITORI_BUILD_NONINTERACTIVE=1` |
 | `smoke_test.py` | 冒煙測試（`--self-check` + 假模式協定 + 啟動時間），CI 與人工共用 |
 
@@ -76,7 +76,7 @@ uv run python packaging/engine/smoke_test.py --dev          對開發環境的�
 
 ### 自我檢查（`kikitori-engine --self-check`）
 
-在打包好的環境執行，每項獨立回報：`version`（metadata 在）、`silero_vad`（讀打包的模型、驗 SHA-256、推論靜音與正弦波，機率有限且靜音 < 0.5；授權檔在）、`onnxruntime`（有 CPU provider）、`ctranslate2`（CPU 支援 int8）、`opencc`（`s2twp` 把「软件」轉成「軟體」）、`audio_backend`（Windows 匯入 pyaudiowpatch；Linux 確認 soundcard 模組與標頭檔已打包，但**不匯入**——匯入就會載入 libpulse 並連線音訊伺服器；macOS 匯入 PyObjC 框架）。同一組檢查也在單元測試中以原始碼環境執行。
+在打包好的環境執行，每項獨立回報：`version`（metadata 在）、`silero_vad`（讀打包的模型、驗 SHA-256、推論靜音與正弦波，機率有限且靜音 < 0.5；授權檔在）、`onnxruntime`（有 CPU provider）、`ctranslate2`（CPU 支援 int8）、`opencc`（`s2twp` 把「软件」轉成「軟體」）、`sudachipy`（振假名：`resources/` 的 char.def 等都在；已下載辭典時分析一句，否則確認 Rust 擴充以 `SudachiError` 拒絕不是辭典的檔案，見 `furigana.md`）、`audio_backend`（Windows 匯入 pyaudiowpatch；Linux 確認 soundcard 模組與標頭檔已打包，但**不匯入**——匯入就會載入 libpulse 並連線音訊伺服器；macOS 匯入 PyObjC 框架）。同一組檢查也在單元測試中以原始碼環境執行。
 
 ## sidecar 方式：one-folder + `bundle.resources`
 

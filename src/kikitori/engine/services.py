@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 from kikitori.capture.types import AudioSource, DeviceInfo, DeviceKind
 from kikitori.config import Settings, SettingsStore, default_settings_path
+from kikitori.engine.furigana_service import DefaultFuriganaProvider, FuriganaProvider
 from kikitori.hardware import (
     GpuRuntimeStatus,
     HardwareInfo,
@@ -158,6 +159,8 @@ class EngineServices:
         translation_models: 翻譯伺服器的狀態與（Ollama）模型下載。
         fake: 是否為測試用的假服務（回報在 `engine.info`）。
         release_models: 引擎結束時釋放行程內保留的模型（ASR 模型池）；None 表示不需要。
+        furigana: 振假名辭典的狀態、下載、刪除與開啟；None 時用真實的實作
+            （`DefaultFuriganaProvider`，模型快取旁的 `furigana/`）。
     """
 
     settings_store: SettingsStore
@@ -169,6 +172,7 @@ class EngineServices:
     translation_models: TranslationModels
     fake: bool = False
     release_models: Callable[[], None] | None = None
+    furigana: FuriganaProvider | None = None
 
 
 def platform_name() -> str:
@@ -311,4 +315,5 @@ def default_services() -> EngineServices:
         models=DefaultModelCatalog(),
         translation_models=DefaultTranslationModels(),
         release_models=release_asr_models,
+        furigana=DefaultFuriganaProvider(),
     )

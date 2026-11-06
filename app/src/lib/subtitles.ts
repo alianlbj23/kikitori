@@ -15,6 +15,7 @@
  * - events from an older session are dropped, a newer session starts afresh.
  */
 
+import { rubyParts, type RubyParts, type RubySpan } from "./ruby";
 import { splitStable, type TextParts } from "./stable";
 import type { SubtitleEvent } from "./types";
 
@@ -29,6 +30,8 @@ export interface SubtitleLine {
   readonly endSample: number;
   /** Partials: code points of `original` that have settled (null = none known). */
   readonly stableChars: number | null;
+  /** Furigana over the original (docs/specs/furigana.md); null = none. */
+  readonly ruby: readonly RubySpan[] | null;
 }
 
 export interface SubtitleState {
@@ -53,6 +56,7 @@ function toLine(ev: SubtitleEvent): SubtitleLine {
     startSample: ev.start_sample,
     endSample: ev.end_sample,
     stableChars: ev.stable_chars,
+    ruby: ev.ruby,
   };
 }
 
@@ -125,6 +129,11 @@ export interface LineDisplay {
   original: string;
   /** `original` split into its settled prefix and the tail that may change (F2). */
   originalParts: TextParts;
+  /**
+   * The same split with furigana (`<ruby>` segments); null when the line has
+   * none, and the renderers then use `originalParts` exactly as before.
+   */
+  originalRuby: RubyParts | null;
   /** Empty when translations are hidden; the translation line is then left out. */
   translation: string;
   /**
@@ -141,9 +150,10 @@ export interface LineDisplay {
  */
 export function lineDisplay(line: SubtitleLine, showTranslation: boolean): LineDisplay {
   const originalParts = splitStable(line.original, line.stableChars, line.isFinal);
+  const originalRuby = rubyParts(line.original, line.ruby, line.stableChars, line.isFinal);
   return showTranslation
-    ? { original: line.original, originalParts, translation: line.translation, originalOnly: false }
-    : { original: line.original, originalParts, translation: "", originalOnly: true };
+    ? { original: line.original, originalParts, originalRuby, translation: line.translation, originalOnly: false }
+    : { original: line.original, originalParts, originalRuby, translation: "", originalOnly: true };
 }
 
 /** Trims to a new limit (e.g. after the user changes "lines on screen"). */

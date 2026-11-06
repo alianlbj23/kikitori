@@ -29,6 +29,7 @@
     "allow-session-start",
     "allow-session-stop",
     "allow-session-set-translation",
+    "allow-session-set-furigana",
     "allow-engine-restart",
     "allow-bridge-status",
     "allow-app-about",

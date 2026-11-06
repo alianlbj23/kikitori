@@ -9,6 +9,7 @@
 
 import type { UiLocalePreference } from "./i18n";
 import type { EngineMessage } from "./messages";
+import type { RubySpan } from "./ruby";
 
 export type Mode = "media" | "interpret";
 
@@ -29,6 +30,13 @@ export interface SubtitleEvent {
   stable_chars: number | null;
   /** Finals only: end of speech → final sent, in ms (F4); null when unknown. */
   latency_ms: number | null;
+  /**
+   * Furigana over the kanji of a Japanese `original` (docs/specs/furigana.md):
+   * code-point offsets and hiragana readings. null when the engine did not
+   * annotate the line (furigana off, not Japanese, older engine) or sent an
+   * invalid list.
+   */
+  ruby: readonly RubySpan[] | null;
 }
 
 /** `metrics` event (F4): about once a second while a session runs. */
@@ -59,7 +67,7 @@ export interface StatusEvent {
 export type DownloadState = "downloading" | "done" | "error";
 
 /** What a `download_progress` event is about; null from engines older than Milestone 13. */
-export type DownloadKind = "asr" | "gpu_runtime" | "translation";
+export type DownloadKind = "asr" | "gpu_runtime" | "translation" | "furigana";
 
 export interface DownloadProgressEvent {
   model: string;
@@ -309,9 +317,29 @@ export interface TranslationModel {
   approx_vram_gb: number | null;
 }
 
+/** `models.list.furigana`: the furigana dictionary (docs/specs/furigana.md). */
+export interface FuriganaDictionary {
+  /** `models.download` / `models.delete` id (`furigana-dictionary`). */
+  id: string;
+  installed: boolean;
+  edition: string;
+  version: string;
+  download_bytes: number;
+  installed_bytes: number;
+  /** Measured disk use when installed, else null. */
+  disk_bytes: number | null;
+  path: string | null;
+  license: string;
+  license_url: string;
+  /** Opened by the running session (cannot be deleted until furigana is off). */
+  in_use: boolean;
+}
+
 export interface ModelsList {
   asr: AsrModel[];
   gpu_runtime: GpuRuntime;
+  /** null from engines without furigana. */
+  furigana: FuriganaDictionary | null;
   translation: {
     server: { base_url: string; is_local: boolean; reachable: boolean; error: string | null };
     models: TranslationModel[];
@@ -371,6 +399,8 @@ export interface Settings {
     /** `translation.glossary` (docs/specs/vtuber-profile.md); edited on the settings page. */
     glossary: GlossarySettings;
   };
+  /** Furigana over Japanese originals; switched at once with `session.set_furigana`. */
+  furigana: { enabled: boolean };
   subtitle: OverlayStyle;
   /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
   obs_output: ObsContent;

@@ -85,7 +85,20 @@ pub struct SubtitlePayload {
     /// `null` when the engine could not measure it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+    /// Furigana for Japanese originals (docs/specs/furigana.md): `[start, end,
+    /// reading]` with code-point offsets into `original` and a hiragana reading.
+    /// Present only when the engine annotated the line; an invalid list is
+    /// dropped (the subtitle itself is kept) and then left out when forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<Vec<RubySpan>>,
 }
+
+/// One furigana annotation: `original[start..end]` (code points) reads `reading`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RubySpan(pub u64, pub u64, pub String);
+
+/// A reading longer than this is not a reading of one word.
+const MAX_RUBY_READING_CHARS: usize = 64;
 
 /// `metrics` event (F4), about once a second while a session runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,8 +168,9 @@ pub struct DownloadProgressPayload {
     pub state: DownloadState,
     #[serde(default)]
     pub error: Option<String>,
-    /// What is being downloaded (Milestone 13): `asr`, `gpu_runtime` or
-    /// `translation`; ASR and translation models may share a name. Kept as a
+    /// What is being downloaded (Milestone 13): `asr`, `gpu_runtime`,
+    /// `translation` or `furigana` (the furigana dictionary, docs/specs/furigana.md);
+    /// ASR and translation models may share a name. Kept as a
     /// checked string so a kind added by a newer engine is still forwarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -367,6 +381,40 @@ fn validate_subtitle(p: &mut SubtitlePayload) -> Result<(), ParseError> {
     }
     if p.latency_ms.is_some_and(|ms| ms > MAX_LATENCY_MS) {
         p.latency_ms = None;
+    }
+    if let Some(spans) = &p.ruby
+        && let Err(reason) = check_ruby(spans, p.original.chars().count() as u64)
+    {
+        // Furigana is a display hint: losing it is better than losing the line.
+        log::warn!("dropping invalid subtitle.ruby: {reason}");
+        p.ruby = None;
+    }
+    Ok(())
+}
+
+/// Furigana spans must be in order, inside `original`, non-overlapping and
+/// carry a short hiragana reading (the engine guarantees this; anything else is
+/// a broken engine and must not reach the webview as markup input).
+fn check_ruby(spans: &[RubySpan], text_chars: u64) -> Result<(), String> {
+    if spans.len() as u64 > text_chars {
+        return Err(format!("{} spans for {text_chars} characters", spans.len()));
+    }
+    let mut previous_end = 0;
+    for RubySpan(start, end, reading) in spans {
+        if *start < previous_end || start >= end || *end > text_chars {
+            return Err(format!("span {start}..{end} is out of order or range"));
+        }
+        let count = reading.chars().count();
+        if count == 0 || count > MAX_RUBY_READING_CHARS {
+            return Err(format!("reading of {count} characters"));
+        }
+        if !reading
+            .chars()
+            .all(|c| ('\u{3041}'..='\u{3096}').contains(&c) || c == '\u{30fc}')
+        {
+            return Err(format!("reading {reading:?} is not hiragana"));
+        }
+        previous_end = *end;
     }
     Ok(())
 }
@@ -621,6 +669,50 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_ruby() {
+        // "今日は" is 3 code points (9 UTF-8 bytes).
+        let mut v = subtitle_json();
+        v["data"]["original"] = json!("今日は");
+        v["data"]["ruby"] = json!([[0, 2, "きょう"]]);
+        let s = parse_subtitle(&v);
+        assert_eq!(s.ruby, Some(vec![RubySpan(0, 2, "きょう".to_owned())]));
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["ruby"],
+            json!([[0, 2, "きょう"]])
+        );
+        v["data"]["ruby"] = json!([]);
+        assert_eq!(parse_subtitle(&v).ruby, Some(vec![]));
+        // Absent stays absent when forwarded.
+        let plain = parse_subtitle(&subtitle_json());
+        assert!(plain.ruby.is_none());
+        assert!(serde_json::to_value(&plain).unwrap().get("ruby").is_none());
+        // Invalid spans drop the annotation, not the subtitle.
+        for bad in [
+            json!([[0, 4, "きょうは"]]),
+            json!([[2, 2, "き"]]),
+            json!([[1, 2, "う"], [0, 1, "き"]]),
+            json!([[0, 2, "キョウ"]]),
+            json!([[0, 2, ""]]),
+            json!([[0, 2, "<b>"]]),
+            json!([[0, 2, "あ".repeat(MAX_RUBY_READING_CHARS + 1)]]),
+            json!([[0, 1, "き"], [1, 2, "ょ"], [2, 3, "う"], [2, 3, "う"]]),
+        ] {
+            v["data"]["ruby"] = bad.clone();
+            let s = parse_subtitle(&v);
+            assert!(s.ruby.is_none(), "{bad}");
+            assert_eq!(s.original, "今日は");
+        }
+        // A wrong type is a broken engine: the line is rejected like any field.
+        for bad in [json!("x"), json!([[0, 2]]), json!([[-1, 2, "き"]])] {
+            v["data"]["ruby"] = bad.clone();
+            assert!(
+                matches!(parse(&v.to_string()), Err(ParseError::Shape(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn subtitle_with_unknown_fields_is_accepted() {
         let mut v = subtitle_json();
         v["data"]["future_field"] = json!({"x": 1});
@@ -724,6 +816,14 @@ mod tests {
             serde_json::to_value(&p).unwrap()["kind"],
             json!("translation")
         );
+        // The furigana dictionary (docs/specs/furigana.md) is forwarded the same way.
+        let got = parse(r#"{"event":"download_progress","data":{"model":"furigana-dictionary","kind":"furigana","downloaded_bytes":0,"total_bytes":72238136,"state":"downloading","error":null}}"#)
+            .unwrap()
+            .unwrap();
+        let Incoming::Event(EngineEvent::DownloadProgress(p)) = got else {
+            panic!("expected download_progress");
+        };
+        assert_eq!(p.kind.as_deref(), Some("furigana"));
         for bad in [json!(""), json!("Translation"), json!("<b>"), json!(1)] {
             let line = json!({"event": "download_progress", "data": {
                 "model": "m", "kind": bad, "downloaded_bytes": 0, "total_bytes": 0

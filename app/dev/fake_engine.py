@@ -40,6 +40,13 @@ running session or a download uses it (`unknown_model`, `model_in_use`,
 validates `translation.glossary` with the engine's limits and error paths
 (`translation.glossary.entries[3].source: ...`).
 
+Furigana (docs/specs/furigana.md) is imitated too: `models.list` has a
+`furigana` object (not downloaded at start), `models.download
+{"model": "furigana-dictionary"}` reports `download_progress` with
+`kind: "furigana"`, `models.delete` frees it unless furigana is on in a running
+session, `session.set_furigana` refuses `model_not_downloaded` until then, and
+Japanese subtitles carry `ruby` from the small reading table below while it is on.
+
 Point the app at it with
     KIKITORI_ENGINE_CMD='["uv","run","--no-project","python","app/dev/fake_engine.py"]'
 or use `npm run menu` in app/.
@@ -94,6 +101,49 @@ MEDIA_LINES: list[tuple[str, str, str]] = [
     ("ja", "まあ、急がなくても大丈夫だよ。", "嗯，不用急也沒關係啦。"),
     ("en", "Honestly, the second half was much better.", "老實說，後半段好看多了。"),
 ]
+# Readings of the kanji words in the canned Japanese lines: word → spans
+# `(start, end, hiragana)` within the word. The real engine uses Sudachi.
+FURIGANA_WORDS: dict[str, list[tuple[int, int, str]]] = {
+    "今日": [(0, 2, "きょう")],
+    "寒": [(0, 1, "さむ")],
+    "散歩": [(0, 2, "さんぽ")],
+    "行": [(0, 1, "い")],
+    "駅": [(0, 1, "えき")],
+    "前": [(0, 1, "まえ")],
+    "新": [(0, 1, "あたら")],
+    "屋": [(0, 1, "や")],
+    "昨日": [(0, 2, "きのう")],
+    "同": [(0, 1, "おな")],
+    "言": [(0, 1, "い")],
+    "急": [(0, 1, "いそ")],
+    "大丈夫": [(0, 3, "だいじょうぶ")],
+    "二つ目": [(0, 1, "ふた"), (2, 3, "め")],
+    "角": [(0, 1, "かど")],
+    "右": [(0, 1, "みぎ")],
+    "曲": [(0, 1, "ま")],
+    "五分": [(0, 2, "ごふん")],
+    "思": [(0, 1, "おも")],
+}
+FURIGANA_ID = "furigana-dictionary"
+FURIGANA_DOWNLOAD_BYTES = 72_238_136
+FURIGANA_INSTALLED_BYTES = 217_391_698
+
+
+def furigana(text: str) -> list[list[Any]]:
+    """`ruby` for `text`: longest known word at each position (code points, like the engine)."""
+    spans: list[list[Any]] = []
+    i = 0
+    words = sorted(FURIGANA_WORDS, key=len, reverse=True)
+    while i < len(text):
+        word = next((w for w in words if text.startswith(w, i)), None)
+        if word is None:
+            i += 1
+            continue
+        spans += [[i + a, i + b, r] for a, b, r in FURIGANA_WORDS[word]]
+        i += len(word)
+    return spans
+
+
 INTERPRET_LINES: list[tuple[str, str, str]] = [
     ("zh", "請問這附近有便利商店嗎？", "すみません、この近くにコンビニはありますか？"),
     (
@@ -347,6 +397,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "context_lines": 3,
         "asr_prompt_context": True,
     },
+    "furigana": {"enabled": False},
     "subtitle": {},
     "ui": {},
 }
@@ -585,6 +636,13 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise ProtocolError(
             "invalid_settings", "asr.cuda_library_dirs: at most 16 paths"
         )
+    furigana_settings = settings.get("furigana", {})
+    if not isinstance(furigana_settings, dict) or set(furigana_settings) - {"enabled"}:
+        raise ProtocolError("invalid_settings", "furigana: only 'enabled' is allowed")
+    if not isinstance(furigana_settings.get("enabled", False), bool):
+        raise ProtocolError(
+            "invalid_settings", "furigana.enabled: expected true or false"
+        )
     for key in ("subtitle", "ui"):
         if not isinstance(settings[key], dict):
             raise ProtocolError("invalid_settings", f"{key}: expected an object")
@@ -625,6 +683,9 @@ class Session(threading.Thread):
         # Read by the session thread for each sentence; `session.set_translation`
         # flips it (a bool assignment, so no lock is needed).
         self.translation_enabled: bool = settings["translation"]["enabled"]
+        # `session.set_furigana` flips it; ruby needs the dictionary too.
+        self.furigana_enabled: bool = settings.get("furigana", {}).get("enabled", False)
+        self.furigana_installed = False
         self.stop_event = threading.Event()
         # Checked before "loading" ends, like the real engine's translation-model
         # and ASR checks: (code, detail, data) of a start that must fail.
@@ -822,6 +883,8 @@ class Session(threading.Thread):
             data["latency_ms"] = latency_ms
         else:
             data["stable_chars"] = stable_chars
+        if self.furigana_enabled and self.furigana_installed and source == "ja":
+            data["ruby"] = furigana(original)
         self.writer.event("subtitle", data)
 
 
@@ -851,6 +914,7 @@ class FakeEngine:
         # Settings live in memory: "first run" until the first settings.set.
         self.is_new = True
         self.downloaded = {"tiny", "base", "small"}
+        self.furigana_installed = False
         self.downloading: set[str] = set()
         self.session: Session | None = None
         self.next_session_id = 1
@@ -868,6 +932,7 @@ class FakeEngine:
             "session.start": self.session_start,
             "session.stop": self.session_stop,
             "session.set_translation": self.session_set_translation,
+            "session.set_furigana": self.session_set_furigana,
             "languages.list": self.languages_list,
             "engine.shutdown": lambda _p: {},
         }
@@ -1151,6 +1216,7 @@ class FakeEngine:
                 "cublas_available": runtime,
                 "cublas_source": "runtime" if runtime else None,
             },
+            "furigana": self._furigana_status(),
             "translation": {
                 "server": {
                     "base_url": self.settings["translation"]["base_url"],
@@ -1495,6 +1561,51 @@ class FakeEngine:
         size = next(int(m["size_bytes"]) for m in ASR_MODELS if m["id"] == model)
         return size + size // 100
 
+    def _furigana_in_use(self) -> bool:
+        session = self.session
+        return bool(
+            session is not None
+            and session.is_alive()
+            and session.furigana_enabled
+            and self.furigana_installed
+        )
+
+    def _furigana_status(self) -> dict[str, Any]:
+        installed = self.furigana_installed
+        return {
+            "id": FURIGANA_ID,
+            "installed": installed,
+            "edition": "core",
+            "version": "20260428",
+            "download_bytes": FURIGANA_DOWNLOAD_BYTES,
+            "installed_bytes": FURIGANA_INSTALLED_BYTES,
+            "disk_bytes": FURIGANA_INSTALLED_BYTES + 421 if installed else None,
+            "path": "C:/fake/furigana/system_core.dic" if installed else None,
+            "license": "Apache-2.0 (SudachiDict; includes UniDic BSD-3-Clause and NEologd notices)",
+            "license_url": "https://github.com/WorksApplications/SudachiDict/blob/v20260428/LEGAL",
+            "in_use": self._furigana_in_use(),
+        }
+
+    def session_set_furigana(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Furigana switch: saved and applied at once; needs the dictionary to turn on."""
+        enabled = params.get("enabled")
+        if set(params) != {"enabled"} or not isinstance(enabled, bool):
+            raise ProtocolError("invalid_params", "enabled must be true or false")
+        if enabled and not self.furigana_installed:
+            raise ProtocolError(
+                "model_not_downloaded",
+                f"the furigana dictionary is not downloaded; download it with "
+                f"models.download (model {FURIGANA_ID}) first",
+            )
+        self.settings_set({"furigana": {"enabled": enabled}})
+        with self.lock:
+            session = self.session
+        session_id = None
+        if session is not None and session.is_alive():
+            session.furigana_enabled = enabled
+            session_id = session.session_id
+        return {**self.settings_result(), "session_id": session_id}
+
     def models_delete(self, params: dict[str, Any]) -> dict[str, Any]:
         """Deletes a downloaded ASR model; the engine's checks in the engine's order."""
         if set(params) - {"model"}:
@@ -1504,6 +1615,20 @@ class FakeEngine:
         model = params.get("model")
         if not isinstance(model, str) or not model:
             raise ProtocolError("invalid_params", "model must be a non-empty string")
+        if model == FURIGANA_ID:
+            with self.lock:
+                if FURIGANA_ID in self.downloading or self._furigana_in_use():
+                    raise ProtocolError(
+                        "model_in_use",
+                        "the furigana dictionary is open; turn furigana off first",
+                    )
+                if not self.furigana_installed:
+                    raise ProtocolError(
+                        "model_not_downloaded",
+                        "the furigana dictionary is not installed",
+                    )
+                self.furigana_installed = False
+            return {"model": FURIGANA_ID, "freed_bytes": FURIGANA_INSTALLED_BYTES + 421}
         if model not in {m["id"] for m in ASR_MODELS}:
             raise ProtocolError("unknown_model", f"unknown ASR model {model!r}")
         with self.lock:
@@ -1535,6 +1660,7 @@ class FakeEngine:
         model = params.get("model")
         sizes = {m["id"]: int(m["size_bytes"]) for m in ASR_MODELS}
         sizes[GPU_RUNTIME_ID] = GPU_RUNTIME_BYTES
+        sizes[FURIGANA_ID] = FURIGANA_DOWNLOAD_BYTES
         if not isinstance(model, str) or model not in sizes:
             raise ProtocolError("unknown_model", f"unknown model {model!r}")
         accept = params.get("accept_license")
@@ -1567,7 +1693,13 @@ class FakeEngine:
 
     def _download(self, model: str, total: int) -> None:
         steps = 20
-        kind = "gpu_runtime" if model == GPU_RUNTIME_ID else "asr"
+        kind = (
+            "gpu_runtime"
+            if model == GPU_RUNTIME_ID
+            else "furigana"
+            if model == FURIGANA_ID
+            else "asr"
+        )
         for i in range(steps + 1):
             self.writer.event(
                 "download_progress",
@@ -1583,7 +1715,12 @@ class FakeEngine:
             time.sleep(0.15)
         with self.lock:
             self.downloading.discard(model)
-            self.downloaded.add(model)
+            if model == FURIGANA_ID:
+                self.furigana_installed = True
+                if self.session is not None:
+                    self.session.furigana_installed = True
+            else:
+                self.downloaded.add(model)
         self.writer.event(
             "download_progress",
             {
@@ -1636,6 +1773,7 @@ class FakeEngine:
                 partial_interval=self.partial_interval,
             )
             session.start_error = self._start_error({**settings, "mode": mode})
+            session.furigana_installed = self.furigana_installed
             self.next_session_id += 1
             self.session = session
         self.after_response.append(session.start)

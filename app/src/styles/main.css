@@ -732,6 +732,23 @@ input[type="range"] {
   opacity: 0.5;
 }
 
+/* Furigana (docs/specs/furigana.md): readings over the kanji of Japanese originals.
+ * The ruby text is not selectable, so copying a line copies the original only. */
+.utt-orig rt {
+  font-size: 0.55em;
+  font-weight: 400;
+  color: var(--nezumi);
+  user-select: none;
+}
+
+.utt-orig:has(ruby) {
+  line-height: 2;
+}
+
+.furigana-status {
+  margin-top: 6px;
+}
+
 .utt.is-partial::before {
   content: "";
   position: absolute;

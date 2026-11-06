@@ -170,6 +170,14 @@ export const api = {
   async sessionSetTranslation(enabled: boolean): Promise<SettingsResult> {
     return parseSettingsResult(await invoke("session_set_translation", { enabled }));
   },
+  /**
+   * Furigana: saves `furigana.enabled` and switches a running session at once.
+   * Turning it on rejects with `model_not_downloaded` until the dictionary
+   * (`models.download` of `furigana-dictionary`) is downloaded.
+   */
+  async sessionSetFurigana(enabled: boolean): Promise<SettingsResult> {
+    return parseSettingsResult(await invoke("session_set_furigana", { enabled }));
+  },
   async about(): Promise<AboutInfo> {
     return parseAbout(await invoke("app_about"));
   },

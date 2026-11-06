@@ -31,6 +31,7 @@ import {
   type UiLocale,
 } from "../lib/i18n";
 import { bufferLines, emptyRhythm, stepRhythm, type RhythmState } from "../lib/rhythm";
+import { segmentNodes } from "../lib/ruby";
 import { DEFAULT_OVERLAY_STYLE } from "../lib/settings";
 import {
   applySubtitle,
@@ -152,8 +153,17 @@ function render(): void {
         h(
           "span",
           { class: "orig", lang: htmlLang(line.sourceLanguage), dir: "auto" },
-          h("span", { class: "stable" }, display.originalParts.stable),
-          display.originalParts.unstable ? h("span", { class: "unstable" }, display.originalParts.unstable) : null,
+          // Furigana (docs/specs/furigana.md): <ruby> segments in the same two spans.
+          display.originalRuby
+            ? h("span", { class: "stable" }, ...segmentNodes(display.originalRuby.stable))
+            : h("span", { class: "stable" }, display.originalParts.stable),
+          display.originalRuby
+            ? display.originalRuby.unstable.length
+              ? h("span", { class: "unstable" }, ...segmentNodes(display.originalRuby.unstable))
+              : null
+            : display.originalParts.unstable
+              ? h("span", { class: "unstable" }, display.originalParts.unstable)
+              : null,
         ),
         display.originalOnly
           ? null
