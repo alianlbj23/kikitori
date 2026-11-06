@@ -147,6 +147,11 @@
 - 字幕紀錄頁工具列與設定頁「字幕」區塊各一個「顯示翻譯」開關，都綁設定 `translation.enabled`，改變即套用（`lib/translation-toggle.ts`）：session 載入中或執行中送 `session.set_translation {enabled}`（引擎存檔並立即切換 pipeline），否則 `settings.set {"translation": {"enabled": …}}`。之後送 `overlay_set_show_translation {enabled}`（以引擎回應的設定為準）。引擎失敗時開關回到原值並說明；只有字幕視窗失敗時設定仍已儲存，另外提示。
 - 切換後重畫字幕紀錄、模式說明與語言預覽（預覽會說明不需要翻譯模型）。引擎就緒讀到設定時也把值推給字幕視窗。
 
+### 設定的回應順序
+
+引擎回傳整份設定的請求（`settings.set`、`session.set_translation`、`session.set_furigana`…）都經 `adoptSettings()` 寫回 `state.settings`：只接受 `revision` 不比畫面上舊的（`lib/settings-revision.ts`），引擎啟動或重啟讀設定前歸零。
+驗收時「顯示翻譯」與「振假名」同時切換，顯示翻譯的回應等字幕視窗後才寫回，把振假名蓋回關閉；之後切介面語言重畫時開關顯示關、引擎卻還開著。
+
 ### 訊息
 
 內容區上方的訊息列（最多三則、可關閉）：操作失敗的原因與下一步、引擎 `log` 事件的 warning／error、`status: error` 的 `code` 對應說明（例如 `model_not_downloaded` →「模型還沒下載。請到『模型』頁下載後再開始。」，`translation_model_missing`、`translation_server_auth_failed` 也有說明）、引擎錯誤碼的說明（含 `license_not_accepted`、`gpu_runtime_unsupported`、`download_in_progress`、`pull_unsupported`、`translation_server_unreachable`、`translation_server_auth_failed`）、下載完成或失敗（開始前下載面板裡的下載除外）、GPU 加速元件安裝後的重啟、更新提示。

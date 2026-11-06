@@ -913,6 +913,10 @@ class FakeEngine:
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         # Settings live in memory: "first run" until the first settings.set.
         self.is_new = True
+        # Like the engine's SettingsStore revision: bumps whenever the settings changed
+        # (checked when a result is built, so every code path that edits them counts).
+        self.revision = 1
+        self._reported = (copy.deepcopy(self.settings), self.is_new)
         self.downloaded = {"tiny", "base", "small"}
         self.furigana_installed = False
         self.downloading: set[str] = set()
@@ -1734,10 +1738,15 @@ class FakeEngine:
         )
 
     def settings_result(self) -> dict[str, Any]:
+        current = copy.deepcopy(self.settings)
+        if (current, self.is_new) != self._reported:
+            self.revision += 1
+            self._reported = (copy.deepcopy(current), self.is_new)
         return {
-            "settings": copy.deepcopy(self.settings),
+            "settings": current,
             "path": "<fake engine: in memory>",
             "is_new": self.is_new,
+            "revision": self.revision,
         }
 
     def settings_set(self, params: dict[str, Any]) -> dict[str, Any]:

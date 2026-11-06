@@ -11,6 +11,7 @@ function result(enabled: boolean): SettingsResult {
     path: null,
     warnings: [],
     isNew: false,
+    revision: null,
   };
 }
 

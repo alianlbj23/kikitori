@@ -397,6 +397,19 @@ class SettingsProtocolTest(EngineTestCase):
         self.assertEqual(result["settings"]["media"]["pause_secs"], 0.6)
         self.assertEqual(Path(result["path"]), self.config_dir / "settings.json")
 
+    def test_settings_results_carry_an_increasing_revision(self) -> None:
+        # 兩個請求的回應可能以相反順序寫回 UI（例如顯示翻譯的回應還在等字幕視窗）；
+        # UI 依 revision 只保留較新的設定
+        first = self.engine.request("settings.get")["result"]["revision"]
+        self.assertIsInstance(first, int)
+        saved = self.engine.request("settings.set", {"mode": "interpret"})["result"]
+        self.assertGreater(saved["revision"], first)
+        toggled = self.engine.request("session.set_translation", {"enabled": False})["result"]
+        self.assertGreater(toggled["revision"], saved["revision"])
+        self.assertEqual(
+            self.engine.request("settings.get")["result"]["revision"], toggled["revision"]
+        )
+
     def test_is_new_until_first_save(self) -> None:
         # 沒有設定檔 → is_new；UI 以此判斷第一次執行、自動套用推薦組合
         first = self.engine.request("settings.get")["result"]

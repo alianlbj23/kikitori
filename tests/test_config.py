@@ -823,6 +823,43 @@ class StoreTest(unittest.TestCase):
         again.load()
         self.assertFalse(again.is_new)
 
+    def test_revision_increases_on_every_change(self) -> None:
+        # UI 收到的設定可能晚於更新的一份才寫回畫面；revision 讓它丟掉較舊的那份
+        store = SettingsStore(self.path)
+        before = store.snapshot().revision
+        store.load()
+        loaded = store.snapshot().revision
+        self.assertGreater(loaded, before)
+        store.update({"mode": "interpret"})
+        first = store.snapshot()
+        self.assertGreater(first.revision, loaded)
+        self.assertEqual(first.settings.mode, "interpret")
+        self.assertFalse(first.is_new)
+        store.update({"furigana": {"enabled": True}})
+        self.assertGreater(store.snapshot().revision, first.revision)
+        # 讀取不改變 revision
+        self.assertEqual(store.snapshot().revision, store.snapshot().revision)
+
+    def test_loading_an_invalid_file_also_bumps_the_revision(self) -> None:
+        self.path.write_text("{not json", encoding="utf-8")
+        store = SettingsStore(self.path)
+        before = store.snapshot().revision
+        self.assertIsNotNone(store.load())
+        snap = store.snapshot()
+        self.assertGreater(snap.revision, before)
+        self.assertEqual(snap.settings, Settings())
+        self.assertFalse(snap.is_new)
+
+    def test_failed_or_skipped_update_keeps_the_revision(self) -> None:
+        store = SettingsStore(self.path)
+        store.load()
+        store.update({"mode": "interpret"})
+        revision = store.snapshot().revision
+        with self.assertRaises(SettingsError):
+            store.update({"mode": "karaoke"})
+        self.assertIsNone(store.update_if_new({"mode": "media"}))
+        self.assertEqual(store.snapshot().revision, revision)
+
     def test_update_if_new_only_writes_a_new_file(self) -> None:
         store = SettingsStore(self.path)
         store.load()

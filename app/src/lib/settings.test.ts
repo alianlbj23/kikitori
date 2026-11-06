@@ -123,6 +123,14 @@ describe("settings patch", () => {
 });
 
 describe("parseSettingsResult", () => {
+  it("reads the revision, and null when it is missing or not a non-negative integer", () => {
+    expect(parseSettingsResult({ settings: {}, revision: 7 }).revision).toBe(7);
+    expect(parseSettingsResult({ settings: {}, revision: 0 }).revision).toBe(0);
+    for (const bad of [undefined, null, -1, 1.5, "7", Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(parseSettingsResult({ settings: {}, revision: bad }).revision).toBeNull();
+    }
+  });
+
   it("reads the engine result and falls back on bad fields with warnings", () => {
     const { settings, warnings, path } = parseSettingsResult({
       settings: {

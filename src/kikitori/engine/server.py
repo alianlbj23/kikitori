@@ -536,11 +536,14 @@ class EngineServer:
 
     def _settings_result(self) -> Mapping[str, Any]:
         store = self._services.settings_store
-        # is_new：還沒有設定檔（第一次執行），UI 據此自動套用硬體推薦
+        snap = store.snapshot()
+        # is_new：還沒有設定檔（第一次執行），UI 據此自動套用硬體推薦。
+        # revision：UI 的回應可能晚於較新的一份才寫回畫面，以此丟掉舊的那份
         return {
-            "settings": store.get().to_dict(),
+            "settings": snap.settings.to_dict(),
             "path": str(store.path),
-            "is_new": store.is_new,
+            "is_new": snap.is_new,
+            "revision": snap.revision,
         }
 
     def _settings_get(self, params: dict[str, Any]) -> Mapping[str, Any]:

@@ -10,6 +10,7 @@ import os
 import tempfile
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,16 @@ def write_json_atomic(path: Path, data: Mapping[str, Any]) -> None:
         raise
 
 
+@dataclass(frozen=True)
+class SettingsSnapshot:
+    """同一時刻的設定、revision 與 is_new（一次取出，三者一致）。"""
+
+    settings: Settings
+    revision: int
+    """每次 `load()` 或成功的 `update()` 加 1。UI 以它丟掉晚到的舊設定。"""
+    is_new: bool
+
+
 class SettingsStore:
     """目前設定的唯一持有者；`get()`／`update()` 可在多執行緒呼叫。"""
 
@@ -97,6 +108,7 @@ class SettingsStore:
         self._file_invalid = False
         # load() 之前不知道檔案在不在：當成「不是新的」，UI 不會因此自動改設定
         self._is_new = False
+        self._revision = 0
 
     @property
     def is_new(self) -> bool:
@@ -122,6 +134,7 @@ class SettingsStore:
                 self._settings = Settings()
                 self._file_invalid = True
                 self._is_new = False
+                self._revision += 1
             message = f"settings file is invalid, using defaults: {exc}"
             logger.warning("%s", message)
             return message
@@ -129,12 +142,18 @@ class SettingsStore:
             self._settings = loaded if loaded is not None else Settings()
             self._file_invalid = False
             self._is_new = loaded is None
+            self._revision += 1
         return None
 
     def get(self) -> Settings:
         """回傳目前設定（不可變物件）。"""
         with self._lock:
             return self._settings
+
+    def snapshot(self) -> SettingsSnapshot:
+        """目前設定與它的 revision、is_new（同一把鎖內取出）。"""
+        with self._lock:
+            return SettingsSnapshot(self._settings, self._revision, self._is_new)
 
     def update(self, patch: object) -> Settings:
         """深度合併部分設定、驗證並存檔，回傳新設定。
@@ -171,6 +190,7 @@ class SettingsStore:
         self._settings = updated
         self._file_invalid = False
         self._is_new = False
+        self._revision += 1
         return updated
 
     def _preserve_invalid_file(self) -> None:

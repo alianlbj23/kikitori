@@ -188,6 +188,7 @@ import type {
   ShortcutAction,
 } from "../lib/types";
 import { autoDismiss } from "../lib/auto-dismiss";
+import { SettingsRevision } from "../lib/settings-revision";
 import { updateNotesBlocks, type NotesBlock } from "../lib/update-notes";
 import { asCommandError } from "../lib/validate";
 import { checkForUpdate, type UpdateUi } from "./updater";
@@ -490,6 +491,24 @@ const el = {
   glossaryStatus: byId("glossary-status"),
 };
 
+// ---------------------------------------------------------------- settings answers
+
+const settingsRevision = new SettingsRevision();
+
+/**
+ * Puts an engine answer's settings on screen unless a newer one is already there
+ * (lib/settings-revision.ts). Returns the settings now on screen: forms filled after
+ * a save use it, so a late answer does not put old values back into them either.
+ */
+function adoptSettings(settings: Settings, revision: number | null): Settings {
+  if (settingsRevision.acceptIfNotOlder(revision)) {
+    state.settings = settings;
+    return settings;
+  }
+  console.info(`settings revision ${revision} arrived after a newer one; kept the newer settings`);
+  return state.settings ?? settings;
+}
+
 // ---------------------------------------------------------------- notices
 
 interface NoticeAction {
@@ -749,8 +768,8 @@ async function setMode(mode: Mode): Promise<void> {
   scheduleLanguagePreview(0);
   const deviceId = mode === "media" ? state.settings?.media_device_id : state.settings?.interpret_device_id;
   try {
-    const { settings } = await api.settingsSet(devicePatch(mode, deviceId ?? null));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(devicePatch(mode, deviceId ?? null));
+    adoptSettings(settings, revision);
   } catch (e) {
     reportError("error.saveMode", e);
   }
@@ -758,8 +777,8 @@ async function setMode(mode: Mode): Promise<void> {
 
 async function setDevice(deviceId: string | null): Promise<void> {
   try {
-    const { settings } = await api.settingsSet(devicePatch(state.mode, deviceId));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(devicePatch(state.mode, deviceId));
+    adoptSettings(settings, revision);
     renderDevices();
   } catch (e) {
     reportError("error.saveDevice", e);
@@ -1164,7 +1183,7 @@ async function changeShowTranslation(enabled: boolean): Promise<void> {
       settingsSet: (patch) => api.settingsSet(patch),
       overlaySetShowTranslation: (on) => api.overlaySetShowTranslation(on),
     });
-    state.settings = result.settings.settings;
+    adoptSettings(result.settings.settings, result.settings.revision);
     if (result.overlay) state.overlay = result.overlay;
     else reportError("error.setTranslation", result.overlayError);
     renderTranscript();
@@ -1310,7 +1329,7 @@ async function setFurigana(enabled: boolean): Promise<void> {
   renderFuriganaSwitch();
   try {
     const result = await api.sessionSetFurigana(enabled);
-    state.settings = result.settings;
+    adoptSettings(result.settings, result.revision);
   } catch (e) {
     reportError("error.setFurigana", e);
     if (engineCode(e) === "model_not_downloaded") void refreshFuriganaState();
@@ -1560,13 +1579,13 @@ async function applyRecommendation(button: HTMLButtonElement | null): Promise<vo
  * "套用", not for the automatic first-run apply.
  */
 function showAppliedSettings(result: AppliedRecommendation, force: boolean): void {
-  state.settings = result.settings;
+  const settings = adoptSettings(result.settings, result.revision);
   if (state.hardware) state.hardware = { ...state.hardware, recommendation: result.recommendation };
   if (result.warnings.length) console.warn("settings fields replaced by defaults:", result.warnings);
   // The saved settings now equal the recommendation: drop the offer, and any
   // preview still in flight (computed against the old settings).
   forgetPreview();
-  fillCombo(result.settings, force);
+  fillCombo(settings, force);
   renderHardware();
   renderModels();
   scheduleCheck(0);
@@ -1630,9 +1649,8 @@ async function firstRunFlow(): Promise<void> {
 /** Re-reads the saved settings into the UI (form edits are kept). */
 async function reloadSettings(): Promise<void> {
   try {
-    const { settings } = await api.settingsGet();
-    state.settings = settings;
-    fillCombo(settings);
+    const { settings, revision } = await api.settingsGet();
+    fillCombo(adoptSettings(settings, revision));
     renderModels();
   } catch (e) {
     reportError("error.readSettings", e);
@@ -1686,8 +1704,8 @@ async function dismissOffer(fingerprint: string): Promise<void> {
   state.closedOffers.add(fingerprint);
   const current = state.settings?.ui.dismissed_recommendations ?? [];
   try {
-    const { settings } = await api.settingsSet({ ui: { dismissed_recommendations: dismissedWith(current, fingerprint) } });
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet({ ui: { dismissed_recommendations: dismissedWith(current, fingerprint) } });
+    adoptSettings(settings, revision);
   } catch (e) {
     reportError("error.saveDismissal", e);
   }
@@ -2396,8 +2414,8 @@ async function submitCombo(): Promise<void> {
   el.comboSave.disabled = true;
   el.comboStatus.textContent = t("common.saving");
   try {
-    const { settings } = await api.settingsSet(combinationPatch(form));
-    state.settings = settings;
+    const { settings: saved, revision } = await api.settingsSet(combinationPatch(form));
+    const settings = adoptSettings(saved, revision);
     // A deliberate choice: never auto-applied over, and no offer right after saving
     // (it comes back on the next start or visit to this page if still different).
     state.userChoseModels = true;
@@ -2497,8 +2515,8 @@ async function submitSettings(): Promise<void> {
   el.settingsStatus.textContent = t("common.saving");
   const restrictedChanged = state.settings?.translation.allow_restricted !== form.allow_restricted;
   try {
-    const { settings } = await api.settingsSet(settingsPatchFromForm(form));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(settingsPatchFromForm(form));
+    adoptSettings(settings, revision);
     await pushOverlayStyle();
     if (state.obs?.content !== obsOutputFromForm(form)) await pushObsOutput();
     renderModeNotes();
@@ -2711,8 +2729,8 @@ async function submitGlossary(): Promise<void> {
   renderGlossaryErrors();
   el.glossaryStatus.textContent = t("common.saving");
   try {
-    const { settings } = await api.settingsSet(glossaryPatch({ builtin: state.glossary.builtin, entries }));
-    state.settings = settings;
+    const { settings: saved, revision: settingsRev } = await api.settingsSet(glossaryPatch({ builtin: state.glossary.builtin, entries }));
+    const settings = adoptSettings(saved, settingsRev);
     state.glossary.saving = false;
     // Rows edited (or imported) while saving stay as they are, still unsaved.
     if (state.glossary.revision === revision) fillGlossary(settings, true);
@@ -2975,8 +2993,8 @@ async function submitLanguages(): Promise<void> {
   el.languagesSave.disabled = true;
   el.languagesStatus.textContent = t("common.saving");
   try {
-    const { settings } = await api.settingsSet(save.patch);
-    state.settings = settings;
+    const { settings: saved, revision } = await api.settingsSet(save.patch);
+    const settings = adoptSettings(saved, revision);
     state.langDirty = false;
     if (save.withModels) {
       // A deliberate model choice: never auto-applied over, and the combination
@@ -3129,8 +3147,8 @@ async function saveUiLocale(pref: UiLocalePreference): Promise<void> {
     return;
   }
   try {
-    const { settings } = await api.settingsSet(uiLocalePatch(pref));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(uiLocalePatch(pref));
+    adoptSettings(settings, revision);
     state.uiLocaleUnsaved = false;
   } catch (e) {
     state.uiLocaleUnsaved = true;
@@ -3236,12 +3254,14 @@ async function loadModelsQuietly(): Promise<void> {
 async function loadEngineData(): Promise<void> {
   let isNew = false;
   try {
-    const { settings, path, warnings, isNew: fresh } = await api.settingsGet();
+    // A (re)started engine counts its settings revisions from the beginning.
+    settingsRevision.reset();
+    const { settings, path, warnings, isNew: fresh, revision } = await api.settingsGet();
     isNew = fresh;
     if (warnings.length) {
       notify(tp("notice.settingsFieldsUnreadable", warnings.length, { fields: joinList(warnings) }), "bad");
     }
-    state.settings = settings;
+    adoptSettings(settings, revision);
     await syncUiLocale(settings.ui.locale);
     state.settingsPath = path;
     state.mode = settings.mode;

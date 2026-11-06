@@ -253,6 +253,8 @@ export interface SettingsResult {
    * report it (older engine): then the UI never changes settings on its own.
    */
   isNew: boolean;
+  /** The engine's settings revision (see lib/settings-revision.ts); null when not reported. */
+  revision: number | null;
 }
 
 /**
@@ -309,6 +311,7 @@ export function parseSettingsResult(result: unknown): SettingsResult {
     path,
     warnings,
     isNew: top.is_new === true,
+    revision: Number.isSafeInteger(top.revision) && (top.revision as number) >= 0 ? (top.revision as number) : null,
   };
 }
 
@@ -323,12 +326,13 @@ export function parseAppliedRecommendation(result: unknown): AppliedRecommendati
   if (o.applied !== null && (typeof o.applied !== "object" || Array.isArray(o.applied))) {
     throw new ValidationError(`${p}.applied`, "expected an object or null");
   }
-  const { settings, path, warnings, isNew } = parseSettingsResult(result);
+  const { settings, path, warnings, isNew, revision } = parseSettingsResult(result);
   return {
     settings,
     path,
     warnings,
     isNew,
+    revision,
     applied: o.applied as Record<string, unknown> | null,
     recommendation: parseRecommendation(o.recommendation, `${p}.recommendation`),
   };

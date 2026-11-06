@@ -340,15 +340,15 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `models.delete`（F7） | `{"model": <ASR id>}` | `{"model", "freed_bytes": int}`；刪除已下載的 ASR 模型（見下方） |
 | `languages.list` | — | `{"languages": [{code, english_name, native_name, whisper_code, rtl, no_space, asr_quality}]}` |
 | `devices.list` | — | `{"devices": [DeviceInfo]}` |
-| `settings.get` | — | `{"settings": {...}, "path": 設定檔路徑, "is_new": bool}` |
+| `settings.get` | — | `{"settings": {...}, "path": 設定檔路徑, "is_new": bool, "revision": int}` |
 | `settings.set` | 部分設定物件（深度合併） | 同 `settings.get` |
-| `settings.apply_recommendation`（背景） | `{"only_if_new"?: bool}` | `{"settings", "path", "is_new", "applied": 寫入的部分設定 \| null, "recommendation": ModelCombination}` |
+| `settings.apply_recommendation`（背景） | `{"only_if_new"?: bool}` | `{"settings", "path", "is_new", "revision", "applied": 寫入的部分設定 \| null, "recommendation": ModelCombination}` |
 | `settings.preview_recommendation`（背景） | — | `{"patch": 套用會寫入的部分設定, "recommendation": ModelCombination, "differs": bool, "fingerprint": 16 個十六進位字元}`（不存檔） |
 | `settings.preview_languages`（背景） | `{"source_language"?, "target_language"?, "partner_language"?, "mode"?}` | 這組語言的推薦組合、每個模型是否已安裝與下載大小（不存檔、不下載），見下方 |
 | `session.start` | `{"mode": "media"\|"interpret", "device_id"?: str \| null}` | `{"session_id": int}` |
 | `session.stop` | — | `{}`（沒有 session 也回 `{}`） |
 | `session.set_furigana` | `{"enabled": bool}` | 同 `session.set_translation`；存進 `furigana.enabled`，執行中立即套用；打開時辭典沒下載 → `model_not_downloaded`（`furigana.md`） |
-| `session.set_translation` | `{"enabled": bool}` | `{"settings", "path", "is_new", "session_id": 套用到的 session id \| null}`；存進設定 `translation.enabled`，執行中的 session 立即切換 |
+| `session.set_translation` | `{"enabled": bool}` | `{"settings", "path", "is_new", "revision", "session_id": 套用到的 session id \| null}`；存進設定 `translation.enabled`，執行中的 session 立即切換 |
 | `engine.shutdown` | — | `{}`，之後結束 |
 
 - 會啟動背景工作的方法（`session.start`、`models.download`、`models.pull_translation`）在**回應寫出之後**才啟動背景執行緒，所以 UI 一定先拿到 `session_id`（或 `started: true`），才收到該 session（或該下載）的事件。`models.pull_translation` 是背景方法：背景工作執行緒寫出回應後才啟動下載執行緒（`Deferred.after`）。
@@ -423,6 +423,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   - 執行中**開啟**翻譯：該 session 開始時沒有預熱（只顯示原文時不預熱），所以本機翻譯服務會在背景先預熱一次、之後照常保溫（不阻塞回應）。`translation.keep_warm_secs = 0` 時沒有定期保溫，但開啟時的這一次預熱照樣進行（`keep_warm.WarmUpOnEnable`）。翻譯伺服器不可用時沿用「翻譯失敗只顯示原文＋提醒一次」；不做 `translation_model_missing` 檢查（session 已在執行）。
   - 執行中**關閉**翻譯：不再呼叫翻譯伺服器，也不再送保溫請求（不佔 GPU）。
 - `settings.get`／`settings.set`／`settings.apply_recommendation` 的 `is_new`：`SettingsStore.is_new`（見「讀寫」）。UI 以它判斷第一次執行、自動套用推薦。
+- 所有帶 `settings` 的結果（上面三個與 `session.set_translation`、`session.set_furigana`）都有 `revision`：`SettingsStore.snapshot()` 在同一把鎖內取出設定、`revision` 與 `is_new`，三者一致。`revision` 在每次 `load()` 與成功的 `update()` 加 1（驗證失敗、`update_if_new` 沒寫入時不變），只在同一個引擎行程內遞增，重啟後從頭算。
+  UI 的回應可能在較新的一份之後才寫回畫面（顯示翻譯的回應還在等字幕視窗時，振假名的回應已經寫入），UI 只保留 `revision` 不比目前舊的設定（`app/src/lib/settings-revision.ts`）；沒有這個欄位的舊引擎照舊以最後收到的為準。
 - **推薦依語言**（Milestone 12）：`hardware.detect`、`models.list`、`settings.apply_recommendation`、`settings.preview_recommendation` 的推薦都依目前設定的語言與 `mode`（`hardware.md`「語言」）。`ModelCombination` 的 `reasons`／`warnings` 是訊息物件，另有 `translation_status`（`recommended`／`remote`／`not_needed`／`unsupported`）與 `languages`（`{mode, source_language, target_language, partner_language}`）。`translation_status` 為 `not_needed`／`unsupported` 時 `translation_fast/final` 為 null，`settings.apply_recommendation` 不改翻譯模型。
 - `settings.preview_recommendation`：`settings.apply_recommendation`「會」寫入什麼，不存檔。`patch` 與 `applied` 出自同一個 `recommendation_patch()`；`differs` = 合併 `patch` 後的設定 ≠ 目前設定（只有推薦涵蓋的欄位會影響）；`fingerprint` = `{"patch": patch, "languages": 推薦依據的語言}` 的正規化 JSON（鍵排序）的 SHA-256 前 16 個十六進位字元，推薦或語言改變時跟著改變，UI 以它記住「不要再提醒」（Milestone 12 起包含語言，升級後舊的「不要再提醒」會再提醒一次）。與其他背景方法不同，設定在**執行時**才讀取（預覽可能排在其他背景請求之後，`differs` 要對照 UI 收到回應時的設定）。重用 10 秒的偵測快取。
 
@@ -574,6 +576,7 @@ UI 流程見 `ui.md`「自動推薦」。
    （由伺服器在 `hardware_service` 的結果外加上，`models.list` 其他部分不變）。
 4. **`models.download`／`models.delete`** 接受 `{"model": "furigana-dictionary"}`；刪除時辭典開啟中或下載中 → `model_in_use`。
 5. **新方法 `session.set_furigana {"enabled"}`**。
+6. **帶 `settings` 的結果新增 `revision: int`**（見「設定」）：選填的新欄位，舊 UI 忽略，`protocol_version` 維持 1。
 
 辭典在第一句需要標的字幕時才開啟，session 結束（送出結束狀態之前）、執行中關閉、引擎結束時釋放；沒有辭典或分析失敗時該句不帶 `ruby`、
 記一次 warning，字幕照常送出（`engine/furigana_service.py`）。

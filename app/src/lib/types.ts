@@ -453,6 +453,8 @@ export interface AppliedRecommendation {
   warnings: string[];
   /** Always false after a save; kept so the shape matches `settings.get`. */
   isNew: boolean;
+  /** The engine's settings revision (see lib/settings-revision.ts); null when not reported. */
+  revision: number | null;
   /**
    * The partial settings the engine actually wrote; null when `only_if_new`
    * was sent and settings had already been saved (nothing written).
