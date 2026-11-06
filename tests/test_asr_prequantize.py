@@ -159,8 +159,20 @@ class RunChildTest(unittest.TestCase):
                 """
             started = time.monotonic()
             try:
-                with self.assertLogs("kikitori.asr.prequantize_process", "WARNING"):
+                if os.name == "nt":
+                    # Windows 查不到已結束父行程的子孫：孫行程留著、管線開著，只記 warning
+                    with self.assertLogs("kikitori.asr.prequantize_process", "WARNING"):
+                        result = pp.run_child(
+                            {}, command=fake_child(code), timeout=WAIT
+                        )
+                else:
+                    # POSIX：_reap_group() 結束同一個行程群組的孫行程，管線隨之關閉
                     result = pp.run_child({}, command=fake_child(code), timeout=WAIT)
+                    grandchild = int(pid_file.read_text())
+                    deadline = time.monotonic() + WAIT
+                    while pid_alive(grandchild) and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    self.assertFalse(pid_alive(grandchild))
                 self.assertEqual(result, {"ok": True})
                 self.assertLess(time.monotonic() - started, WAIT)
             finally:
