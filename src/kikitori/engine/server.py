@@ -973,22 +973,33 @@ class EngineServer:
             last_sent, last_fraction = now, fraction
             send(downloaded, reported_total, "downloading", None)
 
+        # 最後的 done／error 在撤銷登記之後才送：UI 收到 done 就可能立刻 models.delete，
+        # 登記還在時會被誤判成「下載中」而得到 model_in_use。
+        final: tuple[str, str | None] | None = None
         try:
             send(0, expected_total, "downloading", None)
             job(progress, download.cancel)
-            send(total, total, "done", None)
+            final = ("done", None)
             logger.info("%s downloaded", download.model)
         except ChannelClosedError:
             logger.error("download of %s: protocol output closed", download.model)
         except Exception as exc:
             logger.exception("download of %s failed", download.model)
-            try:
-                send(0, total, "error", f"{type(exc).__name__}: {exc}")
-            except ChannelClosedError:
-                logger.error("cannot report download failure: protocol output closed")
+            final = ("error", f"{type(exc).__name__}: {exc}")
         finally:
             with self._downloads_lock:
                 self._downloads.pop((download.kind, download.model), None)
+        if final is None:
+            return
+        state, error = final
+        try:
+            send(total if state == "done" else 0, total, state, error)
+        except ChannelClosedError:
+            logger.error(
+                "cannot report the %s of %s: protocol output closed",
+                "completion" if state == "done" else "failure",
+                download.model,
+            )
 
     # --- session ----------------------------------------------------------------
 

@@ -315,7 +315,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 | `capture_error`／`permission_denied`／`device_lost` | `devices.list`／`session.start` 的其他擷取錯誤 |
 | `unknown_model` | `models.download` 的模型不在清單中（ASR id 或 `gpu-runtime`）；`models.delete` 的模型不是 registry 內的 ASR 模型（含 `gpu-runtime`） |
 | `model_not_downloaded` | `models.delete`：模型沒有下載完成（只有續傳殘留也算沒下載）。也是 `session.start` 的 `status error` code |
-| `model_in_use` | `models.delete`：模型正被使用——執行中或載入中的 session（含已停止、載入執行緒還沒結束的），或同一個 ASR 模型的下載正在進行 |
+| `model_in_use` | `models.delete`：模型正被使用——執行中或載入中的 session（含已停止、載入執行緒還沒結束的），或同一個 ASR 模型的下載正在進行（下載的登記在送出最後的 `download_progress` `done`／`error` **之前**撤銷，收到 `done` 後立即刪除不會得到這個錯誤） |
 | `download_in_progress` | 同一個模型（或 GPU 執行環境、或同名的翻譯模型）已在下載；ASR 與翻譯模型的名稱分開計算 |
 | `pull_unsupported` | `models.pull_translation`：翻譯伺服器不是 Ollama（沒有 `/api/version`），無法替使用者下載；請使用者在該服務自行安裝 |
 | `translation_server_unreachable` | `models.pull_translation`：連不上翻譯伺服器 |

@@ -575,6 +575,32 @@ class ModelsDeleteTest(EngineCase):
             "result", self.request("models.delete", {"model": "large-v3-turbo"})
         )
 
+    def test_download_is_unregistered_before_its_final_progress_event(self) -> None:
+        # UI 收到 done／error 後立即刪除不能因為登記還沒撤銷而得到 model_in_use
+        # （先送 done 再撤銷時，這個測試原本約三次失敗兩次）。
+        registered_at_final: list[bool] = []
+        original = self.server._send_event
+
+        def spy(name: str, data: Any) -> None:
+            if name == "download_progress" and data["state"] in ("done", "error"):
+                with self.server._downloads_lock:
+                    registered_at_final.append(
+                        (data["kind"], data["model"]) in self.server._downloads
+                    )
+            original(name, data)
+
+        with mock.patch.object(self.server, "_send_event", spy):
+            self.request("models.download", {"model": "large-v3-turbo"})
+            self.assertTrue(self.downloads.entered.wait(WAIT))
+            self.downloads.release.set()
+            self.sink.wait(
+                lambda m: (
+                    m.get("event") == "download_progress"
+                    and m["data"]["state"] == "done"
+                )
+            )
+        self.assertEqual(registered_at_final, [False])
+
     def test_other_models_can_be_deleted_during_a_session(self) -> None:
         session_id = self.start()
         self.status(session_id, "running")
