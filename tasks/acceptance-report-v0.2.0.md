@@ -2,7 +2,8 @@
 
 > 分支 `feat/vtuber-models`，HEAD `d6bbdaa`＋本次驗收的未 commit 修改（見「驗收中找到並修正的問題」）。日期：2026-11-06（02:59–06:15，無人值守）。
 > v0.1.0 的報告見 `tasks/acceptance-report.md`；系統怎麼運作請看 `docs/learning/`，各模組細節看 `docs/specs/`。
-> **沒有 commit、沒有 push**：所有修改都留在工作目錄，等你檢查後再 commit（建議的切分見最後）。
+> 後續（同日）：驗收找到的修正已依建議切分 commit（`3fb6d7f`、`d370718`）；第 6 節的 WebView2 記憶體成長已找到根因並修正（`fa6748d`），
+> 「按開始到聆聽 10–13 秒」改成兩個模型並行載入（`78c79d1`），見第 6 節最後與「觀察到、沒有修的」。
 
 ## 環境
 
@@ -27,7 +28,7 @@
 | 3. 引擎端到端（dev／release）＋新推薦組合的 VRAM | PASS：引擎 3.2–3.6 GB＋Ollama 7.07 GB、整張卡最高 10.8／12.2 GB、Ollama `size == size_vram`（沒有放到 CPU） |
 | 4. 記憶體壓力測試（完整規模 1–6） | 三個舊洩漏都已消失；找到並修正模型池上限（換組合時 GPU 仍漏）；情境 2 私有記憶體判定 FAIL 但 5 輪後確認持平（heap 高水位），執行緒門檻偶爾超出（暫時性） |
 | 5. GUI 驗收（a–j） | 全部 PASS（i 的快速鍵以 `keybd_event` 實際送出） |
-| 6. GUI 長時間（情境 7，18 分鐘） | **部分 PASS**：app、DOM、字幕視窗、引擎持平；主視窗 WebView2 renderer 沒有持平（+25–31 MiB／分，停止後回收），根因未找到 |
+| 6. GUI 長時間（情境 7，18 分鐘） | 驗收時**部分 PASS**（主視窗 WebView2 renderer +25–31 MiB／分）；**後續已修正**：根因是字幕紀錄全部列一起重排，`content-visibility` 後 22 分鐘 CDP soak +0.67 MiB／分（門檻 1），PASS |
 
 ## 0. 版本 0.2.0
 
@@ -221,6 +222,22 @@ uv run python -X utf8 experiments/memory_soak/menu.py --batch gui minutes=12 tog
 (1) 跑 30 分鐘以上（到 300 列上限）看會不會自己停在某個值；(2) 用 WebView2 DevTools（Memory → heap snapshot、`chrome://tracing` 的
 blink_gc／PartitionAlloc）看是哪一類物件；(3) 檢查切換翻譯時 `renderTranscript()`／`renderModeNotes()` 以外還重畫了什麼。
 
+**後續修正（`fa6748d`，方法與數字見 `experiments/memory_soak/README.md`「CDP soak」）**
+
+- 根因：字幕紀錄每一列（含畫面外）都參與排版與中日文塑形；切換「顯示翻譯」或介面語系時最多 300 列一起重排，這些原生記憶體
+  （memory-infra 傾印裡不屬於 v8／blink_gc／malloc 任何配置器）要很久才放掉，每切換一次疊一階（+57–100 MiB）。JS heap GC 後一直 2.3 MiB、
+  監聽器固定 70 個、detached 節點 0。二分：`#transcript { display:none }` 時 6 次切換 48 → 48 MiB；原本 87 → 200／247 MiB。
+- 修正：`.utt` 加 `content-visibility: auto`（最新 3 列除外，跟著捲到底才不停在半途）；音量表改 `transform: scaleX()`；每秒的狀態列只寫入改變的值。
+- 結果（除錯版＋假引擎，約 3.4 則即時字幕／秒，切換翻譯、字幕視窗、介面語系）：
+
+| 執行 | 主視窗 renderer | 最後 10 分鐘斜率 |
+|---|---|---|
+| 修正前，12 分鐘 | 39.9 → 197.5 MiB（8 分鐘時一次 +99 MiB） | +19.1 MiB／分 |
+| 修正後，22 分鐘 | 40.3 → 83.7 MiB，停止後 83.7 | **+0.67 MiB／分，PASS** |
+| 修正後，每次取樣強制 GC，22 分鐘 | 40.3 → 69.9 MiB | +0.43 MiB／分，PASS |
+
+- 未重跑：正式版建置＋真引擎的情境 7（量測用除錯版＋假引擎）。
+
 ## 驗收中找到並修正的問題（都先寫重現測試、確認失敗再修；未 commit）
 
 | # | 問題 | 原因 | 修正 | 測試 |
@@ -236,6 +253,8 @@ blink_gc／PartitionAlloc）看是哪一類物件；(3) 檢查切換翻譯時 `r
 `memory_soak/README.md`（修正後的回歸，引用 `47b0b2f`、`a6a93f5`）。
 
 ## 觀察到、沒有修的（給你決定）
+
+> 後續：1 已改善（兩個模型並行載入，11.8 → 7.3 s，`78c79d1`；載入進度以 `status loading` 的 `{step, done, total}` 回報）；2、3、4 已修正（`fa6748d`）。
 
 1. **按「開始」到聆聽要 10–13 秒**（v0.1.0 約 3 秒）：新推薦組合兩個模型都是 int8_float16，快取裡是 float16 權重，載入時量化（large-v3 6.5 s、turbo 3.4 s）。
    可選：快取另存 int8 轉換後的模型、兩個模型並行載入，或 12 GB 時即時路徑改回 turbo f16（VRAM 多約 1 GB，翻譯預算 8.13 → 7.09 GB 會降到 4B，所以目前的挑法不會選）。
@@ -266,7 +285,7 @@ blink_gc／PartitionAlloc）看是哪一類物件；(3) 檢查切換翻譯時 `r
 | 行程 | 每個情境結束都確認沒有 `kikitori-app`、`kikitori-engine`、`msedgedriver`、`tauri-driver` 殘留；最後 `tasklist` 也沒有 |
 | Ollama | 沒有卸載或刪除模型；`qwen3.5:4b` 留在顯示記憶體到 keep_alive 到期（約 5 分鐘）自己卸載 |
 
-## 建議的 commit 切分（等你確認）
+## 建議的 commit 切分（已依此 commit）
 
 1. `scripts/sync_version.py`、`tests/test_sync_version.py`：CRLF 修正。
 2. 版本 0.2.0（`pyproject.toml`、`uv.lock`、app 的五個版本檔）。

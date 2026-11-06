@@ -1,6 +1,6 @@
 # Spec: 競品比較後補強的功能
 
-> 狀態：**F1–F8 全部已實作**（2026-11-06；引擎、Rust 與 UI 都已完成，各功能的進度見下方，細節見 `ui.md` 與 `pipeline-engine.md`）。端到端操作驗收併入里程碑 17（尚未執行）。規格寫於 2026-11-06。依據：`research_notes/競品比較/open_source_projects.md`（約 30 個開源專案）、
+> 狀態：**F1–F8 全部已實作**（2026-11-06；引擎、Rust 與 UI 都已完成，各功能的進度見下方，細節見 `ui.md` 與 `pipeline-engine.md`）。端到端操作驗收已在里程碑 17 完成（`tasks/acceptance-report-v0.2.0.md` 第 5 節 d–i：匯出、OBS 文字檔、術語表、刪除模型、穩定前綴與音量表、快速鍵，全部 PASS）。規格寫於 2026-11-06。依據：`research_notes/競品比較/open_source_projects.md`（約 30 個開源專案）、
 > `research_notes/競品比較/commercial_products.md`（商用產品）。使用者已授權依建議實作，最後驗收。
 
 ## Objective

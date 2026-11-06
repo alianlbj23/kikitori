@@ -68,5 +68,6 @@ kikitori 的主要情境是看日語 VTuber 直播（雜談、遊戲、連動，
 - 端到端：本機 12 GB 顯示卡上實際以新推薦組合跑 session，量 VRAM 是否在預算內（記憶體壓力測試一併檢查）。
   - **結果（2026-11-06，v0.2.0 驗收，`tasks/acceptance-report-v0.2.0.md`）**：turbo int8_float16 ／ large-v3 int8_float16 ＋ qwen3.5:9b，影片翻譯 session 中
     引擎 3.2–3.6 GB、Ollama 7.07 GB、整張卡最高 10.8／12.2 GB；`/api/ps` 的 `size` ＝ `size_vram`（沒有放到 CPU）。完整字幕 `latency_ms` 中位數 578 ms、
-    即時字幕延遲 0.31 s；但 int8_float16 在載入時量化，按「開始」到聆聽 10.6–13.3 s（v0.1.0 約 3 s）。
+    即時字幕延遲 0.31 s；但 int8_float16 在載入時量化，按「開始」到聆聽 10.6–13.3 s（v0.1.0 約 3 s）。後續改成兩個 ASR 模型並行載入，
+    11.8 → 7.3 s（`pipeline-engine.md`「載入進度」）。
   - 共用權重第二個 worker 的 512 MiB 仍是估計值（th／ar／hi 的組合沒有在這次端到端量測）。
