@@ -266,12 +266,16 @@ select {
   overflow: hidden;
 }
 
+/* Scaled, not resized: a width transition re-runs layout on every frame of
+   every metrics update (once a second), a transform only re-composites. */
 .meter-fill {
   display: block;
   height: 100%;
-  width: 0;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
   background: var(--kihada);
-  transition: width 300ms linear;
+  transition: transform 300ms linear;
 }
 
 .meter[data-quiet="true"] .meter-fill {
@@ -324,6 +328,8 @@ select {
   overflow-y: auto;
   padding: 30px 40px 48px;
   position: relative;
+  /* Focus and scrolling stop below the sticky notices (height set by main.ts). */
+  scroll-padding-top: calc(var(--notices-h, 0px) + 12px);
 }
 
 .page {
@@ -663,6 +669,21 @@ input[type="range"] {
   padding: 14px 0 14px 12px;
   border-bottom: 1px solid var(--rule);
   position: relative;
+  /*
+   * Rows off screen are not laid out, shaped or painted. Otherwise every change
+   * that touches all rows (顯示翻譯, interface language) re-lays out and reshapes
+   * up to 300 rows while subtitles keep arriving, and the renderer held ~80 MiB
+   * per such pass until the session stopped (memory_soak README「CDP soak」).
+   * `auto` remembers each row's real height once it has been on screen.
+   */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}
+
+/* Following the subtitles scrolls to scrollHeight right after a row is added; the
+   newest rows must already have their real height there, not the 88 px estimate. */
+.utt:nth-last-child(-n + 3) {
+  content-visibility: visible;
 }
 
 .utt-time {
@@ -1241,6 +1262,18 @@ textarea {
 .glossary td:nth-child(1),
 .glossary td:nth-child(2) {
   width: 36%;
+}
+
+/* As wide as its longest language name ("English（英文）" was cut off at the
+   column's share); the two text columns give up the space. */
+.glossary td[data-cell="target_language"] {
+  width: 1%;
+}
+
+.glossary td[data-cell="target_language"] select {
+  width: auto;
+  min-width: 10em;
+  max-width: 18em;
 }
 
 .glossary td.has-error input,

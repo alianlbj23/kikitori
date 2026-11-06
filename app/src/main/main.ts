@@ -27,7 +27,7 @@ import {
   type CheckView,
 } from "../lib/combination";
 import { RecentLog, buildDiagnostics } from "../lib/diagnostics";
-import { byId, h, replace, setIfChanged } from "../lib/dom";
+import { byId, h, replace, setAttributeIfChanged, setIfChanged } from "../lib/dom";
 import {
   EXPORT_CONTENTS,
   EXPORT_FORMATS,
@@ -109,6 +109,7 @@ import {
   dismissMetricsWarning,
   emptyMetrics,
   metricsSessionState,
+  meterTransform,
   metricsView,
   noAudioDueAt,
   type MetricsState,
@@ -120,6 +121,8 @@ import {
   dismissedWith,
   missingModels,
   missingModelsView,
+  missingNoticeMode,
+  missingShownByStartPanel,
   offerText,
   runFirstRun,
   shouldOfferRecommendation,
@@ -147,7 +150,7 @@ import {
 import { SessionEndSave } from "../lib/session-end";
 import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
 import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
-import { translationGuide } from "../lib/translation-guide";
+import { isTranslationServerLog, translationGuide, type GuideView } from "../lib/translation-guide";
 import { setShowTranslation } from "../lib/translation-toggle";
 import type {
   AboutInfo,
@@ -333,6 +336,8 @@ const state: State = {
 /** Last engine messages for "複製診斷資訊". */
 const recentLog = new RecentLog();
 const GUIDE_NOTICE = "translation-guide";
+/** An engine warning about the translation server; the guide replaces it when it appears. */
+const TRANSLATION_LOG_NOTICE = "engine-translation-log";
 const EXPORT_NOTICE = "export";
 
 const firstRunGate = new FirstRunGate();
@@ -602,14 +607,22 @@ function renderMetrics(): void {
   const view = metricsView(state.metrics, now);
   el.metrics.hidden = !view.visible;
   const level = view.level ?? 0;
-  el.levelFill.style.width = `${Math.round(level * 100)}%`;
-  el.levelMeter.dataset.quiet = String(view.level === null || level === 0);
-  el.levelMeter.setAttribute("aria-valuenow", String(Math.round(view.levelDbfs ?? -120)));
-  el.levelMeter.setAttribute("aria-valuetext", view.levelDbfs === null ? t("metrics.levelUnknown") : t("metrics.levelValue", { db: Math.round(view.levelDbfs) }));
-  el.levelMeter.title = t("metrics.levelLabel");
-  el.latency.textContent =
-    view.latencyMs === null ? t("metrics.latencyUnknown") : t("metrics.latency", { seconds: (view.latencyMs / 1000).toFixed(1) });
-  el.latency.title = t("metrics.latencyHelp");
+  // Called every second while a session runs: write only what changed (see setIfChanged).
+  setIfChanged(el.levelFill.style, "transform", meterTransform(view.level));
+  setIfChanged(el.levelMeter.dataset, "quiet", String(view.level === null || level === 0));
+  setAttributeIfChanged(el.levelMeter, "aria-valuenow", String(Math.round(view.levelDbfs ?? -120)));
+  setAttributeIfChanged(
+    el.levelMeter,
+    "aria-valuetext",
+    view.levelDbfs === null ? t("metrics.levelUnknown") : t("metrics.levelValue", { db: Math.round(view.levelDbfs) }),
+  );
+  setIfChanged(el.levelMeter, "title", t("metrics.levelLabel"));
+  setIfChanged(
+    el.latency,
+    "textContent",
+    view.latencyMs === null ? t("metrics.latencyUnknown") : t("metrics.latency", { seconds: (view.latencyMs / 1000).toFixed(1) }),
+  );
+  setIfChanged(el.latency, "title", t("metrics.latencyHelp"));
 
   for (const warning of ["backlog", "no_audio"] as const) {
     const key = METRICS_NOTICES[warning];
@@ -782,6 +795,7 @@ const startFlow = new StartDownloads({
     renderStartDownloads();
     renderStatus();
     renderTranslationGuide();
+    renderMissingNotice();
   },
 });
 
@@ -917,7 +931,8 @@ function renderExport(): void {
   }
   const any = hasExportableLines(state.exportLog.lines);
   for (const button of exportFormatButtons()) button.disabled = !any;
-  el.exportHelp.textContent = any ? t("export.help") : t("export.empty");
+  // Runs on every subtitle event (renderTranscript).
+  setIfChanged(el.exportHelp, "textContent", any ? t("export.help") : t("export.empty"));
 }
 
 function exportContent(): ExportContent {
@@ -1453,9 +1468,21 @@ async function downloadMissingThenStart(): Promise<boolean> {
   return items.length > 0;
 }
 
+/** The start panel showed the missing models' downloads when the notice was last rendered. */
+let missingInStartPanel = false;
+
 function renderMissingNotice(): void {
   if (!state.missing) return;
   const view = missingModelsView(state.missing, state.models?.asr ?? null, state.downloads);
+  const inPanel = missingShownByStartPanel(state.missing, (id) => startFlow.tracks("asr", id));
+  const mode = missingNoticeMode(view.state, inPanel, missingInStartPanel);
+  missingInStartPanel = inPanel;
+  if (mode !== "notice") {
+    // One progress display is enough: the start panel's (lib/recommend.ts missingNoticeMode).
+    noticeFor(MISSING_NOTICE)?.remove();
+    if (mode === "forget") state.missing = null;
+    return;
+  }
   const shown = noticeFor(MISSING_NOTICE);
   if (shown?.dataset.state === view.state) {
     // Progress updates only change the text; keep the buttons (and focus) in place.
@@ -1817,14 +1844,10 @@ function renderModels(): void {
 
 // ---------------------------------------------------------------- translation server guide
 
-/**
- * "Install Ollama" / "Use original only" when the translation server cannot be
- * reached (lib/translation-guide.ts): on the settings page, and once as a
- * notice each time it appears, so it is seen before starting.
- */
-function renderTranslationGuide(): void {
+/** The guide that applies now (lib/translation-guide.ts), or null. */
+function currentGuide(): GuideView | null {
   const server = state.models?.translation.server ?? state.hardware?.hardware.translation_server ?? null;
-  const guide = translationGuide(
+  return translationGuide(
     {
       translationEnabled: showsTranslation(),
       server,
@@ -1832,12 +1855,23 @@ function renderTranslationGuide(): void {
     },
     state.settings?.translation.base_url ?? DEFAULT_SETTINGS.translation.base_url,
   );
+}
+
+/**
+ * "Install Ollama" / "Use original only" when the translation server cannot be
+ * reached: on the settings page, and once as a notice each time it appears, so
+ * it is seen before starting.
+ */
+function renderTranslationGuide(): void {
+  const guide = currentGuide();
   el.guide.hidden = guide === null;
   if (!guide) {
     state.guideShown = false;
     noticeFor(GUIDE_NOTICE)?.remove();
     return;
   }
+  // The guide says the same in the interface language; the engine's raw text stays in diagnostics.
+  noticeFor(TRANSLATION_LOG_NOTICE)?.remove();
   const text = t(guide.offerInstall ? "guide.local" : "guide.remote", { url: guide.url });
   el.guideText.textContent = text;
   el.guideInstall.hidden = !guide.offerInstall;
@@ -3060,7 +3094,22 @@ async function manualUpdateCheck(): Promise<void> {
 
 // ---------------------------------------------------------------- wiring
 
+/**
+ * The notices stick to the top of the scrolling content and would cover whatever
+ * focus or scrolling brings to the top (the settings form's first row). Their
+ * height becomes the scroller's scroll padding (`--notices-h` in main.css).
+ */
+function keepContentBelowNotices(): void {
+  const scroller = el.notices.closest<HTMLElement>(".content");
+  if (!scroller) return;
+  new ResizeObserver(() => {
+    const height = el.notices.childElementCount > 0 ? el.notices.getBoundingClientRect().height : 0;
+    scroller.style.setProperty("--notices-h", `${Math.ceil(height)}px`);
+  }).observe(el.notices);
+}
+
 function wire(): void {
+  keepContentBelowNotices();
   for (const button of el.modes) {
     button.addEventListener("click", () => void setMode(button.dataset.mode as Mode));
   }
@@ -3239,7 +3288,15 @@ async function subscribe(): Promise<void> {
       if (l.level !== "debug") recentLog.push(l.level, l.message);
       if (l.level === "warning" || l.level === "error") {
         console.warn(`engine ${l.level}: ${l.message}`);
-        notify(t("engine.log", { message: l.message }), l.level === "error" ? "bad" : "info");
+        const translationLog = isTranslationServerLog(l.message);
+        // A translation-server failure the localized guide already explains is not repeated as raw engine text.
+        if (translationLog && currentGuide() !== null) return;
+        notify(
+          t("engine.log", { message: l.message }),
+          l.level === "error" ? "bad" : "info",
+          [],
+          translationLog ? { key: TRANSLATION_LOG_NOTICE } : {},
+        );
       }
     }),
     events.metrics(onMetrics),

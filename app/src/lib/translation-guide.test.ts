@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { OLLAMA_DOWNLOAD_URL, isLocalUrl, translationGuide, type ServerProbe } from "./translation-guide";
+import { OLLAMA_DOWNLOAD_URL, isLocalUrl, isTranslationServerLog, translationGuide, type ServerProbe } from "./translation-guide";
 
 const LOCAL_DOWN: ServerProbe = { base_url: "http://localhost:11434/v1", is_local: true, reachable: false, error: "refused" };
 const REMOTE_DOWN: ServerProbe = { base_url: "https://llm.example/v1", is_local: false, reachable: false, error: null };
@@ -54,5 +54,30 @@ describe("Ollama download page", () => {
     };
     const opener = capability.permissions.find((p) => typeof p !== "string" && p.identifier === "opener:allow-open-url");
     expect(typeof opener === "object" && opener.allow?.map((a) => a.url)).toContain(OLLAMA_DOWNLOAD_URL);
+  });
+});
+
+describe("isTranslationServerLog", () => {
+  it("recognises the engine's translation-server warnings (covered by the guide)", () => {
+    for (const message of [
+      "keep-warm request to the translation server failed: WarmUpError: cannot reach http://localhost:11434 (repeats within 60 s are logged at debug level)",
+      "translation failed: TranslationError: connection refused",
+      "cannot warm up translation model qwen3.5:9b: connection refused",
+      "cannot keep the translation model warm",
+    ]) {
+      expect(isTranslationServerLog(message), message).toBe(true);
+    }
+  });
+
+  it("leaves every other engine message alone", () => {
+    for (const message of [
+      "the translation server rejected the API key (HTTP 401/403); check translation.api_key_env",
+      "cannot switch the keep-warm task: RuntimeError: boom",
+      "session 3 is still releasing its models after 5.0 s; reporting the session as ended anyway",
+      "",
+      "some text mentioning translation failed: in the middle",
+    ]) {
+      expect(isTranslationServerLog(message), message).toBe(false);
+    }
   });
 });

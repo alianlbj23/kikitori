@@ -250,6 +250,34 @@ export function missingModelsView(
   return { state: "done", text: t("missing.done") };
 }
 
+/**
+ * A start ("開始") is downloading some of the missing models: its panel shows
+ * their progress, so the missing-models notice steps aside instead of showing
+ * the same progress a second time.
+ */
+export function missingShownByStartPanel(required: readonly MissingModel[], tracks: (id: string) => boolean): boolean {
+  return required.some((m) => tracks(m.id));
+}
+
+/**
+ * What the missing-models notice does, given whether the start panel shows the
+ * downloads now (`inStartPanel`) and did when last rendered (`wasInStartPanel`):
+ * - `panel`: hidden, the panel shows the same progress;
+ * - `forget`: a start downloaded them; the session starts by itself, so no
+ *   "models are ready, press 開始" notice;
+ * - `notice`: shown as usual — including after the start was cancelled, when
+ *   the engine may still be downloading and only this notice reports it.
+ */
+export function missingNoticeMode(
+  viewState: MissingModelsState,
+  inStartPanel: boolean,
+  wasInStartPanel: boolean,
+): "panel" | "forget" | "notice" {
+  if (inStartPanel) return "panel";
+  if (wasInStartPanel && viewState === "done") return "forget";
+  return "notice";
+}
+
 /** Chosen models still downloading: starting now would fail with `model_not_downloaded`. */
 export function blockingDownloads(asr: AsrChoiceIds, downloads: ReadonlyMap<string, DownloadProgressEvent>): string[] {
   return [...new Set([asr.fast_model, asr.final_model])].filter((id) => downloads.get(id)?.state === "downloading");

@@ -47,6 +47,8 @@ or use `npm run menu` in app/.
 Fault injection (for exercising the bridge): `--garbage-every N` writes an invalid
 line after every N subtitle events; `--crash-after SECONDS` exits with status 3;
 `--ignore-shutdown` never answers `engine.shutdown` (an engine stuck mid-inference).
+Pacing (for memory soaks at the real engine's event rate): `--partial-steps N`
+partials per sentence, `--partial-interval SECONDS` apart.
 """
 
 from __future__ import annotations
@@ -181,6 +183,13 @@ TRANSLATION_SERVER_PROFILES = ("ollama", "openai", "offline", "auth")
 # `--metrics`: what the fake input level and backlog look like.
 METRICS_PROFILES = ("normal", "silent", "backlog")
 METRICS_INTERVAL_SECS = 1.0
+# `--partial-steps` / `--partial-interval`: how often partials arrive. The
+# defaults (4 partials, 0.55 s apart) suit UI work. The real engine sent 4299
+# partials for 217 sentences in 20 minutes (~20 per sentence, ~3.6 per second;
+# experiments/memory_soak/README.md, scenario 4); memory soaks of the app use
+# 20 partials 0.2 s apart, ~3.4 per second with the final's pauses.
+DEFAULT_PARTIAL_STEPS = 4
+DEFAULT_PARTIAL_INTERVAL_SECS = 0.55
 # Engine limits of `translation.glossary` (src/kikitori/translate/glossary.py).
 GLOSSARY_MAX_ENTRIES = 500
 GLOSSARY_MAX_SOURCE_CHARS = 100
@@ -591,12 +600,16 @@ class Session(threading.Thread):
         writer: Writer,
         settings: dict[str, Any] | None = None,
         metrics_profile: str = "normal",
+        partial_steps: int = DEFAULT_PARTIAL_STEPS,
+        partial_interval: float = DEFAULT_PARTIAL_INTERVAL_SECS,
     ) -> None:
         super().__init__(name=f"session-{session_id}", daemon=True)
         self.session_id = session_id
         self.mode = mode
         self.writer = writer
         self.metrics_profile = metrics_profile
+        self.partial_steps = partial_steps
+        self.partial_interval = partial_interval
         settings = settings or DEFAULT_SETTINGS
         # The models this session loads: `models.delete` refuses them while it runs.
         self.asr_models = frozenset(
@@ -713,12 +726,12 @@ class Session(threading.Thread):
         Each partial's `stable_chars` is the previous partial's length: the
         prefix two consecutive hypotheses agree on (LocalAgreement-2).
         """
-        steps = 4
+        steps = self.partial_steps
         stable = 0
         self.speaking = True
         try:
             for i in range(1, steps + 1):
-                if self.stop_event.wait(0.55):
+                if self.stop_event.wait(self.partial_interval):
                     return False
                 cut_o = max(1, len(original) * i // (steps + 1))
                 cut_t = len(translation) * i // (steps + 1)
@@ -819,10 +832,14 @@ class FakeEngine:
         ignore_shutdown: bool = False,
         translation_server: str = "ollama",
         metrics_profile: str = "normal",
+        partial_steps: int = DEFAULT_PARTIAL_STEPS,
+        partial_interval: float = DEFAULT_PARTIAL_INTERVAL_SECS,
     ) -> None:
         self.writer = writer
         self.translation_server = translation_server
         self.metrics_profile = metrics_profile
+        self.partial_steps = partial_steps
+        self.partial_interval = partial_interval
         self.translation_installed = {
             m["name"] for m in TRANSLATION_MODELS if m["installed"]
         }
@@ -1615,6 +1632,8 @@ class FakeEngine:
                 self.writer,
                 settings,
                 metrics_profile=self.metrics_profile,
+                partial_steps=self.partial_steps,
+                partial_interval=self.partial_interval,
             )
             session.start_error = self._start_error({**settings, "mode": mode})
             self.next_session_id += 1
@@ -1757,9 +1776,27 @@ def main() -> int:
         help="fake input: normal, silent (below -60 dBFS: the no-audio hint) or "
         "backlog (grows past 3 sentences: the can't-keep-up warning)",
     )
+    parser.add_argument(
+        "--partial-steps",
+        type=int,
+        default=DEFAULT_PARTIAL_STEPS,
+        metavar="N",
+        help=f"partials per sentence (default {DEFAULT_PARTIAL_STEPS}; 1-100)",
+    )
+    parser.add_argument(
+        "--partial-interval",
+        type=float,
+        default=DEFAULT_PARTIAL_INTERVAL_SECS,
+        metavar="SECONDS",
+        help=f"seconds between partials (default {DEFAULT_PARTIAL_INTERVAL_SECS}; 0.05-5)",
+    )
     args = parser.parse_args()
     if args.garbage_every < 0 or args.crash_after < 0:
         parser.error("arguments must be non-negative")
+    if not 1 <= args.partial_steps <= 100:
+        parser.error("--partial-steps must be between 1 and 100")
+    if not 0.05 <= args.partial_interval <= 5:
+        parser.error("--partial-interval must be between 0.05 and 5 seconds")
 
     writer = Writer(args.garbage_every)
     engine = FakeEngine(
@@ -1767,6 +1804,8 @@ def main() -> int:
         ignore_shutdown=args.ignore_shutdown,
         translation_server=args.translation_server,
         metrics_profile=args.metrics,
+        partial_steps=args.partial_steps,
+        partial_interval=args.partial_interval,
     )
     if args.crash_after > 0:
 

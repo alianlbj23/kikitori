@@ -30,5 +30,7 @@ export default defineConfig(() => ({
   test: {
     include: ["src/**/*.test.ts"],
     environment: "node",
+    // CSS is processed only so `main.css?raw` (render-cost.test.ts) has its text.
+    css: { include: [/\/main\.css(\?|$)/] },
   },
 }));

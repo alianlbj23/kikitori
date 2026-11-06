@@ -110,6 +110,16 @@ export function levelFraction(dbfs: number): number {
   return Math.min(1, Math.max(0, (dbfs - METER_FLOOR_DBFS) / -METER_FLOOR_DBFS));
 }
 
+/**
+ * CSS transform for the meter's fill (0–1 bar length; null = no reading yet).
+ * Rounded to hundredths: the bar is 96 px wide, and an unchanged value must not
+ * restyle it every second.
+ */
+export function meterTransform(level: number | null): string {
+  const v = level === null || !Number.isFinite(level) ? 0 : Math.min(1, Math.max(0, level));
+  return `scaleX(${Math.round(v * 100) / 100})`;
+}
+
 export interface MetricsView {
   /** Show the meter and latency at all (a session is running). */
   visible: boolean;

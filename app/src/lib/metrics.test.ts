@@ -6,6 +6,7 @@ import {
   dismissMetricsWarning,
   emptyMetrics,
   levelFraction,
+  meterTransform,
   metricsSessionState,
   metricsView,
   noAudioDueAt,
@@ -122,5 +123,21 @@ describe("metrics state", () => {
     const stopped = metricsSessionState(state, "loading", 1);
     expect(metricsView(stopped, 30_000).warnings).toEqual([]);
     expect(noAudioDueAt(stopped, 0)).toBeNull();
+  });
+});
+
+describe("meterTransform", () => {
+  it("scales the bar on the compositor, rounded so tiny changes do not restyle it", () => {
+    expect(meterTransform(null)).toBe("scaleX(0)");
+    expect(meterTransform(0)).toBe("scaleX(0)");
+    expect(meterTransform(1)).toBe("scaleX(1)");
+    expect(meterTransform(0.4234)).toBe("scaleX(0.42)");
+    expect(meterTransform(0.4249)).toBe(meterTransform(0.4201));
+  });
+
+  it("clamps out-of-range and non-finite values", () => {
+    expect(meterTransform(1.7)).toBe("scaleX(1)");
+    expect(meterTransform(-0.2)).toBe("scaleX(0)");
+    expect(meterTransform(Number.NaN)).toBe("scaleX(0)");
   });
 });

@@ -57,6 +57,7 @@
 - 每句一列：時間碼（`start_sample / 16000`，`m:ss`）、來源語言單字標籤（日／英／中，滑鼠移上去顯示「日語譯成繁體中文」）、原文（較大）、譯文。原文與譯文都加 `dir="auto"`（阿拉伯語由右到左）。譯文是空字串時以 CSS `attr(data-empty)` 顯示字典裡的「（沒有譯文）」／「翻譯中」（第一階段寫死在 CSS 的中文移到字典）。
 - 「顯示翻譯」關閉時只列原文（譯文列不顯示，`lib/subtitles.ts` 的 `lineDisplay`）；已翻譯的句子保留譯文，再打開時重新顯示。
 - 即時字幕（`is_final=false`）在左側加字幕黃細條，原文只有**還可能改變的尾巴**是淡色、已穩定的前段（`stable_chars`）照一般亮度，譯文整句淡色（見「穩定的即時字幕」）；同一個 `utterance_id` 的完整翻譯到達時原地取代。最多保留 300 句。使用者停在底部時自動捲動，往上翻時不打擾。
+- 每一列 `content-visibility: auto`（最新 3 列除外，跟著捲到底需要它們的實際高度）：畫面外的列不排版、不塑形、不繪製，切換「顯示翻譯」或介面語系時不必重排最多 300 列（v0.2.0 長時間測試中主視窗 renderer 因此每次多留約 80 MiB，見 `experiments/memory_soak/README.md`「CDP soak」）。音量表以 `transform: scaleX()` 動畫（不觸發排版），每秒的狀態列與匯出說明只寫入改變的值。
 - 工具：顯示字幕視窗、滑鼠穿透、**顯示翻譯**三個開關、「清除紀錄」與「**匯出**」選單（見「匯出字幕紀錄」）。開關下方逐行說明三個全域快速鍵（滑鼠穿透、切換顯示翻譯、清除字幕）；被其他程式占用的快速鍵改為提示「已被其他程式占用，無法使用」，其餘照常（不擋其他功能）。
 - 「清除紀錄」同時清掉匯出用的紀錄：清掉的內容之後不會被匯出。
 - 空狀態：說明下一步（選模式與來源後按「開始」）。
@@ -135,7 +136,7 @@
 
 - **開始前**：依最近一次的 `models.list` 找出選用但未下載（或下載中）的 ASR 模型，有就先下載再開始，不送 `session.start`。翻譯模型不在開始前檢查：只有引擎知道伺服器是不是 Ollama。
 - **開始後引擎回報**：`status error` 的 `translation_model_missing` → 對 `data.models`（UI 只保留引擎能下載的名稱）逐一 `models.pull_translation`；`model_not_downloaded` → 重新讀取 `models.list`，下載缺少的 ASR 模型（找不到才顯示原本的錯誤說明）。引擎先檢查翻譯模型、再載入 ASR，所以兩種都缺時會依序下載兩輪。
-- **進度**：`download_progress` 以 `kind`＋`model` 對應（ASR 與翻譯模型可能同名；沒有 `kind` 的舊引擎事件只對應 ASR）。翻譯模型的總量會在下載中變大（Ollama 逐層回報），第一筆是 0／0（顯示「準備下載」）。面板中的下載不再另外跳「下載完成／失敗」訊息。
+- **進度**：`download_progress` 以 `kind`＋`model` 對應（ASR 與翻譯模型可能同名；沒有 `kind` 的舊引擎事件只對應 ASR）。翻譯模型的總量會在下載中變大（Ollama 逐層回報），第一筆是 0／0（顯示「準備下載」）。面板中的下載不再另外跳「下載完成／失敗」訊息；上方「缺少的模型」訊息在面板下載它們時收起，進度只在面板顯示一次；取消後（引擎可能仍在下載）訊息回來，由面板下載完成則不再顯示「已下載完成」（`missingNoticeMode`）。
 - **全部完成**：自動再送一次 `session.start`（與按「開始」相同的模式與裝置），失敗照一般「無法開始」回報。同一次開始中已下載過的模型若引擎又說缺少，不再重抓，直接標成錯誤（避免無限循環）；使用者重按「開始」時重新計算。
 - **失敗**：任一下載失敗（等其他下載結束後）停在錯誤說明與「重試」（只重抓失敗的）。`download_in_progress` 視為已在下載，等進度事件。
 - **翻譯伺服器無法替使用者下載**（只對翻譯模型）：`pull_unsupported` →「翻譯服務 {url} 不是 Ollama…請在該服務上自行安裝 {models}，或到『模型』頁改選已安裝的模型；也可以關閉『顯示翻譯』」；`translation_server_unreachable` →「連不上翻譯服務…請先啟動 Ollama（開啟 Ollama 應用程式，或在終端機執行 ollama serve），再按『重試』」；`translation_server_auth_failed`（伺服器回 401／403）→「翻譯伺服器拒絕連線：請檢查 API 金鑰」。三者都可重試。
@@ -149,6 +150,9 @@
 ### 訊息
 
 內容區上方的訊息列（最多三則、可關閉）：操作失敗的原因與下一步、引擎 `log` 事件的 warning／error、`status: error` 的 `code` 對應說明（例如 `model_not_downloaded` →「模型還沒下載。請到『模型』頁下載後再開始。」，`translation_model_missing`、`translation_server_auth_failed` 也有說明）、引擎錯誤碼的說明（含 `license_not_accepted`、`gpu_runtime_unsupported`、`download_in_progress`、`pull_unsupported`、`translation_server_unreachable`、`translation_server_auth_failed`）、下載完成或失敗（開始前下載面板裡的下載除外）、GPU 加速元件安裝後的重啟、更新提示。
+
+- 翻譯服務連不上的引導（見「翻譯服務連不上時」）出現時，引擎關於翻譯服務失敗的英文 `log`（`keep-warm request to the translation server failed: …`、`translation failed: …`、`cannot warm up translation model …`，`isTranslationServerLog`）不再顯示成「引擎提醒」——引導已用介面語言說明同一件事；原文仍留在診斷資訊的最近訊息。引導晚一步出現時會收起先前那則。
+- 訊息列固定在內容區上方；它的高度設成內容區的 `scroll-padding-top`（`--notices-h`），聚焦或捲動到的欄位不會停在訊息列底下（設定頁表單的第一列）。
 
 ### 匯出字幕紀錄
 
@@ -179,7 +183,7 @@
 
 規格見 `competitive-features.md` F3、資料形狀見 `vtuber-profile.md`。邏輯在 `app/src/lib/glossary.ts`（純函式、可測），`main.ts` 只畫表格。
 
-- 設定頁的獨立表單：「使用內建的直播用語表」（`builtin`）、自訂詞條表格（每列：原文、譯文、字幕語言選單——第一項「全部語言」＝`null`，其餘是 `languages.list` 的語言；設定裡有清單沒有的代碼時照樣列出，不悄悄改掉——與「刪除」）、「新增詞條」「匯入 CSV」「匯出 CSV」、「儲存術語表」「還原」。改動只在表格裡，按「儲存術語表」才送 `settings.set {"translation": {"glossary": {builtin, entries}}}`（引擎對物件深度合併、對清單整個取代，所以一律送整份清單）；儲存後執行中的 session 下次開始才生效。未儲存的修改在重新讀取設定時保留。
+- 設定頁的獨立表單：「使用內建的直播用語表」（`builtin`）、自訂詞條表格（每列：原文、譯文、字幕語言選單——第一項「全部語言」＝`null`，其餘是 `languages.list` 的語言；設定裡有清單沒有的代碼時照樣列出，不悄悄改掉；選單寬度依最長的語言名稱（10–18em），「English（英文）」不被截斷——與「刪除」）、「新增詞條」「匯入 CSV」「匯出 CSV」、「儲存術語表」「還原」。改動只在表格裡，按「儲存術語表」才送 `settings.set {"translation": {"glossary": {builtin, entries}}}`（引擎對物件深度合併、對清單整個取代，所以一律送整份清單）；儲存後執行中的 session 下次開始才生效。未儲存的修改在重新讀取設定時保留。
 - **本地檢查**（`validateGlossary`，與引擎的 `_parse_glossary`／`GlossaryEntry` 相同的限制）：最多 500 筆；原文 1–100、譯文 1–200 個字（以 code point 計）；不能是空白、開頭結尾不能有空白、不能有換行、Tab 與其他 Python `isprintable()` 不接受的字元（控制、格式、私用、未指派、U+0020 以外的空白）；字幕語言必須在清單內（清單還沒載入時只檢查格式）；同一個字幕語言下，原文以 NFKC＋大小寫摺疊（`toUpperCase().toLowerCase()` 近似 Python `casefold`，`ς` 摺成 `σ`）＋去頭尾空白後相同就算重複，錯誤標在**後面那一列**並指出是第幾列。剛新增、還沒動過的列不顯示「請填寫」，按「儲存術語表」時才顯示。
 - **引擎錯誤**：`invalid_settings` 的訊息路徑 `translation.glossary.entries[3].source` 對到第 4 列的原文欄（`glossaryErrorForEnginePath`；`entries[3]` 本身或不認得的欄位標在該列原文欄，`translation.glossary.entries`／`translation.glossary`／`.builtin` 顯示在表格下方）。之後修改那一列、或新增／刪除／匯入（列的位置變了）時清掉這個錯誤。
 - **匯出 CSV**（`glossaryToCsv`）：UTF-8 BOM、標頭 `source,target,target_language`（`null` 寫空白）、CRLF、RFC 4180 引號與匯出字幕相同的公式防護（`csvField`）。寫到字幕紀錄資料夾，檔名 `glossary_YYYY-MM-DD_HHMMSS.csv`，沿用 Rust 的 `transcript_save`（檔名規則與原子寫入相同，不新增寫檔指令）；存好的訊息附「開啟資料夾」。匯出的是表格目前的內容（包含尚未儲存的修改）。

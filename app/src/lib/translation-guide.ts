@@ -59,3 +59,23 @@ export function isLocalUrl(url: string): boolean {
     return false;
   }
 }
+
+/**
+ * Engine warnings about failed translation requests (`log` events carry no
+ * code, only the engine's English text; pipeline/keep_warm.py, pipeline.py,
+ * factory.py). `translation failed:` covers every `TranslationError`, not only
+ * an unreachable server; but these are only held back while the guide says the
+ * server cannot be reached, which is then the cause. The text stays in the
+ * diagnostics log either way.
+ */
+const TRANSLATION_SERVER_LOG: readonly RegExp[] = [
+  /^keep-warm request to the translation server failed:/,
+  /^translation failed:/,
+  /^cannot warm up translation model\b/,
+  /^cannot keep the translation model warm\b/,
+];
+
+/** The engine message is one of the translation-server failures the guide covers. */
+export function isTranslationServerLog(message: string): boolean {
+  return TRANSLATION_SERVER_LOG.some((re) => re.test(message));
+}

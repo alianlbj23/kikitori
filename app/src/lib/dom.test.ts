@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { setIfChanged } from "./dom";
+import { setAttributeIfChanged, setIfChanged } from "./dom";
 
 /** Counts writes, like a DOM property whose setter always does work (textContent replaces the text node). */
 function counting<T>(initial: T): { value: T; writes: number } {
@@ -39,5 +39,39 @@ describe("setIfChanged", () => {
     const node = counting<string | null>(null);
     setIfChanged(node, "value", "");
     expect(node.writes).toBe(1);
+  });
+});
+
+describe("setAttributeIfChanged", () => {
+  /** The two Element methods it uses, counting writes. */
+  function element(initial: Record<string, string>): {
+    getAttribute(name: string): string | null;
+    setAttribute(name: string, value: string): void;
+    writes: number;
+  } {
+    const attrs = new Map(Object.entries(initial));
+    return {
+      writes: 0,
+      getAttribute: (name) => attrs.get(name) ?? null,
+      setAttribute(name, value) {
+        this.writes += 1;
+        attrs.set(name, value);
+      },
+    };
+  }
+
+  it("skips an attribute that already has the value (the meter is updated every second)", () => {
+    const meter = element({ "aria-valuenow": "-20" });
+    setAttributeIfChanged(meter, "aria-valuenow", "-20");
+    expect(meter.writes).toBe(0);
+  });
+
+  it("writes a changed or missing attribute", () => {
+    const meter = element({ "aria-valuenow": "-20" });
+    setAttributeIfChanged(meter, "aria-valuenow", "-21");
+    setAttributeIfChanged(meter, "aria-valuetext", "");
+    expect(meter.writes).toBe(2);
+    expect(meter.getAttribute("aria-valuenow")).toBe("-21");
+    expect(meter.getAttribute("aria-valuetext")).toBe("");
   });
 });

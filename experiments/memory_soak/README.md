@@ -19,6 +19,8 @@
 | `monitor.py` | 每秒取樣：行程樹的私有記憶體、工作集、handle、執行緒、每個行程的顯示記憶體；整張顯示卡；Ollama `/api/ps` |
 | `proxy.py` | 計數用的本機反向代理：引擎 → 代理 → Ollama，記下引擎送出的每一個翻譯請求 |
 | `harness.py` | 共用：引擎啟動、循環播放、session 操作、**判定門檻**（每個門檻旁邊寫了理由）、統計 |
+| `cdp_soak.mjs` | 主視窗／字幕視窗的 WebView2 記憶體（Node 24、只用標準庫）：以 Chrome DevTools Protocol 連上除錯版 app，假引擎（`app/dev/fake_engine.py`）以真引擎的速率送字幕；每次取樣記 renderer 私有記憶體（強制 GC 前後）、JS heap、DOM 計數、版面次數，可拍 heap snapshot 並依建構子比較。見「CDP soak」 |
+| `cdp_memdump.mjs` | 對執行中的 app 要一次 Chromium memory-infra 傾印，列出每個行程各配置器（v8、blink_gc、malloc、cc、gpu…）的大小 |
 | `results/` | 每次執行的取樣（`samples.ndjson`）、代理紀錄、引擎 stderr、`summary.json`；git 忽略 |
 
 沿用 `experiments/e2e_acceptance/e2e_common.py` 的 NDJSON 客戶端、WAV 讀取與「只播到 Steam Streaming Speakers」的檢查；
@@ -115,7 +117,7 @@ GPU 使用率中位數 1%、沒有其他 Ollama 模型；Ollama 只有本測試�
 | 5 下載＋`pull_model=qwen3.5:4b`（`20261106-040411-s5-downloads`） | **PASS** | 下載 tiny 到 8.4 MB 時 shutdown：0.1 s 結束碼 0、保留 `.part`；續傳＋重複 4 次都 done、handle 344–345 持平；pull × 5 都 done（1.1–1.8 s，handle 348）、digest 不變；**pull 途中 shutdown**：0.05 s 結束碼 0、`PullCancelledError`、無殘留，重啟後再 pull → done |
 | 6 錯誤路徑 × 3、引擎重啟（`20261106-040541-s6-errors`） | **PASS** | **開裝置失敗**（`wasapi:loopback:999999`）之後顯示記憶體 0 → 239.5 MiB（只剩 CUDA context，修正前 0 → 3024）、私有 1406 MiB（修正前 4260）；每一步都在 +128 MiB 內；shutdown 0.33 s、EOF 0.23 s、強制結束都沒有殘留行程 |
 
-| 7 GUI 18 分鐘（`20261106-044743-s7-gui`、修正嘗試後 `20261106-054144-s7-gui`） | 腳本判定 PASS（300 列上限沒到，WebView2 不判定）；**主視窗 WebView2 renderer 沒有持平** | 字幕紀錄 ≤ 208 列；DOM 殘差 −0.8 節點／分；字幕視窗 18–27 節點；`kikitori-app.exe` 持平；WebView2 合計 318 → 802 MiB（+30.8 MiB／分），只讓 `setIfChanged()` 寫入改變的值後 321 → 658 MiB（+25.3）；幾乎全在主視窗 renderer，跳階出現在切換「顯示翻譯」／語系之後，停止 session 後 434 → 118 MiB（可回收）。根因未找到，見 `tasks/acceptance-report-v0.2.0.md` 第 6 節 |
+| 7 GUI 18 分鐘（`20261106-044743-s7-gui`、修正嘗試後 `20261106-054144-s7-gui`） | 腳本判定 PASS（300 列上限沒到，WebView2 不判定）；**主視窗 WebView2 renderer 沒有持平** | 字幕紀錄 ≤ 208 列；DOM 殘差 −0.8 節點／分；字幕視窗 18–27 節點；`kikitori-app.exe` 持平；WebView2 合計 318 → 802 MiB（+30.8 MiB／分），只讓 `setIfChanged()` 寫入改變的值後 321 → 658 MiB（+25.3）；幾乎全在主視窗 renderer，跳階出現在切換「顯示翻譯」／語系之後，停止 session 後 434 → 118 MiB（可回收）。根因未找到，見 `tasks/acceptance-report-v0.2.0.md` 第 6 節。**之後找到並修正：見「CDP soak」** |
 
 第一次 GUI 執行（`20261106-044107-s7-gui`）在 2 分鐘時中止：WebDriver 原生點擊開關被擋（`element click intercepted`），`gui_soak.py` 改用 JS `click()`；
 另外加了 `toggles=false`（只讓字幕流動的診斷：`20261106-051544-s7-gui`，renderer 99 → 193 MiB／12 分、停止後 89 MiB）。
@@ -140,6 +142,85 @@ GPU 使用率中位數 1%、沒有其他 Ollama 模型；Ollama 只有本測試�
   載入／卸載時 Windows heap 的高水位可能還在上升；需要更多輪（`rounds=5` 以上）判斷會不會停在某個值。
 - 執行緒：情境 1 第一次有 4 輪是 35（中位數 32，門檻 +2），之後回到 31–32、handle 持平、斜率 −0.002；重跑最高 34（PASS）。情境 2 重跑 35–39
   （6 個池中物件各有一條 CTranslate2 工作執行緒，池滿之前執行緒數會隨池成長；handle 持平 631）。都不像洩漏，但門檻沒有改。
+
+## CDP soak：主視窗 WebView2 renderer 的成長（2026-11-06，`feat/vtuber-models` b3c4a68＋本次修改）
+
+情境 7 的「主視窗 renderer 沒有持平」（+25–31 MiB／分，停止 session 後回收）的根因與修正。情境 7 只看得到行程總量；這裡改用
+WebView2 的遠端除錯直接量 renderer，並用假引擎重現，不需要模型、聲音裝置或 WebDriver。
+
+```text
+cd app && npx tauri build --debug --no-bundle                       （除錯版，前端內嵌）
+node experiments/memory_soak/cdp_soak.mjs                            互動選單（逐項詢問，Enter 用預設值）
+node experiments/memory_soak/cdp_soak.mjs --batch minutes=22 gc=false snapshots=false toggles=true
+node experiments/memory_soak/cdp_memdump.mjs 9222 <renderer pid>     執行中的配置器分項
+```
+
+- app 以 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>` 啟動，WebView2 使用者資料放在結果資料夾
+  （`WEBVIEW2_USER_DATA_FOLDER`，不碰使用者的設定）；引擎是 `fake_engine.py --partial-steps 20 --partial-interval 0.2`：每句 20 則即時字幕、
+  約 3.4 則／秒、每分鐘約 10 句（真引擎在情境 4 是 3.6 則／秒、每分鐘約 11 句），metrics 每秒一則。
+- 主視窗與字幕視窗各是哪個 renderer：CDP 的 target 沒有 pid，所以在頁面裡配置一次 192 MiB 再釋放，私有記憶體跳起來的那個就是。
+- `toggles=true`：每 2 分鐘切換「顯示翻譯」、每 3 分鐘關閉再打開字幕視窗、每 5 分鐘切換介面語系（en → ja → zh-TW，經過設定頁），與情境 7 相同。
+- 不開 Runtime／Debugger／Console／Log domain：開了之後 renderer 會替除錯端保留 console 訊息與遠端物件，那是量測造成的成長（`webdriver_like=true` 才會開，
+  模擬 WebDriver；本次沒有用它比較）。`gc=true` 每次取樣前 `HeapProfiler.collectGarbage` 兩次並另外記「GC 後」的私有記憶體。
+
+**判定門檻**（`cdp_soak.mjs` 的 summary）：最後 10 分鐘的最小平方斜率——renderer 私有記憶體（不強制 GC、使用者實際看到的值）≤ 1 MiB／分、
+強制 GC 後的私有記憶體 ≤ 1 MiB／分、JS heap（GC 後）≤ 0.1 MiB／分、WebView2 全部行程合計 ≤ 2 MiB／分。理由：1 MiB／分＝8 小時直播 480 MiB，
+與引擎長時間 session 的門檻相同；300 列上限之前字幕紀錄本來就會長——heap snapshot 量到每列約 14 KiB 的 DOM／版面物件，每分鐘 10 句約 0.15 MiB／分，
+在門檻內而且到 300 列就停。
+
+### 修正前（同一個建置、假引擎）
+
+| 執行 | 結果 |
+|---|---|
+| `20261106-061205-cdp-before-passive`（12 分鐘，不強制 GC） | 主視窗 renderer **39.9 → 197.5 MiB**，最後 10 分鐘 **+19.1 MiB／分**；8.0–8.3 分（第 4 次切換「顯示翻譯」、86 列）一次 **+99 MiB** 後停在 197；停止後 80.3 MiB。JS heap 2.3–4.2 MiB 不長、事件監聽器固定 70、字幕視窗 +0.3 MiB／分 |
+| `20261106-062449-cdp-before-gc`（12 分鐘，每 20 秒強制 GC、拍 heap snapshot） | 一樣在 8 分鐘的切換跳起來，之後「GC 後」的值在 80–212 MiB 之間跳動；JS heap（GC 後）2.1–2.3 MiB（+0.006 MiB／分）；heap snapshot（含 Blink 物件）5.3 → 7.6 MiB、detached 節點 0；增加的是每列的版面物件（`LayoutGrid`、`GridSizingTrackCollection`、每個列三個 `HTMLCollection`），隨列數成長、最多 300 列 |
+
+memory-infra 傾印（`cdp_memdump.mjs`，同一次執行每 2 分鐘）：v8 約 3 MiB、blink_gc 6 → 27 MiB、malloc 的 PartitionAlloc 15 → 22 MiB、cc／gpu 持平；
+**80–100 MiB 的跳階不在任何配置器裡**（Chromium 沒有記帳的原生記憶體），session 停止、頁面閒置之後的 GC 才放掉。
+
+**二分**（暫存腳本，假引擎加速到每分鐘約 32 句；填到 100 列後每 15 秒切換「顯示翻譯」6 次；數字是主視窗 renderer 私有記憶體，MiB）：
+
+| 變因（以 CSSOM 注入） | 填到 100 列 | 6 次切換後 | 停止後 |
+|---|---|---|---|
+| 無（兩次） | 87 / 82 | **200 / 247**（每次跳 +57–80） | 83 / 80 |
+| `#transcript { display: none }` | 48 | **48**（不動） | 46 |
+| `visibility: hidden`（照樣排版，不繪製） | 80 | 169 | 71 |
+| `aria-hidden="true"`（不進無障礙樹） | 80 | 183 | 75 |
+| 列不用 grid（`display: block`） | 81 | 145 | 69 |
+| 譯文不用 `opacity` | 87 | 178 | 72 |
+| 字幕紀錄裁到 2000 px（`overflow: hidden`，畫面外照樣排版） | 97 | 184 | 73 |
+| 幾列＋30000 px 空白（版面很高但幾乎沒有文字） | 51 | 58（不動） | 49 |
+| **`.utt { content-visibility: auto }`** | 88 | **103** | 72 |
+
+結論：成長來自**排版與文字塑形每一列**（不是 JS 物件、不是繪製或點陣化、不是無障礙樹、不是 grid 或 opacity、不是版面高度）。
+「顯示翻譯」與介面語系的切換讓全部的列（最多 300 列，含畫面外）一起重排與重新塑形中日文，session 持續送字幕時這些原生記憶體要等很久的 GC 才放掉，
+所以每次切換都疊上一階；停止後才回收（情境 7 的 434 → 118 MiB）。字幕本身的更新是增量的：devtools.timeline 追蹤每次排版只有 9 個 dirty 物件（共約 1050 個）。
+已排除：`console.*` 每則事件（沒有，只有 warning／error）、`listen()` 沒有 `unlisten`（監聽器固定 70）、`Intl` 物件（`DisplayNames`／`PluralRules`／`Segmenter` 都有快取）、
+匯出用的 20000 列紀錄（純 JS，JS heap 不長）、計時器、detached 節點（0）。
+
+### 修正
+
+- `.utt { content-visibility: auto; contain-intrinsic-size: auto 88px }`：畫面外的列不排版、不塑形、不繪製（`auto` 記住每列上次的實際高度）；
+  最新 3 列除外（`:nth-last-child(-n + 3)`），因為跟著捲到底時新的一列要有實際高度——實測執行中與切換後 `scrollHeight − scrollTop − clientHeight` 都是 0±1。
+- 音量表改以 `transform: scaleX()` 動畫：原本 `width` 的 transition 每秒有 300 ms 每個畫格都排版一次（`meterTransform`）。
+- 每秒的狀態列（音量、延遲）與每則字幕都會跑的匯出說明只寫入改變的值（`setIfChanged`、`setAttributeIfChanged`）。
+- 測試：`render-cost.test.ts`（CSS 的兩條規則）、`metrics.test.ts`（`meterTransform`）、`dom.test.ts`（`setAttributeIfChanged`），先確認失敗再實作。
+
+### 修正後
+
+22 分鐘、`toggles=true`（「顯示翻譯」切換 10 次、字幕視窗 7 次、介面語系 4 次），兩個 app 同時跑（第二個用 `port=9223`）：
+
+| 執行 | 主視窗 renderer | 最後 10 分鐘斜率（MiB／分） | 其他 |
+|---|---|---|---|
+| `20261106-075347-cdp-final-passive`（不強制 GC） | 40.3 → **83.7 MiB**（225 列）；停止後 83.7 | **+0.67**（門檻 1）PASS | JS heap −0.001／分（3.5–4.4 MiB）；字幕視窗 −0.02／分（41–44 MiB）；WebView2 合計 −0.89／分；監聽器固定 70 |
+| `20261106-075432-cdp-final-gc`（每 30 秒強制 GC、heap snapshot） | 40.3 → 69.9 MiB；停止後 69.8 | 私有 **+0.43**、GC 後 **+0.50** PASS | JS heap（GC 後）**+0.005**（2.3–2.5 MiB）PASS；snapshot 5.5 → 8.6 MiB（每列的版面物件，detached 0）；字幕視窗 +0.09 |
+| 第一版修正（沒有「最新 3 列」例外）`20261106-072946-cdp-after-passive`／`-073032-cdp-after-gc` | 40.1 → 75.9／68.1 MiB | +0.28／+0.42（GC 後 +0.53） | 例外是之後才加的（新的一列不能用 88 px 的估計高度，否則跟著捲到底會停在半途）；記憶體沒有明顯差別。最終版在第 1–4 分鐘（兩次切換「顯示翻譯」之後）量到 `scrollHeight − scrollTop − clientHeight` = 0±1 |
+
+修正前同樣到 12 分鐘時已是 197 MiB（+19 MiB／分），而且每次切換都可能再跳一階；修正後 22 分鐘的切換都只有 0–10 MiB 的小幅變化，
+停止後也沒有大量回收（代表執行中沒有積壓）。字幕視窗本來就持平（每則事件重建 3 列，DOM 計數在 GC 之間上下跳動，記憶體不長），沒有改。
+
+沒有驗證的：正式版建置與真引擎（情境 7）沒有重跑；`webdriver_like=true`（WebDriver 本身對量測的影響）沒有比較；
+從設定頁回到字幕紀錄頁時「跟著捲到底」會停下（`renderTranscript` 量的是當時顯示中頁面的捲動位置），這是修正前就有的行為，沒有改。
 
 ## 結果（2026-11-06，初步、中等規模，開發版引擎；修正前）
 
