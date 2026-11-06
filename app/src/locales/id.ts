@@ -655,6 +655,7 @@ export const id: Messages = {
   "update.latest": "Anda sudah memakai versi terbaru.",
   "update.checkFailed": "Gagal memeriksa pembaruan: {reason}",
   "update.failed": "Pembaruan gagal: {reason}",
+  "update.showNotes": "Lihat yang baru",
   "update.relaunchFailed": "Gagal memulai ulang otomatis; tutup dan buka kembali kikitori secara manual. ({reason})",
 
   // ------------------------------------------------------------ overlay

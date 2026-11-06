@@ -546,6 +546,51 @@ input[type="range"] {
   gap: 8px;
 }
 
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Release notes in the update notice: collapsed by default, scrolls instead of
+   pushing the page down (the notices stick to the top of the content). */
+.update-notes {
+  margin-top: 6px;
+  font-size: var(--t-sm);
+}
+
+.update-notes summary {
+  cursor: pointer;
+  color: var(--nezumi);
+  width: max-content;
+}
+
+.update-notes[open] summary {
+  color: var(--sumi);
+}
+
+.update-notes-body {
+  max-height: min(16rem, 40vh);
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 4px 12px 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.notice .update-notes-body p {
+  margin: 0 0 6px;
+  white-space: pre-line;
+}
+
+.notice .update-notes-body .update-notes-heading {
+  margin-top: 10px;
+  font-weight: 600;
+}
+
+.update-notes-body ul {
+  margin: 0 0 6px;
+  padding-left: 1.4em;
+}
+
 /* ---------- Downloads before starting ---------- */
 
 .start-downloads {

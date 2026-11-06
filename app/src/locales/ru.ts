@@ -694,6 +694,7 @@ export const ru: Messages = {
   "update.latest": "У вас последняя версия.",
   "update.checkFailed": "Не удалось проверить обновления: {reason}",
   "update.failed": "Не удалось обновить: {reason}",
+  "update.showNotes": "Что нового",
   "update.relaunchFailed":
     "Не удалось перезапустить автоматически; закройте kikitori и откройте снова. ({reason})",
 

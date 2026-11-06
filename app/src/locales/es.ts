@@ -678,6 +678,7 @@ export const es: Messages = {
   "update.latest": "Tienes la versión más reciente.",
   "update.checkFailed": "No se pudo buscar actualizaciones: {reason}",
   "update.failed": "Error al actualizar: {reason}",
+  "update.showNotes": "Ver las novedades",
   "update.relaunchFailed": "No se pudo reiniciar automáticamente; cierra y vuelve a abrir kikitori. ({reason})",
 
   // ------------------------------------------------------------ overlay

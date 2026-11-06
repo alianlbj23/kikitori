@@ -177,6 +177,7 @@ import type {
   Settings,
   ShortcutAction,
 } from "../lib/types";
+import { updateNotesBlocks, type NotesBlock } from "../lib/update-notes";
 import { asCommandError } from "../lib/validate";
 import { checkForUpdate, type UpdateUi } from "./updater";
 
@@ -473,6 +474,8 @@ interface NoticeOptions {
   key?: string;
   /** Runs when the user closes the notice with 關閉. */
   onClose?: () => void;
+  /** Extra content under the text (the update notes). */
+  detail?: Node;
 }
 
 /** Shows a dismissible message at the top of the content area; returns it. */
@@ -488,7 +491,8 @@ function notify(
   if (options.key) noticeFor(options.key)?.remove();
   const notice = h("div", { class: "notice", "data-tone": tone, "data-text": text, role: tone === "bad" ? "alert" : "status" });
   if (options.key) notice.dataset.key = options.key;
-  const body = h("p", {}, text);
+  // The text stays the notice's first <p>: progress updates find it with querySelector("p").
+  const body = options.detail ? h("div", { class: "notice-body" }, h("p", {}, text), options.detail) : h("p", {}, text);
   const buttons = h("div", { class: "notice-actions" });
   for (const action of actions) {
     const b = h("button", { type: "button", class: "ghost" }, action.label);
@@ -3045,20 +3049,47 @@ async function restartEngine(): Promise<void> {
 
 // ---------------------------------------------------------------- updates
 
+/**
+ * The release notes as a collapsed "see what's new" section, or null when there
+ * are none. Built with text nodes only: the notes come from the network.
+ */
+function updateNotesDetail(notes: string | null, version: string): HTMLElement | null {
+  const blocks = updateNotesBlocks(notes, version);
+  if (!blocks.length) return null;
+  const render = (b: NotesBlock): HTMLElement =>
+    b.kind === "heading"
+      ? h("p", { class: "update-notes-heading" }, b.text)
+      : b.kind === "list"
+        ? h("ul", {}, ...b.items.map((item) => h("li", {}, item)))
+        : h("p", {}, b.text);
+  return h(
+    "details",
+    { class: "update-notes" },
+    h("summary", {}, t("update.showNotes")),
+    h("div", { class: "update-notes-body", tabindex: 0 }, ...blocks.map(render)),
+  );
+}
+
 function updateUi(): UpdateUi {
   let notice: HTMLElement | null = null;
   return {
-    offer(version, _notes, install) {
-      notice = notify(t("update.available", { version }), "update", [
-        {
-          label: t("update.install"),
-          run: () => {
-            notice?.remove();
-            notice = notify(t("update.downloading"), "update");
-            void install();
+    offer(version, notes, install) {
+      const detail = updateNotesDetail(notes, version) ?? undefined;
+      notice = notify(
+        t("update.available", { version }),
+        "update",
+        [
+          {
+            label: t("update.install"),
+            run: () => {
+              notice?.remove();
+              notice = notify(t("update.downloading"), "update");
+              void install();
+            },
           },
-        },
-      ]);
+        ],
+        { detail },
+      );
     },
     progress(pct) {
       const p = notice?.querySelector("p");

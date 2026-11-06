@@ -642,6 +642,7 @@ export const vi: Messages = {
   "update.latest": "Bạn đang dùng phiên bản mới nhất.",
   "update.checkFailed": "Không thể kiểm tra cập nhật: {reason}",
   "update.failed": "Cập nhật thất bại: {reason}",
+  "update.showNotes": "Xem nội dung cập nhật",
   "update.relaunchFailed": "Không thể tự động khởi động lại; hãy tự đóng rồi mở lại kikitori. ({reason})",
 
   // ------------------------------------------------------------ overlay

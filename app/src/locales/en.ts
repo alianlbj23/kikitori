@@ -629,6 +629,7 @@ export const en: Messages = {
   "update.latest": "You're up to date.",
   "update.checkFailed": "Couldn't check for updates: {reason}",
   "update.failed": "Update failed: {reason}",
+  "update.showNotes": "See what's new",
   "update.relaunchFailed": "Couldn't restart automatically; close and reopen kikitori yourself. ({reason})",
 
   // ------------------------------------------------------------ overlay

@@ -639,6 +639,7 @@ export const th: Messages = {
   "update.latest": "คุณใช้เวอร์ชันล่าสุดอยู่แล้ว",
   "update.checkFailed": "ไม่สามารถตรวจหาอัปเดตได้: {reason}",
   "update.failed": "อัปเดตไม่สำเร็จ: {reason}",
+  "update.showNotes": "ดูรายละเอียดการอัปเดต",
   "update.relaunchFailed": "ไม่สามารถรีสตาร์ทโดยอัตโนมัติได้ โปรดปิดและเปิด kikitori ใหม่ด้วยตนเอง ({reason})",
 
   // ------------------------------------------------------------ overlay

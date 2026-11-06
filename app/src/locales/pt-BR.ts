@@ -676,6 +676,7 @@ export const ptBR: Messages = {
   "update.latest": "Você está com a versão mais recente.",
   "update.checkFailed": "Não foi possível verificar atualizações: {reason}",
   "update.failed": "Falha na atualização: {reason}",
+  "update.showNotes": "Ver as novidades",
   "update.relaunchFailed":
     "Não foi possível reiniciar automaticamente; feche e abra o kikitori novamente. ({reason})",
 

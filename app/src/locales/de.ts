@@ -683,6 +683,7 @@ export const de: Messages = {
   "update.latest": "Sie verwenden die neueste Version.",
   "update.checkFailed": "Die Suche nach Updates ist fehlgeschlagen: {reason}",
   "update.failed": "Update fehlgeschlagen: {reason}",
+  "update.showNotes": "Neuerungen anzeigen",
   "update.relaunchFailed":
     "Automatischer Neustart fehlgeschlagen; schließen Sie kikitori und öffnen Sie es erneut. ({reason})",
 

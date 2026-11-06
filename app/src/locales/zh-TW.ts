@@ -588,6 +588,7 @@ export const zhTW = {
   "update.latest": "目前已是最新版本。",
   "update.checkFailed": "無法檢查更新：{reason}",
   "update.failed": "更新失敗：{reason}",
+  "update.showNotes": "看更新內容",
   "update.relaunchFailed": "無法自動重新啟動，請手動關閉後再開啟 kikitori。（{reason}）",
 
   // ------------------------------------------------------------ 字幕視窗

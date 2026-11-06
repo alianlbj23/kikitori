@@ -607,6 +607,7 @@ export const ja: Messages = {
   "update.latest": "最新バージョンです。",
   "update.checkFailed": "更新を確認できませんでした：{reason}",
   "update.failed": "更新に失敗しました：{reason}",
+  "update.showNotes": "更新内容を見る",
   "update.relaunchFailed": "自動で再起動できませんでした。kikitori を手動で終了してから再度起動してください。（{reason}）",
 
   // ------------------------------------------------------------ overlay

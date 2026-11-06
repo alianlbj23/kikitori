@@ -687,6 +687,7 @@ export const fr: Messages = {
   "update.latest": "Vous disposez de la dernière version.",
   "update.checkFailed": "Impossible de rechercher des mises à jour : {reason}",
   "update.failed": "Échec de la mise à jour : {reason}",
+  "update.showNotes": "Voir les nouveautés",
   "update.relaunchFailed":
     "Impossible de redémarrer automatiquement ; fermez puis rouvrez kikitori vous-même. ({reason})",
 

@@ -570,6 +570,7 @@ export const zhCN: Messages = {
   "update.latest": "当前已是最新版本。",
   "update.checkFailed": "无法检查更新：{reason}",
   "update.failed": "更新失败：{reason}",
+  "update.showNotes": "查看更新内容",
   "update.relaunchFailed": "无法自动重启，请手动关闭后重新打开 kikitori。（{reason}）",
 
   // ------------------------------------------------------------ overlay

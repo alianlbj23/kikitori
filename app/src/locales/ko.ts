@@ -610,6 +610,7 @@ export const ko: Messages = {
   "update.latest": "최신 버전입니다.",
   "update.checkFailed": "업데이트를 확인할 수 없습니다: {reason}",
   "update.failed": "업데이트 실패: {reason}",
+  "update.showNotes": "업데이트 내용 보기",
   "update.relaunchFailed": "자동으로 다시 시작할 수 없습니다. kikitori를 직접 종료한 후 다시 여세요. ({reason})",
 
   // ------------------------------------------------------------ overlay
