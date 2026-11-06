@@ -29,6 +29,7 @@
 | 4. 記憶體壓力測試（完整規模 1–6） | 三個舊洩漏都已消失；找到並修正模型池上限（換組合時 GPU 仍漏）；情境 2 私有記憶體判定 FAIL 但 5 輪後確認持平（heap 高水位），執行緒門檻偶爾超出（暫時性） |
 | 5. GUI 驗收（a–j） | 全部 PASS（i 的快速鍵以 `keybd_event` 實際送出） |
 | 6. GUI 長時間（情境 7，18 分鐘） | 驗收時**部分 PASS**（主視窗 WebView2 renderer +25–31 MiB／分）；**後續已修正**：根因是字幕紀錄全部列一起重排，`content-visibility` 後 22 分鐘 CDP soak +0.67 MiB／分（門檻 1），PASS |
+| 7. 後續功能（振假名、衍生快取、下載事件順序）正式版驗收 | A 建置、B 振假名、C 衍生快取、E 回歸 **PASS**；D 記憶體：GUI soak 15 分鐘**未過**門檻（最後 10 分鐘 +2.03 MiB／分，判定窗含字幕紀錄初期隨列數成長），延長到 30 分鐘最後 10 分鐘 −0.42 MiB／分 PASS；引擎 session 間**振假名本身不累積**，但引擎整體每個 session 約 +2.6 MiB（開關都一樣，與第 4 節情境 1 同級，不是這次的改動）。讀音抽查 56 個詞 54 個對 |
 
 ## 0. 版本 0.2.0
 
@@ -237,6 +238,247 @@ blink_gc／PartitionAlloc）看是哪一類物件；(3) 檢查切換翻譯時 `r
 | 修正後，每次取樣強制 GC，22 分鐘 | 40.3 → 69.9 MiB | +0.43 MiB／分，PASS |
 
 - 未重跑：正式版建置＋真引擎的情境 7（量測用除錯版＋假引擎）。
+
+## 7. 後續功能驗收（振假名、衍生快取）
+
+> HEAD `26a085d`（含 `3b85dee` 衍生快取、`300ac44` 子行程、`e1359ad` 下載事件順序、振假名），2026-11-06 17:53–19:45，無人值守。
+> **沒有改產品程式碼**；只新增測試腳本 `experiments/e2e_acceptance/{final_followup.py,final_gui_cdp.mjs,furigana_leak_probe.py}`。
+> 同時在改的：工作目錄裡 `tests/test_asr_prequantize.py` 的修改**不是本次驗收做的**。
+> 環境同上（RTX 5070、WebView2 156.0.4314.58、Ollama 0.40.14）；開始前 `nvidia-smi` 1805 MiB、沒有其他 compute 行程。
+
+**隔離方式**：設定一律在結果資料夾（`KIKITORI_CONFIG_DIR`）；模型快取一律是隔離的 `LOCALAPPDATA`，使用者正式快取裡的模型檔以**硬連結**放入
+（硬連結只能在同一磁碟區，所以放在 `C:` 的暫存：`%TEMP%\kkf\`、session scratchpad；結果資料夾在 `D:`）。C 不連 `derived/`（驗「第一次」）；
+B 不連辭典（驗下載）。每個情境開始與結束都比對使用者快取（模型、GPU 元件、辭典）每個檔案的大小與修改時間：**全部相同**。
+測試聲音只播到 Steam Streaming Speakers。Ollama 只以 `keep_alive` 預先載入 qwen3.5:9b，沒有卸載或刪除模型。
+
+| 項目 | 結果 | 結果資料夾（`experiments/e2e_acceptance/results/`） |
+|---|---|---|
+| A. 正式版建置＋自我檢查 | **PASS** | `20261106-final/{engine-build.log,app-build.log,selfcheck-*.json}` |
+| B. 振假名＋真引擎＋真日語音訊（正式版 GUI） | **PASS**（讀音 54／56） | `20261106-182128-final-gui-furigana` |
+| C. 衍生快取（推薦組合＋翻譯） | **PASS** | `20261106-180435-final-derived` |
+| D1. GUI soak（正式版＋真引擎、振假名開） | 15 分鐘 **FAIL**（+2.03 MiB／分）；30 分鐘 **PASS**（−0.42 MiB／分），判斷是初期隨列數成長、不是洩漏 | `20261106-185210-final-gui-soak`（15 分）、`20261106-190819-final-gui-soak`（30 分） |
+| D2. 引擎 session 間記憶體（振假名開／關） | 振假名本身 **PASS**；引擎整體每 session +2.6 MiB（見下） | `20261106-182634-final-furigana-sessions`、`20261106-183501-final-furigana-sessions` |
+| E. 回歸（只顯示原文、匯出、OBS、下載後立即刪除） | **PASS** | `20261106-181400-v020-original`、`20261106-181444-v020-session`、`20261106-182505-final-download-delete` |
+
+### A. 正式版建置
+
+```text
+# 引擎：packaging/engine/build.py 的 build("onedir", paths=paths_for("onedir", dist_root=data/build-final, work_root=<scratchpad>/work)) ＋ smoke()
+uv run python -X utf8 <scratchpad>/build_engine.py experiments/e2e_acceptance/data/build-final <scratchpad>/work
+# 「沒有辭典」分支：LOCALAPPDATA 指到空資料夾
+LOCALAPPDATA=<空資料夾> data/build-final/kikitori-engine/kikitori-engine.exe --self-check
+# app：resources 指到 data/build-final/kikitori-engine 與 src-tauri/licenses，createUpdaterArtifacts=false（沒有簽章私鑰）
+CARGO_TARGET_DIR=<scratchpad>/target npm run tauri build -- --bundles nsis --config <scratchpad>/tauri.final.conf.json
+```
+
+- 引擎：174.4 MB、PyInstaller 15 s。`--self-check` 8 項全部 ok：version 0.2.0、silero v6.2.3、onnxruntime 1.31.1、ctranslate2 4.8.5、opencc、
+  **sudachipy**（這台已下載辭典：`sudachipy 0.6.11, installed dictionary ok`；空的 `LOCALAPPDATA`：`resources ok (no dictionary downloaded)`）、
+  **prequantize_child**（`--prequantize: converted 188 bytes`，打包後的子行程路徑）、pyaudiowpatch 0.2.12.9。協定冒煙 `startup 0.33s, exit 0`。
+- app：cargo release 4 分 19 秒；`kikitori-app.exe` 與 `kikitori_0.2.0_x64-setup.exe`（41.98 MiB）。
+- 授權：`THIRD_PARTY_LICENSES/sudachipy-0.6.11/upstream/`（`LICENSE`、`SOURCE.md`、`third_party/` 57 個 crate，共 119 個檔案）；`README.txt` 列
+  `SudachiPy 0.6.11 [Apache-2.0]`，`manifest.json` 也有。app 的 `target/release/kikitori-engine/THIRD_PARTY_LICENSES/` 內容相同。
+
+### B. 振假名＋真引擎＋真日語音訊（正式版 GUI，CDP）
+
+```text
+node experiments/e2e_acceptance/final_gui_cdp.mjs --batch furigana app=<scratchpad>/target/release/kikitori-app.exe
+```
+
+音訊：`experiments/vtuber_eval/data/` 的 FLEURS ja_jp 朗讀 12 句（CC-BY 4.0；`final_followup.py --batch prepare` 組成 `data/final_ja.wav`，142.7 s），
+循環播到虛擬喇叭。設定：推薦組合（turbo／large-v3 int8_float16）＋qwen3.5:9b、ja → zh-TW、振假名關閉；隔離快取沒有辭典。
+
+| 步驟 | 結果 |
+|---|---|
+| 開始前 | 模型頁「還沒下載（約 72.2 MB），在設定頁打開振假名時會下載。」；隔離快取沒有 `furigana/` |
+| 設定頁打開振假名 | 開關鎖住、進度條「正在下載振假名辭典：0%，0 B / 72.2 MB」→ … → 95%（從 GitHub 實際下載），**14.7 s** 後開關打開、通知「振假名辭典已下載，已打開振假名。」；`furigana/sudachidict-core-20260428/system_core.dic` 等檔案出現 |
+| 模型頁 | 「已下載，佔用 217 MB。」＋「刪除辭典」按鈕 |
+| 開始 | 3.1 s 後「正在聆聽」；第一則即時字幕就有讀音（`<ruby>香港<rt>ほんこん</rt></ruby>` 在淡化尾巴裡，整詞不拆） |
+| 字幕紀錄 | 前 10 句日文完整字幕 **10／10 有 `<ruby>`**；字幕視窗 12 個 `<ruby>`（兩句） |
+| 執行中關閉振假名 | 關閉後（略過當時正在處理的一句）的 3 句完整字幕都**沒有讀音**，字幕視窗最後一句也沒有；之前的 10 句保留讀音 |
+| 結束 | 沒有殘留行程；使用者快取不變 |
+
+**讀音抽查（10 句，人工逐詞看；原文是 Whisper 的辨識結果）**
+
+| # | 原文（辨識結果） | 讀音 | 判定 |
+|---|---|---|---|
+| 1 | 香港の最高の景色を見るには島から出てクーロンのウォーターフロントに向かいましょう。 | 香港ほんこん 最高さいこう 景色けしき 見み 島しま 出で 向む | 7／7 |
+| 2 | 空を飛べるので恐竜だと思っていない人もいます。 | 空そら 飛と 恐竜きょうりゅう 思おも 人ひと | 5／5 |
+| 3 | 体験したければ早めに到着して演奏が聞こえやすいキャンプ場を確保しなければなりません。 | 体験たいけん 早はや 到着とうちゃく 演奏えんそう 聞き 場じょう 確保かくほ | 7／7 |
+| 4 | 洞窟はメッカの北にあたる山頂にあり、 | 洞窟どうくつ 北きた 山頂さんちょう | 3／3 |
+| 5 | 下界から完全に隔離されています。（原句「外界」，辨識錯） | **下界かかい**（一般讀 げかい）、完全かんぜん 隔離かくり | 2／3 |
+| 6 | MSは脳、脊髄、視神経からなる中枢神経系に影響を与える病気です。 | 脳のう 脊髄せきずい 視し 神経しんけい 中枢ちゅうすう 神経しんけい 系けい 影響えいきょう 与あた 病気びょうき | 10／10 |
+| 7 | スプリングボックにとっては5連敗が止まりました。 | 連敗れんぱい 止と（「5」是數字，不標） | 2／2 |
+| 8 | 同じように男性は膝を覆うズボンを履くことが義務付けられています。 | 同おな 男性だんせい 膝ひざ 覆おお 履は 義務ぎむ **付つ**（應為 づ，連濁） | 6／7 |
+| 9 | この発見はまた、鳥類の羽毛の進化について掲げるための手がかりとなるものでした。（原句「探る」） | 発見はっけん 鳥類ちょうるい 羽毛うもう 進化しんか 掲かか 手て | 6／6 |
+| 10 | ギザの大ピラミッドは七不思議の中で唯一現存しているものです。 | 大だい 七なな 不思議ふしぎ 中なか 唯一ゆいいつ 現存げんそん | 6／6 |
+
+56 個詞 54 個對。兩個錯都來自辭典的切詞（以 `FuriganaAnalyzer.tokens()` 重現）：「下界」Sudachi core 給 カカイ；「義務付け」被切成
+`義務／付け(ツケ)` 兩個 C 單位，連濁跨詞，對齊演算法看不到。屬於 `furigana.md`「已知限制」同一類（辭典讀音），不是對齊或 UI 的問題。
+
+截圖（都看過；含 FLEURS 句子，只放結果資料夾，沒有放進 `screenshots/`）：`shots/b1-models-before.png`、`b2-download-progress.png`（進度條＋百分比）、
+`b3-settings-on.png`、`b4-models-after.png`、`b5-live.png`（即時字幕淡色＋讀音）、`b6-transcript-on.png`（每句漢字上方的平假名、譯文正體）、
+`b7-overlay-on.png`（字幕視窗兩句都有讀音，讀音在原文上方、不擋住譯文）、`b8-transcript-off.png`（關閉後的句子沒有讀音，之前的保留）、`b9-overlay-off.png`。
+
+### C. 預先量化衍生快取（正式版引擎、推薦組合、翻譯開啟）
+
+```text
+uv run python -X utf8 experiments/e2e_acceptance/final_followup.py --batch derived trials=3     （KIKITORI_FINAL_LAD_ROOT=<C: 的暫存>）
+```
+
+每一輪：新的隔離快取（只連原始檔）→ 新引擎 → `settings.apply_recommendation`（turbo／large-v3 int8_float16、qwen3.5:9b）→ s1（即時量化）→ 停止 →
+等 log 出現兩次 `pre-quantized model ready` → s2、s3（同一引擎）→ 關閉 → 新引擎 s4。每個 session 播 2 句日語（s3、s4 不播）。
+翻譯模型事先載入（`/api/ps`：`size` ＝ `size_vram` ＝ 5,606,337,412），所以四種 session 的差別只在 ASR。
+
+| `session.start` → `running`（s） | 第 1 輪 | 第 2 輪 | 第 3 輪 | **中位數** |
+|---|---|---|---|---|
+| s1 第一次（即時量化） | 7.88 | 7.39 | 7.42 | **7.42** |
+| s2 同一引擎，衍生檔 | 2.63 | 2.59 | 2.64 | **2.63** |
+| s3 同一引擎，衍生檔 | 2.30 | 2.30 | 2.23 | **2.30** |
+| s4 新引擎，衍生檔 | 2.48 | 2.52 | 2.53 | **2.52** |
+
+- s1 的 log 沒有 `loading pre-quantized`；s2–s4 兩個模型都有。有播音的 s1、s2 都有完整字幕；停止 0.06–0.08 s 回到 idle；引擎結束碼都是 0。
+- 背景轉換：停止後**閒置 15.1 s** 才開始；turbo 轉換 5.0–5.1＋驗證 5.6–5.7 s，large-v3 9.4–9.7＋9.6–10.0 s，兩份共 30.3–30.8 s。驗證在 CUDA 上做，
+  當時 qwen3.5:9b（5.6 GB）也在顯示記憶體裡，沒有失敗。
+
+**記憶體**（引擎與子孫行程每 0.1 s 取樣；「之前」＝第一份工作開始前 3 s、「之後」＝最後一份完成後 3–6 s 的中位數）
+
+| | 之前 | 期間最高 | 之後 | 差 | 子行程（`kikitori-engine.exe --prequantize`）私有記憶體最高 |
+|---|---|---|---|---|---|
+| 第 1 輪 | 1445.5 MiB | 1446.0 | 1445.8 | **+0.3** | turbo 2841 MiB（11.0 s）、large-v3 3925 MiB（19.2 s） |
+| 第 2 輪 | 1443.5 | 1444.2 | 1444.1 | **+0.6** | 2784（11.1 s）、4171（19.5 s） |
+| 第 3 輪 | 1447.6 | 1448.1 | 1447.9 | **+0.3** | 2785（11.0 s）、4172（19.4 s） |
+
+完成後 3 s 的取樣裡沒有任何子行程（含它的 `conhost.exe`）；結束時沒有 `kikitori-engine` 殘留。門檻 ±20 MiB：**PASS**。
+
+**驗證途中按「開始」**（第 4 輪）：turbo 印出 `verifying` 1 s 後 `session.start` → 子行程（與它的 conhost）**0.83 s 內結束**、log
+`interrupted (pre-quantization process was stopped); will retry when ASR is idle`、`derived/` 沒有 `.tmp-*`；session 8.28 s 開始（還沒有衍生檔，照常即時量化）、
+有字幕；停止 15 s 後重做，兩份都完成，之後 s2 2.67 s、s3 2.25 s、新引擎 2.55 s 都從衍生檔載入。
+（這一輪的「之前／之後」跨過被打斷的 session，+14.3 MiB 不能拿來判定。）
+
+**`models.list`／`models.delete`**（第 1 輪，新引擎）：
+
+| 模型 | `disk_bytes` | 資料夾實際（含 `derived/`） | 其中 `derived/` |
+|---|---|---|---|
+| large-v3-turbo | 2,444,899,317 | 2,444,899,317 | 823,232,708 |
+| large-v3 | 4,651,111,071 | 4,651,111,071 | 1,560,274,760 |
+
+`models.delete large-v3-turbo` → `freed_bytes` 2,444,899,317（含衍生檔），隔離快取裡的資料夾消失；使用者快取的 turbo 仍是 2,444,899,317 bytes。
+
+第一次執行（`20261106-180215-final-derived`）是**測試腳本的錯**而中止：第 1 輪在新引擎 s4 之前就刪了 turbo，s4 得到 `model_not_downloaded`；
+改成 s4 之後才列表與刪除，重跑全部（上表）。
+
+### D. 記憶體
+
+**D1. 正式版 GUI＋真引擎、振假名開啟，CDP soak（15 分鐘，另跑 30 分鐘）**
+
+```text
+node experiments/e2e_acceptance/final_gui_cdp.mjs --batch soak app=<scratchpad>/target/release/kikitori-app.exe minutes=15   （gc=false）
+node experiments/e2e_acceptance/final_gui_cdp.mjs --batch soak app=<scratchpad>/target/release/kikitori-app.exe minutes=30   （延長，確認是否持平）
+```
+
+`memory_soak/cdp_soak.mjs` 的量法（192 MiB 探針找出主視窗／字幕視窗 renderer、不開 Runtime／Log domain、不強制 GC＝使用者看到的值），
+但用正式版 app 的內建引擎與真聲音（FLEURS 循環）；每 2 分鐘切換「顯示翻譯」、每 3 分鐘在設定頁切換振假名、每 5 分鐘切換介面語系（en → ja → zh-TW）。
+
+| | 15 分鐘（`20261106-185210-final-gui-soak`） | 30 分鐘（`20261106-190819-final-gui-soak`） |
+|---|---|---|
+| 字幕紀錄 | 79 列（約 5.3 句／分）、`<ruby>` 287 個 | 159 列、`<ruby>` 491 個 |
+| 切換次數 | 顯示翻譯 7、振假名 4、介面語系 2 | 顯示翻譯 14、振假名 9、介面語系 5 |
+| **主視窗 renderer**（不強制 GC） | 43.0 → 81.2 MiB，停止後 86.4 | 40.2 → 104.1 MiB（最後一筆 167.9 是暫時的高峰），停止後 92.1 |
+| 最後 10 分鐘斜率（門檻 1 MiB／分） | **+2.03，FAIL** | **−0.42，PASS** |
+| 其他時間窗的斜率 | 10–15 分 +0.95 | 5–15 分 +2.02、10–20 分 +0.45、20–30 分 −0.42 |
+| 字幕視窗 renderer | 29.7 → 52.8 MiB（+0.49／分，PASS） | 27.0 → 50.8（+0.15／分，PASS） |
+| WebView2 全部行程 | +3.57 MiB／分（門檻 2，FAIL） | +1.05（PASS）；停止後 303 MiB |
+| JS heap／監聽器／`kikitori-app.exe` | 2.2–4.4 MiB（+0.013／分）／64–66／9.3–9.5 MiB | 2.2–4.7 MiB（+0.004／分）／64–66／9.1–9.2 MiB |
+| 殘留行程、使用者快取 | 沒有／不變 | 沒有／不變 |
+
+- 兩次執行的前 15 分鐘走勢相同（5–15 分 +2.0 MiB／分）：前 15 分鐘（約 80 列）平均每列約 0.5 MiB，之後慢下來；30 分鐘那次的下緣 15 分 80 → 28 分 91 MiB
+  （約 0.17 MiB／列，字幕紀錄本來就會長到 300 列上限才停）。有振假名時每列約 26 個 DOM 節點（2352 → 6545 節點／159 列；第 6 節沒有振假名時約 8 個）。
+- 切換顯示翻譯、介面語系、振假名之後會出現 +25–75 MiB 的暫時高原（例如 20–23 分 116 MiB、25–26 分 137 MiB），1–3 分鐘內收回到 86–92 MiB，
+  不再像修正前那樣一階一階疊上去。
+- **判定**：依本節的字面門檻（15 分鐘、最後 10 分鐘），**FAIL**；判定窗落在字幕紀錄還在快速長列的階段。延長到 30 分鐘後斜率 −0.42，沒有洩漏的跡象。
+  沒有跑到 300 列上限（真引擎約 5–6 句／分，要 50–60 分鐘），上限時的最終值沒有量。
+- 這個量法看不到引擎的記憶體（`cdp_soak.mjs` 的 `processTable()` 只查 WebView2 與 app），引擎以 D2 為準。
+
+**D2. 引擎 session 間的私有記憶體與顯示記憶體（協定，正式版引擎）**
+
+```text
+uv run python -X utf8 experiments/e2e_acceptance/final_followup.py --batch furigana-sessions                       （關＋開／關交錯 3 次）
+uv run python -X utf8 experiments/e2e_acceptance/final_followup.py --batch furigana-sessions plan=000011111111000  （關×4、開×8、關×3）
+uv run python -X utf8 experiments/e2e_acceptance/furigana_leak_probe.py --batch main|thread|thread-open-only|analyze-only cycles=12
+```
+
+每個 session 播 4 句日語（約 45 s）、翻譯開啟；停止後等 12 s，取 4 s 的私有記憶體中位數與 WDDM 計數器的顯示記憶體（dedicated＋shared）。
+
+| 執行 | 振假名 | 每個 session 之後的私有記憶體（MiB） |
+|---|---|---|
+| 交錯 | 關（暖機）、開、關、開、關、開、關 | 1442.1、1456.0、1458.1、1467.2、1467.2、1472.9、1474.1 |
+| 區塊 | 關×4 | 1444.9（暖機）、1460.7、1459.9、1466.5 |
+| | 開×8 | 1472.3、1476.7、1471.9、1471.7、1473.7、1474.6、1486.2、1493.4 |
+| | 關×3 | 1488.8、1493.5、1493.1 |
+
+- 振假名開的 session 每句日文完整字幕都有 `ruby`（4–5／4–5），關的都沒有。
+- **振假名本身沒有累積**：區塊執行中「開×8」的斜率 +2.4 MiB／session，「關」的前段 +2.9；開×8 的前 6 個 session 停在 1471.7–1476.7。
+  不經過引擎的探針（同一份辭典，開→分析 12 句的所有前綴 162 次→關，重複 12 次）：主執行緒、每次新執行緒、只開關不分析都是第一次 +2.6–2.8 MiB
+  （sudachipy 模組與 Rust 配置器），之後每次中位數 −0.05–+0.05 MiB；只開一次、反覆分析 0.0。與 `furigana.md` 的「三次後 +1.3 MiB」一致。
+- **但引擎整體每個 session 約 +2.6 MiB**（區塊執行 14 個 session 的斜率，開或關都一樣；交錯執行 +3.9），15 個 session 共 +48 MiB，看不出已經停住。
+  這與第 4 節情境 1（start/stop × 20：+3.35／+3.08 MiB／輪，門檻 4）同級，是振假名之前就有的行為，不是這次的改動；但不符合本節「不能累積」的字面要求，
+  所以腳本的絕對門檻（暖機後 ≤ 6 MiB）判定 FAIL。
+- 顯示記憶體：239.5 → 245.5 MiB（14 個 session，兩次 2／4 MiB 的配置器跳階），PASS。
+
+### E. 回歸
+
+```text
+（KIKITORI_E2E_APP=<scratchpad>/target/release/kikitori-app.exe、KIKITORI_E2E_TAURI_DRIVER、KIKITORI_E2E_EDGEDRIVER；LOCALAPPDATA=<硬連結的隔離快取，含 derived>）
+.venv/Scripts/python.exe -X utf8 experiments/e2e_acceptance/gui_acceptance.py --batch v020-original
+.venv/Scripts/python.exe -X utf8 experiments/e2e_acceptance/gui_acceptance.py --batch v020-session
+uv run python -X utf8 experiments/e2e_acceptance/final_followup.py --batch download-delete
+```
+
+（`LOCALAPPDATA` 改了之後 `uv run` 會換 uv 快取位置，所以 WebDriver 情境直接用 `.venv` 的 python。）tauri-driver 2.1.0、msedgedriver 156.0.4314.58（SHA-256 與第 5 節相同、Authenticode 有效）。
+
+| 項目 | 結果 |
+|---|---|
+| 只顯示原文（`20261106-181400-v020-original`） | **PASS**：字幕視窗每句 `is-original-only`、原文 32 px、沒有譯文；翻譯服務 0 個請求；執行中打開翻譯 → 「連不上翻譯服務…」引導 |
+| 匯出、自動存檔、OBS（`20261106-181444-v020-session`） | **PASS**：SRT（CRLF、`-->`）、VTT、TXT、CSV（BOM）都在 `文件\kikitori\transcripts`；停止後自動存 SRT＋TXT；OBS 檔更新 33 次、停止後清空；另外穩定前綴、音量表、延遲、Ctrl+Alt+U／J 也都 PASS |
+| 下載完成後立即刪除（`20261106-182505-final-download-delete`） | **PASS**：`tiny` × 5、`furigana-dictionary` × 2，收到 `done` 後同一個時鐘刻度內（< 16 ms，Windows `monotonic` 解析度）送 `models.delete`，**7／7 成功**（`freed_bytes` 78,204,118／217,392,119），沒有 `model_in_use`、`done` 之後沒有進度事件、資料夾都已刪除；辭典事件的 `kind` 是 `furigana` |
+
+WebDriver 情境會覆寫 `screenshots/25–28`：新截圖改放 `results/20261106-final/webdriver-shots/`，追蹤中的檔案以 `git checkout` 還原（沒有變更）。
+
+### 找到的問題（都沒有修；這次是驗收）
+
+1. **（引擎，既有）每個 session 私有記憶體約 +2.6 MiB**，振假名開關都一樣（D2）。重現：上面的 `furigana-sessions plan=000011111111000`，或第 4 節情境 1。
+   建議：用 `memory_soak` 情境 1 跑 50 輪以上確認會不會停住；不會停的話以 `tracemalloc`／`cdp_memdump` 類的分項找 Python 物件與原生配置器的哪一邊在長。
+2. **（GUI，判定未過）15 分鐘 soak 主視窗 renderer +2.03 MiB／分**（D1）。重現：上面的 `final_gui_cdp.mjs --batch soak minutes=15`。
+   30 分鐘的同一情境最後 10 分鐘 −0.42、10–20 分 +0.45，所以判斷是字幕紀錄前幾十列的成長（振假名讓每列節點約 3 倍），不是洩漏。
+   建議：跑一次 60 分鐘以上（到 300 列上限）確認上限時的值；驗收門檻改成「30 分鐘以上、最後 10 分鐘」或「上限之後」再判定。
+3. **（辭典讀音）**「下界」→ かかい（一般讀 げかい）；「義務付け」→ 付＝つ（應為 づ）。重現：
+   `FuriganaAnalyzer(dictionary_path(default_root())).ruby("義務付けられています")` → `[(0,2,'ぎむ'),(2,3,'つ')]`。建議：寫進 `docs/specs/furigana.md`「已知限制」
+   （跨 C 單位的連濁、辭典的少見讀音）；要修可以考慮之後的 Sudachi 使用者辭典，不建議在對齊演算法裡猜連濁。
+4. （UI，與「觀察到、沒有修的」第 4 點同類）打開振假名後的通知「振假名辭典已下載，已打開振假名。」不會自己消失，切到模型頁、字幕紀錄時仍固定在上方，
+   蓋住內容最上面一列（`shots/b3`、`b4`、`b6`；要按「關閉」）。建議：成功類通知幾秒後自動收起，或不固定在捲動區上方。
+5. （量測工具）`final_gui_cdp.mjs` 的 soak 沿用 `cdp_soak.mjs` 的 `processTable()`，只查 `msedgewebview2.exe`／`kikitori-app.exe`，所以 D1 沒有引擎的記憶體欄位；
+   引擎記憶體以 D2 為準。
+
+### 沒有驗證到的
+
+- 更新提示的「看更新內容」（依指示不重驗）。
+- NSIS 安裝檔只建置、沒有安裝；GUI 直接執行 `target/release/kikitori-app.exe`。
+- 衍生快取在 CPU、其他 GPU、Windows 沒開長路徑以外的情況；轉換逾時（300 s）；同一個鍵升級 CTranslate2 後的重做。
+- 振假名：辭典下載中斷／續傳、雜湊不符、刪除辭典的 GUI 流程（模型頁按鈕只看到、沒有按）；即時口譯模式（麥克風）的日文。
+- 隔離快取的路徑太長時（> 260 字元）硬連結建立失敗——這是測試腳本放在 scratchpad 深層路徑造成的，改到 `%TEMP%\kkf\`；引擎本身的長路徑行為沒有另外測。
+
+### 清理
+
+| 項目 | 處理 |
+|---|---|
+| 隔離快取（`%TEMP%\kkf\…`、scratchpad 的 `lad\…`，都是硬連結） | 每個情境結束時刪除；最後確認 `%TEMP%\kkf\`、scratchpad `lad\` 都已移除。使用者快取前後比對相同（硬連結刪掉只少一個連結） |
+| `文件\kikitori\` | 原本不存在；`v020-session` 結束時整個移除（已確認不存在） |
+| `data/build-final/`（引擎 174 MB）、`results/20261106-final/selfcheck-empty-lad/` | **已刪除** |
+| scratchpad：app 建置 `target/`（1.8 GB，含 NSIS 安裝檔）、PyInstaller `work/`、tauri-driver、msedgedriver | **已刪除**（只留 `build_engine.py`、`tauri.final.conf.json`） |
+| 保留 | `data/final_ja.{wav,json}`（git 忽略，FLEURS）、各結果資料夾（git 忽略）、三個新腳本 |
+| 行程 | 最後 `tasklist`：沒有 `kikitori-app`、`kikitori-engine`（含 `--prequantize`）、`msedgedriver`、`tauri-driver` |
+| Ollama | 沒有卸載或刪除模型；qwen3.5:9b 留在顯示記憶體到 keep_alive 到期（20:08）自己卸載 |
+| 測試閘門（沒有改產品程式碼，只確認） | `uv run python -m unittest discover -s tests` 1583 個 OK（92.5 s）；`uv run ruff check` All checks passed |
 
 ## 驗收中找到並修正的問題（都先寫重現測試、確認失敗再修；未 commit）
 
