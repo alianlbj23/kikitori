@@ -114,6 +114,7 @@ class FactoryTest(unittest.TestCase):
         self.assertEqual(kwargs["compute_type"], "int8_float16")
         self.assertEqual(kwargs["cuda_library_dirs"], [Path(cuda_dir)])
         self.assertFalse(kwargs["download"])
+        self.assertTrue(kwargs["derived_cache"])  # int8 系列用預先量化的衍生檔
         self.assertEqual(kwargs["options"].beam_size, 1)  # 即時路徑 greedy
         self.assertEqual(kwargs["options"].candidate_languages, ("zh", "ja"))
 
@@ -690,6 +691,35 @@ class ModelManagementTest(unittest.TestCase):
             factory.delete_asr_model("tiny", self.cache)
         self.assertEqual(pool.idle_count(), 0)
 
+    def test_delete_removes_derived_files_after_stopping_their_job(self) -> None:
+        from kikitori.asr import model_disk_bytes
+
+        directory = self.install()
+        derived = directory.parent / "derived" / "key"
+        derived.mkdir(parents=True)
+        (derived / "model.bin").write_bytes(b"x" * 1000)
+        self.assertGreaterEqual(
+            model_disk_bytes(self.spec, self.cache) or 0, self.spec.total_bytes + 1000
+        )
+        worker = mock.Mock()
+        worker.cancel_model.return_value = True
+        with mock.patch("kikitori.asr.derived.DERIVED_CACHE", worker):
+            freed = factory.delete_asr_model("tiny", self.cache)
+        worker.cancel_model.assert_called_once_with("tiny")
+        self.assertGreaterEqual(freed, self.spec.total_bytes + 1000)
+        self.assertFalse((self.cache / "tiny").exists())
+
+    def test_delete_refuses_while_prequantization_cannot_stop(self) -> None:
+        directory = self.install()
+        worker = mock.Mock()
+        worker.cancel_model.return_value = False
+        with (
+            mock.patch("kikitori.asr.derived.DERIVED_CACHE", worker),
+            self.assertRaisesRegex(OSError, "pre-quantized"),
+        ):
+            factory.delete_asr_model("tiny", self.cache)
+        self.assertTrue(directory.exists())
+
     def test_delete_errors(self) -> None:
         with self.assertRaises(factory.UnknownModelError):
             factory.delete_asr_model("whisper-9000", self.cache)
@@ -702,9 +732,14 @@ class ModelManagementTest(unittest.TestCase):
 
         pool = ModelPool()
         pool.release(ModelKey("x", "cpu", 0, "int8", 1, 1), mock.Mock())
-        with mock.patch("kikitori.asr.MODEL_POOL", pool):
+        worker = mock.Mock()
+        with (
+            mock.patch("kikitori.asr.MODEL_POOL", pool),
+            mock.patch("kikitori.asr.derived.DERIVED_CACHE", worker),
+        ):
             factory.release_asr_models()
         self.assertEqual(pool.idle_count(), 0)
+        worker.shutdown.assert_called_once_with()
 
 
 class _RecordingTranslator:

@@ -27,6 +27,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
+from kikitori.asr import derived
 from kikitori.asr.audio import to_float32, validate_audio
 from kikitori.asr.download import (
     ProgressCallback,
@@ -300,6 +301,8 @@ class _ModelLease:
         self._lock = threading.Lock()
         self._users = 1
         self._reusable = True
+        # 背景預先量化只在沒有模型開著時進行（derived.DerivedCacheWorker）
+        derived.ASR_ACTIVITY.begin()
 
     def retain(self) -> None:
         """多一個共用者（`with_options()`）。"""
@@ -315,8 +318,12 @@ class _ModelLease:
                 return
             model, self._model = self._model, None
             reusable = self._reusable
-        if model is not None and reusable:
-            self._pool.release(self._key, model)
+        try:
+            if model is not None and reusable:
+                self._pool.release(self._key, model)
+        finally:
+            if model is not None:
+                derived.ASR_ACTIVITY.end()
 
 
 class WhisperTranscriber:
@@ -711,10 +718,43 @@ def _create_model(
     )
 
 
+@dataclass(frozen=True)
+class _DerivedSource:
+    """可用的預先量化衍生檔（`derived.py`）；載入失敗時改用原始檔並記下失敗。"""
+
+    path: Path
+    mark_failed: Callable[[str], None]
+
+
 def _acquire_model(
-    path: Path, device: str, compute_type: str, cpu_threads: int, workers: int
+    path: Path,
+    device: str,
+    compute_type: str,
+    cpu_threads: int,
+    workers: int,
+    prequantized: _DerivedSource | None = None,
 ) -> tuple[Any, _ModelLease]:
-    """從 `MODEL_POOL` 取用（或建立）模型物件，回傳物件與借用紀錄。"""
+    """從 `MODEL_POOL` 取用（或建立）模型物件，回傳物件與借用紀錄。
+
+    有 `prequantized` 時先從衍生檔載入；失敗時記錄、改從原始檔 `path` 載入，原始檔成功才把
+    衍生檔標記為失敗（兩者都失敗表示是環境問題，例如顯示記憶體不足，原始檔的錯誤往上拋）。
+    """
+    if prequantized is not None:
+        try:
+            return _acquire_model(
+                prequantized.path, device, compute_type, cpu_threads, workers
+            )
+        except Exception as exc:
+            logger.exception(
+                "loading the pre-quantized model %s failed; using the original",
+                prequantized.path,
+            )
+            result = _acquire_model(path, device, compute_type, cpu_threads, workers)
+            try:
+                prequantized.mark_failed(f"loading failed: {type(exc).__name__}: {exc}")
+            except OSError:
+                logger.exception("cannot record the pre-quantized model failure")
+            return result
     pool = MODEL_POOL
     key = ModelKey(
         path=_normalized(path),
@@ -741,6 +781,7 @@ def _pooled_transcriber(
     cpu_threads: int,
     workers: int,
     warmup: bool,
+    prequantized: _DerivedSource | None = None,
 ) -> WhisperTranscriber:
     """從模型池取得模型並建立 transcriber；之後任何一步失敗都歸還借用紀錄。
 
@@ -752,7 +793,9 @@ def _pooled_transcriber(
         ValueError: 解碼參數指定的語言模型不支援。
         RuntimeError、OSError: 建立、載入或暖機失敗。
     """
-    model, lease = _acquire_model(path, device, compute_type, cpu_threads, workers)
+    model, lease = _acquire_model(
+        path, device, compute_type, cpu_threads, workers, prequantized
+    )
     try:
         transcriber = WhisperTranscriber(
             model,
@@ -800,6 +843,7 @@ def load_transcriber(
     download: bool = False,
     progress: ProgressCallback | None = None,
     workers: int = 1,
+    derived_cache: bool = False,
 ) -> WhisperTranscriber:
     """載入模型並回傳 `WhisperTranscriber`。
 
@@ -816,6 +860,9 @@ def load_transcriber(
         progress: 下載進度回報。
         workers: 可並行的解碼數（CTranslate2 `inter_threads`）；要用 `with_options()`
             讓即時與完整路徑共用這個模型時設 2。權重只載入一份。
+        derived_cache: registry 模型以 int8 系列精度載入時使用預先量化的衍生檔
+            （`derived.py`）：有可用的就從它載入（免即時量化）；沒有就照常從原始檔載入，
+            成功後排入背景轉換（ASR 閒置時才做）。`model_path` 時不適用。
 
     Raises:
         ValueError: 參數組合不合法。
@@ -831,6 +878,7 @@ def load_transcriber(
     if not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"workers must be in [1, {MAX_WORKERS}], got {workers}")
 
+    spec: ModelSpec | None = None
     if model_path is not None:
         path = _validate_model_path(Path(model_path))
         name = path.name
@@ -849,6 +897,40 @@ def load_transcriber(
             download_model(spec, cache_dir, progress=progress)
         path = model_dir(spec, cache_dir)
         name = spec.id
+
+    def load_on(
+        device: Literal["cpu", "cuda"], compute_type: str, warmup: bool
+    ) -> WhisperTranscriber:
+        plan = (
+            _plan_prequantized(spec, cache_dir, device, compute_type, cpu_threads)
+            if derived_cache and spec is not None and cache_dir is not None
+            else None
+        )
+        # 載入期間也算使用中（借用紀錄要載入完才建立）：背景轉換在下一個檢查點就停下，
+        # 不與 session 的載入搶 CPU 與顯示記憶體
+        derived.ASR_ACTIVITY.begin()
+        try:
+            transcriber = _pooled_transcriber(
+                path,
+                tokenizer,
+                options,
+                name=name,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=cpu_threads,
+                workers=workers,
+                warmup=warmup,
+                prequantized=None if plan is None else plan.source,
+            )
+        finally:
+            derived.ASR_ACTIVITY.end()
+        if plan is not None and plan.job is not None:
+            # 原始檔載入成功之後才排入：載入失敗（例如 CUDA 不能用）時轉換也沒有意義
+            try:
+                derived.DERIVED_CACHE.request(plan.job)
+            except OSError:
+                logger.exception("cannot queue pre-quantization of %s", name)
+        return transcriber
 
     tokenizer = WhisperTokenizer.from_file(path / "tokenizer.json")
 
@@ -882,17 +964,7 @@ def load_transcriber(
             else:
                 cuda_type = compute_type or default_compute_type("cuda")
                 try:
-                    return _pooled_transcriber(
-                        path,
-                        tokenizer,
-                        options,
-                        name=name,
-                        device="cuda",
-                        compute_type=cuda_type,
-                        cpu_threads=cpu_threads,
-                        workers=workers,
-                        warmup=True,
-                    )
+                    return load_on("cuda", cuda_type, warmup=True)
                 except (RuntimeError, OSError) as exc:
                     _record_cuda_failure(str(exc))
                     if device == "cuda":
@@ -903,14 +975,52 @@ def load_transcriber(
 
     cpu_type = compute_type or default_compute_type("cpu")
     # CPU 不暖機：沒有要提早發現的 GPU 函式庫問題，也沒有 CUDA kernel 初始化的延遲
-    return _pooled_transcriber(
-        path,
-        tokenizer,
-        options,
-        name=name,
-        device="cpu",
-        compute_type=cpu_type,
-        cpu_threads=cpu_threads,
-        workers=workers,
-        warmup=False,
-    )
+    return load_on("cpu", cpu_type, warmup=False)
+
+
+@dataclass(frozen=True)
+class _PrequantizedPlan:
+    source: _DerivedSource | None
+    """可用的衍生檔；None 表示從原始檔載入。"""
+    job: derived.DerivationJob | None
+    """原始檔載入成功後要排入背景的轉換；None 表示不需要（已有、之前失敗過）。"""
+
+
+def _plan_prequantized(
+    spec: ModelSpec,
+    cache_dir: Path,
+    device: Literal["cpu", "cuda"],
+    compute_type: str,
+    cpu_threads: int,
+) -> _PrequantizedPlan | None:
+    """決定從衍生檔或原始檔載入；這個精度不需要衍生檔時 None。
+
+    查詢失敗（例如版本字串異常）只記錄，照常從原始檔載入：衍生檔只是加速，不能讓 session
+    因此開不了。
+    """
+    try:
+        key = derived.derived_key(spec, compute_type)
+        if key is None:
+            return None
+        # 失敗標記優先：載入衍生檔失敗過的鍵，資料夾還在也不再使用
+        reason = derived.failure_reason(spec, cache_dir, key)
+        if reason is not None:
+            logger.debug("pre-quantized %s skipped: %s", spec.id, reason)
+            return None
+        found = derived.find_derived(spec, cache_dir, key)
+        if found is not None:
+            logger.info(
+                "loading pre-quantized %s (%s) from %s", spec.id, compute_type, found
+            )
+
+            def record_failure(detail: str) -> None:
+                derived.mark_failed(spec, cache_dir, key, detail)
+
+            return _PrequantizedPlan(_DerivedSource(found, record_failure), None)
+        job = derived.DerivationJob(spec, cache_dir, key, device, cpu_threads)
+        return _PrequantizedPlan(None, job)
+    except (OSError, ValueError, TypeError):
+        logger.exception(
+            "cannot look up the pre-quantized %s; using the original", spec.id
+        )
+        return None

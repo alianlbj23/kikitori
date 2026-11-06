@@ -407,6 +407,8 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
     `<快取>/<id>`（所有 revision、`.part` 殘留）；只在模型快取內刪：路徑解析後必須就在快取資料夾正下方，`<快取>/<id>` 或樹裡任何地方是
     symlink／junction 就整個拒絕（什麼都不刪）。路徑不安全或刪除失敗（檔案被開著）→ `internal_error`（訊息為例外類別與說明；沒有另設錯誤碼，
     協定只約定上面三個 code）。刪除中途失敗時先刪掉的是完成標記，模型之後就是「沒下載」，可重新 `models.download`。
+    預先量化的衍生檔（`<快取>/<id>/derived/`，`asr.md`「預先量化的衍生快取」）在同一棵樹裡，一起刪除（也算進 `disk_bytes`）；刪除前先停下這個
+    模型的背景轉換（session 結束、閒置 15 s 後才會進行），最多等 20 s（驗證時正在載入模型），等不到 → `internal_error`，稍後再刪即可。
   - 結果 `freed_bytes` = 刪掉的普通檔案大小合計（與刪除前的 `disk_bytes` 相同）。之後 `models.list` 的 `downloaded` 為 false、`disk_bytes` 為 null；
     用到它的 `session.start` 回 `status error model_not_downloaded`。
 - `session.start` 的**翻譯模型檢查**（Milestone 13）：載入 ASR **之前**，若這個 session 需要翻譯（`translation.enabled=true`，且不是「影片翻譯、收聽與字幕同一個 Whisper 語言」），引擎檢查翻譯伺服器（同上，最多數秒；仍在 `loading`）。伺服器是**連得上的 Ollama** 而設定的 `translation.fast_model`／`final_model` 有任一個沒裝 → `status error`，`code: "translation_model_missing"`，`data: {"models": [缺少的模型名稱]}`（依 fast、final 順序、去重）。UI 對每個模型呼叫 `models.pull_translation`，全部 `done` 後再 `session.start`。檢查刻意在載入 ASR **之前**、不與它並行：本機 Ollama 實測只要約 0.05 s（`/v1/models` ＋ `/api/version`，中位數），並行省不到時間，卻會讓缺模型的 session 先把 ASR 載到 GPU 上（約 7 s、3.4 GB）才回報。

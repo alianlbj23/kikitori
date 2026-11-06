@@ -209,6 +209,8 @@ def create_transcriber(
         cuda_library_dirs=[Path(d) for d in cuda_library_dirs],
         download=False,
         workers=workers,
+        # int8 系列精度從預先量化的衍生檔載入（沒有時背景產生），見 asr/derived.py
+        derived_cache=True,
     )
 
 
@@ -337,21 +339,31 @@ def delete_asr_model(model_id: str, cache_dir: Path | None = None) -> int:
     """刪除已下載的 ASR 模型（含續傳用的 `.part` 與其他版本的殘留），回傳釋放的位元組數。
 
     刪除前後都把模型池中這個模型的閒置物件丟掉：它們之後 `load_model()` 會從這個資料夾
-    重新讀檔。呼叫端（引擎）負責確認沒有 session（含正在釋放元件的）或下載正在使用它。
+    重新讀檔。預先量化的衍生檔在 `<cache>/<id>/derived/` 底下，一起刪除；刪除前先停下這個
+    模型的背景轉換（轉換途中會寫入那個資料夾）。呼叫端（引擎）負責確認沒有 session（含正在
+    釋放元件的）或下載正在使用它。
 
     Raises:
         UnknownModelError: 模型 id 不在清單中。
         FileNotFoundError: 模型沒有下載。
         UnsafeModelPathError（ValueError）: 資料夾是連結或不在模型快取內，拒絕刪除。
-        OSError: 刪除失敗（例如檔案被其他程式開著）。
+        OSError: 刪除失敗（例如檔案被其他程式開著），或背景轉換沒有及時停下。
     """
     from kikitori.asr import MODEL_POOL, default_cache_dir, delete_model, get_model
+    from kikitori.asr.derived import DERIVED_CACHE
 
     try:
         spec = get_model(model_id)
     except KeyError as exc:
         raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
     cache = default_cache_dir() if cache_dir is None else cache_dir
+    # True＝這個模型已沒有排隊或執行中的背景轉換（之後才能安全地刪資料夾）
+    if not DERIVED_CACHE.cancel_model(spec.id):
+        # 正在載入模型比對輸出（CTranslate2 的載入不能中斷），稍後再刪
+        raise OSError(
+            f"ASR model {spec.id} is still being pre-quantized in the background; "
+            "try again in a moment"
+        )
     evicted = MODEL_POOL.evict_under(cache / spec.id)
     try:
         return delete_model(spec, cache)
@@ -368,9 +380,12 @@ def delete_asr_model(model_id: str, cache_dir: Path | None = None) -> int:
 
 
 def release_asr_models() -> None:
-    """引擎結束時丟掉模型池中所有閒置的 ASR 模型物件。"""
+    """引擎結束時停止背景的預先量化，並丟掉模型池中所有閒置的 ASR 模型物件。"""
     from kikitori.asr import MODEL_POOL
+    from kikitori.asr.derived import DERIVED_CACHE
 
+    # 先停轉換：它驗證時會載入模型；中止的轉換刪掉自己的暫存資料夾
+    DERIVED_CACHE.shutdown()
     MODEL_POOL.clear()
 
 

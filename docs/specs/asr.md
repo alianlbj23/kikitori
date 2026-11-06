@@ -95,7 +95,8 @@ class Transcriber(Protocol):
 | `registry.py` | 可選模型清單（固定 revision 與 SHA-256、資源用量、`no_speech_reliable`） | `ModelSpec`、`MODELS`、`get_model()` |
 | `cache.py` | 使用者快取目錄 | `default_cache_dir()` |
 | `download.py` | 下載、續傳、驗證 | `download_model()`、`download_file()`（單檔，hardware 下載 cuBLAS wheel 用）、`is_downloaded()`、`model_dir()`、`ModelDownloadError` |
-| `whisper.py` | CTranslate2 推論、模型物件池 | `WhisperTranscriber`（含 `close()`）、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`、`preload_cuda_libraries()`、`ModelPool`、`MODEL_POOL` |
+| `derived.py` | 預先量化的衍生快取（int8 權重另存一份，載入免量化） | `derived_key()`、`find_derived()`、`build_derived()`、`write_quantized_model_bin()`、`read_model_index()`、`DerivedCacheWorker`、`DERIVED_CACHE`、`ASR_ACTIVITY` |
+| `whisper.py` | CTranslate2 推論、模型物件池 | `WhisperTranscriber`（含 `close()`）、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`（`derived_cache=True` 時用衍生快取）、`preload_cuda_libraries()`、`ModelPool`、`MODEL_POOL` |
 | `filtering.py` | 幻覺過濾 | `FilterConfig`、`rejection_reason()` |
 | `hallucination_lexicon.py` | 依語言的幻覺片語資料（`lexicon.json` 的 Python 版本） | `HALLUCINATION_LEXICON` |
 
@@ -149,7 +150,7 @@ class Transcriber(Protocol):
 - **本機路徑**：`load_transcriber(model_path=...)` 直接使用使用者指定的 CTranslate2 Whisper 目錄（必須有 `model.bin`、`config.json`、`tokenizer.json`），不下載、不驗雜湊。
 - **可替換的 fetcher**：下載透過 `Fetcher` Protocol（預設用 `urllib`），測試注入假 fetcher 或本機 HTTP 伺服器，不連網。
 - **磁碟用量與刪除**（F7，`models.list` 的 `disk_bytes`、`models.delete`）：`model_disk_bytes(spec, cache)` 回傳 `<cache>/<id>`
-  底下普通檔案的大小合計（含其他 revision 與 `.part` 殘留，不跟隨連結），沒有下載完成（`is_downloaded()` 為 False）時 None。
+  底下普通檔案的大小合計（含其他 revision、`.part` 殘留與 `derived/` 底下的預先量化衍生檔，不跟隨連結），沒有下載完成（`is_downloaded()` 為 False）時 None。
   `delete_model(spec, cache)` 刪掉整個 `<cache>/<id>`，回傳釋放的位元組數；全部檢查通過才刪任何東西：id 是單一資料夾名稱
   （沒有分隔符號、`..`、磁碟代號）、`<cache>/<id>` 不是 symlink／junction、解析後就在解析後的快取資料夾正下方、整棵樹裡沒有任何
   連結（違反時 `UnsafeModelPathError`，`ValueError` 的子類別）。沒有下載完成時 `FileNotFoundError`（只有 `.part` 殘留時也是：留給
@@ -234,22 +235,119 @@ v0.2.0 的推薦組合（即時 `large-v3-turbo`、完整 `large-v3`，都是 CU
   （即時路徑的錯誤優先，其他失敗記 error log）。模型不在清單或沒下載時，在載入任何模型之前就丟出（`factory._require_downloaded()`，
   錯誤與 `load_transcriber(download=False)` 相同）。
 
-**預先量化（調查，未實作）**：把 int8 版本存在快取裡，載入時就不必量化。
-- 收益（原型腳本，large-v3，CUDA `int8_float16`，新行程交錯各 5 次）：載入＋暖機 **6.72 s → 2.50 s**；同一段隨機特徵的 `encode()` 輸出
-  與從 float16 載入的模型**逐位元相同**（量化規則與 C++ `ensure_dtype()` 一致）。轉換一次約 11 s，large-v3 多佔 1.5 GB 磁碟。
-- 為什麼沒做：CTranslate2 **沒有讀取既有 `model.bin` 的官方 API**。官方的寫檔 API 是 `ModelSpec.optimize(quantization=...)` 與 `save()`，
-  但 spec 只能由 converters 從原始框架建立——Whisper 要 `TransformersConverter`（`transformers` ＋ PyTorch，違反「絕不依賴 PyTorch」）。
-  原型是依 `specs/model_spec.py::_serialize()` 與 `Model::load()` 手寫解析（binary version 6、`WhisperSpec` revision 3），格式改版時要跟著改，
-  不是 CTranslate2 承諾的介面。
-- 若要做（需使用者決定，兩種做法都不改動驗證過的原始檔）：
-  1. 引擎內轉換：解析 float16 `model.bin`，以官方 `LayerSpec._quantize()` 相同的規則量化，另存到**衍生快取**
-     `<cache>/derived/<id>/<model.bin 的 SHA-256 前 12 碼>-<compute_type>-ct2-<CTranslate2 版本>/`（`config.json` 等小檔照抄）。
-     registry 的 SHA-256 仍只驗證原始下載；衍生資料夾另記自己的雜湊與來源雜湊，缺檔、版本或來源不符、讀取失敗就丟掉重做或退回從原始檔載入。
-     第一次 session 仍慢（多花轉換時間；可在下載完成後背景轉換），`models.delete` 要一併刪除衍生檔。
-  2. 改下載已量化的模型：在自己的 Hugging Face repo 發布 int8 版本並把 revision／SHA-256 寫進 registry——沿用既有的下載與驗證流程、
-     不需要解析格式；代價是要維護模型託管，切換精度時要另外下載。
+**預先量化**：見下一節「預先量化的衍生快取」——推薦組合按「開始」到 `running` 7.00 → 2.42 s。
 - 另一個可行但沒做的選項：`unload_model(to_cpu=True)` ＋ `load_model(keep_cache=True)` 讓模型池保留量化後的 CPU 副本（同一個引擎的
-  下一個 session 免量化），代價是閒置時多佔約 1.5（large-v3）＋0.8（turbo）GB 主記憶體，與目前「閒置物件只留執行環境」的設計衝突。
+  下一個 session 免量化），代價是閒置時多佔約 1.5（large-v3）＋0.8（turbo）GB 主記憶體，與目前「閒置物件只留執行環境」的設計衝突；
+  衍生快取已涵蓋這個收益（連新引擎也受益），不需要。
+
+## 預先量化的衍生快取（`derived.py`，2026-11-06）
+
+int8 系列精度（`int8`、`int8_float16`、`int8_float32`、`int8_bfloat16`）載入快取裡的 float16 權重時，CTranslate2 每次都在 CPU 上量化
+（見上一節）。衍生快取把量化後的權重另存一份，之後從它載入；原始下載的檔案不動，registry 的 SHA-256 仍只驗證原始檔。
+
+### 格式依據（source-driven，CTranslate2 4.8.5）
+
+CTranslate2 沒有讀取既有 `model.bin` 的官方 API，所以自己解析；每條規則都對應到官方原始碼：
+
+| 項目 | 依據 | 實作 |
+|---|---|---|
+| 檔案結構 | 讀：C++ [`src/models/model.cc`](https://github.com/OpenNMT/CTranslate2/blob/v4.8.5/src/models/model.cc) `Model::load()`（`consume<T>()`、binary version ≥ 4 的 `type_id`＋`num_bytes`、≥ 3 的別名表）；寫：Python `ctranslate2/specs/model_spec.py` `ModelSpec._serialize()` | `read_model_index()`：little-endian `u32 version`、字串（`u16` 長度含結尾 `\0`）、`u32 revision`、`u32 變數數`，每個變數「名稱、`u8 rank`、`u32 × rank`、`u8 dtype`、`u32 bytes`、資料」，最後 `u32 別名數`＋（別名, 目標）。只接受 binary version 6、`WhisperSpec` revision 3（`whisper.cc` 的 `current_spec_revision()`）；每個欄位檢查範圍（變數／別名 ≤ 100000、rank ≤ 8、維度 > 0、dtype 0–5、`bytes == 元素數 × 大小`、不超出檔尾、檔尾沒有多餘資料、名稱非空且是 UTF-8），只讀標頭、資料留在檔案裡 |
+| 哪些變數量化 | `model.cc` `Model::set_compute_type()`：`is_quantizable()` ＝ 名稱以 `weight` 結尾（`WhisperModel` 沒有改寫）；名稱含 `conv` 的在 CUDA 與有 oneDNN 的 CPU 上**不量化**、改成浮點精度；其他浮點變數轉成 float 精度、`*_scale` 不轉 | `is_quantized_at_load()`：`weight` 結尾、不含 `conv`、不是純量、float16／float32。conv 權重與其他變數原樣複製（執行時照原本規則轉換；沒有 oneDNN 的 CPU，例如 macOS，會在載入時量化這兩個小權重，結果與從原始檔載入相同） |
+| 量化規則 | `model.cc` `ensure_dtype()` → `to_float32()` ＋ `ops::Quantize`（`round_before_cast` ＝ binary version ≥ 5，`model.h`）→ [`src/cpu/kernels.cc`](https://github.com/OpenNMT/CTranslate2/blob/v4.8.5/src/cpu/kernels.cc) `quantize_s8_row()`：每列 `scale = 127 / amax`（amax 為 0 時 1）、`round(x × scale)` 後轉 int8，scale 形狀 `{列數}`（[`src/ops/quantize.cc`](https://github.com/OpenNMT/CTranslate2/blob/v4.8.5/src/ops/quantize.cc)） | `quantize_int8()`：float32 計算、`np.rint`（就近取偶，同 `Vec::round`）、每 2048 列一塊。**不用** Python 轉換器的 `LayerSpec._quantize()`：它會量化 conv、把極小的 amax 夾到 `127 / FLT_MAX`，與執行時的結果不同 |
+| 別名 | `model.cc`：別名在量化之後登記，並自動加上 `<alias>_scale → <target>_scale` | 別名表原樣複製（Whisper 只有 `decoder/projection/weight → decoder/embeddings/weight`） |
+| 寫檔 | `_serialize()`：依名稱排序寫出變數，量化的變數另有 float32 `<name>_scale` | `write_quantized_model_bin()` 逐個變數讀、量化、寫出，與 `_serialize()` 逐位元組相同（測試以官方函式產生對照檔）。**不直接呼叫 `_serialize()`**：打包的引擎排除了 `ctranslate2.specs`（`packaging/engine/policy.py`，它會帶入 torch），而且它要先把所有變數放進記憶體 |
+
+### 鍵與資料夾
+
+- `<cache>/<id>/derived/<model.bin SHA-256 前 16 碼>-<compute_type>-ct2-<CTranslate2 版本>-f<格式版本>/`，內含量化後的 `model.bin`、
+  原樣複製的 `config.json`／`tokenizer.json`／詞彙表等（registry 列的其他檔案），以及完成標記 `kikitori-derived.json`
+  （完整的鍵：格式版本、模型 id、revision、來源 SHA-256、精度、CTranslate2 版本；各檔大小；衍生 `model.bin` 的 SHA-256；驗證用的裝置）。
+- **與原本草案的差異**：草案是 `<cache>/derived/<id>/…`。改放在 `<cache>/<id>/derived/` 底下，理由：`model_disk_bytes()`（`models.list` 的
+  `disk_bytes`）與 `delete_model()`（`models.delete`）本來就以 `<cache>/<id>` 整棵樹為單位，衍生檔自動算進用量、一起刪除，**協定不用改**；
+  連結檢查與「只刪快取內」的安全規則也沿用。revision 資料夾名稱是 12 碼 hex，不會與 `derived` 衝突。
+- 鍵依精度區分（同一個模型 CPU `int8` 與 CUDA `int8_float16` 的權重位元組其實相同，但驗證是在各自的裝置上做的，分開存比較單純；
+  兩者都用時多佔一份磁碟）。
+- `find_derived()`：完成標記的鍵與目前完全相同、列出的每個檔案都在且大小相符才算可用（同 `is_downloaded()`，不重算雜湊，啟動快）；
+  任一不符就當作不存在。資料夾是連結時也不用。
+- 失敗標記 `<鍵>.failed.json`（原因與時間）：有標記的鍵不使用也不重做；鍵改變（例如升級 CTranslate2、改格式版本）時自然重試。
+  使用者要強制重試可刪掉這個檔案。
+
+### 產生時機（不在「開始」的關鍵路徑上）
+
+- `load_transcriber(derived_cache=True)`（`factory.create_transcriber()` 一律傳 True）：精度是 int8 系列、模型來自 registry 時——
+  有失敗標記 → 照常從原始檔載入；有可用的衍生檔 → 從它載入；否則從原始檔載入（即時量化，與以前相同），**載入成功後**才把這個鍵排入
+  `DERIVED_CACHE`（載入失敗，例如 CUDA 不能用，轉換也沒有意義）。`model_path`（使用者自己的資料夾）不適用。
+- `DerivedCacheWorker`：一條 daemon 執行緒依序處理。`ASR_ACTIVITY` 計算使用中的模型：`load_transcriber()` 載入期間 +1（借用紀錄要載入完才
+  建立，session 一開始載入轉換就要停）、`_ModelLease` 存在期間 +1（最後一個共用者關閉時 −1；`close()` 逾時時也照樣減少，計數不代表推論中），
+  所有 ASR 模型都關閉、**連續閒置 15 s**（`IDLE_SECS`）才開始，所以實際上是在 session 結束後做；每轉換一個變數、每個驗證步驟之間檢查，
+  有 session 開始（模型被借出）就中止、刪掉暫存、放回佇列，下次閒置時重做，不算失敗。
+- **量測依據**（RTX 5070、Ryzen 7 5700X，turbo＋large-v3 int8_float16 已載入，每輪即時＋完整各一次，30 輪）：在背景同時轉換 large-v3 時，
+  即時路徑延遲中位數 126 → 130 ms（p90 133 → 141）、完整路徑 286 → 303 ms（p90 314 → 331）；轉換本身 10.7 s（單獨時 11.4 s）。
+  只看轉換，在 session 中做也可以接受；但正確性驗證要**再載入兩次模型**（原始檔的即時量化約 7 s CPU、一個模型的顯示記憶體，12 GB 卡上
+  與 Ollama 共用時可能不夠），所以整個工作都等閒置再做，被打斷的代價只是重做。
+- 剩下的重疊：驗證時 CTranslate2 的模型載入（large-v3 原始檔約 7 s）與 `generate` 不能中斷，session 若剛好在這時開始，要與它同時載入
+  （CPU 量化與顯示記憶體都多一份，最多約 7 s）；實測 small 在驗證中開始的 session 1.39 s 照常開始。
+- 引擎結束（`factory.release_asr_models()`）先 `DERIVED_CACHE.shutdown()`：下一個檢查點中止、刪暫存（最多等 5 s；驗證中的模型載入
+  可能更久，daemon 執行緒隨行程結束，留下的暫存資料夾由下一行說明的清理處理）。`shutdown()` 之後同一個行程不再接受新工作。行程被強制結束時留下的
+  `.tmp-*` 暫存資料夾，在下一次轉換前刪掉超過 1 小時的（`STALE_TMP_SECS`；較新的可能是另一個行程正在寫）。
+
+### 正確性把關與原子性
+
+1. 在 `derived/.tmp-<鍵>-<pid>-<亂數>/` 寫入：`model.bin`（`open("xb")`、寫完 `fsync`）＋複製其他檔案（各自 `fsync`，斷電後不會留下大小對
+   但內容是零的檔案——`find_derived()` 只比大小）。標記裡的 `model_bin_sha256` 只供診斷，載入時不重算（1.5 GB 約 1–2 s，抵消一部分收益）。
+2. 驗證（`_verify()`）：在 session 用的裝置與精度上**依序**（一次只佔一個模型的顯示記憶體）載入原始檔（即時量化）與暫存的衍生檔，
+   對固定輸入（`PROBE_SEED` 的亂數 log-mel，1×n_mels×3000）跑 `encode(to_cpu=True)` 與 greedy 解碼 24 個 token（含 `no_speech` 機率）。
+   encode 只用到 encoder，解碼用到 decoder 與詞嵌入（logits 經過整個詞嵌入矩陣），兩者合起來涵蓋所有量化的權重。
+   **encoder 輸出逐位元組相同、token 序列相同、分數與 no_speech 機率的位元相同**才算通過（不是數值近似）。
+3. 寫完成標記（暫存檔＋`os.replace`）後，把暫存資料夾 `rename` 成正式名稱；目標已被另一個行程發布時用它的。正式名稱的資料夾存在但
+   不可用（標記壞掉）時先刪掉再做。
+4. 任何錯誤（格式不支援、輸出不同、載入失敗、I/O）→ `logger.exception`、寫失敗標記、刪暫存；原始檔照常使用。被取消（session 開始、
+   刪除模型、引擎結束）不寫失敗標記。**例外**：失敗當下有 ASR 模型在載入或使用（例如 session 開始載入，驗證時顯示記憶體不足）時不標記，
+   放回佇列、閒置時重做——那不是這個鍵的問題；閒置時仍失敗才標記。
+5. 載入衍生檔失敗時（`whisper._acquire_model()`）：記錄後改從原始檔載入；**原始檔成功**才寫失敗標記（兩者都失敗代表環境問題，例如顯示
+   記憶體不足，原始檔的錯誤照常往上拋，不標記）。暖機失敗沿用 CUDA 失敗的既有規則，不標記。
+6. 實測：tiny（CPU int8、CUDA int8_float16）、small、medium、large-v3-turbo、large-v3（CUDA int8_float16）全部逐位元相同；把一個量化值
+   改 1 的衍生檔被驗證擋下（`tests/test_asr_derived.py::RealModelTest`）。
+
+### 刪除與模型池
+
+- `models.delete` → `factory.delete_asr_model()` 先 `DERIVED_CACHE.cancel_model(id)`：丟掉排隊中的工作、等正在做的停下（最多 20 s；
+  驗證時 CTranslate2 的載入不能中斷，large-v3 原始檔約 7 s）。等不到就丟 `OSError`（引擎回 `internal_error`，稍後再刪）。之後照舊
+  `evict_under(<cache>/<id>)` 並刪整個 `<cache>/<id>`（衍生檔在其中）。「使用中」的保護（session、下載）不變。
+- 從衍生檔載入的物件在模型池中的鍵是衍生資料夾（`ModelKey.path`），`evict_under(<cache>/<id>)` 一樣涵蓋。
+- 驗證時建立的兩個 CTranslate2 物件不經過模型池（暫存資料夾 rename 後路徑就失效），用完就丟——每產生一份衍生檔漏一次 memory_soak #2
+  的量（實測同一行程連續 4 次，每次私有記憶體 +19.5 MiB）；每個鍵一生只產生一次。
+
+### 量測（RTX 5070 12 GB、Ryzen 7 5700X、模型已在 OS 檔案快取，2026-11-06）
+
+| | 原始檔（即時量化） | 衍生檔 |
+|---|---|---|
+| large-v3 單獨載入＋暖機（新行程，交錯各 5 次，中位數） | 6.80 s（6.67–6.95） | **2.53 s**（2.51–2.58） |
+| large-v3-turbo 單獨 | 3.75 s（3.68–3.85） | **1.69 s**（1.62–2.94） |
+| 引擎 `session.start` → `running`，新引擎的第一個 session（「冷」，交錯各 5 次） | 7.00 s（6.98–7.31） | **2.42 s**（2.41–2.58） |
+| 同一個引擎的第二個 session（「熱」，模型物件從池中 `load_model()`） | 7.50 s（7.44–7.62） | **2.09 s**（2.02–2.11） |
+| `model.bin` 大小 | large-v3 2944 MiB／turbo 1543 MiB | 1485／781 MiB |
+
+- 引擎量測：推薦組合（即時 turbo、完整 large-v3，CUDA `int8_float16`），**翻譯關閉**（只量 ASR；有翻譯時另加預熱）；「原始檔」以
+  失敗標記讓引擎忽略衍生檔。「冷」是新的引擎行程，不是冷的磁碟快取（模型檔都已在 OS 檔案快取裡）。腳本在 scratchpad，未收進 repo。
+- 轉換（`write_quantized_model_bin()`，單獨）：large-v3 11.4 s、turbo 5.1 s；私有記憶體只多約 210 MiB（每次一個變數，最大的是
+  51866×1280 的詞嵌入），結束後回到原值。
+- 整個工作（轉換＋驗證）：large-v3 18.8 s（9.7＋9.1）、turbo 10.6 s（5.0＋5.6）、medium 9.0 s、small 2.9 s。驗證時載入原始檔的峰值與
+  一般 session 載入相同（引擎內 medium：私有記憶體 1389 → 峰值 2844 MiB；large-v3 獨立行程 1592 → 4590 MiB）。
+- 引擎實測流程（medium、small）：第一個 session 照常（medium 3.84 s）→ 停止後 15.1 s 開始轉換 → 完成 → 下一個 session 從衍生檔載入
+  （1.25 s）。轉換途中開始 session：在驗證步驟中止（`interrupted (stopped during verification)`），那個 session 照常開始
+  （1.39 s），停止後 15 s 重做並完成。
+- 引擎內做完一份衍生檔後 2 s，私有記憶體比開始前高約 240 MiB（medium、small 都是）；獨立行程連續做 4 次只每次 +19.5 MiB，
+  沒有隨次數累積。前者的來源沒有查明（可能是 CTranslate2／CUDA 的配置器快取），未修。
+- 磁碟：每個 int8 系列的鍵多一份約原始 `model.bin` 一半的檔案（large-v3 +1.5 GB、turbo +0.8 GB），算進 `disk_bytes`。
+
+### 限制
+
+- 舊的鍵（升級 CTranslate2 或格式版本之後）不自動清掉，佔用的空間顯示在 `disk_bytes`，`models.delete` 會一起刪；要自動清理再另外做。
+- 第一個 session（以及升級後的第一個 session）仍要即時量化；衍生檔在 session 結束、閒置 15 s 後才產生。
+- 只在本機 Windows（RTX 5070、AVX2）實測；macOS／Linux、其他 CPU 指令集（AVX-512 的 `quantize_s8` 路徑）的逐位元一致性由各自機器上的
+  驗證步驟把關（不一致就標記失敗、繼續用原始檔），沒有實機確認。
+- 格式改版（binary version ≠ 6 或 spec revision 改變）時轉換會失敗並標記，要跟著更新 `derived.py`；這不是 CTranslate2 承諾的介面。
 
 ## 幻覺過濾（`filtering.py`）
 
@@ -316,6 +414,10 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
   - registry：id 唯一、revision 為 40 碼 hex、SHA-256 為 64 碼 hex、必要檔案齊全。
   - 快取目錄：模擬 Windows／macOS／Linux 與環境變數（含不合法值）。
   - 下載：本機 `http.server`（只綁 127.0.0.1）與假 fetcher；進度回報、續傳、HTTP 錯誤、逾時、雜湊不符、取消、非 https 拒絕。
+  - 衍生快取（`test_asr_derived.py`）：以官方 `ModelSpec._serialize()` 產生的檔案對照讀寫格式（輸出逐位元組相同），量化對照逐元素的參考實作
+    （全零列、就近取偶、分塊）；格式錯誤的各種檔案；鍵、完成／失敗標記、竄改偵測、原子發布（失敗或取消不留暫存）、背景工作的閒置等待、
+    session 打斷後重排、取消與關閉；`load_transcriber(derived_cache=True)` 的載入選擇與失敗回退（假的 `ctranslate2`）。本機快取有 `tiny`
+    時以真的 CTranslate2（CPU int8）確認衍生檔與即時量化逐位元相同、改錯一個值會被擋下（沒有時 skip）。
   - 幻覺過濾：每條規則的正反例；片語表（`test_asr_hallucination_lexicon.py`）：與 `lexicon.json` 一致、保留既有項目、每個 hard 片語在 19 個語言標籤下都被濾、soft 只在同語言且 no_speech 高於門檻時濾、各語言一般句子與翻譯評測台詞在任何語言標籤下都保留、本機有 `experiments/asr_benchmark/results` 時真實日語辨識結果不被片語濾掉（沒有資料時 skip）、天城文與泰文保留組合記號而阿拉伯文照舊忽略。
 - 真模型檢查放在 `experiments/asr_benchmark/`（含與 HF `tokenizers` 對照分詞結果），不放進單元測試。
 - 指令：`uv run python -m unittest discover -s tests`、`uv run ruff check`。
