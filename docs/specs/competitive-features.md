@@ -77,14 +77,14 @@ kikitori 的核心情境（日語直播 → 繁中、系統聲音、免費、離
 - 快速鍵：新增「切換顯示翻譯」「清除字幕」（沿用既有全域快速鍵機制，衝突時只提示）。
 - 「複製診斷資訊」：版本、OS、硬體偵測、設定（遮蔽 API key 環境變數名稱以外的秘密）、最近的引擎錯誤。
 
-## 先不做（列入回報，需使用者決定）
+## 先不做（2026-11-06 使用者授權依建議決定）
 
 | 項目 | 原因 |
 |---|---|
 | ~~振假名~~ | **已實作**（2026-11-06，使用者同意新增 SudachiPy 並延後下載辭典）：見 `furigana.md`。點字查詞仍未做 |
-| 只擷取單一 App 的聲音 | Windows process loopback 需自寫 COM 介面（L、風險高）；macOS／Linux 各自不同 |
-| 歌回模式（歌聲分類） | CED 等分類器授權未確認、缺歌回評測資料 |
-| OBS 瀏覽器來源／網路字幕 | 要開本機網路埠，與「不開網路埠」的架構原則衝突，需 ADR |
+| 只擷取單一 App 的聲音 | 暫不做：Windows process loopback 需自寫 COM 介面（L、風險高）；macOS／Linux 沒有實機。替代做法與重新考慮條件見 `docs/adr/0002-defer-per-app-audio-capture.md` |
+| 歌回模式（歌聲分類） | 暫不做：CED 等分類器授權未確認、缺歌回評測資料（`docs/adr/0003-defer-singing-mode.md`） |
+| OBS 瀏覽器來源／網路字幕 | 不做：維持不開網路埠，OBS 用 F6 文字檔（`docs/adr/0004-no-local-network-subtitle-server.md`） |
 | 說話者分離 | 現有方案多依賴 PyTorch |
 
 ## 驗證
