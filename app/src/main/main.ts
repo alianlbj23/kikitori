@@ -187,6 +187,7 @@ import type {
   Settings,
   ShortcutAction,
 } from "../lib/types";
+import { autoDismiss } from "../lib/auto-dismiss";
 import { updateNotesBlocks, type NotesBlock } from "../lib/update-notes";
 import { asCommandError } from "../lib/validate";
 import { checkForUpdate, type UpdateUi } from "./updater";
@@ -503,6 +504,8 @@ interface NoticeOptions {
   onClose?: () => void;
   /** Extra content under the text (the update notes). */
   detail?: Node;
+  /** A plain confirmation: closes itself after a few seconds (lib/auto-dismiss.ts). */
+  autoDismiss?: boolean;
 }
 
 /** Shows a dismissible message at the top of the content area; returns it. */
@@ -527,7 +530,21 @@ function notify(
     buttons.appendChild(b);
   }
   const close = h("button", { type: "button", class: "ghost", "aria-label": t("notice.closeLabel") }, t("notice.close"));
+  const timer = options.autoDismiss
+    ? autoDismiss({
+        isBeingRead: () => notice.isConnected && (notice.matches(":hover") || notice.contains(document.activeElement)),
+        dismiss: () => notice.remove(),
+      })
+    : undefined;
+  if (timer) {
+    // A full delay from the moment the reader lets go, not whatever is left of the current check.
+    notice.addEventListener("pointerleave", () => timer.restart());
+    notice.addEventListener("focusout", (e) => {
+      if (!(e.relatedTarget instanceof Node && notice.contains(e.relatedTarget))) timer.restart();
+    });
+  }
   close.addEventListener("click", () => {
+    timer?.cancel();
     notice.remove();
     options.onClose?.();
   });
@@ -1352,7 +1369,7 @@ function onFuriganaDownload(p: DownloadProgressEvent): void {
     void refreshFuriganaState().then(async () => {
       if (next !== "enable") return;
       await setFurigana(true);
-      if (state.settings?.furigana.enabled) notify(t("furigana.ready"));
+      if (state.settings?.furigana.enabled) notify(t("furigana.ready"), "info", [], { autoDismiss: true });
     });
   }
   renderFurigana();
@@ -1365,7 +1382,7 @@ async function deleteFuriganaDictionary(): Promise<void> {
   renderFuriganaBlock();
   try {
     const result = await api.modelsDelete(FURIGANA_DICTIONARY_ID);
-    notify(t("furigana.deleted", { size: formatBytes(result.freed_bytes) }));
+    notify(t("furigana.deleted", { size: formatBytes(result.freed_bytes) }), "info", [], { autoDismiss: true });
   } catch (e) {
     reportError("error.deleteFurigana", e);
   } finally {
@@ -1949,7 +1966,7 @@ async function deleteModel(model: AsrModel): Promise<void> {
   renderModels();
   try {
     const result = await api.modelsDelete(model.id);
-    notify(t("asr.deleted", { model: result.model, size: formatBytes(result.freed_bytes) }));
+    notify(t("asr.deleted", { model: result.model, size: formatBytes(result.freed_bytes) }), "info", [], { autoDismiss: true });
   } catch (e) {
     // model_not_downloaded / model_in_use / unknown_model have their own sentences;
     // the reload below shows the list as the engine sees it now.
@@ -3561,7 +3578,7 @@ async function subscribe(): Promise<void> {
           // "still needed" while the list is being reloaded.
           const listed = state.models?.asr.find((m) => m.id === p.model);
           if (listed) listed.downloaded = true;
-          if (!quiet) notify(t("download.done", { model: p.model }));
+          if (!quiet) notify(t("download.done", { model: p.model }), "info", [], { autoDismiss: true });
           void loadModels();
         }
       } else if (p.state === "error" && !quiet) {

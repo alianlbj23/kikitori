@@ -153,6 +153,7 @@
 
 - 翻譯服務連不上的引導（見「翻譯服務連不上時」）出現時，引擎關於翻譯服務失敗的英文 `log`（`keep-warm request to the translation server failed: …`、`translation failed: …`、`cannot warm up translation model …`，`isTranslationServerLog`）不再顯示成「引擎提醒」——引導已用介面語言說明同一件事；原文仍留在診斷資訊的最近訊息。引導晚一步出現時會收起先前那則。
 - 訊息列固定在內容區上方；它的高度設成內容區的 `scroll-padding-top`（`--notices-h`），聚焦或捲動到的欄位不會停在訊息列底下（設定頁表單的第一列）。
+- 純確認、沒有按鈕要選的訊息 8 秒後自己收起（`autoDismiss`，`lib/auto-dismiss.ts`）：模型下載完成、模型刪除、振假名辭典下載後已打開、辭典刪除。滑鼠停在訊息上或焦點在訊息裡時不收；移開（`pointerleave`、焦點移出）後重新等完整的 8 秒。錯誤、需要決定的訊息、有按鈕的訊息（例如「打開資料夾」）、更新提示都留到使用者關閉——訊息列固定在捲動區上方，確認類訊息一直留著會蓋住每一頁最上面一列。
 
 ### 匯出字幕紀錄
 
