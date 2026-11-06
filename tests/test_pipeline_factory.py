@@ -5,6 +5,7 @@
 
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -213,8 +214,16 @@ class BuildComponentsAsrTest(unittest.TestCase):
             mock.patch("kikitori.vad.SileroVad"),
             mock.patch("kikitori.hardware.installed_runtime_dir"),
             mock.patch("kikitori.hardware.auto_cpu_threads", return_value=4),
+            # 載入前的「有沒有下載」檢查會讀使用者的模型快取；這裡只看傳給 asr 的參數
+            mock.patch.object(factory, "_require_downloaded"),
         ]
-        self.load, _, self.runtime_dir, self.auto_threads = [p.start() for p in patches]
+        (
+            self.load,
+            _,
+            self.runtime_dir,
+            self.auto_threads,
+            self.require_downloaded,
+        ) = [p.start() for p in patches]
         for p in patches:
             self.addCleanup(p.stop)
         self.runtime_dir.return_value = self.runtime
@@ -379,6 +388,221 @@ class BuildComponentsAsrTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             factory.build_components(settings, "media")
         fast.close.assert_called_once_with()
+
+    # --- 兩個模型並行載入（v0.2.x：按「開始」到聆聽 10–13 秒） ---------------------
+
+    @staticmethod
+    def _cuda_pair() -> Settings:
+        return Settings().merged(
+            {
+                "asr": {
+                    "fast_model": "large-v3-turbo",
+                    "final_model": "large-v3",
+                    "device": "cuda",
+                    "fast_compute_type": "int8_float16",
+                    "final_compute_type": "int8_float16",
+                }
+            }
+        )
+
+    @staticmethod
+    def _role(kwargs: dict[str, Any]) -> str:
+        return "fast" if kwargs["options"].beam_size == 1 else "final"
+
+    def test_cuda_loads_both_models_at_the_same_time(self) -> None:
+        # 依序載入時第一個呼叫會在 barrier 等到逾時（BrokenBarrierError）
+        barrier = threading.Barrier(2, timeout=5)
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            barrier.wait()
+            return mock.Mock(role=self._role(kwargs))
+
+        self.load.side_effect = load
+        components = factory.build_components(self._cuda_pair(), "media")
+        self.assertEqual(self.load.call_count, 2)
+        self.assertEqual(components.fast_transcriber.role, "fast")  # type: ignore[attr-defined]
+        self.assertEqual(components.final_transcriber.role, "final")  # type: ignore[attr-defined]
+
+    def test_cpu_loads_both_models_at_the_same_time(self) -> None:
+        barrier = threading.Barrier(2, timeout=5)
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            barrier.wait()
+            return mock.Mock()
+
+        self.load.side_effect = load
+        settings = Settings().merged(
+            {"asr": {"fast_model": "base", "final_model": "small", "device": "cpu"}}
+        )
+        factory.build_components(settings, "media")
+        self.assertEqual(self.load.call_count, 2)
+
+    def test_auto_device_loads_one_after_the_other(self) -> None:
+        # "auto" 時 CUDA 失敗會改用 CPU，並讓同一行程之後的載入直接用 CPU；並行的話兩個
+        # 載入會同時第一次碰 CUDA，第二個看不到第一個的失敗紀錄。
+        lock = threading.Lock()
+        active = peak = 0
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return mock.Mock()
+
+        self.load.side_effect = load
+        settings = Settings().merged(
+            {"asr": {"fast_model": "base", "final_model": "small"}}
+        )
+        factory.build_components(settings, "media")
+        self.assertEqual(self.load.call_count, 2)
+        self.assertEqual(peak, 1)
+
+    def test_failed_load_waits_for_the_other_and_returns_it_to_the_pool(self) -> None:
+        # 完整模型先失敗時即時模型還在載入（CTranslate2 的建構不能中斷）：要等它載完、
+        # close() 放回模型池，才丟出錯誤；否則載入執行緒結束後模型還留在 GPU 上。
+        fast = mock.Mock()
+        final_failed = threading.Event()
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            if self._role(kwargs) == "fast":
+                final_failed.wait(5)
+                time.sleep(0.05)
+                return fast
+            final_failed.set()
+            raise RuntimeError("CUDA failed: out of memory")
+
+        self.load.side_effect = load
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            factory.build_components(self._cuda_pair(), "media")
+        fast.close.assert_called_once_with()
+
+    def test_when_both_fail_the_fast_path_error_is_raised(self) -> None:
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            if self._role(kwargs) == "fast":
+                raise FileNotFoundError("fast missing")
+            raise RuntimeError("final broken")
+
+        self.load.side_effect = load
+        with (
+            self.assertRaisesRegex(FileNotFoundError, "fast missing"),
+            self.assertLogs("kikitori.pipeline.factory", "ERROR") as logs,
+        ):
+            factory.build_components(self._cuda_pair(), "media")
+        # 只能丟出一個；另一個失敗也要記下來，不能消失
+        self.assertIn("final broken", logs.output[0])
+
+    def test_missing_model_fails_before_loading_anything(self) -> None:
+        # 並行之後，即時模型沒下載也不能先花數秒載入完整模型才回報
+        self.require_downloaded.side_effect = [
+            None,
+            FileNotFoundError("ASR model large-v3 is not downloaded"),
+        ]
+        with self.assertRaisesRegex(FileNotFoundError, "large-v3"):
+            factory.build_components(self._cuda_pair(), "media")
+        self.load.assert_not_called()
+
+    def test_progress_is_reported_on_the_calling_thread_as_each_model_finishes(
+        self,
+    ) -> None:
+        # 即時模型等到「完整模型完成」已經回報才返回：證明回報不是等兩個都載完才一起送，
+        # 而且回呼在呼叫端的執行緒上（引擎的回呼會寫 stdout，不該在載入執行緒上丟例外）。
+        reported: list[tuple[str, threading.Thread]] = []
+        final_reported = threading.Event()
+
+        def on_loaded(step: str) -> None:
+            reported.append((step, threading.current_thread()))
+            if step == "asr_final":
+                final_reported.set()
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            if self._role(kwargs) == "fast":
+                self.assertTrue(final_reported.wait(5))
+            return mock.Mock()
+
+        self.load.side_effect = load
+        factory.build_components(self._cuda_pair(), "media", on_loaded=on_loaded)
+        self.assertEqual([step for step, _ in reported], ["asr_final", "asr_fast"])
+        caller = threading.current_thread()
+        self.assertTrue(all(thread is caller for _, thread in reported))
+
+    def test_shared_model_reports_both_paths(self) -> None:
+        settings = Settings().merged(
+            {"asr": {"fast_model": "large-v3", "final_model": "large-v3"}}
+        )
+        reported: list[str] = []
+        factory.build_components(settings, "media", on_loaded=reported.append)
+        self.assertEqual(reported, ["asr_fast", "asr_final"])
+
+    def test_progress_failure_still_returns_both_models_to_the_pool(self) -> None:
+        loaded: list[mock.Mock] = []
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            transcriber = mock.Mock()
+            loaded.append(transcriber)
+            return transcriber
+
+        def on_loaded(step: str) -> None:
+            raise OSError("protocol output closed")
+
+        self.load.side_effect = load
+        with self.assertRaisesRegex(OSError, "output closed"):
+            factory.build_components(self._cuda_pair(), "media", on_loaded=on_loaded)
+        self.assertEqual(len(loaded), 2)
+        for transcriber in loaded:
+            transcriber.close.assert_called_once_with()
+
+    def test_thread_start_failure_still_returns_the_started_model(self) -> None:
+        # 第二條載入執行緒開不起來（例如執行緒數用完）：第一個模型照樣載完並放回模型池
+        loaded: list[mock.Mock] = []
+
+        def load(*args: Any, **kwargs: Any) -> mock.Mock:
+            transcriber = mock.Mock()
+            loaded.append(transcriber)
+            return transcriber
+
+        real_thread = threading.Thread
+        starts = 0
+
+        class FlakyThread(real_thread):  # type: ignore[valid-type,misc]
+            def start(self) -> None:
+                nonlocal starts
+                starts += 1
+                if starts == 2:
+                    raise RuntimeError("can't start new thread")
+                super().start()
+
+        self.load.side_effect = load
+        with (
+            mock.patch.object(factory.threading, "Thread", FlakyThread),
+            self.assertRaisesRegex(RuntimeError, "can't start new thread"),
+        ):
+            factory.build_components(self._cuda_pair(), "media")
+        self.assertEqual(len(loaded), 1)
+        loaded[0].close.assert_called_once_with()
+
+
+class RequireDownloadedTest(unittest.TestCase):
+    """並行載入前的快速檢查：錯誤與 `load_transcriber(download=False)` 相同。"""
+
+    def test_unknown_and_missing_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(factory.UnknownModelError):
+                factory._require_downloaded("no-such-model", Path(tmp))
+            with self.assertRaisesRegex(FileNotFoundError, "small is not downloaded"):
+                factory._require_downloaded("small", Path(tmp))
+
+    def test_downloaded_model_passes(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("kikitori.asr.is_downloaded", return_value=True) as check,
+        ):
+            factory._require_downloaded("small", Path(tmp))
+        self.assertEqual(check.call_args.args[0].id, "small")
+        self.assertEqual(check.call_args.args[1], Path(tmp))
 
 
 class ModelManagementTest(unittest.TestCase):
@@ -640,7 +864,7 @@ class WarmUpTranslationTest(unittest.TestCase):
             mock.patch.object(
                 factory,
                 "build_components",
-                side_effect=lambda *a: order.append("asr") or components,
+                side_effect=lambda *a, **k: order.append("asr") or components,
             ) as build,
             mock.patch.object(
                 factory,
@@ -656,9 +880,109 @@ class WarmUpTranslationTest(unittest.TestCase):
             result = factory.build_session_components(Settings(), "interpret")
         self.assertIs(result, components)
         self.assertEqual(order, ["asr", "translation", "keep_warm"])
-        build.assert_called_once_with(Settings(), "interpret")
+        build.assert_called_once_with(Settings(), "interpret", on_loaded=mock.ANY)
         warm.assert_called_once_with(Settings(), "interpret")
         attach.assert_called_once_with(components, Settings(), "interpret")
+
+    @staticmethod
+    def _fake_build(components: object, during: Any = None) -> Any:
+        """假的 build_components：依完成順序回報兩個 ASR（完整路徑較快先完成）。"""
+
+        def build(settings: Settings, mode: str, *, on_loaded: Any) -> object:
+            if during is not None:
+                during()
+            on_loaded("asr_final")
+            on_loaded("asr_fast")
+            return components
+
+        return build
+
+    def test_progress_counts_both_asr_models_and_the_warm_up(self) -> None:
+        components = object()
+        events: list[tuple[str, int, int]] = []
+        with (
+            mock.patch.object(
+                factory, "build_components", side_effect=self._fake_build(components)
+            ),
+            mock.patch.object(factory, "warm_up_translation") as warm,
+            mock.patch.object(factory, "attach_keep_warm", side_effect=lambda c, *a: c),
+        ):
+            factory.build_session_components(
+                Settings(), "media", progress=lambda *e: events.append(e)
+            )
+        warm.assert_called_once()
+        self.assertEqual(
+            events,
+            [("asr_final", 1, 3), ("asr_fast", 2, 3), ("translation", 3, 3)],
+        )
+
+    def test_progress_without_a_warm_up_has_two_steps(self) -> None:
+        for settings in (
+            Settings().merged({"translation": {"enabled": False}}),
+            Settings().merged(
+                {"translation": {"base_url": "https://api.example.com/v1"}}
+            ),
+        ):
+            with self.subTest(translation=settings.translation):
+                events: list[tuple[str, int, int]] = []
+                with (
+                    mock.patch.object(
+                        factory,
+                        "build_components",
+                        side_effect=self._fake_build(object()),
+                    ),
+                    mock.patch.object(factory, "ping_translation_models") as ping,
+                    mock.patch.object(
+                        factory, "attach_keep_warm", side_effect=lambda c, *a: c
+                    ),
+                ):
+                    factory.build_session_components(
+                        settings, "media", progress=lambda *e, log=events: log.append(e)
+                    )
+                ping.assert_not_called()
+                self.assertEqual(events, [("asr_final", 1, 2), ("asr_fast", 2, 2)])
+
+    def test_stopped_while_loading_asr_skips_the_warm_up(self) -> None:
+        # 預熱最久要等 60 秒、還會讓 Ollama 為已停止的 session 佔用顯示記憶體
+        components = object()
+        cancelled = threading.Event()
+        events: list[tuple[str, int, int]] = []
+        with (
+            mock.patch.object(
+                factory,
+                "build_components",
+                side_effect=self._fake_build(components, during=cancelled.set),
+            ),
+            mock.patch.object(factory, "warm_up_translation") as warm,
+            mock.patch.object(factory, "attach_keep_warm", side_effect=lambda c, *a: c),
+        ):
+            result = factory.build_session_components(
+                Settings(),
+                "media",
+                progress=lambda *e: events.append(e),
+                cancelled=cancelled,
+            )
+        self.assertIs(result, components)
+        warm.assert_not_called()
+        self.assertEqual(events, [("asr_final", 1, 3), ("asr_fast", 2, 3)])
+
+    def test_progress_failure_after_loading_releases_the_components(self) -> None:
+        components = object()
+
+        def progress(step: str, done: int, total: int) -> None:
+            if step == "translation":
+                raise OSError("protocol output closed")
+
+        with (
+            mock.patch.object(
+                factory, "build_components", side_effect=self._fake_build(components)
+            ),
+            mock.patch.object(factory, "warm_up_translation"),
+            mock.patch.object(factory, "release_components") as release,
+            self.assertRaisesRegex(OSError, "output closed"),
+        ):
+            factory.build_session_components(Settings(), "media", progress=progress)
+        release.assert_called_once_with(components)
 
     def test_build_errors_propagate_without_warming(self) -> None:
         with (

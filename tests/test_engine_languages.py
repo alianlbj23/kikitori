@@ -231,7 +231,7 @@ class _CountingTranslation:
 class _GatedBuild:
     """讓 build_components 停住，模擬載入模型的數秒。"""
 
-    def __init__(self, inner: Callable[[Settings, Mode], PipelineComponents]) -> None:
+    def __init__(self, inner: Callable[..., PipelineComponents]) -> None:
         self.inner = inner
         self.calls = 0
         self.entered = threading.Event()
@@ -242,7 +242,9 @@ class _GatedBuild:
         self.max_active = 0
         """同時在載入的 session 數的最大值（GPU 上同時載入兩份 ASR 模型會用完顯示記憶體）。"""
 
-    def __call__(self, settings: Settings, mode: Mode) -> PipelineComponents:
+    def __call__(
+        self, settings: Settings, mode: Mode, **kwargs: Any
+    ) -> PipelineComponents:
         with self._lock:
             self.calls += 1
             self.active += 1
@@ -250,7 +252,7 @@ class _GatedBuild:
         try:
             self.entered.set()
             self.release.wait(WAIT)
-            return self.inner(settings, mode)
+            return self.inner(settings, mode, **kwargs)
         finally:
             with self._lock:
                 self.active -= 1

@@ -234,6 +234,8 @@ class _Session:
         """這個 session 載入的 ASR 模型（`models.delete` 的「使用中」判斷）。"""
         self.cancelled = threading.Event()
         self.lock = threading.Lock()
+        self.status_lock = threading.Lock()
+        """非結束狀態的「檢查還沒結束 → 寫出」與設定 `terminal_sent` 互斥（見 `_session_status`）。"""
         self.pipeline: Pipeline | None = None
         self.terminal_sent = False
         self.loader: threading.Thread | None = None
@@ -988,7 +990,8 @@ class EngineServer:
 
         停止（`session.cancelled`）在每一步之間檢查：檢查翻譯伺服器（數秒）、載入 ASR
         與預熱（`build_components`，數秒到數十秒）本身不能中斷，停止後做完這一步就結束，
-        不再進行下一步。
+        不再進行下一步（`build_components` 也拿到 `session.cancelled`：ASR 載入完時已停止
+        就不預熱）。載入期間每完成一步送一則帶 `data` 的 `loading`（`_loading_progress`）。
 
         為什麼要等前一個 session：被停止的 session 會立即送出 idle 並釋放 `_session`，
         UI 可以馬上開始下一個；但它的載入執行緒可能還卡在 `build_components()` 裡。兩個
@@ -1018,7 +1021,17 @@ class EngineServer:
                 )
                 return
             try:
-                components = self._services.build_components(settings, session.mode)
+                components = self._services.build_components(
+                    settings,
+                    session.mode,
+                    progress=lambda step, done, total: self._loading_progress(
+                        session, step, done, total
+                    ),
+                    cancelled=session.cancelled,
+                )
+            except ChannelClosedError:
+                # 送進度時 stdout 已關閉（引擎正在結束）：不是載入錯誤，交給外層記錄
+                raise
             except UnknownModelError as exc:
                 _clear_tracebacks(exc)
                 self._session_failed(session, "unknown_model", str(exc))
@@ -1085,6 +1098,22 @@ class EngineServer:
                     )
         except ChannelClosedError:
             logger.error("session %d: protocol output closed", session.id)
+
+    def _loading_progress(
+        self, session: _Session, step: str, done: int, total: int
+    ) -> None:
+        """載入進度：`status loading` 加上 `data: {step, done, total}`。
+
+        第一則 `loading`（開始載入時）沒有 `data`，舊的 UI 照樣只看 `state`。session 已送出
+        結束狀態（例如載入中被停止）後的進度由 `_session_status` 丟掉。
+        """
+        self._session_status(
+            session,
+            "loading",
+            None,
+            None,
+            data={"step": step, "done": done, "total": total},
+        )
 
     def _wait_for_loader(
         self, session: _Session, previous: threading.Thread | None
@@ -1228,25 +1257,34 @@ class EngineServer:
         收到 idle／error 就可能開始下一個 session，舊模型不能還佔著顯示記憶體。
         """
         terminal = state in ("idle", "error")
+        if not terminal:
+            # 檢查與寫出在同一把鎖內：否則已通過檢查的 loading（載入進度）或 running 可能在
+            # 另一條執行緒送出 idle 之後才寫出，UI 會在結束後又看到這個 session 在載入。
+            # 不用 _session_lock：寫 stdout 可能卡住，不能擋住其他請求。
+            with session.status_lock:
+                with self._session_lock:
+                    if session.terminal_sent:
+                        return
+                self._send_status(state, detail, session.id, code, data)
+            return
         reporter: _MetricsReporter | None = None
-        with self._session_lock:
+        # 等進行中的非結束狀態寫完才標記結束（見上）；之後的非結束狀態都會被丟掉
+        with session.status_lock, self._session_lock:
             if session.terminal_sent:
                 return
-            if terminal:
-                session.terminal_sent = True
-                reporter, session.metrics = session.metrics, None
-                if self._session is session:
-                    self._session = None
-                # pipeline 的回呼參照 session，session 又參照 pipeline：不切斷的話這個循環
-                # 要等循環垃圾回收才會釋放，GPU 上的 ASR 模型（每個 session 約 2.6 GB）會
-                # 一直佔著，開幾次 session 就把顯示記憶體用完。結束後 pipeline 只剩自己的
-                # 執行緒參照，執行緒結束時以參照計數立即釋放。不取 session.lock：
-                # `_load_session` 持有它時也可能走到這裡（啟動失敗）。
-                session.pipeline = None
+            session.terminal_sent = True
+            reporter, session.metrics = session.metrics, None
+            if self._session is session:
+                self._session = None
+            # pipeline 的回呼參照 session，session 又參照 pipeline：不切斷的話這個循環
+            # 要等循環垃圾回收才會釋放，GPU 上的 ASR 模型（每個 session 約 2.6 GB）會
+            # 一直佔著，開幾次 session 就把顯示記憶體用完。結束後 pipeline 只剩自己的
+            # 執行緒參照，執行緒結束時以參照計數立即釋放。不取 session.lock：
+            # `_load_session` 持有它時也可能走到這裡（啟動失敗）。
+            session.pipeline = None
         if reporter is not None:
             reporter.stop()
-        if terminal:
-            self._release_components(session)
+        self._release_components(session)
         self._send_status(state, detail, session.id, code, data)
 
     def _release_components(self, session: _Session) -> None:

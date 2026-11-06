@@ -110,8 +110,8 @@ class MidSessionCaptureErrorTest(unittest.TestCase):
         original = services.build_components
         self.built: list[weakref.ref[Any]] = []
 
-        def build(settings: Settings, mode: Mode) -> PipelineComponents:
-            components = original(settings, mode)
+        def build(settings: Settings, mode: Mode, **kwargs: Any) -> PipelineComponents:
+            components = original(settings, mode, **kwargs)
             self.built.append(weakref.ref(components.final_transcriber))
             return components
 
@@ -189,8 +189,8 @@ class StartFailureReleasesComponentsTest(unittest.TestCase):
         original = services.build_components
         built: list[weakref.ref[Any]] = []
 
-        def build(settings: Settings, mode: Mode) -> PipelineComponents:
-            components = original(settings, mode)
+        def build(settings: Settings, mode: Mode, **kwargs: Any) -> PipelineComponents:
+            components = original(settings, mode, **kwargs)
             built.append(weakref.ref(components.fast_transcriber))
             return components
 

@@ -191,7 +191,7 @@ class Transcriber(Protocol):
   memory_soak 情境 2（4 組語言／模型輪流＝6 個鍵）造成每個 session 仍多約 11 MiB 顯示記憶體，2026-11-06 改為 10。卸載失敗的物件記錄後丟掉；`unload_model()` 返回後 `model_is_loaded` 仍為 True 的物件也丟掉
   （見下方 CTranslate2 語意：模型忙碌時它直接返回、不丟例外）。
 - 誰呼叫 `close()`：引擎在 session 結束（停止、讀完、錯誤、載入中被停止、開裝置失敗）時以 `pipeline.types.release_components()` 關閉兩個
-  transcriber；`factory.build_components()` 在完整模型載入失敗時關閉已載入的即時模型。`models.delete` 先以 `MODEL_POOL.evict_under(模型資料夾)`
+  transcriber；`factory.build_components()` 在任一模型載入失敗（或載入進度回報失敗）時關閉已載入的模型（見「載入時間」）。`models.delete` 先以 `MODEL_POOL.evict_under(模型資料夾)`
   丟掉該模型的閒置物件（之後 `load_model()` 會從那個資料夾讀檔）；引擎結束時 `MODEL_POOL.clear()`。
 - 驗證：單元測試以假的 `ctranslate2` 模組計數建立／載入／卸載（`tests/test_asr_model_pool.py`）；實機回歸用 memory_soak 情境 1（`cycles=20`），
   預期顯示記憶體斜率 ≈ 0（尚未在修正後實測）。
@@ -202,6 +202,54 @@ class Transcriber(Protocol):
   CPU 實機確認（`tiny` float32、Windows、私有記憶體）：載入後 675 MiB → `unload_model()` 後 527 MiB（權重約 148 MiB 釋放）→ `load_model()`
   後 677 MiB；再 5 輪卸載／載入／推論後 676 MiB，沒有累積。卸載後呼叫 `encode()` 丟 `RuntimeError: No model replica is available`。
   所以 CPU 物件也照樣放進池中：卸載確實釋放權重，閒置物件只留執行環境。CPU 上每建立一個新物件是否也會漏記憶體沒有另外量過。
+
+## 載入時間（v0.2.x，2026-11-06）
+
+v0.2.0 的推薦組合（即時 `large-v3-turbo`、完整 `large-v3`，都是 CUDA `int8_float16`）讓按「開始」到聆聽從 v0.1.0 的約 3 s
+變成 10.6–13.3 s。快取裡的權重是 float16，`int8_float16` 要在**載入時量化**；模型池的重用也省不了這段：`load_model()`
+沒有 CPU 快取時重新讀檔、重新量化（同一個引擎的第二個 session 仍要 10.8 s，新引擎 11.8 s）。
+
+**CTranslate2 的載入流程**（4.8.5 原始碼，2026-11-06 查證）：
+- `python/cpp/replica_pool.h`：`ReplicaPoolHelper` 的建構子一開始就 `pybind11::gil_scoped_release`；`python/cpp/whisper.cc` 的
+  `load_model`／`unload_model` 以 `py::call_guard<py::gil_scoped_release>()` 綁定。兩條 Python 執行緒可以同時載入。
+- `src/models/model.cc`：`Model::load()` 先把所有變數讀進 CPU 記憶體，`set_compute_type()` → `ensure_dtype()` 在 **CPU** 上把 float16
+  轉 float32 再量化成 int8（`cpu::quantize_s8`，`parallel_for`），之後 `set_device()` 才把結果搬到 GPU。GPU 上不會同時有 float16
+  與 int8 兩份，峰值就是量化後的權重。載入路徑沒有跨模型的全域鎖（只有記錄系統設定一次的 `std::once_flag`）；每個模型物件
+  有自己的 `ReplicaPoolHelper` 與 `std::shared_mutex`，互不阻擋。
+
+**並行載入**（`factory.build_components()`）：`device` 為 "cuda" 或 "cpu"、兩條路徑各載入一個模型時，各用一條執行緒同時載入。
+實測（每次新行程，依序／並行交錯各 5 次，RTX 5070、Ryzen 7 5700X、模型已在快取，載入＋暖機）：
+
+| | 合計中位數（範圍） | turbo／large-v3 各自 | GPU 用量增加（nvidia-smi 每 50 ms 的最大值） |
+|---|---|---|---|
+| 依序 | **10.63 s**（9.87–11.76） | 3.6–4.4 s／6.3–7.4 s | 3235–3479 MiB |
+| 並行 | **6.86 s**（6.72–7.22） | 4.1–4.7 s／6.7–7.2 s | 3427–3491 MiB |
+
+- CTranslate2 沒有在內部把兩個載入串行化：並行時 large-v3 幾乎不變慢、turbo 慢約 0.5 s（兩者搶 CPU 量化）。
+- 峰值不超過兩個模型的和（差異在量測雜訊內）：兩個載入是同一組模型，只是時間重疊；權重在 CPU 量化完才配置 GPU 記憶體。
+  `hardware` 的 VRAM 預算不變。
+- `device="auto"` 仍依序：CUDA 失敗改用 CPU 時，第二個模型要看得到第一個的失敗紀錄（同一行程不再重試 CUDA，見「行為規則」）。
+- 兩條路徑共用一個模型（`workers=2`）時本來就只載入一次。
+- 失敗處理：任一個失敗時另一個載入不能中斷（CTranslate2 的建構沒有取消機制），等它結束、`close()` 放回模型池，再丟出錯誤
+  （即時路徑的錯誤優先，其他失敗記 error log）。模型不在清單或沒下載時，在載入任何模型之前就丟出（`factory._require_downloaded()`，
+  錯誤與 `load_transcriber(download=False)` 相同）。
+
+**預先量化（調查，未實作）**：把 int8 版本存在快取裡，載入時就不必量化。
+- 收益（原型腳本，large-v3，CUDA `int8_float16`，新行程交錯各 5 次）：載入＋暖機 **6.72 s → 2.50 s**；同一段隨機特徵的 `encode()` 輸出
+  與從 float16 載入的模型**逐位元相同**（量化規則與 C++ `ensure_dtype()` 一致）。轉換一次約 11 s，large-v3 多佔 1.5 GB 磁碟。
+- 為什麼沒做：CTranslate2 **沒有讀取既有 `model.bin` 的官方 API**。官方的寫檔 API 是 `ModelSpec.optimize(quantization=...)` 與 `save()`，
+  但 spec 只能由 converters 從原始框架建立——Whisper 要 `TransformersConverter`（`transformers` ＋ PyTorch，違反「絕不依賴 PyTorch」）。
+  原型是依 `specs/model_spec.py::_serialize()` 與 `Model::load()` 手寫解析（binary version 6、`WhisperSpec` revision 3），格式改版時要跟著改，
+  不是 CTranslate2 承諾的介面。
+- 若要做（需使用者決定，兩種做法都不改動驗證過的原始檔）：
+  1. 引擎內轉換：解析 float16 `model.bin`，以官方 `LayerSpec._quantize()` 相同的規則量化，另存到**衍生快取**
+     `<cache>/derived/<id>/<model.bin 的 SHA-256 前 12 碼>-<compute_type>-ct2-<CTranslate2 版本>/`（`config.json` 等小檔照抄）。
+     registry 的 SHA-256 仍只驗證原始下載；衍生資料夾另記自己的雜湊與來源雜湊，缺檔、版本或來源不符、讀取失敗就丟掉重做或退回從原始檔載入。
+     第一次 session 仍慢（多花轉換時間；可在下載完成後背景轉換），`models.delete` 要一併刪除衍生檔。
+  2. 改下載已量化的模型：在自己的 Hugging Face repo 發布 int8 版本並把 revision／SHA-256 寫進 registry——沿用既有的下載與驗證流程、
+     不需要解析格式；代價是要維護模型託管，切換精度時要另外下載。
+- 另一個可行但沒做的選項：`unload_model(to_cpu=True)` ＋ `load_model(keep_cache=True)` 讓模型池保留量化後的 CPU 副本（同一個引擎的
+  下一個 session 免量化），代價是閒置時多佔約 1.5（large-v3）＋0.8（turbo）GB 主記憶體，與目前「閒置物件只留執行環境」的設計衝突。
 
 ## 幻覺過濾（`filtering.py`）
 

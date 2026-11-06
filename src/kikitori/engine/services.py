@@ -20,12 +20,35 @@ from kikitori.hardware import (
     HardwareInfo,
     ModelCombination,
 )
-from kikitori.pipeline.factory import AsrModelInfo
+from kikitori.pipeline.factory import AsrModelInfo, LoadProgress
 from kikitori.pipeline.types import Mode, PipelineComponents
 
 ProgressCallback = Callable[[int, int], None]
 
 logger = logging.getLogger(__name__)
+
+
+class ComponentBuilder(Protocol):
+    """建立一個 session 的 pipeline 元件（載入模型，數秒到數十秒）。"""
+
+    def __call__(
+        self,
+        settings: Settings,
+        mode: Mode,
+        *,
+        progress: LoadProgress | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> PipelineComponents:
+        """見 `factory.build_session_components()`。
+
+        Args:
+            settings: 這個 session 的設定。
+            mode: session 模式。
+            progress: 每完成一個載入步驟呼叫 `(步驟, 已完成數, 總數)`；可以不呼叫
+                （例如假服務），引擎只是少送進度。
+            cancelled: session 已被停止；之後的步驟可以省略（載入本身不能中斷）。
+        """
+        ...
 
 
 class HardwareProvider(Protocol):
@@ -128,7 +151,8 @@ class EngineServices:
         settings_store: 設定的唯一持有者。
         list_devices: 列出擷取裝置。
         open_source: `(device_id, kind)` → 尚未 start 的 `AudioSource`。
-        build_components: `(settings, mode)` → pipeline 元件（可能要載入模型數秒）。
+        build_components: `(settings, mode, *, progress, cancelled)` → pipeline 元件
+            （可能要載入模型數秒，見 `ComponentBuilder`）。
         hardware: 硬體偵測、模型總覽與 GPU 執行環境。
         models: ASR 模型清單與下載。
         translation_models: 翻譯伺服器的狀態與（Ollama）模型下載。
@@ -139,7 +163,7 @@ class EngineServices:
     settings_store: SettingsStore
     list_devices: Callable[[], list[DeviceInfo]]
     open_source: Callable[[str | None, DeviceKind], AudioSource]
-    build_components: Callable[[Settings, Mode], PipelineComponents]
+    build_components: ComponentBuilder
     hardware: HardwareProvider
     models: ModelCatalog
     translation_models: TranslationModels

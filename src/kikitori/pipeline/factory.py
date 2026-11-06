@@ -7,9 +7,10 @@ ASR 的公開 API 若改變，只需要修改本檔。
 """
 
 import logging
+import queue
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -25,6 +26,7 @@ from kikitori.pipeline.types import (
     PipelineComponents,
     PipelineConfig,
     TranscriptFilter,
+    release_components,
 )
 from kikitori.translate import (
     ContextFallbackTranslator,
@@ -39,6 +41,11 @@ from kikitori.translate import (
 )
 
 TranscriberRole = Literal["fast", "final"]
+AsrLoadStep = Literal["asr_fast", "asr_final"]
+LoadStep = Literal["asr_fast", "asr_final", "translation"]
+"""session 載入的步驟：即時路徑的 ASR、完整路徑的 ASR、預熱本機翻譯模型。"""
+LoadProgress = Callable[[LoadStep, int, int], None]
+"""載入進度回報 `(剛完成的步驟, 已完成的步驟數, 這次載入的總步驟數)`。"""
 
 if TYPE_CHECKING:
     from kikitori.asr import DecodeOptions, WhisperTranscriber
@@ -402,15 +409,38 @@ def create_translators(
     return ContextFallbackTranslator(fast), ContextFallbackTranslator(final)
 
 
-def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
+def build_components(
+    settings: Settings,
+    mode: Mode,
+    *,
+    on_loaded: Callable[[AsrLoadStep], None] | None = None,
+) -> PipelineComponents:
     """依設定建立一個 session 的全部元件（載入 Silero 與兩個 ASR 模型，可能要數秒）。
 
     兩條路徑的模型、精度與執行緒數都相同時（例如 th／ar／hi 的推薦兩條都用 large-v3）
     只載入一次：CTranslate2 以兩個 worker 共用同一份權重（VRAM 只算一個模型），完整路徑
     用 `with_options()` 換成自己的解碼參數，兩條路徑仍可並行。其他情況各載入一個。
 
+    各載入一個時，`device` 為 "cuda" 或 "cpu" 就兩個模型同時載入（各一條執行緒）：
+    CTranslate2 建構模型時釋放 GIL，int8 量化在 CPU 上做完才把權重搬到 GPU，所以 GPU 的
+    峰值與依序載入相同（兩個模型的權重和）。RTX 5070 實測 turbo＋large-v3（int8_float16）
+    依序 10.6 s → 並行 6.9 s，峰值 3235–3479 → 3427–3491 MiB（見 `docs/specs/asr.md`）。
+    "auto" 仍依序載入：CUDA 失敗改用 CPU 時，第二個模型要看得到第一個的失敗紀錄
+    （`asr.whisper` 同一行程內不再重試 CUDA）。
+
+    任一個載入失敗時，另一個仍在進行的載入不能中斷（CTranslate2 的建構沒有取消機制）：
+    等它結束、`close()` 放回模型池，再丟出錯誤（即時路徑的錯誤優先，與依序載入時相同）。
+
+    Args:
+        settings: 使用者設定。
+        mode: session 模式。
+        on_loaded: 每個 ASR 模型載入完成時，以 "asr_fast"／"asr_final" 在**呼叫端的
+            執行緒**上呼叫（依完成順序；共用一個模型時兩個依序回報）。丟出例外時已載入的
+            模型照樣放回模型池，例外往上拋。
+
     Raises:
-        UnknownModelError、FileNotFoundError、RuntimeError: 見 `create_transcriber()`。
+        UnknownModelError、FileNotFoundError、RuntimeError: 見 `create_transcriber()`；
+            模型不在清單中或沒下載時，在載入任何模型之前就丟出。
         ModelIntegrityError: Silero 模型檔雜湊不符。
     """
     from kikitori.vad import SileroVad
@@ -418,6 +448,9 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
     forced_language, candidate_languages = asr_languages(settings, mode)
     fast_translator, final_translator = create_translators(settings)
     asr = settings.asr
+    # 並行時另一個模型會先載入數秒才發現這個沒下載；先檢查（只讀完成標記與檔案大小）
+    for model_id in dict.fromkeys((asr.fast_model, asr.final_model)):
+        _require_downloaded(model_id)
     cuda_dirs = asr_cuda_library_dirs(settings)
     fast_threads = resolve_cpu_threads(asr.fast_cpu_threads, asr.device)
     final_threads = resolve_cpu_threads(asr.final_cpu_threads, asr.device)
@@ -427,38 +460,56 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
         == _resolved_compute_type(asr.final_compute_type, asr.device)
         and fast_threads == final_threads
     )
-    fast_transcriber = create_transcriber(
-        asr.fast_model,
-        device=asr.device,
-        role="fast",
-        candidate_languages=candidate_languages,
-        forced_language=forced_language,
-        compute_type=asr.fast_compute_type,
-        cpu_threads=fast_threads,
-        cuda_library_dirs=cuda_dirs,
-        workers=2 if shared else 1,
-    )
-    final_transcriber: Transcriber | None = None
-    try:
-        if shared:
-            final_transcriber = fast_transcriber.with_options(
+    report = on_loaded if on_loaded is not None else _ignore_step
+
+    def load_fast() -> "WhisperTranscriber":
+        return create_transcriber(
+            asr.fast_model,
+            device=asr.device,
+            role="fast",
+            candidate_languages=candidate_languages,
+            forced_language=forced_language,
+            compute_type=asr.fast_compute_type,
+            cpu_threads=fast_threads,
+            cuda_library_dirs=cuda_dirs,
+            workers=2 if shared else 1,
+        )
+
+    def load_final() -> "WhisperTranscriber":
+        return create_transcriber(
+            asr.final_model,
+            device=asr.device,
+            role="final",
+            candidate_languages=candidate_languages,
+            forced_language=forced_language,
+            compute_type=asr.final_compute_type,
+            cpu_threads=final_threads,
+            cuda_library_dirs=cuda_dirs,
+        )
+
+    if shared:
+        fast_transcriber = load_fast()
+        loaded: dict[AsrLoadStep, Transcriber] = {"asr_fast": fast_transcriber}
+        try:
+            loaded["asr_final"] = fast_transcriber.with_options(
                 decode_options("final", candidate_languages, forced_language)
             )
-        else:
-            final_transcriber = create_transcriber(
-                asr.final_model,
-                device=asr.device,
-                role="final",
-                candidate_languages=candidate_languages,
-                forced_language=forced_language,
-                compute_type=asr.final_compute_type,
-                cpu_threads=final_threads,
-                cuda_library_dirs=cuda_dirs,
-            )
+            report("asr_fast")
+            report("asr_final")
+        except BaseException:
+            _close_transcribers(loaded.values())
+            raise
+    else:
+        loaded = _load_transcribers(
+            (("asr_fast", load_fast), ("asr_final", load_final)),
+            report,
+            parallel=asr.device != "auto",
+        )
+    try:
         return PipelineComponents(
             voice_model=SileroVad(),
-            fast_transcriber=fast_transcriber,
-            final_transcriber=final_transcriber,
+            fast_transcriber=loaded["asr_fast"],
+            final_transcriber=loaded["asr_final"],
             fast_translator=fast_translator,
             final_translator=final_translator,
             transcript_filter=create_transcript_filter(
@@ -467,15 +518,126 @@ def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
             final_no_speech_reliable=no_speech_reliable(asr.final_model),
         )
     except BaseException:
-        # 已載入的模型放回模型池（不然這個 CTranslate2 物件被丟掉，GPU 上漏約 8 MiB），
-        # 例外照樣往上拋，由引擎回報 unknown_model／model_not_downloaded／load_error
-        for transcriber in dict.fromkeys(
-            t for t in (fast_transcriber, final_transcriber) if t is not None
-        ):
-            close = getattr(transcriber, "close", None)
-            if callable(close):
-                close()
+        _close_transcribers(loaded.values())
         raise
+
+
+def _ignore_step(step: AsrLoadStep) -> None:
+    """沒有指定 `on_loaded` 時的預設回報（不做事）。"""
+
+
+def _require_downloaded(model_id: str, cache_dir: Path | None = None) -> None:
+    """確認 ASR 模型在清單中且已下載（不載入、不重算雜湊）。
+
+    錯誤與 `load_transcriber(download=False)` 相同，引擎照樣回報 unknown_model／
+    model_not_downloaded；差別只在不必等另一個模型載入完才回報。
+
+    Raises:
+        UnknownModelError: 模型 id 不在清單中。
+        FileNotFoundError: 模型尚未下載到 `cache_dir`（省略時為使用者的模型快取）。
+    """
+    from kikitori.asr import default_cache_dir, get_model, is_downloaded
+
+    try:
+        spec = get_model(model_id)
+    except KeyError as exc:
+        raise UnknownModelError(str(exc.args[0]) if exc.args else model_id) from None
+    cache = default_cache_dir() if cache_dir is None else cache_dir
+    if not is_downloaded(spec, cache):
+        raise FileNotFoundError(f"ASR model {spec.id} is not downloaded to {cache}")
+
+
+def _close_transcribers(transcribers: Iterable[Transcriber]) -> None:
+    """已載入的模型放回模型池（不然這個 CTranslate2 物件被丟掉，GPU 上漏約 8 MiB）。"""
+    for transcriber in dict.fromkeys(transcribers):
+        close = getattr(transcriber, "close", None)
+        if callable(close):
+            close()
+
+
+_LoadResult = tuple[AsrLoadStep, Transcriber | None, BaseException | None]
+
+
+def _load_transcribers(
+    jobs: Sequence[tuple[AsrLoadStep, Callable[[], Transcriber]]],
+    report: Callable[[AsrLoadStep], None],
+    *,
+    parallel: bool,
+) -> dict[AsrLoadStep, Transcriber]:
+    """執行載入工作（`parallel` 時各一條執行緒），每完成一個就在呼叫端的執行緒上回報。
+
+    回報放在呼叫端的執行緒：引擎的回報會寫 stdout，寫不出去時的例外要由載入流程
+    處理，而不是讓某條載入執行緒默默結束。任何失敗（載入或回報）都等所有已開始的
+    載入結束、把成功的模型關閉後才丟出；依序載入時失敗後不再開始下一個。
+
+    Raises:
+        依 `jobs` 順序第一個失敗的載入例外；載入都成功時是開不了執行緒或回報丟出的例外。
+    """
+    results: queue.SimpleQueue[_LoadResult] = queue.SimpleQueue()
+
+    def run(step: AsrLoadStep, load: Callable[[], Transcriber]) -> None:
+        try:
+            results.put((step, load(), None))
+        except BaseException as exc:  # noqa: BLE001 - 交給呼叫端的執行緒記錄、清理並往上拋
+            results.put((step, None, exc))
+
+    loaded: dict[AsrLoadStep, Transcriber] = {}
+    load_errors: dict[AsrLoadStep, BaseException] = {}
+    report_error: BaseException | None = None
+
+    def collect() -> None:
+        nonlocal report_error
+        step, transcriber, error = results.get()
+        if error is not None:
+            load_errors[step] = error
+            return
+        assert transcriber is not None
+        loaded[step] = transcriber
+        if load_errors or report_error is not None:
+            return
+        try:
+            report(step)
+        except BaseException as exc:  # noqa: BLE001 - 等載入都結束、清理完才往上拋
+            report_error = exc
+
+    start_error: BaseException | None = None
+    if parallel:
+        started = 0
+        for step, load in jobs:
+            try:
+                threading.Thread(
+                    target=run, args=(step, load), name=f"load-{step}", daemon=True
+                ).start()
+            except BaseException as exc:  # noqa: BLE001 - 先收回已開始的載入再往上拋
+                start_error = exc
+                break
+            started += 1
+        for _ in range(started):
+            collect()
+    else:
+        for step, load in jobs:
+            if load_errors or report_error is not None:
+                break
+            run(step, load)
+            collect()
+
+    failures = [load_errors[step] for step, _ in jobs if step in load_errors]
+    if start_error is not None:
+        failures.append(start_error)
+    if report_error is not None:
+        failures.append(report_error)
+    if not failures:
+        return loaded
+    _close_transcribers(loaded.values())
+    for extra in failures[1:]:
+        # 只能丟出一個；其他的失敗也記下來（例如兩個模型都因顯示記憶體不足而失敗）
+        logger.error(
+            "another ASR load step also failed: %s: %s",
+            type(extra).__name__,
+            extra,
+            exc_info=extra,
+        )
+    raise failures[0]
 
 
 def _resolved_compute_type(value: str | None, device: AsrDevice) -> str | None:
@@ -580,6 +742,11 @@ def ping_translation_models(
             raise WarmUpError(model, exc) from exc
 
 
+def will_warm_up(settings: Settings, mode: Mode) -> bool:
+    """`warm_up_translation()` 會不會送出預熱請求（需要翻譯模型、服務在本機）。"""
+    return warm_up_request(settings, mode) is not None and _is_local_server(settings)
+
+
 def warm_up_translation(
     settings: Settings,
     mode: Mode,
@@ -595,7 +762,7 @@ def warm_up_translation(
     多花一次請求，所以只預熱 loopback 位址。失敗只記 warning，不中斷 session。
     只顯示原文（`translation.enabled=false`）或不需要翻譯的語言組合不預熱。
     """
-    if warm_up_request(settings, mode) is None or not _is_local_server(settings):
+    if not will_warm_up(settings, mode):
         return
     try:
         ping_translation_models(settings, mode, make_translator=make_translator)
@@ -657,18 +824,53 @@ def attach_keep_warm(
     )
 
 
-def build_session_components(settings: Settings, mode: Mode) -> PipelineComponents:
-    """engine 用的元件建立：先載入 ASR，再預熱翻譯模型，兩者都完成才回傳；本機翻譯服務
-    另外加上執行中的保溫（`attach_keep_warm()`）。
+def build_session_components(
+    settings: Settings,
+    mode: Mode,
+    *,
+    progress: LoadProgress | None = None,
+    cancelled: threading.Event | None = None,
+) -> PipelineComponents:
+    """engine 用的元件建立：先載入 ASR（兩個模型並行，見 `build_components()`），再預熱
+    翻譯模型，兩者都完成才回傳；本機翻譯服務另外加上執行中的保溫（`attach_keep_warm()`）。
 
-    session 在這段期間維持 `loading`，`running` 時第一句就能即時翻譯。刻意不並行：兩個
-    行程同時在 GPU 上配置記憶體時，Ollama 載入模型前估算的可用顯示記憶體會過時，
+    session 在這段期間維持 `loading`，`running` 時第一句就能即時翻譯。預熱刻意不與 ASR
+    並行：兩個行程同時在 GPU 上配置記憶體時，Ollama 載入模型前估算的可用顯示記憶體會過時，
     端到端驗收時 llama-server 因此以 CUDA 錯誤當掉；依序載入時它看到 ASR 載入後真正
-    剩下的記憶體，不夠時會自己把部分層放到 CPU。
+    剩下的記憶體，不夠時會自己把部分層放到 CPU。模型已在 Ollama 上時預熱只要約 0.1 s，
+    並行也省不了多少。
+
+    Args:
+        settings: 使用者設定。
+        mode: session 模式。
+        progress: 每完成一步呼叫 `(步驟, 已完成數, 總數)`（在呼叫端的執行緒上）。總數是
+            2（兩個 ASR）或 3（另加預熱翻譯模型，只有 `will_warm_up()` 時）。丟出例外時
+            已載入的元件放回模型池，例外往上拋。
+        cancelled: ASR 載入完時已被設定（session 在載入中被停止）就不預熱：預熱可能要
+            等 Ollama 載入模型（最久 60 秒逾時），也會讓 Ollama 為已停止的 session 佔用
+            顯示記憶體；下一個 session 也要等這個載入執行緒結束。
 
     Raises:
         同 `build_components()`（失敗時不預熱）。
     """
-    components = build_components(settings, mode)
-    warm_up_translation(settings, mode)
-    return attach_keep_warm(components, settings, mode)
+    warm = will_warm_up(settings, mode)
+    total = 3 if warm else 2
+    done = 0
+
+    def report(step: LoadStep) -> None:
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(step, done, total)
+
+    components = build_components(settings, mode, on_loaded=report)
+    try:
+        if cancelled is not None and cancelled.is_set():
+            logger.info("stopped while loading ASR models; skipping the warm-up")
+        elif warm:
+            warm_up_translation(settings, mode)
+            report("translation")
+        return attach_keep_warm(components, settings, mode)
+    except BaseException:
+        release_components(components)
+        raise

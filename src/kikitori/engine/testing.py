@@ -60,7 +60,7 @@ from kikitori.pipeline import (
     PipelineComponents,
     default_transcript_filter,
 )
-from kikitori.pipeline.factory import AsrModelInfo, UnknownModelError
+from kikitori.pipeline.factory import AsrModelInfo, LoadProgress, UnknownModelError
 from kikitori.translate.presets import normalize_model_name
 from kikitori.translate.types import TranslationRequest
 
@@ -625,9 +625,19 @@ def fake_services() -> EngineServices:
     catalog = FakeModelCatalog()
     server = FakeTranslationServer(_fake_translation_profile())
 
-    def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
+    def build_components(
+        settings: Settings,
+        mode: Mode,
+        *,
+        progress: LoadProgress | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> PipelineComponents:
         catalog.check_loadable(settings.asr.fast_model)
         catalog.check_loadable(settings.asr.final_model)
+        # 與真的載入一樣回報兩個 ASR 步驟，UI 在假模式下也看得到載入進度
+        if progress is not None:
+            progress("asr_fast", 1, 2)
+            progress("asr_final", 2, 2)
         language = _fake_spoken_language(settings, mode)
         translator = FakeTranslator()
         return PipelineComponents(

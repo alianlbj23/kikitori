@@ -93,7 +93,7 @@ class _ClosingTranscriber:
 class _Build:
     """包裝假的 build_components：可停住（模擬載入數秒）、記錄建立的 transcriber。"""
 
-    def __init__(self, inner: Callable[[Settings, Mode], PipelineComponents]) -> None:
+    def __init__(self, inner: Callable[..., PipelineComponents]) -> None:
         self.inner = inner
         self.entered = threading.Event()
         self.release = threading.Event()
@@ -102,10 +102,12 @@ class _Build:
         self.on_close: Callable[[], None] | None = None
         """之後建立的 transcriber 在 close() 時呼叫（觀察釋放的時機）。"""
 
-    def __call__(self, settings: Settings, mode: Mode) -> PipelineComponents:
+    def __call__(
+        self, settings: Settings, mode: Mode, **kwargs: Any
+    ) -> PipelineComponents:
         self.entered.set()
         self.release.wait(WAIT)
-        components = self.inner(settings, mode)
+        components = self.inner(settings, mode, **kwargs)
         fast = _ClosingTranscriber(components.fast_transcriber)
         final = _ClosingTranscriber(components.final_transcriber)
         fast.on_close = final.on_close = self.on_close
