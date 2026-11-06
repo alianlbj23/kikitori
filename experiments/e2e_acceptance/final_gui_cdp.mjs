@@ -50,7 +50,7 @@ const SCENARIOS = {
   furigana: { help: "B. furigana download + real engine + Japanese audio", params: {} },
   soak: {
     help: "D. real-engine CDP soak with furigana on",
-    params: { minutes: "15", sample_secs: "15", window_min: "10", gc: "false" },
+    params: { minutes: "15", sample_secs: "15", window_min: "10", gc: "false", furigana_every: "3" },
   },
 };
 const COMMON = {
@@ -438,6 +438,8 @@ function slope(samples, field, windowMin) {
 async function scenarioSoak(p, runDir) {
   const minutes = Number(p.minutes);
   const sampleSecs = Number(p.sample_secs);
+  const furiganaEvery = Number(p.furigana_every);
+  if (!(furiganaEvery > 0)) throw new Error(`furigana_every must be a positive number of minutes, got ${p.furigana_every}`);
   const windowMin = Number(p.window_min);
   const gc = p.gc === "true";
   const lad = join(LAD_ROOT, basename(runDir));
@@ -515,7 +517,7 @@ async function scenarioSoak(p, runDir) {
     }
 
     let nextToggle = 2;
-    let nextFurigana = 3;
+    let nextFurigana = furiganaEvery;
     let nextLocale = 5;
     let localeI = 0;
     let showTranslation = true;
@@ -531,12 +533,33 @@ async function scenarioSoak(p, runDir) {
         actions.push({ min: mins(), action: "show-translation", value: showTranslation });
       }
       if (m >= nextFurigana) {
-        nextFurigana += 3;
+        nextFurigana += furiganaEvery;
         await page.eval(NAV("settings"));
+        const before = await page.eval(STATE);
         await page.eval(CLICK("#f-furigana"));
         furiganaOn = !furiganaOn;
         const want = furiganaOn;
-        await waitFor("furigana toggled", async () => (await page.eval(STATE)).furigana === want, 20_000);
+        try {
+          await waitFor("furigana toggled", async () => (await page.eval(STATE)).furigana === want, 20_000);
+        } catch (e) {
+          // Keep what the page showed: a disabled switch and an error notice need different fixes.
+          const after = await page.eval(STATE);
+          // Slow answer or none at all: keep polling a while longer before giving up.
+          const t0 = Date.now();
+          let settledAfterSecs = null;
+          try {
+            await waitFor("furigana toggled (late)", async () => (await page.eval(STATE)).furigana === want, 120_000, 1000);
+            settledAfterSecs = 20 + (Date.now() - t0) / 1000;
+          } catch {
+            settledAfterSecs = null;
+          }
+          const late = await page.eval(STATE);
+          const diag = { min: mins(), want, before, after, settledAfterSecs, late };
+          appendFileSync(join(runDir, "toggle-failure.json"), `${JSON.stringify(diag, null, 2)}
+`);
+          console.error("furigana toggle failed:", JSON.stringify(diag));
+          throw e;
+        }
         await sleep(1000);
         await page.eval(NAV("transcript"));
         actions.push({ min: mins(), action: "furigana", value: furiganaOn });

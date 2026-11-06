@@ -404,10 +404,13 @@ class SettingsProtocolTest(EngineTestCase):
         self.assertIsInstance(first, int)
         saved = self.engine.request("settings.set", {"mode": "interpret"})["result"]
         self.assertGreater(saved["revision"], first)
-        toggled = self.engine.request("session.set_translation", {"enabled": False})["result"]
+        toggled = self.engine.request("session.set_translation", {"enabled": False})[
+            "result"
+        ]
         self.assertGreater(toggled["revision"], saved["revision"])
         self.assertEqual(
-            self.engine.request("settings.get")["result"]["revision"], toggled["revision"]
+            self.engine.request("settings.get")["result"]["revision"],
+            toggled["revision"],
         )
 
     def test_is_new_until_first_save(self) -> None:
