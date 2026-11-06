@@ -95,7 +95,9 @@ class Transcriber(Protocol):
 | `registry.py` | 可選模型清單（固定 revision 與 SHA-256、資源用量、`no_speech_reliable`） | `ModelSpec`、`MODELS`、`get_model()` |
 | `cache.py` | 使用者快取目錄 | `default_cache_dir()` |
 | `download.py` | 下載、續傳、驗證 | `download_model()`、`download_file()`（單檔，hardware 下載 cuBLAS wheel 用）、`is_downloaded()`、`model_dir()`、`ModelDownloadError` |
-| `derived.py` | 預先量化的衍生快取（int8 權重另存一份，載入免量化） | `derived_key()`、`find_derived()`、`build_derived()`、`write_quantized_model_bin()`、`read_model_index()`、`DerivedCacheWorker`、`DERIVED_CACHE`、`ASR_ACTIVITY` |
+| `derived.py` | 預先量化的衍生快取（int8 權重另存一份，載入免量化） | `derived_key()`、`find_derived()`、`prepare_derived()`、`publish_derived()`、`build_derived()`（同一行程，測試／量測用）、`write_quantized_model_bin()`、`read_model_index()`、`DerivedCacheWorker`、`DERIVED_CACHE`、`ASR_ACTIVITY` |
+| `prequantize_process.py` | 引擎端：在子行程裡產生衍生檔、取消時結束行程樹、確認後發布 | `build_derived_in_subprocess()`、`run_child()`、`child_command()`、`kill_process_tree()`、`PrequantizeChildError` |
+| `prequantize_child.py` | 子行程進入點（`python -m`／打包後 `--prequantize`） | `run()`、`main()`、`parse_derive_request()`、`run_self_test()` |
 | `whisper.py` | CTranslate2 推論、模型物件池 | `WhisperTranscriber`（含 `close()`）、`DecodeOptions`、`FAST_DECODE`、`FINAL_DECODE`、`load_transcriber()`（`derived_cache=True` 時用衍生快取）、`preload_cuda_libraries()`、`ModelPool`、`MODEL_POOL` |
 | `filtering.py` | 幻覺過濾 | `FilterConfig`、`rejection_reason()` |
 | `hallucination_lexicon.py` | 依語言的幻覺片語資料（`lexicon.json` 的 Python 版本） | `HALLUCINATION_LEXICON` |
@@ -279,28 +281,58 @@ CTranslate2 沒有讀取既有 `model.bin` 的官方 API，所以自己解析；
   `DERIVED_CACHE`（載入失敗，例如 CUDA 不能用，轉換也沒有意義）。`model_path`（使用者自己的資料夾）不適用。
 - `DerivedCacheWorker`：一條 daemon 執行緒依序處理。`ASR_ACTIVITY` 計算使用中的模型：`load_transcriber()` 載入期間 +1（借用紀錄要載入完才
   建立，session 一開始載入轉換就要停）、`_ModelLease` 存在期間 +1（最後一個共用者關閉時 −1；`close()` 逾時時也照樣減少，計數不代表推論中），
-  所有 ASR 模型都關閉、**連續閒置 15 s**（`IDLE_SECS`）才開始，所以實際上是在 session 結束後做；每轉換一個變數、每個驗證步驟之間檢查，
-  有 session 開始（模型被借出）就中止、刪掉暫存、放回佇列，下次閒置時重做，不算失敗。
+  所有 ASR 模型都關閉、**連續閒置 15 s**（`IDLE_SECS`）才開始，所以實際上是在 session 結束後做。工作在**子行程**裡執行（見下一節），
+  引擎每 0.1 s 檢查：有 session 開始（模型開始載入）就結束子行程、刪掉暫存、放回佇列，下次閒置時重做，不算失敗。
 - **量測依據**（RTX 5070、Ryzen 7 5700X，turbo＋large-v3 int8_float16 已載入，每輪即時＋完整各一次，30 輪）：在背景同時轉換 large-v3 時，
   即時路徑延遲中位數 126 → 130 ms（p90 133 → 141）、完整路徑 286 → 303 ms（p90 314 → 331）；轉換本身 10.7 s（單獨時 11.4 s）。
   只看轉換，在 session 中做也可以接受；但正確性驗證要**再載入兩次模型**（原始檔的即時量化約 7 s CPU、一個模型的顯示記憶體，12 GB 卡上
   與 Ollama 共用時可能不夠），所以整個工作都等閒置再做，被打斷的代價只是重做。
-- 剩下的重疊：驗證時 CTranslate2 的模型載入（large-v3 原始檔約 7 s）與 `generate` 不能中斷，session 若剛好在這時開始，要與它同時載入
-  （CPU 量化與顯示記憶體都多一份，最多約 7 s）；實測 small 在驗證中開始的 session 1.39 s 照常開始。
-- 引擎結束（`factory.release_asr_models()`）先 `DERIVED_CACHE.shutdown()`：下一個檢查點中止、刪暫存（最多等 5 s；驗證中的模型載入
-  可能更久，daemon 執行緒隨行程結束，留下的暫存資料夾由下一行說明的清理處理）。`shutdown()` 之後同一個行程不再接受新工作。行程被強制結束時留下的
-  `.tmp-*` 暫存資料夾，在下一次轉換前刪掉超過 1 小時的（`STALE_TMP_SECS`；較新的可能是另一個行程正在寫）。
+- 引擎結束（`factory.release_asr_models()`）先 `DERIVED_CACHE.shutdown()`：結束子行程、刪暫存。`shutdown()` 之後同一個行程不再接受新工作。
+  引擎被強制結束（當掉）時，子行程看到 stdin EOF 自己結束（結束碼 3）；留下的 `.tmp-*` 暫存資料夾在下一次轉換前刪掉超過 1 小時的
+  （`STALE_TMP_SECS`；較新的可能是另一個行程正在寫）。
+
+### 子行程（`prequantize_process.py`、`prequantize_child.py`，2026-11-06）
+
+**為什麼**：在引擎行程裡做（第一版）有兩個問題——驗證要再載入兩次模型，做完一份後引擎的私有記憶體多留約 240 MiB（CTranslate2／CUDA
+配置器快取，沒有 API 可以釋放）；而且 CTranslate2 的載入與 `generate` 不能中斷，session 若在驗證時開始，要與它同時載入約 7 s。
+子行程結束時作業系統收回全部記憶體，取消時也能直接結束它。
+
+- **指令**（`child_command()`，不經過 shell）：開發環境 `sys.executable -m kikitori.asr.prequantize_child`；PyInstaller 打包後是引擎
+  執行檔本身加隱藏旗標 `--prequantize`（`packaging/engine/entry.py`，不列在用法裡；與 `prequantize_process.PREQUANTIZE_FLAG` 相同，測試檢查）。
+  Windows 以 `BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW` 啟動，其他平台 `start_new_session=True` 且子行程 `os.nice(10)`。
+- **協定**：引擎寫一行 JSON 請求到 stdin（`job_request()`：`version`、`action: "derive"`、模型 id、快取資料夾、鍵、裝置、執行緒數、cuBLAS
+  目錄、暫存資料夾），之後**保持 stdin 開著**——子行程以 `os.read` 等 EOF，讀到就表示引擎不在了，`os._exit(3)`。子行程以結束碼（0 成功、
+  1 工作失敗、2 請求不合法、3 引擎不在了）＋ stdout **最後一行** JSON 回報（`{"ok": true, "model_bin_bytes", "convert_secs", "verify_secs"}`
+  或 `{"ok": false, "error_type", "error"}`）。stdout 只留尾端 64 KiB（前面有雜訊也不會擠掉結果）。
+- **輸入驗證**：子行程以 registry 重新查出模型、自己算鍵並要求與引擎送來的**完全相同**；裝置只能是 cpu／cuda、執行緒 0–256、cuBLAS 目錄
+  最多 16 個；暫存資料夾必須**解析連結後**就在該模型 `derived/` 正下方、名稱 `.tmp-*`、本身與 `derived/` 都不是連結、是空的，路徑不能有 `..`。
+  引擎端檢查結果的型別與範圍（數字非負）、`model_bin_bytes` 與暫存資料夾裡的 `model.bin` 大小相同。
+- **log**：子行程以 `等級 名稱: 訊息` 寫 stderr，引擎逐行轉進自己的 log（`kikitori.asr.prequantize_process`，保留等級，沒有等級的行
+  沿用上一行的等級——例如 traceback），不吞錯；最後幾行附在失敗訊息裡。
+- **時間上限**：`CHILD_TIMEOUT_SECS = 300 s`。本機 large-v3（最大的模型）在 GPU 上整個工作約 20 s；CPU 驗證、慢磁碟或低階 CPU 可能慢
+  一個數量級，所以給約 15 倍。逾時就結束子行程並記為失敗（寫失敗標記，同一個鍵不再試；升級後鍵改變才重試）。
+- **取消**：`should_stop()`（session 開始、刪除模型、引擎結束）為真時結束**整棵行程樹**：Windows `taskkill /T /F`（venv 的 `python.exe`
+  是啟動器，真正的直譯器是它的子行程；PyInstaller onefile 也有一層），其他平台 `killpg(SIGKILL)`；等它結束後刪暫存資料夾（Windows 剛結束的
+  行程可能還沒放開檔案，`_cleanup_tmp()` 重試 5 次）。子行程正常結束後，POSIX 上也對行程群組送一次 `SIGKILL` 清掉殘留的子孫。讀取執行緒
+  等 2 s 還沒結束（有子孫握著管線）就記 warning、不關管線（關閉會卡在讀取執行緒持有的 buffer 鎖上）。
+- **發布在引擎行程**（選擇與理由）：子行程只寫暫存資料夾與完成標記；引擎確認完成標記、檔案清單（不多不少）與大小後才 `rename`。
+  理由：(1) 子行程隨時可能被結束（取消、逾時、引擎結束），由它 rename 就可能在「標記寫了、rename 還沒做」或「rename 了、引擎以為被取消」
+  之間被打斷，引擎無法分辨；(2) 刪除模型（`cancel_model()`）會等執行中的工作結束（`_running` 清除）才回傳，發布與刪除在同一個行程裡
+  依序發生，不會交錯；(3) 失敗標記也由引擎寫，子行程不碰正式名稱與標記。
+- **打包驗證**：`entry.py --self-check` 的 `prequantize_child` 項目以 `run_child({"action": "self_test"})` 實際啟動子行程（打包後就是
+  `kikitori-engine --prequantize`），在暫存目錄合成一個小 `model.bin` 轉換並讀回；`packaging/engine/build.py --smoke` 跑 self-check。
+  本機另以打包後的執行檔對 tiny 跑完整的 `derive`（CUDA int8_float16）：成功、逐位元相同。
 
 ### 正確性把關與原子性
 
-1. 在 `derived/.tmp-<鍵>-<pid>-<亂數>/` 寫入：`model.bin`（`open("xb")`、寫完 `fsync`）＋複製其他檔案（各自 `fsync`，斷電後不會留下大小對
+1. 在 `derived/.tmp-<精度>-<pid>-<亂數>/`（名稱短：Windows 沒開長路徑時整條路徑要在 260 字元內）寫入：`model.bin`（`open("xb")`、寫完 `fsync`）＋複製其他檔案（各自 `fsync`，斷電後不會留下大小對
    但內容是零的檔案——`find_derived()` 只比大小）。標記裡的 `model_bin_sha256` 只供診斷，載入時不重算（1.5 GB 約 1–2 s，抵消一部分收益）。
 2. 驗證（`_verify()`）：在 session 用的裝置與精度上**依序**（一次只佔一個模型的顯示記憶體）載入原始檔（即時量化）與暫存的衍生檔，
    對固定輸入（`PROBE_SEED` 的亂數 log-mel，1×n_mels×3000）跑 `encode(to_cpu=True)` 與 greedy 解碼 24 個 token（含 `no_speech` 機率）。
    encode 只用到 encoder，解碼用到 decoder 與詞嵌入（logits 經過整個詞嵌入矩陣），兩者合起來涵蓋所有量化的權重。
    **encoder 輸出逐位元組相同、token 序列相同、分數與 no_speech 機率的位元相同**才算通過（不是數值近似）。
-3. 寫完成標記（暫存檔＋`os.replace`）後，把暫存資料夾 `rename` 成正式名稱；目標已被另一個行程發布時用它的。正式名稱的資料夾存在但
-   不可用（標記壞掉）時先刪掉再做。
+3. 子行程寫完成標記（暫存檔＋`os.replace`）；引擎確認後把暫存資料夾 `rename` 成正式名稱（見「子行程」）；目標已被另一個行程發布時
+   用它的。正式名稱的資料夾存在但不可用（標記壞掉）時先刪掉再做。
 4. 任何錯誤（格式不支援、輸出不同、載入失敗、I/O）→ `logger.exception`、寫失敗標記、刪暫存；原始檔照常使用。被取消（session 開始、
    刪除模型、引擎結束）不寫失敗標記。**例外**：失敗當下有 ASR 模型在載入或使用（例如 session 開始載入，驗證時顯示記憶體不足）時不標記，
    放回佇列、閒置時重做——那不是這個鍵的問題；閒置時仍失敗才標記。
@@ -311,12 +343,11 @@ CTranslate2 沒有讀取既有 `model.bin` 的官方 API，所以自己解析；
 
 ### 刪除與模型池
 
-- `models.delete` → `factory.delete_asr_model()` 先 `DERIVED_CACHE.cancel_model(id)`：丟掉排隊中的工作、等正在做的停下（最多 20 s；
-  驗證時 CTranslate2 的載入不能中斷，large-v3 原始檔約 7 s）。等不到就丟 `OSError`（引擎回 `internal_error`，稍後再刪）。之後照舊
+- `models.delete` → `factory.delete_asr_model()` 先 `DERIVED_CACHE.cancel_model(id)`：丟掉排隊中的工作、等正在做的停下（子行程在
+  0.1 s 內被結束，通常不到 1 s；上限 20 s 只防結束行程或清理卡住）。等不到就丟 `OSError`（引擎回 `internal_error`，稍後再刪）。之後照舊
   `evict_under(<cache>/<id>)` 並刪整個 `<cache>/<id>`（衍生檔在其中）。「使用中」的保護（session、下載）不變。
 - 從衍生檔載入的物件在模型池中的鍵是衍生資料夾（`ModelKey.path`），`evict_under(<cache>/<id>)` 一樣涵蓋。
-- 驗證時建立的兩個 CTranslate2 物件不經過模型池（暫存資料夾 rename 後路徑就失效），用完就丟——每產生一份衍生檔漏一次 memory_soak #2
-  的量（實測同一行程連續 4 次，每次私有記憶體 +19.5 MiB）；每個鍵一生只產生一次。
+- 驗證時建立的兩個 CTranslate2 物件在子行程裡，行程結束就全部收回（第一版在引擎行程裡時，每份漏一次 memory_soak #2 的量）。
 
 ### 量測（RTX 5070 12 GB、Ryzen 7 5700X、模型已在 OS 檔案快取，2026-11-06）
 
@@ -337,14 +368,37 @@ CTranslate2 沒有讀取既有 `model.bin` 的官方 API，所以自己解析；
 - 引擎實測流程（medium、small）：第一個 session 照常（medium 3.84 s）→ 停止後 15.1 s 開始轉換 → 完成 → 下一個 session 從衍生檔載入
   （1.25 s）。轉換途中開始 session：在驗證步驟中止（`interrupted (stopped during verification)`），那個 session 照常開始
   （1.39 s），停止後 15 s 重做並完成。
-- 引擎內做完一份衍生檔後 2 s，私有記憶體比開始前高約 240 MiB（medium、small 都是）；獨立行程連續做 4 次只每次 +19.5 MiB，
-  沒有隨次數累積。前者的來源沒有查明（可能是 CTranslate2／CUDA 的配置器快取），未修。
+- 第一版（在引擎行程裡）：做完一份衍生檔後 2 s，引擎私有記憶體比開始前高約 240 MiB（medium、small 都是），來源沒有查明（可能是
+  CTranslate2／CUDA 的配置器快取）。**改成子行程後**（引擎行程每 0.1 s 取樣）：
+
+  | 模型 | 工作開始前 | 工作期間峰值 | 結束後 1 s／5 s | 整個工作 |
+  |---|---|---|---|---|
+  | medium | 1391 MiB | 1391 | 1391／1391 | 10.9 s |
+  | small | 1386 MiB | 1386 | 1386／1386 | 4.3 s |
+  | large-v3 | 1397 MiB | 1398 | 1397／1397 | 19.9 s（轉換 9.7＋驗證，含子行程啟動） |
+
+  引擎行程的記憶體在 ±1 MiB 內不變（量測用暫存的模型快取：`LOCALAPPDATA` 指到 scratchpad，模型檔以硬連結放入）。
+- session 在**驗證途中**開始（large-v3，子行程印出 `verifying` 1 s 後 `session.start`）：子行程在 0.75 s 內被結束、暫存資料夾已刪
+  （`interrupted (pre-quantization process was stopped)`），session 7.22 s 開始（同一次的第一個 session 6.97 s；第一版沒有中斷時是
+  7.00 s，差異在雜訊內）；停止 15 s 後重做並完成，下一個 session 從衍生檔載入 2.16 s。
+- **翻譯開啟**（`settings.apply_recommendation`：即時 turbo／完整 large-v3 int8_float16、翻譯 `qwen3.5:9b`（Ollama，本機），
+  `session.start` → `running`，新引擎、每次先請 Ollama 卸載模型，交錯各 4 次，中位數）：
+
+  | | 原始檔 | 衍生檔 |
+  |---|---|---|
+  | 新引擎的第一個 session（LLM 冷，要載入 9B） | 10.95 s（10.61–15.12） | **6.06 s**（6.05–6.38） |
+  | 同一引擎第二個 session（LLM 已在顯示記憶體） | 7.75 s（7.62–8.22） | **2.35 s**（2.25–2.44） |
+
+  載入步驟依序：兩個 ASR 並行載入完（原始檔約 7.0 s、衍生檔約 2.4 s）之後才預熱翻譯（冷約 3.6–4 s、熱約 0.15 s）。15.12 s 是當天
+  第一次載入 9B（LLM 權重不在 OS 檔案快取）。
 - 磁碟：每個 int8 系列的鍵多一份約原始 `model.bin` 一半的檔案（large-v3 +1.5 GB、turbo +0.8 GB），算進 `disk_bytes`。
 
 ### 限制
 
 - 舊的鍵（升級 CTranslate2 或格式版本之後）不自動清掉，佔用的空間顯示在 `disk_bytes`，`models.delete` 會一起刪；要自動清理再另外做。
 - 第一個 session（以及升級後的第一個 session）仍要即時量化；衍生檔在 session 結束、閒置 15 s 後才產生。
+- 時間上限 300 s 逾時算失敗、不重試：極慢的機器（例如 CPU 上驗證 large-v3）可能永遠用不到衍生檔；沒有實測過那種機器。
+- Windows 上子行程正常結束後若留下子孫（我們的子行程不會），行程樹已查不到、無法清理；只會記 warning。
 - 只在本機 Windows（RTX 5070、AVX2）實測；macOS／Linux、其他 CPU 指令集（AVX-512 的 `quantize_s8` 路徑）的逐位元一致性由各自機器上的
   驗證步驟把關（不一致就標記失敗、繼續用原始檔），沒有實機確認。
 - 格式改版（binary version ≠ 6 或 spec revision 改變）時轉換會失敗並標記，要跟著更新 `derived.py`；這不是 CTranslate2 承諾的介面。
@@ -418,6 +472,9 @@ pipeline 對每個 `Transcript` 呼叫 `rejection_reason(transcript, config)`，
     （全零列、就近取偶、分塊）；格式錯誤的各種檔案；鍵、完成／失敗標記、竄改偵測、原子發布（失敗或取消不留暫存）、背景工作的閒置等待、
     session 打斷後重排、取消與關閉；`load_transcriber(derived_cache=True)` 的載入選擇與失敗回退（假的 `ctranslate2`）。本機快取有 `tiny`
     時以真的 CTranslate2（CPU int8）確認衍生檔與即時量化逐位元相同、改錯一個值會被擋下（沒有時 skip）。
+  - 子行程（`test_asr_prequantize.py`）：以 `python -c` 的假子行程測結果解析（大量雜訊之後的最後一行）、stderr 依等級轉進 log、
+    回報的錯誤與缺少結果、逾時與取消時結束整棵行程樹（孫行程也結束）、子孫握著管線時仍會返回；引擎端的發布與清理（假 runner）；
+    子行程的請求驗證（不合法請求、`..`、非空資料夾、鍵不符）與自我測試；本機有 tiny 時用真的子行程完成、取消、引擎消失時自行結束。
   - 幻覺過濾：每條規則的正反例；片語表（`test_asr_hallucination_lexicon.py`）：與 `lexicon.json` 一致、保留既有項目、每個 hard 片語在 19 個語言標籤下都被濾、soft 只在同語言且 no_speech 高於門檻時濾、各語言一般句子與翻譯評測台詞在任何語言標籤下都保留、本機有 `experiments/asr_benchmark/results` 時真實日語辨識結果不被片語濾掉（沒有資料時 skip）、天城文與泰文保留組合記號而阿拉伯文照舊忽略。
 - 真模型檢查放在 `experiments/asr_benchmark/`（含與 HF `tokenizers` 對照分詞結果），不放進單元測試。
 - 指令：`uv run python -m unittest discover -s tests`、`uv run ruff check`。

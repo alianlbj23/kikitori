@@ -7,7 +7,8 @@
 - 原始檔不動：衍生檔放在 `<cache>/<id>/derived/<key>/`，鍵含來源 `model.bin` 的 SHA-256、
   精度、CTranslate2 版本與本格式版本，任一不符就當作不存在（退回原始檔照常即時量化）。
 - 不在「開始」的關鍵路徑上：session 照常從原始檔載入，`DerivedCacheWorker` 在所有 ASR 模型
-  都關閉一段時間後才在背景轉換；轉換途中有 session 開始就中止，之後閒置時重做。
+  都關閉一段時間後才在背景轉換（在子行程裡，見 `prequantize_process`）；轉換途中有 session 開始就
+  結束子行程，之後閒置時重做。
 - 正確性把關：轉換後以固定輸入比對「載入衍生檔」與「從原始檔即時量化」的 `encode()` 與
   greedy 解碼輸出，逐位元相同才發布（暫存資料夾 → rename）；任何錯誤都記 log、寫下失敗標記
   （同一個鍵不再重試）。
@@ -514,35 +515,40 @@ def find_derived(spec: ModelSpec, cache_dir: Path, key: DerivedKey) -> Path | No
     與 `is_downloaded()` 相同只比對標記與檔案大小、不重算雜湊（驗證在發布前做過）。
     """
     directory = derived_dir(spec, cache_dir, key)
+    return directory if _is_complete_folder(directory, key) else None
+
+
+def _is_complete_folder(directory: Path, key: DerivedKey) -> bool:
+    """`directory` 有 `key` 的完成標記，列出的檔案都在且大小相符（發布前後共用）。"""
     marker = directory / DERIVED_MARKER
     try:
         if _is_link(directory) or not marker.is_file():
-            return None
+            return False
         recorded = _read_json(marker)
     except FileNotFoundError:
-        return None
+        return False
     except (OSError, ValueError) as exc:
         logger.warning("ignoring unreadable derived model marker %s: %s", marker, exc)
-        return None
+        return False
     if not isinstance(recorded, dict) or recorded.get("key") != key.as_dict():
-        return None
+        return False
     files = recorded.get("files")
     if not isinstance(files, dict) or "model.bin" not in files:
-        return None
+        return False
     for name, size in files.items():
         if (
             not isinstance(name, str)
             or Path(name).name != name
             or name in ("", ".", "..")
         ):
-            return None
+            return False
         path = directory / name
         try:
             if not path.is_file() or path.stat().st_size != size:
-                return None
+                return False
         except OSError:
-            return None
-    return directory
+            return False
+    return True
 
 
 def failure_reason(spec: ModelSpec, cache_dir: Path, key: DerivedKey) -> str | None:
@@ -586,7 +592,7 @@ def mark_failed(spec: ModelSpec, cache_dir: Path, key: DerivedKey, reason: str) 
 
 
 def _write_atomic(path: Path, content: str) -> None:
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    tmp = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
     try:
         with tmp.open("x", encoding="utf-8") as file:
             file.write(content)
@@ -771,6 +777,8 @@ class DerivationJob:
     key: DerivedKey
     device: str
     cpu_threads: int = 0
+    cuda_library_dirs: tuple[str, ...] = ()
+    """cuBLAS 所在目錄（子行程要自己預載，見 `whisper.preload_cuda_libraries()`）。"""
 
 
 ModelFactory = Callable[[Path, str, str, int], Any]
@@ -808,6 +816,135 @@ class DerivationResult:
     verify_secs: float
 
 
+def _plan_folders(job: DerivationJob) -> tuple[Path | None, Path]:
+    """產生前的檢查與清理；回傳（已可用的衍生資料夾或 None, 新暫存資料夾的路徑，尚未建立）。
+
+    Raises:
+        FileNotFoundError: 原始模型沒有下載。
+        UnsafeModelPathError、OSError: 衍生資料夾是連結，或清理失敗。
+    """
+    spec, cache, key = job.spec, job.cache_dir, job.key
+    if not is_downloaded(spec, cache):
+        raise FileNotFoundError(f"ASR model {spec.id} is not downloaded to {cache}")
+    existing = find_derived(spec, cache, key)
+    root = derived_root(spec, cache)
+    # 名稱短：Windows 沒開長路徑時整條路徑要在 260 字元內（使用者快取的路徑本身就約 70 字元）
+    tmp = root / f"{TMP_PREFIX}{key.compute_type}-{os.getpid()}-{secrets.token_hex(4)}"
+    if existing is not None:
+        return existing, tmp
+    root.mkdir(parents=True, exist_ok=True)
+    if _is_link(root):
+        raise UnsafeModelPathError(f"{root} is a link; refusing to write into it")
+    _remove_stale_tmp(root)
+    final = derived_dir(spec, cache, key)
+    if final.exists() or _is_link(final):
+        # 標記不符或缺檔的舊資料夾（例如上次 rename 後標記被改壞）：刪掉重做
+        logger.warning("replacing invalid pre-quantized model folder %s", final)
+        remove_tree(final, root)
+    return None, tmp
+
+
+def prepare_derived(
+    job: DerivationJob,
+    tmp: Path,
+    *,
+    should_stop: StopCheck = _never_stop,
+    create_model: ModelFactory = _create_ct2_model,
+    storage: Callable[[Any], Any] = _storage,
+) -> DerivationResult:
+    """在空的暫存資料夾 `tmp` 寫入衍生檔、驗證、寫完成標記；**不發布**（子行程做的部分）。
+
+    Raises:
+        DerivationCancelled: `should_stop()` 在步驟之間回傳 True。
+        ModelFormatError: 原始 `model.bin` 格式不支援。
+        RuntimeError: 衍生檔的輸出與即時量化不同，或模型載入／推論失敗。
+        OSError: 讀寫失敗。
+    """
+    spec, key = job.spec, job.key
+    source_dir = model_dir(spec, job.cache_dir)
+    started = time.perf_counter()
+    stats = write_quantized_model_bin(
+        source_dir / "model.bin", tmp / "model.bin", should_stop=should_stop
+    )
+    for file in spec.files:
+        if file.name != "model.bin":
+            shutil.copyfile(source_dir / file.name, tmp / file.name)
+            _fsync_file(tmp / file.name)
+    convert_secs = time.perf_counter() - started
+    if should_stop():
+        raise DerivationCancelled("stopped before verification")
+
+    logger.info(
+        "converted %s in %.1f s; verifying on %s (%s)",
+        spec.id,
+        convert_secs,
+        job.device,
+        key.compute_type,
+    )
+    started = time.perf_counter()
+    _verify(job, source_dir, tmp, should_stop, create_model, storage)
+    verify_secs = time.perf_counter() - started
+
+    files = {"model.bin": stats.size}
+    files.update({f.name: f.size for f in spec.files if f.name != "model.bin"})
+    marker = {
+        "key": key.as_dict(),
+        "files": files,
+        "model_bin_sha256": stats.sha256,
+        "quantized_variables": stats.quantized,
+        "verified_on": {"device": job.device, "compute_type": key.compute_type},
+        "time": time.time(),
+    }
+    _write_atomic(tmp / DERIVED_MARKER, json.dumps(marker, indent=2))
+    return DerivationResult(tmp, stats.size, convert_secs, verify_secs)
+
+
+def publish_derived(job: DerivationJob, tmp: Path) -> Path:
+    """確認暫存資料夾完整（完成標記與檔案大小）後 rename 成正式名稱，回傳正式資料夾。
+
+    Raises:
+        RuntimeError: 暫存資料夾不完整（例如子行程回報成功卻沒寫好）。
+        OSError: rename 失敗，而且也沒有其他行程發布同一個鍵。
+    """
+    spec, cache, key = job.spec, job.cache_dir, job.key
+    if not _is_complete_folder(tmp, key):
+        raise RuntimeError(f"pre-quantized folder {tmp} is incomplete; not publishing")
+    expected = {DERIVED_MARKER, *(f.name for f in spec.files)}
+    present = {entry.name for entry in tmp.iterdir()}
+    if present != expected:
+        raise RuntimeError(
+            f"pre-quantized folder {tmp} has unexpected contents: "
+            f"extra {sorted(present - expected)}, missing {sorted(expected - present)}"
+        )
+    final = derived_dir(spec, cache, key)
+    try:
+        os.rename(tmp, final)
+    except OSError:
+        # 另一個引擎行程剛好發布了同一個鍵
+        if find_derived(spec, cache, key) is None:
+            raise
+        logger.info("pre-quantized %s was published by another process", final)
+    return final
+
+
+def _cleanup_tmp(tmp: Path) -> None:
+    """刪掉暫存資料夾；剛被結束的子行程可能還沒放開檔案，稍等重試幾次。"""
+    for attempt in range(5):
+        if not tmp.exists():
+            return
+        try:
+            remove_tree(tmp, tmp.parent)
+            return
+        except PermissionError:
+            if attempt == 4:
+                logger.exception("cannot remove pre-quantization temp folder %s", tmp)
+                return
+            time.sleep(0.2 * (attempt + 1))
+        except (OSError, UnsafeModelPathError):
+            logger.exception("cannot remove pre-quantization temp folder %s", tmp)
+            return
+
+
 def build_derived(
     job: DerivationJob,
     *,
@@ -815,7 +952,7 @@ def build_derived(
     create_model: ModelFactory = _create_ct2_model,
     storage: Callable[[Any], Any] = _storage,
 ) -> DerivationResult:
-    """產生、驗證並發布一份衍生檔（暫存資料夾寫完、比對一致後才 rename 成正式名稱）。
+    """在這個行程內產生、驗證並發布一份衍生檔（測試與量測用；引擎用 `build_derived_in_subprocess()`）。
 
     任何失敗或中止都刪掉暫存資料夾，不留半成品；已有可用的衍生檔時直接回傳它。
 
@@ -826,78 +963,38 @@ def build_derived(
         FileNotFoundError: 原始模型沒有下載。
         OSError、UnsafeModelPathError: 寫檔、rename 或刪除失敗。
     """
-    spec, cache, key = job.spec, job.cache_dir, job.key
-    if not is_downloaded(spec, cache):
-        raise FileNotFoundError(f"ASR model {spec.id} is not downloaded to {cache}")
-    final = derived_dir(spec, cache, key)
-    existing = find_derived(spec, cache, key)
+    existing, tmp = _plan_folders(job)
     if existing is not None:
         return DerivationResult(existing, (existing / "model.bin").stat().st_size, 0, 0)
-    source_dir = model_dir(spec, cache)
-    root = derived_root(spec, cache)
-    root.mkdir(parents=True, exist_ok=True)
-    if _is_link(root):
-        raise UnsafeModelPathError(f"{root} is a link; refusing to write into it")
-    _remove_stale_tmp(root)
-    if final.exists() or _is_link(final):
-        # 標記不符或缺檔的舊資料夾（例如上次 rename 後標記被改壞）：刪掉重做
-        logger.warning("replacing invalid pre-quantized model folder %s", final)
-        remove_tree(final, root)
-
-    tmp = root / f"{TMP_PREFIX}{key.dirname}-{os.getpid()}-{secrets.token_hex(4)}"
     tmp.mkdir()
     try:
-        started = time.perf_counter()
-        stats = write_quantized_model_bin(
-            source_dir / "model.bin", tmp / "model.bin", should_stop=should_stop
+        result = prepare_derived(
+            job,
+            tmp,
+            should_stop=should_stop,
+            create_model=create_model,
+            storage=storage,
         )
-        for file in spec.files:
-            if file.name != "model.bin":
-                shutil.copyfile(source_dir / file.name, tmp / file.name)
-                _fsync_file(tmp / file.name)
-        convert_secs = time.perf_counter() - started
-        if should_stop():
-            raise DerivationCancelled("stopped before verification")
-
-        started = time.perf_counter()
-        _verify(job, source_dir, tmp, should_stop, create_model, storage)
-        verify_secs = time.perf_counter() - started
-
-        files = {"model.bin": stats.size}
-        files.update({f.name: f.size for f in spec.files if f.name != "model.bin"})
-        marker = {
-            "key": key.as_dict(),
-            "files": files,
-            "model_bin_sha256": stats.sha256,
-            "quantized_variables": stats.quantized,
-            "verified_on": {"device": job.device, "compute_type": key.compute_type},
-            "time": time.time(),
-        }
-        _write_atomic(tmp / DERIVED_MARKER, json.dumps(marker, indent=2))
         if should_stop():
             raise DerivationCancelled("stopped before publishing")
-        try:
-            os.rename(tmp, final)
-        except OSError:
-            # 另一個引擎行程剛好發布了同一個鍵
-            if find_derived(spec, cache, key) is None:
-                raise
-            logger.info("pre-quantized %s was published by another process", final)
-        logger.info(
-            "pre-quantized %s (%s): %d MB, convert %.1f s, verify %.1f s",
-            spec.id,
-            key.compute_type,
-            stats.size >> 20,
-            convert_secs,
-            verify_secs,
+        final = publish_derived(job, tmp)
+        _log_ready(job, result)
+        return DerivationResult(
+            final, result.model_bin_bytes, result.convert_secs, result.verify_secs
         )
-        return DerivationResult(final, stats.size, convert_secs, verify_secs)
     finally:
-        if tmp.exists():
-            try:
-                remove_tree(tmp, root)
-            except (OSError, UnsafeModelPathError):
-                logger.exception("cannot remove pre-quantization temp folder %s", tmp)
+        _cleanup_tmp(tmp)
+
+
+def _log_ready(job: DerivationJob, result: DerivationResult) -> None:
+    logger.info(
+        "pre-quantized %s (%s): %d MB, convert %.1f s, verify %.1f s",
+        job.spec.id,
+        job.key.compute_type,
+        result.model_bin_bytes >> 20,
+        result.convert_secs,
+        result.verify_secs,
+    )
 
 
 def _verify(
@@ -938,14 +1035,24 @@ def _verify(
 IDLE_SECS = 15.0
 """所有 ASR 模型關閉後要連續閒置多久才開始轉換（session 停止後馬上又開始時不搶資源）。"""
 CANCEL_WAIT_SECS = 20.0
-"""`cancel_model()` 預設等多久（刪除模型在引擎主執行緒上；比對時載入 large-v3 的原始檔約 7 s）。"""
+"""`cancel_model()` 預設等多久（刪除模型在引擎主執行緒上）。子行程每 0.1 s 檢查一次取消、
+被直接結束，通常不到 1 s；上限只防 taskkill 或檔案清理卡住。"""
+
+
+def _build_in_subprocess_lazy(
+    job: DerivationJob, *, should_stop: StopCheck = _never_stop
+) -> DerivationResult:
+    # 延遲匯入：prequantize_process 匯入本模組
+    from kikitori.asr.prequantize_process import build_derived_in_subprocess
+
+    return build_derived_in_subprocess(job, should_stop=should_stop)
 
 
 class DerivedCacheWorker:
     """背景產生衍生檔的單一工作執行緒（行程內共用 `DERIVED_CACHE`）。
 
-    `request()` 只排入佇列；執行緒等到 ASR 閒置 `idle_secs` 秒才轉換，期間每個變數之間
-    檢查：有模型開始使用、`cancel_model()` 或 `shutdown()` 就中止（刪暫存、不記失敗）。
+    `request()` 只排入佇列；執行緒等到 ASR 閒置 `idle_secs` 秒才轉換（預設在子行程裡），期間
+    每 0.1 s 檢查：有模型開始使用、`cancel_model()` 或 `shutdown()` 就結束子行程（刪暫存、不記失敗）。
     被 session 中止的工作放回佇列，下次閒置時重做。其他錯誤記 log 並寫下失敗標記。
     """
 
@@ -954,13 +1061,14 @@ class DerivedCacheWorker:
         activity: ActivityTracker,
         *,
         idle_secs: float = IDLE_SECS,
-        build: Callable[..., DerivationResult] = build_derived,
+        build: Callable[..., DerivationResult] = _build_in_subprocess_lazy,
     ) -> None:
         """
         Args:
             activity: ASR 模型使用中的計數。
             idle_secs: 開始轉換前要連續閒置的秒數。
-            build: 產生衍生檔的函式（測試替換）。
+            build: 產生衍生檔的函式；預設在子行程裡轉換與驗證（`prequantize_process`），
+                這個行程只發布。
         """
         self._activity = activity
         self._idle_secs = idle_secs

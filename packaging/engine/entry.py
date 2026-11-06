@@ -6,6 +6,10 @@
 - `--self-check`：在打包好的執行環境裡確認原生函式庫與資料檔都在、真的載得起來
   （Silero VAD 模型、onnxruntime、CTranslate2、OpenCC、SudachiPy、平台音訊後端），把結果以一行
   JSON 寫到 stdout。CI 與 `smoke_test.py` 用它驗證打包內容，不屬於引擎協定。
+- `--prequantize`（隱藏，不列在用法裡）：引擎自己啟動的衍生快取子行程
+  （`kikitori.asr.prequantize_child`，stdin 一行 JSON 請求、stdout 一行 JSON 結果）。打包後沒有
+  `python -m` 可用，所以引擎以自己的執行檔加這個旗標啟動子行程；`--self-check` 的
+  `prequantize_child` 項目實際走一次這條路徑。
 
 `kikitori` 的互動選單不放進執行檔：sidecar 只給程式呼叫。
 """
@@ -24,6 +28,9 @@ from typing import Any
 USAGE = "usage: kikitori-engine [--self-check]\n  (no arguments: stdio engine)\n"
 
 SELF_CHECK_FLAG = "--self-check"
+PREQUANTIZE_FLAG = "--prequantize"
+"""與 `kikitori.asr.prequantize_process.PREQUANTIZE_FLAG` 相同（測試檢查）；這裡寫死，
+判斷參數時不必先匯入 kikitori。"""
 
 Check = Callable[[], str]
 """一項檢查：成功時回傳簡短說明，失敗時拋例外。"""
@@ -136,6 +143,16 @@ def _check_sudachipy() -> str:
     return f"sudachipy {sudachipy.__version__}, resources ok (no dictionary downloaded)"
 
 
+def _check_prequantize_child() -> str:
+    """以引擎啟動衍生快取子行程的方式（打包後是本執行檔加 `--prequantize`）跑一次自我測試。"""
+    from kikitori.asr.prequantize_process import child_command, run_child
+
+    result = run_child({"version": 1, "action": "self_test"}, timeout=120.0)
+    return (
+        f"{' '.join(child_command()[1:])}: converted {result['model_bin_bytes']} bytes"
+    )
+
+
 def _module_dir(name: str) -> Path:
     spec = importlib.util.find_spec(name)
     if spec is None or not spec.submodule_search_locations:
@@ -182,6 +199,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("ctranslate2", _check_ctranslate2),
     ("opencc", _check_opencc),
     ("sudachipy", _check_sudachipy),
+    ("prequantize_child", _check_prequantize_child),
     ("audio_backend", _check_audio_backend),
 )
 
@@ -230,6 +248,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_engine()
     if args == [SELF_CHECK_FLAG]:
         return _self_check()
+    if args == [PREQUANTIZE_FLAG]:
+        from kikitori.asr.prequantize_child import run as prequantize_run
+
+        return prequantize_run()
     sys.stderr.write(USAGE)
     return 2
 

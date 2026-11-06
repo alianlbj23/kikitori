@@ -902,7 +902,9 @@ def load_transcriber(
         device: Literal["cpu", "cuda"], compute_type: str, warmup: bool
     ) -> WhisperTranscriber:
         plan = (
-            _plan_prequantized(spec, cache_dir, device, compute_type, cpu_threads)
+            _plan_prequantized(
+                spec, cache_dir, device, compute_type, cpu_threads, cuda_library_dirs
+            )
             if derived_cache and spec is not None and cache_dir is not None
             else None
         )
@@ -992,6 +994,7 @@ def _plan_prequantized(
     device: Literal["cpu", "cuda"],
     compute_type: str,
     cpu_threads: int,
+    cuda_library_dirs: Sequence[Path] = (),
 ) -> _PrequantizedPlan | None:
     """決定從衍生檔或原始檔載入；這個精度不需要衍生檔時 None。
 
@@ -1017,7 +1020,15 @@ def _plan_prequantized(
                 derived.mark_failed(spec, cache_dir, key, detail)
 
             return _PrequantizedPlan(_DerivedSource(found, record_failure), None)
-        job = derived.DerivationJob(spec, cache_dir, key, device, cpu_threads)
+        # 子行程要自己預載 cuBLAS，所以把目錄一起交給它
+        job = derived.DerivationJob(
+            spec,
+            cache_dir,
+            key,
+            device,
+            cpu_threads,
+            tuple(os.fspath(d) for d in cuda_library_dirs),
+        )
         return _PrequantizedPlan(None, job)
     except (OSError, ValueError, TypeError):
         logger.exception(

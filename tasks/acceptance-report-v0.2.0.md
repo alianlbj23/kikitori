@@ -255,7 +255,7 @@ blink_gc／PartitionAlloc）看是哪一類物件；(3) 檢查切換翻譯時 `r
 ## 觀察到、沒有修的（給你決定）
 
 > 後續：1 已改善（兩個模型並行載入，11.8 → 7.3 s，`78c79d1`；載入進度以 `status loading` 的 `{step, done, total}` 回報）；2、3、4 已修正（`fa6748d`）。
-> 1 再改善：預先量化的衍生快取（`asr/derived.py`，int8 權重另存在 `<快取>/<id>/derived/`，產生後以固定輸入確認與即時量化逐位元相同才使用；第一個 session 照常即時量化，結束後閒置 15 s 在背景產生）。推薦組合（翻譯關閉、交錯各 5 次中位數）`session.start` → `running`：新引擎 7.00 → 2.42 s、同一引擎第二個 session 7.50 → 2.09 s；large-v3 單獨載入 6.80 → 2.53 s、turbo 3.75 → 1.69 s。磁碟多 1.5＋0.8 GB（算進 `disk_bytes`，`models.delete` 一起刪）。見 `docs/specs/asr.md`「預先量化的衍生快取」。
+> 1 再改善：預先量化的衍生快取（`asr/derived.py`，int8 權重另存在 `<快取>/<id>/derived/`，產生後以固定輸入確認與即時量化逐位元相同才使用；第一個 session 照常即時量化，結束後閒置 15 s 在背景產生）。推薦組合（翻譯關閉、交錯各 5 次中位數）`session.start` → `running`：新引擎 7.00 → 2.42 s、同一引擎第二個 session 7.50 → 2.09 s；large-v3 單獨載入 6.80 → 2.53 s、turbo 3.75 → 1.69 s。磁碟多 1.5＋0.8 GB（算進 `disk_bytes`，`models.delete` 一起刪）。轉換＋驗證在子行程裡做：引擎私有記憶體做完前後不變（±1 MiB），session 在驗證中開始時子行程在 0.75 s 內被結束。翻譯開啟（`qwen3.5:9b`）時：新引擎 10.95 → 6.06 s、第二個 session 7.75 → 2.35 s（交錯各 4 次中位數）。見 `docs/specs/asr.md`「預先量化的衍生快取」。
 
 1. **按「開始」到聆聽要 10–13 秒**（v0.1.0 約 3 秒）：新推薦組合兩個模型都是 int8_float16，快取裡是 float16 權重，載入時量化（large-v3 6.5 s、turbo 3.4 s）。
    可選：快取另存 int8 轉換後的模型、兩個模型並行載入，或 12 GB 時即時路徑改回 turbo f16（VRAM 多約 1 GB，翻譯預算 8.13 → 7.09 GB 會降到 4B，所以目前的挑法不會選）。
