@@ -30,7 +30,7 @@
 |---|---|---|
 | `types.py` | 凍結 dataclass 與 `to_dict()` | `HardwareInfo`、`CpuInfo`、`MemoryInfo`、`GpuInfo`、`CublasInfo`、`TranslationServerInfo`、`LanguageSelection`、`AsrChoice`、`ModelCombination`、`ValidationResult` |
 | `messages.py` | 結構化訊息與訊息碼表（唯一來源） | `Message`、`message()`、`CATALOG` |
-| `ollama.py` | Ollama 原生 API：判斷是不是 Ollama、`/api/pull` 下載翻譯模型 | `ollama_version()`、`pull_model()`、`native_root()`、`validate_pull_model_name()`、`OllamaUnreachableError`、`NotOllamaError`、`OllamaAuthError`、`PullError`、`PullCancelledError` |
+| `ollama.py` | Ollama 原生 API：判斷是不是 Ollama、`/api/pull` 下載翻譯模型、`/api/generate` 卸載模型 | `ollama_version()`、`pull_model()`、`unload_model()`、`native_root()`、`validate_pull_model_name()`、`OllamaUnreachableError`、`NotOllamaError`、`OllamaAuthError`、`PullError`、`PullCancelledError`、`UnloadError` |
 | `system.py` | OS、CPU、RAM（各平台） | `detect_cpu()`、`detect_memory()`、`detect_apple_silicon()`、解析器 |
 | `nvidia.py` | `nvidia-smi` 與 cuBLAS 搜尋 | `query_nvidia_gpus()`、`find_cublas()`、`NvidiaSmiError` |
 | `translation_server.py` | `GET {base_url}/models` | `probe_translation_server()`、`is_listed_model_name()`（寬鬆：伺服器列出的名稱，只用來顯示與比對） |
@@ -397,7 +397,7 @@ replica 都指向同一個 `Model`；`encode()` 回傳前會 `synchronize_stream
 
 翻譯伺服器是 Ollama 時，引擎可以替使用者下載翻譯模型（`models.pull_translation`）；其他 OpenAI 相容伺服器只能提示使用者
 自行安裝。全部用標準庫 `http.client`（不經 proxy；`localhost` 依序試 127.0.0.1、::1，理由同翻譯伺服器探測）。
-協定以官方文件（docs.ollama.com/api 的 pull、version、errors；2026-11-05 查閱）與本機 Ollama 0.40.14 的實測為準（見下方「實測」）。
+協定以官方文件（docs.ollama.com/api 的 pull、version、generate、errors；2026-11-05 查閱，generate 的卸載 2026-11-07）與本機 Ollama 0.40.14 的實測為準（見下方「實測」）。
 
 - **原生 API 的位置**（`native_root()`）：設定存的是 OpenAI 相容端點，例如 `http://host:11434/v1`；去掉路徑結尾的 `/v1`
   就是 Ollama 原生 API 的根（反向代理的前綴保留，例如 `http://h/ollama/v1` → `/ollama/api/...`）。連接埠 0 或不合法 → `ValueError`。
@@ -436,6 +436,19 @@ replica 都指向同一個 `Model`；`encode()` 回傳前會 `synchronize_stream
     讀取器（`_PollingSocket`／`_PollingReader`）提供給 `http.client.HTTPResponse`。
   - 金鑰：`api_key_env` 的環境變數有值才送 `Authorization: Bearer …`（Ollama 不需要），不出現在例外或 log。
   - 已安裝的模型也可以 pull（Ollama 只檢查 manifest，很快回報 success）。
+- **卸載**（`unload_model()`）：`POST {root}/api/generate`，body `{"model": <名稱>, "keep_alive": 0}`（官方文件的 "Unload a model"）。
+  與 `/api/version` 共用同一個小請求（`_short_request`），但時限是**整個請求的總和**（含 `localhost` 依序試兩個位址的連線、送出與讀回應；
+  `/api/version` 仍是每一步各自 2 s），預設 1 s，引擎結束時傳入它剩下的時間；200 → 成功，401／403 → `OllamaAuthError`，
+  3xx 或其他狀態 → `UnloadError("HTTP <code> from /api/generate")`，連不上或逾時 → `OllamaUnreachableError`。
+  引擎結束時用它把 session 用過的模型立刻卸載（`pipeline-engine.md`「結束」），否則 Ollama 預設閒置 5 分鐘才釋放顯示記憶體。
+
+### 實測：卸載（Ollama 0.40.15，Windows 11，RTX 5070 12 GB，2026-11-07）
+
+- 已載入的 `qwen3.5:9b`：`200`、`{"model":"qwen3.5:9b",…,"response":"","done":true,"done_reason":"unload"}`，約 45 ms；
+  2 秒內 `GET /api/ps` 變成 `{"models":[]}`，GPU 已用記憶體 8101 → 1702 MiB。經 `DefaultTranslationModels.unload()` 呼叫 15 ms。
+- **沒載入**的模型：同樣 `200`、`done_reason: "unload"`，約 46 ms，`/api/ps` 仍是空的、GPU 記憶體不變——不會先載入再卸載。
+- 不存在的模型：`404`、`{"error":"model 'no-such-model:1b' not found"}`。
+- 產生到一半（`/api/generate` 長回應進行中）收到卸載：卸載立即回 200，進行中的回應照常完成，完成後 `/api/ps` 變空、GPU 回到 1707 MiB。
 
 ### 實測（Ollama 0.40.14，Windows 11，2026-11-05）
 

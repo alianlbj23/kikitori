@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Mapping
 from importlib import metadata
 from typing import Any, BinaryIO, Literal
+from urllib.parse import urlsplit
 
 from kikitori.capture.errors import (
     BackendUnavailableError,
@@ -47,7 +48,12 @@ from kikitori.engine.services import (
 )
 from kikitori.furigana.dictionary import DICTIONARY_ID
 from kikitori.hardware import GPU_RUNTIME_ID
-from kikitori.hardware.ollama import validate_pull_model_name
+from kikitori.hardware.ollama import (
+    OllamaError,
+    UnloadError,
+    validate_pull_model_name,
+)
+from kikitori.hardware.translation_server import is_loopback_host
 from kikitori.languages import LANGUAGES
 from kikitori.pipeline import MODES, Mode, Pipeline, PipelineState, SubtitleUpdate
 from kikitori.pipeline.factory import (
@@ -71,6 +77,13 @@ MAX_MODEL_ID_CHARS = 100
 METRICS_INTERVAL = 1.0
 """`metrics` 事件的間隔（秒）：狀態列的音量表與延遲，每秒一次就夠，不會塞爆 stdout。"""
 METRICS_JOIN_TIMEOUT = 1.0
+TRANSLATION_UNLOAD_BUDGET = 1.5
+"""引擎結束時卸載本機翻譯模型的總時限（秒）。app 送出 `engine.shutdown` 後只等 3 秒就
+強制結束引擎（`app/src-tauri/src/engine.rs` 的 `SHUTDOWN_TIMEOUT`），停止 session 也要
+時間；一個卸載請求實測 45 ms，伺服器不回應時剩下的模型放棄（Ollama 閒置 5 分鐘後仍會
+自己卸載）。"""
+MIN_UNLOAD_REMAINING_SECS = 0.05
+"""剩下的時間少於這個就不再送卸載請求（Windows 的計時精度約 15 ms，太短的請求只會逾時）。"""
 RELEASE_TIMEOUT = 5.0
 """session 結束時等元件釋放（ASR 模型卸載、放回模型池）的上限（秒），之後才送出結束狀態。
 
@@ -297,6 +310,10 @@ class EngineServer:
         self._writer = writer
         self._version = version or engine_version()
         self._shutdown = threading.Event()
+        # 這次執行在本機翻譯服務上用過的 (base_url, api_key_env, model)：結束時請
+        # Ollama 卸載，顯示記憶體才會立刻釋放（見 `_unload_translation_models`）
+        self._used_translation_targets: set[tuple[str, str, str]] = set()
+        self._used_translation_lock = threading.Lock()
         self._session_lock = threading.Lock()
         self._session: _Session | None = None
         self._next_session_id = 1
@@ -436,8 +453,13 @@ class EngineServer:
             action()
 
     def close(self) -> None:
-        """停止 session、放棄尚未開始的背景請求、取消下載、釋放模型（可重複呼叫）。"""
+        """停止 session、卸載本機翻譯模型、放棄尚未開始的背景請求、取消下載、釋放模型
+        （可重複呼叫）。"""
         self._stop_session()
+        # session 停了才卸載：之後不會再有翻譯請求把模型載回來（進行中的翻譯會先做完，
+        # Ollama 之後才卸載，實測）。排在 ASR 釋放之前：app 等不及而強制結束引擎時，
+        # 引擎行程內的 ASR 模型由作業系統收回，Ollama 行程裡的模型卻會一直佔著顯示記憶體。
+        self._unload_translation_models()
         self._deferred.close(DEFERRED_JOIN_TIMEOUT)
         with self._downloads_lock:
             downloads = list(self._downloads.values())
@@ -459,6 +481,61 @@ class EngineServer:
             except Exception:
                 # 結束流程不能因釋放失敗中斷；行程結束時作業系統仍會收回
                 logger.exception("releasing ASR models failed")
+
+    def _note_translation_models(self, settings: Settings) -> None:
+        """記下 session 會用到的本機翻譯模型；遠端服務不記（不對它多送請求）。"""
+        t = settings.translation
+        base_url = t.base_url.strip()
+        if not is_loopback_host(urlsplit(base_url).hostname or ""):
+            return
+        with self._used_translation_lock:
+            for model in (t.fast_model, t.final_model):
+                self._used_translation_targets.add((base_url, t.api_key_env, model))
+
+    def _unload_translation_models(self) -> None:
+        """請本機 Ollama 立刻卸載這次用過的翻譯模型，總共最多 `TRANSLATION_UNLOAD_BUDGET` 秒。
+
+        不是 Ollama 的伺服器會拒絕（記 warning）；失敗不影響結束流程。
+        """
+        with self._used_translation_lock:
+            used = sorted(self._used_translation_targets)
+            self._used_translation_targets.clear()
+        if not used:
+            return
+        deadline = time.monotonic() + TRANSLATION_UNLOAD_BUDGET
+        for i, (base_url, api_key_env, model) in enumerate(used):
+            remaining = deadline - time.monotonic()
+            if remaining < MIN_UNLOAD_REMAINING_SECS:
+                skipped = ", ".join(m for _, _, m in used[i:])
+                logger.warning(
+                    "no time left to unload translation model(s) %s; "
+                    "the server unloads them after its own idle timeout",
+                    skipped,
+                )
+                return
+            try:
+                self._services.translation_models.unload(
+                    base_url, api_key_env, model, remaining
+                )
+            except UnloadError as exc:
+                # 模型沒安裝（404）或本機服務不是 Ollama：每次結束都一樣，不是故障
+                logger.info("translation server declined to unload %s: %s", model, exc)
+            except (OllamaError, ValueError) as exc:
+                logger.warning(
+                    "could not unload translation model %s from %s: %s",
+                    model,
+                    redact_url(base_url),
+                    exc,
+                )
+            except Exception:
+                # 結束流程不能因此中斷：之後還要取消下載、釋放 ASR 模型（同 `close()`）
+                logger.exception(
+                    "unloading translation model %s from %s failed",
+                    model,
+                    redact_url(base_url),
+                )
+            else:
+                logger.info("unloaded translation model %s", model)
 
     # --- 送出 -----------------------------------------------------------------
 
@@ -1049,6 +1126,9 @@ class EngineServer:
                 raise p.ProtocolError(_capture_code(exc), str(exc)) from exc
             except ValueError as exc:
                 raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
+            # 翻譯關閉的 session 也記：執行中可以開啟翻譯；卸載沒載入的模型不會載入它。
+            # 在建立 session 之前：萬一出錯，不會留下一個永遠不啟動的 session。
+            self._note_translation_models(settings)
             session = _Session(
                 self._next_session_id,
                 mode,

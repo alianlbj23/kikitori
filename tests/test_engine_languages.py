@@ -227,6 +227,9 @@ class _CountingTranslation:
     def pull(self, *args: Any) -> None:
         self.inner.pull(*args)
 
+    def unload(self, *args: Any) -> None:
+        self.inner.unload(*args)
+
 
 class _GatedBuild:
     """讓 build_components 停住，模擬載入模型的數秒。"""

@@ -452,7 +452,17 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
 
 ### 結束
 
-- `engine.shutdown`：先回 `{}`，再停 session（`stop(timeout=5)`）、取消下載，結束碼 0。
+- `engine.shutdown`：先回 `{}`，再停 session（`stop(timeout=5)`）、卸載本機翻譯模型、取消下載，結束碼 0。
+- **卸載本機翻譯模型**：這次執行中每個 `session.start` 都記下設定的 `translation.fast_model`、`final_model`（翻譯關閉的 session 也記，
+  執行中可以開啟），但只限 `base_url` 在 loopback（本機）；遠端服務不送任何請求。session 停止後依序請 Ollama 卸載
+  （`hardware/ollama.py` 的 `unload_model`，`keep_alive: 0`），總共最多 1.5 s（`TRANSLATION_UNLOAD_BUDGET`；app 只等引擎 3 s
+  就強制結束，停止 session 也要時間），剩不到 50 ms 就放棄剩下的並記 warning。伺服器拒絕（模型沒安裝回 404、本機服務不是 Ollama）只記 info——每次結束都一樣，
+  不是故障；連不上或逾時記 warning；其他例外記完整錯誤後繼續。都不影響結束（之後照常取消下載、釋放 ASR 模型）。
+  排在釋放 ASR 模型之前：app 強制結束引擎時，引擎內的 ASR 模型由作業系統收回，Ollama 行程裡的模型不會。
+  進行中的翻譯收到卸載時會先做完，之後才卸載（實測）。從沒開始 session 就什麼都不送，不會卸載別的程式載入的模型。為什麼：Ollama 預設閒置 5 分鐘才卸載，
+  使用者關掉 kikitori 後顯示記憶體不會馬上回來；卸載沒載入的模型不會先載入它（`hardware.md` 實測）。
+  不關閉 Ollama 本身：它是使用者自己啟動的，可能還有別的程式在用，沒有模型時幾乎不佔顯示記憶體。
+  已知限制：停止 session 超過 app 的等待時間時引擎被強制結束、來不及卸載，Ollama 仍會在閒置 5 分鐘後自己卸載。
 - stdin EOF：同樣清理後結束碼 0。
 
 ### 可注入的服務（測試與之後的里程碑）

@@ -521,6 +521,12 @@ class FakeTranslationServer:
             error=None if self.profile == "ollama" else "HTTP 404 from /api/version",
         )
 
+    def unload(
+        self, base_url: str, api_key_env: str, model: str, timeout: float
+    ) -> None:
+        """假伺服器沒有載入任何東西：只記 debug（真實行為見 `hardware.ollama.unload_model`）。"""
+        logger.debug("fake translation server: unload %s", model)
+
     def pull(
         self,
         settings: Settings,

@@ -143,6 +143,17 @@ class TranslationModels(Protocol):
         """請 Ollama 下載模型；`cancel` 被設定時停止。失敗時丟例外。"""
         ...
 
+    def unload(
+        self, base_url: str, api_key_env: str, model: str, timeout: float
+    ) -> None:
+        """請 Ollama 立刻卸載模型、釋放顯示記憶體（引擎結束時）；最多 `timeout` 秒。
+
+        Raises:
+            OllamaError: 連不上、逾時或伺服器拒絕（例如不是 Ollama）。
+            ValueError: `base_url` 不合法。
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class EngineServices:
@@ -299,6 +310,14 @@ class DefaultTranslationModels:
             cancel=cancel,
             api_key_env=t.api_key_env,
         )
+
+    def unload(
+        self, base_url: str, api_key_env: str, model: str, timeout: float
+    ) -> None:
+        """見 `hardware.ollama.unload_model()`。"""
+        from kikitori.hardware.ollama import unload_model
+
+        unload_model(base_url, model, api_key_env=api_key_env, timeout=timeout)
 
 
 def default_services() -> EngineServices:

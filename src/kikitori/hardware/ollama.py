@@ -1,4 +1,5 @@
-"""Ollama 的原生 API：判斷翻譯伺服器是不是 Ollama，以及用 `/api/pull` 下載翻譯模型。
+"""Ollama 的原生 API：判斷翻譯伺服器是不是 Ollama、用 `/api/pull` 下載翻譯模型，
+以及引擎結束時用 `/api/generate`（`keep_alive: 0`）卸載用過的模型。
 
 位於 hardware 模組的安裝層（與 `gpu_runtime.py` 並列）：引擎的 `models.pull_translation`
 在背景執行緒呼叫 `pull_model()`，`session.start` 前以 `ollama_version()` 判斷能不能替
@@ -10,7 +11,7 @@ Ollama 的原生 API 在同一個主機的根路徑（`/api/...`），所以先�
 各有逾時，讀取以短逾時輪詢，取消時最多約 0.2 秒就結束。不跟隨轉址（3xx）：轉址到
 別的主機會把 `Authorization` 帶過去，而 Ollama 本身從不轉址，出現就是設定錯了。
 
-協定以官方文件（docs.ollama.com/api：pull、version、errors）與本機 Ollama 0.40.14 的
+協定以官方文件（docs.ollama.com/api：pull、version、generate、errors）與本機 Ollama 0.40.14（卸載為 0.40.15）的
 實測為準，實測的串流內容記錄在 `docs/specs/hardware.md`。
 """
 
@@ -38,6 +39,8 @@ from kikitori.translate.client import redact_url
 logger = logging.getLogger(__name__)
 
 VERSION_TIMEOUT_SECS = 2.0
+UNLOAD_TIMEOUT_SECS = 1.0
+"""`unload_model` 直接呼叫時的總時限（秒）；實測 45 ms。引擎結束時改傳它剩下的時間（`EngineServer.close()`）。"""
 PULL_CONNECT_TIMEOUT_SECS = 5.0
 PULL_IDLE_TIMEOUT_SECS = 120.0
 """兩行進度之間最久等多久。Ollama 下載中每秒都會回報；驗證大檔的 SHA-256 時會安靜
@@ -86,6 +89,10 @@ class OllamaAuthError(OllamaError):
 
 class PullError(OllamaError):
     """`/api/pull` 失敗：伺服器回報錯誤、回應不合法、中途斷線或逾時。"""
+
+
+class UnloadError(OllamaError):
+    """`/api/generate` 的卸載請求被拒絕（不是 Ollama、模型不存在等）。"""
 
 
 class PullCancelledError(PullError):
@@ -170,12 +177,18 @@ def _headers(
 
 
 def _connect(
-    root: NativeRoot, timeout: float, connect: ConnectionFactory
+    root: NativeRoot,
+    timeout: float,
+    connect: ConnectionFactory,
+    deadline: float | None = None,
 ) -> http.client.HTTPConnection:
-    """建立連線（只受 `timeout` 限制）；`localhost` 依序試 127.0.0.1、::1。
+    """建立連線；`localhost` 依序試 127.0.0.1、::1。
+
+    每個位址最多 `timeout` 秒；有 `deadline`（`time.monotonic()` 的絕對時間）時，所有位址
+    加起來也不超過它。
 
     Raises:
-        OllamaUnreachableError: 每個位址都連不上。
+        OllamaUnreachableError: 每個位址都連不上，或時間用完。
     """
     hosts = (
         ["127.0.0.1", "::1"]
@@ -184,7 +197,13 @@ def _connect(
     )
     last_error = "no address to connect"
     for host in hosts:
-        conn = connect(root.scheme, host, root.port, timeout)
+        limit = timeout
+        if deadline is not None:
+            limit = min(timeout, deadline - time.monotonic())
+            if limit <= 0:
+                last_error = "timed out"
+                break
+        conn = connect(root.scheme, host, root.port, limit)
         try:
             conn.connect()
         except OSError as exc:
@@ -204,6 +223,85 @@ def _redirect_message(resp: http.client.HTTPResponse, path: str) -> str:
         f"HTTP {resp.status} redirect from {path}{target}; redirects are not "
         "followed, set the translation server URL to the final address"
     )
+
+
+class _Status(NamedTuple):
+    code: int
+    redirect_message: str | None
+    """3xx 時的錯誤說明（不跟隨轉址）；其他狀態為 None。"""
+
+
+def _short_request(
+    root: NativeRoot,
+    method: str,
+    api_path: str,
+    headers: dict[str, str],
+    payload: Mapping[str, Any] | None,
+    timeout: float,
+    connect: ConnectionFactory,
+    *,
+    total: bool = False,
+) -> tuple[_Status, bytes]:
+    """送一個小請求並在時限內讀完回應；回傳狀態與內容（只有 200 才讀內容）。
+
+    預設連線、送出請求與讀完整個回應（標頭與內容）各自最多 `timeout` 秒；回應讀取的
+    時限是整體的（不是每次 recv），伺服器一點一點送也不會無限拖延。`total=True` 時
+    `timeout` 是整個請求（含 `localhost` 的兩個位址）的總時限，給只剩幾秒可用的呼叫端。
+
+    Raises:
+        OllamaUnreachableError: 連不上、沒回應，或回應沒在時限內讀完。
+    """
+    path = f"{root.prefix}{api_path}"
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers = {**headers, "Content-Type": "application/json"}
+    deadline = time.monotonic() + timeout if total else None
+    conn = _connect(root, timeout, connect, deadline)
+    resp: http.client.HTTPResponse | None = None
+    try:
+        conn.request(method, path, body=body, headers=headers)
+        sock = conn.sock
+        if sock is None:
+            raise OllamaUnreachableError(
+                f"{root.host}:{root.port} closed the connection before responding"
+            )
+        read_deadline = time.monotonic() + timeout if deadline is None else deadline
+        polling = _PollingSocket(
+            sock,
+            threading.Event(),
+            max(0.001, read_deadline - time.monotonic()),
+            deadline=read_deadline,
+        )
+        conn.sock = polling  # type: ignore[assignment]
+        try:
+            resp = conn.getresponse()
+        except BaseException:
+            polling.abort()  # 沒有回應物件會關閉讀取器（見 `_PollingSocket`）
+            raise
+        # 判斷只需要 200 的內容；其他狀態不讀內容，也就不會卡在讀取
+        data = resp.read(MAX_ERROR_BODY_BYTES + 1) if resp.status == 200 else b""
+        redirect = (
+            _redirect_message(resp, api_path) if 300 <= resp.status < 400 else None
+        )
+        return _Status(resp.status, redirect), data
+    except TimeoutError as exc:
+        phase = (
+            "a response" if resp is None else "the response body (the headers arrived)"
+        )
+        raise OllamaUnreachableError(
+            f"timed out waiting for {phase} of {api_path} from "
+            f"{root.host}:{root.port} after {timeout:g} s"
+        ) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise OllamaUnreachableError(
+            f"no response from {root.host}:{root.port}: {type(exc).__name__}"
+        ) from exc
+    finally:
+        # `Connection: close` 時回應擁有 socket（見 `_PollingSocket`），要一併關閉
+        if resp is not None:
+            resp.close()
+        conn.close()
 
 
 def ollama_version(
@@ -228,57 +326,18 @@ def ollama_version(
     root = native_root(base_url)
     env = os.environ if env is None else env
     headers = _headers(root, api_key_env, env)
-    path = f"{root.prefix}/api/version"
-    conn = _connect(root, timeout, connect)
-    resp: http.client.HTTPResponse | None = None
-    try:
-        conn.request("GET", path, headers=headers)
-        sock = conn.sock
-        if sock is None:
-            raise OllamaUnreachableError(
-                f"{root.host}:{root.port} closed the connection before responding"
-            )
-        polling = _PollingSocket(
-            sock,
-            threading.Event(),
-            timeout,
-            deadline=time.monotonic() + timeout,
-        )
-        conn.sock = polling  # type: ignore[assignment]
-        try:
-            resp = conn.getresponse()
-        except BaseException:
-            polling.abort()  # 沒有回應物件會關閉讀取器（見 `_PollingSocket`）
-            raise
-        # 判斷只需要 200 的內容；其他狀態不讀內容，也就不會卡在讀取
-        body = resp.read(MAX_ERROR_BODY_BYTES + 1) if resp.status == 200 else b""
-    except TimeoutError as exc:
-        phase = (
-            "a response" if resp is None else "the response body (the headers arrived)"
-        )
-        raise OllamaUnreachableError(
-            f"timed out waiting for {phase} of /api/version from "
-            f"{root.host}:{root.port} after {timeout:g} s"
-        ) from exc
-    except (OSError, http.client.HTTPException) as exc:
-        raise OllamaUnreachableError(
-            f"no response from {root.host}:{root.port}: {type(exc).__name__}"
-        ) from exc
-    finally:
-        # `Connection: close` 時回應擁有 socket（見 `_PollingSocket`），要一併關閉
-        if resp is not None:
-            resp.close()
-        conn.close()
-    assert resp is not None  # 沒拿到回應的路徑都已丟出例外
-    if resp.status in AUTH_STATUSES:
+    status, body = _short_request(
+        root, "GET", "/api/version", headers, None, timeout, connect
+    )
+    if status.code in AUTH_STATUSES:
         raise OllamaAuthError(
-            f"HTTP {resp.status} from /api/version: the server requires a valid "
+            f"HTTP {status.code} from /api/version: the server requires a valid "
             "API key (check the environment variable named in translation.api_key_env)"
         )
-    if 300 <= resp.status < 400:
-        raise NotOllamaError(_redirect_message(resp, "/api/version"))
-    if resp.status != 200 or len(body) > MAX_ERROR_BODY_BYTES:
-        raise NotOllamaError(f"HTTP {resp.status} from /api/version")
+    if status.redirect_message is not None:
+        raise NotOllamaError(status.redirect_message)
+    if status.code != 200 or len(body) > MAX_ERROR_BODY_BYTES:
+        raise NotOllamaError(f"HTTP {status.code} from /api/version")
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -291,6 +350,49 @@ def ollama_version(
     ):
         raise NotOllamaError("/api/version has no version string")
     return version
+
+
+def unload_model(
+    base_url: str,
+    model: str,
+    *,
+    api_key_env: str = "",
+    timeout: float = UNLOAD_TIMEOUT_SECS,
+    env: Mapping[str, str] | None = None,
+    connect: ConnectionFactory = default_connection,
+) -> None:
+    """`POST {root}/api/generate {"model", "keep_alive": 0}`：請 Ollama 立刻卸載模型。
+
+    官方文件的卸載方式（docs.ollama.com/api：generate 的 "Unload a model"）。沒有
+    prompt 時只卸載、不會先載入；模型沒載入時同樣立即回 200（本機 0.40.15 實測）。
+    引擎結束時用它釋放顯示記憶體，否則 Ollama 預設閒置 5 分鐘才卸載。`timeout` 是整個
+    請求的總時限（連線、送出、讀回應加起來），引擎傳入它剩下的時間。
+
+    Raises:
+        ValueError: `base_url` 不合法，或金鑰環境變數含不合法的字元。
+        OllamaUnreachableError: 連不上或沒在 `timeout` 內回應。
+        OllamaAuthError: 401／403。
+        UnloadError: 其他非 200 回應（例如不是 Ollama、模型不存在）。
+    """
+    root = native_root(base_url)
+    env = os.environ if env is None else env
+    headers = _headers(root, api_key_env, env)
+    status, _ = _short_request(
+        root,
+        "POST",
+        "/api/generate",
+        headers,
+        {"model": model, "keep_alive": 0},
+        timeout,
+        connect,
+        total=True,
+    )
+    if status.code in AUTH_STATUSES:
+        raise OllamaAuthError(f"HTTP {status.code} from /api/generate")
+    if status.redirect_message is not None:
+        raise UnloadError(status.redirect_message)
+    if status.code != 200:
+        raise UnloadError(f"HTTP {status.code} from /api/generate")
 
 
 def _http_error(resp: http.client.HTTPResponse) -> OllamaError:

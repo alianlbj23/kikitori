@@ -10,6 +10,7 @@ import http.server
 import json
 import socket
 import threading
+import time
 import unittest
 from typing import Any, ClassVar
 from unittest import mock
@@ -22,10 +23,12 @@ from kikitori.hardware.ollama import (
     OllamaUnreachableError,
     PullCancelledError,
     PullError,
+    UnloadError,
     _PollingSocket,
     native_root,
     ollama_version,
     pull_model,
+    unload_model,
     validate_pull_model_name,
 )
 from kikitori.hardware.translation_server import default_connection
@@ -117,6 +120,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         srv.requests.append(("POST", self.path, body, dict(self.headers)))
+        if self.path == "/api/generate":
+            if srv.unload_stall:
+                srv.stalled.set()
+                srv.release.wait(WAIT)
+            self._json(srv.unload_status, srv.unload_body, srv.extra_headers)
+            return
         if self.path != "/api/pull":
             self._json(404, b'{"error":"not found"}')
             return
@@ -154,6 +163,9 @@ class _Server(http.server.ThreadingHTTPServer):
     extra_headers: dict[str, str]
     pull_status: int
     pull_error_body: bytes
+    unload_status: int
+    unload_body: bytes
+    unload_stall: bool
     lines: list[bytes]
     stall_before: int | None
     stalled: threading.Event
@@ -182,6 +194,13 @@ class OllamaServerTest(unittest.TestCase):
         srv.extra_headers = {}
         srv.pull_status = 200
         srv.pull_error_body = b""
+        srv.unload_status = 200
+        # 本機 Ollama 0.40.15 實測的回應（模型有沒有載入都一樣）
+        srv.unload_body = (
+            b'{"model":"qwen3.5:9b","created_at":"2026-11-07T03:10:55.4857911Z",'
+            b'"response":"","done":true,"done_reason":"unload"}'
+        )
+        srv.unload_stall = False
         srv.lines = ndjson(
             {"status": "pulling manifest"},
             {"status": "pulling a", "digest": DIGEST_A, "total": 1000, "completed": 0},
@@ -264,6 +283,76 @@ class OllamaServerTest(unittest.TestCase):
                 env={},
                 connect_timeout=2.0,
             )
+
+    def test_unload_asks_the_native_root_to_drop_the_model_now(self) -> None:
+        unload_model(self.base, "qwen3.5:9b", env={})
+        method, path, body, _ = self.server.requests[0]
+        self.assertEqual((method, path), ("POST", "/api/generate"))
+        # 沒有 prompt、keep_alive 0：Ollama 只卸載，不會先載入（實測見 docs/specs/hardware.md）
+        self.assertEqual(json.loads(body), {"model": "qwen3.5:9b", "keep_alive": 0})
+
+    def test_unload_failures_carry_the_status(self) -> None:
+        self.server.unload_status = 404
+        self.server.unload_body = b'{"error":"model "x:1b" not found"}'
+        with self.assertRaisesRegex(UnloadError, "404"):
+            unload_model(self.base, "x:1b", env={})
+
+    def test_unload_of_an_unreachable_server(self) -> None:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        with self.assertRaises(OllamaUnreachableError):
+            unload_model(
+                f"http://127.0.0.1:{port}/v1", "qwen3.5:9b", env={}, timeout=1.0
+            )
+
+    def test_unload_is_bounded_by_its_timeout(self) -> None:
+        # 引擎結束時只有幾秒；伺服器不回應也不能拖住結束流程
+        self.server.unload_stall = True
+        started = time.monotonic()
+        with self.assertRaises(OllamaUnreachableError):
+            unload_model(self.base, "qwen3.5:9b", env={}, timeout=0.5)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_unload_timeout_covers_connecting_to_both_localhost_addresses(self) -> None:
+        # `localhost` 依序試 127.0.0.1、::1；封包被丟掉時每個位址都會等到逾時。
+        # 卸載的時限是整個請求的總和，不是每一步各自一份。
+        tried: list[float] = []
+
+        class _Stalled:
+            def __init__(self, timeout: float) -> None:
+                self.timeout = timeout
+
+            def connect(self) -> None:
+                tried.append(self.timeout)
+                time.sleep(self.timeout)
+                raise TimeoutError("timed out")
+
+            def close(self) -> None:
+                pass
+
+        def connect(scheme: str, host: str, port: int, timeout: float) -> Any:
+            return _Stalled(timeout)
+
+        started = time.monotonic()
+        with self.assertRaises(OllamaUnreachableError):
+            unload_model(
+                "http://localhost:11434/v1",
+                "qwen3.5:9b",
+                env={},
+                timeout=0.4,
+                connect=connect,
+            )
+        self.assertLess(time.monotonic() - started, 0.6)
+        self.assertLessEqual(sum(tried), 0.45)
+
+    def test_unload_sends_the_api_key_when_set(self) -> None:
+        unload_model(
+            self.base, "qwen3.5:9b", api_key_env="K", env={"K": "secret-token"}
+        )
+        self.assertEqual(
+            self.server.requests[0][3].get("Authorization"), "Bearer secret-token"
+        )
 
     def test_pull_streams_progress_summed_over_layers(self) -> None:
         seen = self.pull()
