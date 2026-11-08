@@ -26,6 +26,7 @@ from kikitori.translate.errors import (
     TranslationResponseError,
     TranslationTimeoutError,
 )
+from kikitori.translate.glossary import Glossary, GlossaryEntry
 from kikitori.translate.presets import preset_for_model
 from kikitori.translate.types import TranslationRequest, Translator
 
@@ -235,7 +236,7 @@ class TranslateTest(ClientTestCase):
         self.assertEqual(req.headers["content-type"], "application/json")
         self.assertEqual(req.body["model"], "hy-mt1.5-7b:latest")
         self.assertIs(req.body["stream"], False)
-        self.assertEqual(req.body["temperature"], 0.7)
+        self.assertEqual(req.body["temperature"], 0.0)
         self.assertEqual(req.body["top_p"], 0.6)
         self.assertEqual(req.body["max_tokens"], 256)
         self.assertNotIn("reasoning_effort", req.body)
@@ -266,6 +267,40 @@ class TranslateTest(ClientTestCase):
         self.assertEqual(body["model"], "my-qwen")
         self.assertEqual(body["reasoning_effort"], "none")
 
+    def test_glossary_terms_present_in_source_go_into_the_prompt(self) -> None:
+        self.server.script.extend([completion("謝謝超級留言"), completion("早安")])
+        translator = OpenAICompatibleTranslator(
+            TranslatorConfig(model="qwen3.5:9b", base_url=self.server.base_url),
+            glossary=Glossary([GlossaryEntry("ぺこら", "佩克拉")]),
+        )
+        translator.translate(TranslationRequest("スパチャありがとう", "ja"))
+        translator.translate(TranslationRequest("おはよう", "ja"))
+        with_terms = self.server.requests[0].body["messages"][1]["content"]
+        without = self.server.requests[1].body["messages"][1]["content"]
+        self.assertIn("スパチャ → 超級留言", with_terms)
+        self.assertNotIn("ぺこら", with_terms)
+        self.assertNotIn("術語", without)
+
+    def test_glossary_used_by_stream_and_absent_by_default(self) -> None:
+        self.server.script.extend(
+            [sse([chunk("推", finish="stop")]), sse([chunk("推", finish="stop")])]
+        )
+        list(
+            OpenAICompatibleTranslator(
+                TranslatorConfig(model="qwen3.5:9b", base_url=self.server.base_url),
+                glossary=Glossary(),
+            ).stream(TranslationRequest("推しが尊い", "ja", "en"))
+        )
+        list(
+            self.make("qwen3.5:9b").stream(TranslationRequest("推しが尊い", "ja", "en"))
+        )
+        self.assertIn(
+            "推し → oshi", self.server.requests[0].body["messages"][1]["content"]
+        )
+        self.assertNotIn(
+            "Terminology", self.server.requests[1].body["messages"][1]["content"]
+        )
+
     def test_think_tags_are_stripped(self) -> None:
         self.server.script.append(
             completion("<think>\nThe user wants...\n</think>\n\n早安")
@@ -286,7 +321,7 @@ class TranslateTest(ClientTestCase):
 
     def test_conversion_can_be_disabled(self) -> None:
         self.server.script.append(completion("这个"))
-        out = self.make(SAKURA, convert_to_traditional=False).translate(
+        out = self.make(SAKURA, convert_script=False).translate(
             TranslationRequest("これ", "ja")
         )
         self.assertEqual(out, "这个")
@@ -600,9 +635,9 @@ class ValidationTest(ClientTestCase):
         bad = [
             TranslationRequest("", "ja"),
             TranslationRequest("   ", "ja"),
-            TranslationRequest("hola", "es"),
-            TranslationRequest("おはよう", "ja", "fr"),
-            TranslationRequest("你好", "zh", "zh-TW"),
+            TranslationRequest("hej", "sv"),  # 不在語言清單內
+            TranslationRequest("おはよう", "ja", "zh"),  # 譯文要分繁簡
+            TranslationRequest("你好", "zh", "zh-TW"),  # 同一個 Whisper 語言
         ]
         for req in bad:
             with self.subTest(req=req):
@@ -658,7 +693,7 @@ class ConfigValidationTest(unittest.TestCase):
             {"model": "m", "retry_backoff": -1},
             {"model": "m", "max_tokens": 0},
             {"model": "m", "max_context_lines": -1},
-            {"model": "m", "convert_to_traditional": "yes"},
+            {"model": "m", "convert_script": "yes"},
         ]
         for kwargs in bad:
             with (
@@ -666,6 +701,16 @@ class ConfigValidationTest(unittest.TestCase):
                 self.assertRaises((ValueError, TypeError)),
             ):
                 TranslatorConfig(**kwargs)
+
+    def test_credentials_in_the_url_are_redacted(self) -> None:
+        for url in ("http://kiki:s3cret@h:99999/v1", "ftp://kiki:s3cret@h/v1"):
+            with self.subTest(url=url[:6]), self.assertRaises(ValueError) as ctx:
+                TranslatorConfig(model="m", base_url=url)
+            self.assertNotIn("s3cret", str(ctx.exception))
+        translator = OpenAICompatibleTranslator(
+            TranslatorConfig(model="m", base_url="http://kiki:s3cret@localhost:1/v1")
+        )
+        self.assertNotIn("s3cret", repr(translator))
 
     def test_accepts_https_and_custom_port(self) -> None:
         cfg = TranslatorConfig(model="m", base_url="https://api.example.com:8443/v1/")

@@ -1,0 +1,13 @@
+{
+  "_note": "自寫的補充句（直播用語）：translate_benchmark/lines.json 沒有涵蓋的 てぇてぇ、初見、同接、切り抜き 等。scene 相同的句子依序翻譯，前兩句原文當 context。",
+  "lines": [
+    {"id": "vx01", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "初見さんいらっしゃい！ゆっくりしていってね。"},
+    {"id": "vx02", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "今日の同接すごくない？みんなありがとう！"},
+    {"id": "vx03", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "さっきのコラボ、二人ともてぇてぇすぎる…"},
+    {"id": "vx04", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "赤スパありがとうございます！え、こんなにいいの？"},
+    {"id": "vx05", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "切り抜き師さん、今のところ切り抜いといて！"},
+    {"id": "vx06", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "メン限で歌枠やるから、メンバーの人は来てね。"},
+    {"id": "vx07", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "あ、ミュートになってた？ごめんごめん！"},
+    {"id": "vx08", "scene": "slang", "source": "ja", "target": "zh-TW", "text": "それな！わかりみが深い。"}
+  ]
+}

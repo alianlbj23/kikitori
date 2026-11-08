@@ -15,10 +15,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import PurePath
 from typing import Any, Literal, cast
 
+from kikitori.languages import UnknownLanguageError, get_language, normalize_language
 from kikitori.pipeline.types import MODES, Mode
 from kikitori.translate import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TranslatorConfig
+from kikitori.translate.glossary import MAX_USER_ENTRIES, GlossaryEntry, match_key
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """目前的設定檔版本；改變結構時加一並在 `MIGRATIONS` 補上轉換。"""
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
@@ -42,13 +44,30 @@ def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-MIGRATIONS: dict[int, Migration] = {1: _migrate_v1_to_v2}
+def _migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
+    """v2 → v3：多國語言。補上 `source_language: "ja"` 與 `translation.enabled: true`。
+
+    v2 的影片翻譯只聽日／英，v3 起收聽語言由使用者指定（不再預設自動偵測），規格選定
+    日語為遷移後的值。其他欄位原樣保留；`target_language`、`partner_language` 的 v2
+    值（zh-TW、ja／en）在 v3 仍然合法。`translation` 不是物件時原樣保留，交給驗證報錯。
+    """
+    result = dict(data)
+    result.setdefault("source_language", "ja")
+    translation = result.get("translation", {})
+    if isinstance(translation, Mapping):
+        section = dict(translation)
+        section.setdefault("enabled", True)
+        result["translation"] = section
+    return result
+
+
+MIGRATIONS: dict[int, Migration] = {1: _migrate_v1_to_v2, 2: _migrate_v2_to_v3}
 """`MIGRATIONS[n]` 把版本 n 的設定 dict 轉成版本 n + 1。"""
 
 AsrDevice = Literal["auto", "cpu", "cuda"]
 ASR_DEVICES: tuple[AsrDevice, ...] = ("auto", "cpu", "cuda")
-TARGET_LANGUAGES: tuple[str, ...] = ("zh-TW",)
-PARTNER_LANGUAGES: tuple[str, ...] = ("ja", "en")
+AUTO_LANGUAGE = "auto"
+"""`source_language` 的「自動偵測」（範圍限語言清單內的 Whisper 語言）。"""
 
 PAUSE_RANGE = (0.1, 5.0)
 MAX_RANGE = (1.0, 30.0)
@@ -133,25 +152,42 @@ class AsrSettings:
 
 
 @dataclass(frozen=True)
+class GlossarySettings:
+    """翻譯術語表（`translate.glossary`）。
+
+    Attributes:
+        builtin: 是否使用內建的日語直播用語（原文是日語、譯文是 zh-TW／zh-CN／en／ko 時）。
+        entries: 使用者詞條（最多 `MAX_USER_ENTRIES` 筆）；同一個原文寫法優先於內建表。
+    """
+
+    builtin: bool = True
+    entries: tuple[GlossaryEntry, ...] = ()
+
+
+@dataclass(frozen=True)
 class TranslationSettings:
     """OpenAI 相容翻譯 API 的位置與模型；`api_key_env` 是環境變數名稱，不是金鑰。
 
     Attributes:
-        allow_restricted: 是否推薦有地區限制授權的翻譯模型（例如 HY-MT 的授權不適用於
-            歐盟、英國、南韓）。預設 False：引擎不知道使用者身在何處，用語系猜地區並不
-            可靠，而推薦了不能用的授權會讓使用者在不知情下違約；使用者在設定頁確認
-            自己不在這些地區後才打開。只影響推薦與驗證警告，不阻止使用者手動選用。
+        allow_restricted: 使用者是否確認自己不在翻譯模型授權排除的地區（例如 HY-MT 的授權
+            不適用於歐盟、英國、南韓）。預設 False：引擎不知道使用者身在何處，用語系猜地區
+            並不可靠。推薦組合目前只用沒有地區限制的 Qwen3.5（`RECOMMENDATION_TIERS`），
+            所以實際只影響手動選用這些模型時的驗證警告，不阻止使用者手動選用。
         keep_warm_secs: session 執行中翻譯請求停了這麼多秒，就對本機翻譯伺服器送一次
             預熱請求，讓模型不被卸載（Ollama 預設閒置 5 分鐘就卸載，OpenAI 相容端點
             無法指定 keep_alive）。0 關閉；遠端服務一律不送。
+        enabled: False 時只顯示原文：pipeline 不呼叫翻譯伺服器，也不預熱、不保溫。
+        glossary: 術語表設定；每句只把原文出現的詞放進提示詞。
     """
 
+    enabled: bool = True
     base_url: str = DEFAULT_BASE_URL
     fast_model: str = "qwen3.5:4b"
     final_model: str = "qwen3.5:4b"
     api_key_env: str = DEFAULT_API_KEY_ENV
     allow_restricted: bool = False
     keep_warm_secs: int = 240
+    glossary: GlossarySettings = field(default_factory=GlossarySettings)
 
 
 @dataclass(frozen=True)
@@ -169,6 +205,18 @@ class PipelineSettings:
     no_speech_threshold: float = 0.6
     context_lines: int = 3
     asr_prompt_context: bool = True
+
+
+@dataclass(frozen=True)
+class FuriganaSettings:
+    """日文原文字幕的振假名（`docs/specs/furigana.md`）。
+
+    Attributes:
+        enabled: 是否在原文是日文的字幕上標振假名。需要先下載辭典（`models.download
+            {"model": "furigana-dictionary"}`）；執行中以 `session.set_furigana` 切換。
+    """
+
+    enabled: bool = False
 
 
 def _default_media() -> ModeSettings:
@@ -190,13 +238,18 @@ class Settings:
 
     schema_version: int = SCHEMA_VERSION
     mode: Mode = "media"
+    source_language: str = "ja"
+    """影片翻譯的收聽語言（語言清單的語言碼）或 "auto"。"""
     target_language: str = "zh-TW"
+    """影片翻譯的字幕語言；即時口譯時是「我的語言」。"""
     partner_language: str = "ja"
+    """即時口譯的對方語言；Whisper 語言必須和 `target_language` 不同。"""
     media: ModeSettings = field(default_factory=_default_media)
     interpret: ModeSettings = field(default_factory=_default_interpret)
     asr: AsrSettings = field(default_factory=AsrSettings)
     translation: TranslationSettings = field(default_factory=TranslationSettings)
     pipeline: PipelineSettings = field(default_factory=PipelineSettings)
+    furigana: FuriganaSettings = field(default_factory=FuriganaSettings)
     subtitle: dict[str, Any] = field(default_factory=dict)
     ui: dict[str, Any] = field(default_factory=dict)
 
@@ -213,6 +266,7 @@ class Settings:
         return {
             "schema_version": self.schema_version,
             "mode": self.mode,
+            "source_language": self.source_language,
             "target_language": self.target_language,
             "partner_language": self.partner_language,
             "media": _mode_to_dict(self.media),
@@ -228,12 +282,24 @@ class Settings:
                 "cuda_library_dirs": list(self.asr.cuda_library_dirs),
             },
             "translation": {
+                "enabled": self.translation.enabled,
                 "base_url": self.translation.base_url,
                 "fast_model": self.translation.fast_model,
                 "final_model": self.translation.final_model,
                 "api_key_env": self.translation.api_key_env,
                 "allow_restricted": self.translation.allow_restricted,
                 "keep_warm_secs": self.translation.keep_warm_secs,
+                "glossary": {
+                    "builtin": self.translation.glossary.builtin,
+                    "entries": [
+                        {
+                            "source": e.source,
+                            "target": e.target,
+                            "target_language": e.target_language,
+                        }
+                        for e in self.translation.glossary.entries
+                    ],
+                },
             },
             "pipeline": {
                 "partial_interval_ms": self.pipeline.partial_interval_ms,
@@ -241,6 +307,7 @@ class Settings:
                 "context_lines": self.pipeline.context_lines,
                 "asr_prompt_context": self.pipeline.asr_prompt_context,
             },
+            "furigana": {"enabled": self.furigana.enabled},
             "subtitle": copy.deepcopy(self.subtitle),
             "ui": copy.deepcopy(self.ui),
         }
@@ -335,15 +402,22 @@ def _deep_merge(base: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any
 
 
 def _section(
-    data: Mapping[str, Any], key: str, allowed: tuple[str, ...]
+    data: Mapping[str, Any],
+    key: str,
+    allowed: tuple[str, ...],
+    path: str | None = None,
 ) -> dict[str, Any]:
-    """取出子物件並擋掉未知欄位；缺少時回傳空 dict（全部用預設值）。"""
+    """取出子物件並擋掉未知欄位；缺少時回傳空 dict（全部用預設值）。
+
+    `path` 是錯誤訊息用的完整路徑（巢狀物件用，例如 `translation.glossary`），預設為 `key`。
+    """
     if key not in data:
         return {}
+    path = key if path is None else path
     value = data[key]
     if not isinstance(value, Mapping):
-        raise SettingsError(f"{key}: expected an object, got {type(value).__name__}")
-    _reject_unknown(value, allowed, prefix=f"{key}.")
+        raise SettingsError(f"{path}: expected an object, got {type(value).__name__}")
+    _reject_unknown(value, allowed, prefix=f"{path}.")
     return dict(value)
 
 
@@ -505,12 +579,14 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
         data,
         "translation",
         (
+            "enabled",
             "base_url",
             "fast_model",
             "final_model",
             "api_key_env",
             "allow_restricted",
             "keep_warm_secs",
+            "glossary",
         ),
     )
     values: dict[str, str] = {}
@@ -546,9 +622,63 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
             f"translation.keep_warm_secs: must be 0 (off) or "
             f"{KEEP_WARM_RANGE[0]}–{KEEP_WARM_RANGE[1]}, got {keep_warm_secs}"
         )
+    enabled = _boolean(section.get("enabled", default.enabled), "translation.enabled")
     return TranslationSettings(
-        **values, allow_restricted=allow_restricted, keep_warm_secs=keep_warm_secs
+        **values,
+        enabled=enabled,
+        allow_restricted=allow_restricted,
+        keep_warm_secs=keep_warm_secs,
+        glossary=_parse_glossary(section),
     )
+
+
+_GLOSSARY_ENTRY_KEYS = ("source", "target", "target_language")
+
+
+def _parse_glossary(section: Mapping[str, Any]) -> GlossarySettings:
+    """`translation.glossary`：內建表開關與使用者詞條（UI 的術語表編輯器直接寫入）。"""
+    default = GlossarySettings()
+    path = "translation.glossary"
+    data = _section(section, "glossary", ("builtin", "entries"), path)
+    builtin = _boolean(data.get("builtin", default.builtin), f"{path}.builtin")
+    raw = data.get("entries", [])
+    if not isinstance(raw, list) or len(raw) > MAX_USER_ENTRIES:
+        raise SettingsError(
+            f"{path}.entries: expected a list of at most {MAX_USER_ENTRIES} entries, "
+            f"got {type(raw).__name__} of length "
+            f"{len(raw) if isinstance(raw, list) else '-'}"
+        )
+    entries: list[GlossaryEntry] = []
+    seen: set[tuple[str, str | None]] = set()
+    for i, item in enumerate(raw):
+        entry_path = f"{path}.entries[{i}]"
+        if not isinstance(item, Mapping):
+            raise SettingsError(
+                f"{entry_path}: expected an object, got {type(item).__name__}"
+            )
+        _reject_unknown(item, _GLOSSARY_ENTRY_KEYS, prefix=f"{entry_path}.")
+        for name in ("source", "target"):
+            if name not in item:
+                raise SettingsError(f"{entry_path}.{name}: missing")
+        language = item.get("target_language")
+        if language is not None:
+            language = _language(language, f"{entry_path}.target_language")
+        try:
+            entry = GlossaryEntry(item["source"], item["target"], language)
+        except (TypeError, ValueError) as exc:
+            # 例外訊息以欄位名稱開頭（"source must ..."），取出來組成完整路徑
+            name = str(exc).split(" ", 1)[0]
+            field_path = name if name in _GLOSSARY_ENTRY_KEYS else "source"
+            raise SettingsError(f"{entry_path}.{field_path}: {exc}") from exc
+        key = (match_key(entry.source), entry.target_language)
+        if key in seen:
+            raise SettingsError(
+                f"{entry_path}.source: duplicate of an earlier entry "
+                f"({entry.source!r} for target_language {entry.target_language!r})"
+            )
+        seen.add(key)
+        entries.append(entry)
+    return GlossarySettings(builtin=builtin, entries=tuple(entries))
 
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:
@@ -584,6 +714,15 @@ def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:
             section.get("asr_prompt_context", default.asr_prompt_context),
             "pipeline.asr_prompt_context",
         ),
+    )
+
+
+def _parse_furigana(data: Mapping[str, Any]) -> FuriganaSettings:
+    """`furigana`：缺少時用預設值（關閉）。新欄位有預設值，不升 schema（與 `translation.glossary` 相同）。"""
+    default = FuriganaSettings()
+    section = _section(data, "furigana", ("enabled",))
+    return FuriganaSettings(
+        enabled=_boolean(section.get("enabled", default.enabled), "furigana.enabled")
     )
 
 
@@ -623,9 +762,71 @@ def _parse_opaque(data: Mapping[str, Any], key: str) -> dict[str, Any]:
     return copy.deepcopy(dict(value))
 
 
+def _language(value: object, path: str, *, allow_auto: bool = False) -> str:
+    """語言清單的語言碼（不分大小寫、接受舊別名，正規化後儲存）；可選擇允許 "auto"。"""
+    if allow_auto and value == AUTO_LANGUAGE:
+        return AUTO_LANGUAGE
+    try:
+        return normalize_language(value)  # type: ignore[arg-type]
+    except UnknownLanguageError as exc:
+        hint = f"{AUTO_LANGUAGE!r} or " if allow_auto else ""
+        raise SettingsError(
+            f"{path}: {exc} (expected {hint}a code from the language list)"
+        ) from None
+
+
+def check_interpret_languages(target_language: str, partner_language: str) -> None:
+    """確認兩個語言能用於即時口譯：Whisper 語言必須不同。
+
+    口譯靠 Whisper 的語言偵測分辨誰在說話；兩邊是同一個 Whisper 語言（例如 ja 與 ja、
+    繁中與簡中）就無法分辨要翻往哪個方向。影片翻譯不用對方語言，所以只有口譯要檢查。
+
+    Args:
+        target_language: 我的語言（正規化後的清單語言碼）。
+        partner_language: 對方語言（正規化後的清單語言碼）。
+
+    Raises:
+        SettingsError: 兩者 Whisper 語言相同；訊息以 `partner_language` 開頭。
+    """
+    if (
+        get_language(partner_language).whisper_code
+        == get_language(target_language).whisper_code
+    ):
+        raise SettingsError(
+            "partner_language: interpret mode needs a different language from "
+            f"target_language ({target_language!r}), got {partner_language!r}"
+        )
+
+
+def _parse_languages(
+    data: Mapping[str, Any], default: "Settings", mode: Mode
+) -> dict[str, str]:
+    source = _language(
+        data.get("source_language", default.source_language),
+        "source_language",
+        allow_auto=True,
+    )
+    target = _language(
+        data.get("target_language", default.target_language), "target_language"
+    )
+    partner = _language(
+        data.get("partner_language", default.partner_language), "partner_language"
+    )
+    # 只在口譯模式檢查：影片翻譯時日語使用者把字幕語言設成 ja，預設的對方語言 ja 不該讓
+    # 設定無法儲存。切換到口譯時 `merged()` 會重新驗證；`session.start` 另外檢查。
+    if mode == "interpret":
+        check_interpret_languages(target, partner)
+    return {
+        "source_language": source,
+        "target_language": target,
+        "partner_language": partner,
+    }
+
+
 _TOP_LEVEL = (
     "schema_version",
     "mode",
+    "source_language",
     "target_language",
     "partner_language",
     "media",
@@ -633,6 +834,7 @@ _TOP_LEVEL = (
     "asr",
     "translation",
     "pipeline",
+    "furigana",
     "subtitle",
     "ui",
 )
@@ -641,25 +843,18 @@ _TOP_LEVEL = (
 def _parse(data: Mapping[str, Any]) -> Settings:
     _reject_unknown(data, _TOP_LEVEL)
     default = Settings()
+    mode = cast(Mode, _choice(data.get("mode", default.mode), "mode", MODES))
     return replace(
         default,
         schema_version=SCHEMA_VERSION,
-        mode=cast(Mode, _choice(data.get("mode", default.mode), "mode", MODES)),
-        target_language=_choice(
-            data.get("target_language", default.target_language),
-            "target_language",
-            TARGET_LANGUAGES,
-        ),
-        partner_language=_choice(
-            data.get("partner_language", default.partner_language),
-            "partner_language",
-            PARTNER_LANGUAGES,
-        ),
+        mode=mode,
+        **_parse_languages(data, default, mode),
         media=_parse_mode(data, "media", default.media),
         interpret=_parse_mode(data, "interpret", default.interpret),
         asr=_parse_asr(data),
         translation=_parse_translation(data),
         pipeline=_parse_pipeline(data),
+        furigana=_parse_furigana(data),
         subtitle=_parse_opaque(data, "subtitle"),
         ui=_parse_opaque(data, "ui"),
     )

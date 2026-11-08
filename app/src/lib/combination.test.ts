@@ -8,6 +8,7 @@ import {
   canSave,
   type CheckView,
 } from "./combination";
+import { OLLAMA_DOWNLOAD_URL } from "./translation-guide";
 
 describe("canSave", () => {
   it.each<[CheckView, boolean]>([
@@ -71,13 +72,15 @@ describe("canOpenLicenseUrl", () => {
 });
 
 describe("opener permission", () => {
-  it("is scoped to exactly the URL the UI opens", async () => {
+  it("is scoped to exactly the URLs the UI opens (NVIDIA EULA, Ollama download page)", async () => {
     const capability = (await import("../../src-tauri/capabilities/main.json")).default as {
       permissions: Array<string | { identifier: string; allow?: Array<{ url?: string }> }>;
     };
     const opener = capability.permissions.filter(
       (p) => (typeof p === "string" ? p : p.identifier).startsWith("opener:"),
     );
-    expect(opener).toEqual([{ identifier: "opener:allow-open-url", allow: [{ url: NVIDIA_EULA_URL }] }]);
+    expect(opener).toEqual([
+      { identifier: "opener:allow-open-url", allow: [{ url: NVIDIA_EULA_URL }, { url: OLLAMA_DOWNLOAD_URL }] },
+    ]);
   });
 });

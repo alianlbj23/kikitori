@@ -12,7 +12,8 @@
   collect   把本平台的安裝檔與更新器檔案（含 .sig）以固定名稱複製到輸出目錄
   verify    以 minisign 驗證目錄內每個 .sig（公鑰取自 tauri.conf.json 或指定檔案）
   manifest  從各平台的輸出目錄挑出發布檔案、驗證簽章格式，寫出 `latest.json`
-  notes     寫出 GitHub Release 的說明（下載表與各平台的安裝提示）
+            （`--notes-from-version`：notes 取自 docs/release-notes/v<版本>.md）
+  notes     寫出 GitHub Release 的說明（docs/release-notes/v<版本>.md、下載表與安裝提示）
 不帶參數是互動選單。
 """
 
@@ -44,6 +45,16 @@ SEMVER = re.compile(
 REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MINISIGN_TIMEOUT_SECS = 60
 GIT_TIMEOUT_SECS = 30
+VERSION_NOTES_DIR = Path("docs") / "release-notes"
+# GitHub Release 說明上限約 125,000 字元；中文一字 3 bytes，100 KB 的檔案加上下載表與
+# 安裝提示仍在上限內，也遠大於正常的更新說明。
+VERSION_NOTES_MAX_BYTES = 100_000
+# latest.json 的 notes（App 內更新提示顯示的說明）上限，以 code point 計。app 的
+# `validate.ts` 以 UTF-16 長度拒絕超過 10,000 的字串，而且是整個 update_check 結果失敗——
+# 使用者會看不到這次更新。4,000 個 code point 即使全是 BMP 以外的字元（UTF-16 佔 2 單位）
+# 加上截斷標示也在 8,100 以內；每個已安裝的 app 啟動時都會下載 latest.json，也不該讓它
+# 變大。正常的更新說明（v0.2.0 約 3,000 字）放得下；超過時截斷並附上 Release 頁面網址。
+LATEST_NOTES_MAX_CHARS = 4_000
 
 Mode = Literal["publish", "dry-run", "skip"]
 Platform = Literal["windows", "linux", "macos"]
@@ -470,8 +481,77 @@ def _asset_name_ending(
     return names[0]
 
 
-def release_notes(product: str, version: str, tag: str) -> str:
-    """GitHub Release 頁面的說明（Markdown）：下載表與安裝提示。
+def version_notes_path(root: Path, version: str) -> Path:
+    """這一版人工撰寫的更新說明：`docs/release-notes/v<版本>.md`。"""
+    return root / VERSION_NOTES_DIR / f"v{version}.md"
+
+
+def read_version_notes(root: Path, version: str) -> str | None:
+    """讀 `docs/release-notes/v<版本>.md`；檔案不存在回傳 None。
+
+    檢查失敗就丟 ReleaseError 而不是略過：檔案存在代表有人為這一版寫了說明，靜靜地發布一個
+    沒有說明的 Release 比讓 assemble 失敗更難察覺。開頭若是含版本號的 H1 就拿掉，因為
+    Release 標題（release.yml 的 `--title "kikitori $TAG"`）與說明第一行已經寫了版本。
+    """
+    path = version_notes_path(root, version)
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ReleaseError(f"{path} is not a regular file")
+    # 先看大小再讀，避免誤放的大檔整個讀進記憶體。
+    size = path.stat().st_size
+    if size > VERSION_NOTES_MAX_BYTES:
+        raise ReleaseError(
+            f"{path} is too large ({size} bytes > {VERSION_NOTES_MAX_BYTES})"
+        )
+    try:
+        # utf-8-sig：Windows 編輯器存檔時可能加上 BOM，不該讓它跑進 Release 說明。
+        text = path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ReleaseError(f"{path} is not valid UTF-8 text: {exc}") from exc
+    if "\x00" in text:
+        raise ReleaseError(f"{path} is not text (contains NUL bytes)")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").strip().split("\n")
+    first = lines[0]
+    if first.startswith("# ") and version in first:
+        lines = lines[1:]
+    body = "\n".join(lines).strip()
+    if not body:
+        raise ReleaseError(f"{path} is empty after removing the title")
+    return body
+
+
+def manifest_notes(root: Path, product: str, version: str, tag: str, repo: str) -> str:
+    """`latest.json` 的 `notes`：這一版的更新說明，沒有說明檔時是 `<product> <tag>`。
+
+    與 Release 頁面共用 `read_version_notes` 的檢查（檔案有問題就失敗、去掉含版本號的
+    H1）。超過 `LATEST_NOTES_MAX_CHARS` 時盡量在整行處截斷（不留半個清單項目），並在
+    結尾標示以下省略與完整說明的網址。
+    """
+    parse_semver(version)
+    if tag != f"v{version}":
+        raise ReleaseError(f"tag {tag!r} does not match version {version!r}")
+    if not REPO_NAME.match(repo):
+        raise ReleaseError(f"invalid repository name: {repo!r}")
+    body = read_version_notes(root, version)
+    if body is None:
+        return f"{product} {tag}"
+    if len(body) <= LATEST_NOTES_MAX_CHARS:
+        return body
+    cut = body[:LATEST_NOTES_MAX_CHARS]
+    # 只在後半段找換行：整份只有一兩行很長的段落時，寧可切在行中也不要丟掉大半內容。
+    newline = cut.rfind("\n", LATEST_NOTES_MAX_CHARS // 2)
+    if newline > 0:
+        cut = cut[:newline]
+    url = f"https://github.com/{repo}/releases/tag/{quote(tag)}"
+    return f"{cut.rstrip()}\n\n…（以下省略，完整說明：{url}）"
+
+
+def release_notes(product: str, version: str, tag: str, root: Path = ROOT) -> str:
+    """GitHub Release 頁面的說明（Markdown）：這一版的更新說明（若有）、下載表與安裝提示。
+
+    `root/docs/release-notes/v<版本>.md` 存在時放在下載表之前並加上「下載」標題，讓表格
+    不會落在更新說明最後一節底下；不存在時輸出與以往相同。
 
     程式沒有付費簽章，第一次安裝會遇到 SmartScreen／Gatekeeper；Linux 的 AppImage 與字型
     在精簡系統上也有坑。內容與 `docs/specs/release-update.md`「給使用者的安裝說明」是同一份
@@ -484,9 +564,11 @@ def release_notes(product: str, version: str, tag: str) -> str:
     appimage = _asset_name_ending("linux", ".AppImage", product, version)
     deb = _asset_name_ending("linux", ".deb", product, version)
     dmg = _asset_name_ending("macos", ".dmg", product, version)
+    changes = read_version_notes(root, version)
+    intro = f"{changes}\n\n## 下載\n\n" if changes is not None else ""
     return f"""{product} {tag}
 
-| 平台 | 下載 |
+{intro}| 平台 | 下載 |
 |---|---|
 | Windows 10/11 x64 | `{setup}` |
 | Linux x64 | `{appimage}` 或 `{deb}` |
@@ -566,7 +648,13 @@ def build_parser() -> argparse.ArgumentParser:
     man.add_argument("--stage", type=Path, required=True)
     man.add_argument("--repo", required=True, help="owner/name")
     man.add_argument("--tag", required=True)
-    man.add_argument("--notes", default="")
+    man_notes = man.add_mutually_exclusive_group()
+    man_notes.add_argument("--notes", default="")
+    man_notes.add_argument(
+        "--notes-from-version",
+        action="store_true",
+        help="use docs/release-notes/v<version>.md (else '<product> <tag>')",
+    )
 
     notes = sub.add_parser("notes", help="write the GitHub Release body (Markdown)")
     notes.add_argument("--tag", required=True)
@@ -622,20 +710,28 @@ def run_command(
                 out(f"signature ok: {name}")
         elif ns.command == "manifest":
             version = project_version(root)
+            product = product_name(root)
+            notes = (
+                manifest_notes(root, product, version, ns.tag, ns.repo)
+                if ns.notes_from_version
+                else ns.notes
+            )
             manifest = build_manifest(
                 ns.dir,
                 ns.stage,
-                product=product_name(root),
+                product=product,
                 version=version,
                 tag=ns.tag,
                 repo=ns.repo,
-                notes=ns.notes,
+                notes=notes,
             )
             out(f"latest.json: version {manifest['version']}, platforms:")
             for key, entry in manifest["platforms"].items():
                 out(f"  {key}: {entry['url']}")
         elif ns.command == "notes":
-            text = release_notes(product_name(root), project_version(root), ns.tag)
+            text = release_notes(
+                product_name(root), project_version(root), ns.tag, root=root
+            )
             ns.out.parent.mkdir(parents=True, exist_ok=True)
             ns.out.write_text(text, encoding="utf-8", newline="\n")
             out(f"release notes: {ns.out}")

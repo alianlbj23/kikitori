@@ -25,8 +25,10 @@ from kikitori.capture import (
     CaptureError,
     DeviceKind,
     DeviceLostError,
+    DeviceNotFoundError,
     PermissionDeniedError,
 )
+from kikitori.capture.threaded import ThreadedSource
 from kikitori.config import Settings
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
@@ -108,8 +110,8 @@ class MidSessionCaptureErrorTest(unittest.TestCase):
         original = services.build_components
         self.built: list[weakref.ref[Any]] = []
 
-        def build(settings: Settings, mode: Mode) -> PipelineComponents:
-            components = original(settings, mode)
+        def build(settings: Settings, mode: Mode, **kwargs: Any) -> PipelineComponents:
+            components = original(settings, mode, **kwargs)
             self.built.append(weakref.ref(components.final_transcriber))
             return components
 
@@ -161,6 +163,64 @@ class MidSessionCaptureErrorTest(unittest.TestCase):
                 referrers = [
                     type(r).__name__ for r in gc.get_referrers(self.built[0]())
                 ]
+                self.fail(f"components of the failed session still alive: {referrers}")
+            time.sleep(0.02)
+
+
+def _missing_device() -> Any:
+    raise DeviceNotFoundError("loopback device not found: 999999")
+
+
+class StartFailureReleasesComponentsTest(unittest.TestCase):
+    """開裝置失敗（`pipeline.start()` 丟出）的 session 也要只靠參照計數就釋放元件。
+
+    memory_soak #1：`ThreadedSource.start()` 重新丟出存起來的同一個例外物件，traceback
+    接上 `Pipeline.start` 的 frame，形成 source → 例外 → frame → pipeline → 元件的循環，
+    整組模型（約 3 GB 顯示記憶體）留到循環垃圾回收（引擎裡幾乎不會發生）。
+    """
+
+    def test_components_are_freed_without_gc(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"KIKITORI_CONFIG_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        services = fake_services()
+        original = services.build_components
+        built: list[weakref.ref[Any]] = []
+
+        def build(settings: Settings, mode: Mode, **kwargs: Any) -> PipelineComponents:
+            components = original(settings, mode, **kwargs)
+            built.append(weakref.ref(components.fast_transcriber))
+            return components
+
+        def open_source(device_id: str | None, kind: DeviceKind) -> AudioSource:
+            return ThreadedSource(_missing_device)
+
+        sink = _Sink()
+        server = EngineServer(
+            dataclasses.replace(
+                services, open_source=open_source, build_components=build
+            ),
+            MessageWriter(sink),  # type: ignore[arg-type]
+            version="test",
+        )
+        self.addCleanup(server.close)
+        gc.collect()
+        gc.disable()
+        self.addCleanup(gc.enable)
+        with self.assertLogs("kikitori", "ERROR"):
+            server.handle_line(
+                json.dumps(
+                    {"id": 1, "method": "session.start", "params": {"mode": "media"}}
+                ).encode()
+            )
+            status = sink.wait_terminal(1)
+        self.assertEqual(status["code"], "device_not_found")
+        deadline = time.monotonic() + WAIT
+        while built[0]() is not None:
+            if time.monotonic() > deadline:
+                referrers = [type(r).__name__ for r in gc.get_referrers(built[0]())]
                 self.fail(f"components of the failed session still alive: {referrers}")
             time.sleep(0.02)
 

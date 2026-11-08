@@ -11,6 +11,11 @@ from kikitori.translate.client import (
     DEFAULT_BASE_URL,
     OpenAICompatibleTranslator,
     TranslatorConfig,
+    redact_url,
+)
+from kikitori.translate.context_guard import (
+    ContextFallbackTranslator,
+    looks_like_context_leak,
 )
 from kikitori.translate.errors import (
     InvalidRequestError,
@@ -20,28 +25,36 @@ from kikitori.translate.errors import (
     TranslationResponseError,
     TranslationTimeoutError,
 )
-from kikitori.translate.languages import SUPPORTED_PAIRS
+from kikitori.translate.glossary import Glossary, GlossaryEntry, Term
+from kikitori.translate.languages import ALL_LANGUAGE_CODES
 from kikitori.translate.presets import (
     PRESETS,
     RECOMMENDATION_TIERS,
     ModelPreset,
+    NoSupportingModelError,
     RecommendationTier,
     TranslationModelChoice,
     preset_for_model,
     recommend_translation_models,
+    supports,
 )
 from kikitori.translate.types import TranslationRequest, Translator
 
 __all__ = [
+    "ALL_LANGUAGE_CODES",
     "DEFAULT_API_KEY_ENV",
     "DEFAULT_BASE_URL",
     "PRESETS",
     "RECOMMENDATION_TIERS",
-    "SUPPORTED_PAIRS",
+    "ContextFallbackTranslator",
+    "Glossary",
+    "GlossaryEntry",
     "InvalidRequestError",
     "ModelPreset",
+    "NoSupportingModelError",
     "OpenAICompatibleTranslator",
     "RecommendationTier",
+    "Term",
     "TranslationConnectionError",
     "TranslationError",
     "TranslationHTTPError",
@@ -51,6 +64,9 @@ __all__ = [
     "TranslationTimeoutError",
     "Translator",
     "TranslatorConfig",
+    "looks_like_context_leak",
     "preset_for_model",
     "recommend_translation_models",
+    "redact_url",
+    "supports",
 ]

@@ -1,5 +1,6 @@
 """模型下載的測試：本機 HTTP 伺服器（只綁 127.0.0.1）與假 fetcher，不連外網。"""
 
+import dataclasses
 import hashlib
 import http.server
 import json
@@ -9,18 +10,22 @@ import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest import mock
 
+from kikitori.asr import download as download_module
 from kikitori.asr.download import (
     MARKER_NAME,
     DownloadCancelledError,
     ModelDownloadError,
     ModelIntegrityError,
+    UnsafeModelPathError,
+    delete_model,
     download_file,
     download_model,
     is_downloaded,
     model_dir,
+    model_disk_bytes,
     validate_url,
 )
 from kikitori.asr.registry import ModelFile, ModelSpec
@@ -479,6 +484,152 @@ class ValidateUrlTest(unittest.TestCase):
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 validate_url(url)
+
+
+def _install(
+    spec: ModelSpec, cache: Path, contents: Mapping[str, bytes] = CONTENTS
+) -> Path:
+    """在快取裡放一份「已下載」的模型（檔案與完成標記，與 download_model 的結果相同）。"""
+    directory = model_dir(spec, cache)
+    directory.mkdir(parents=True)
+    for name, data in contents.items():
+        (directory / name).write_bytes(data)
+    marker = {
+        "id": spec.id,
+        "repo_id": spec.repo_id,
+        "revision": spec.revision,
+        "files": {f.name: f.sha256 for f in spec.files},
+    }
+    (directory / MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+    return directory
+
+
+def _link_dir(link: Path, target: Path) -> bool:
+    """建立目錄連結（symlink，Windows 上沒有權限時改用 junction）；都不行回傳 False。"""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except OSError:
+        pass
+    try:
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))  # type: ignore[attr-defined]
+        return True
+    except (ImportError, AttributeError, OSError):
+        return False
+
+
+class DeleteModelTest(unittest.TestCase):
+    """F7：模型的磁碟用量與刪除（只在模型快取內、不跟隨連結）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.cache = self.root / "cache"
+        self.cache.mkdir()
+        self.spec = make_spec()
+
+    def tree_bytes(self, path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    def test_disk_bytes_is_none_until_downloaded(self) -> None:
+        self.assertIsNone(model_disk_bytes(self.spec, self.cache))
+        # 只有續傳用的殘留也不算已下載
+        directory = model_dir(self.spec, self.cache)
+        directory.mkdir(parents=True)
+        (directory / "model.bin.part").write_bytes(b"x" * 100)
+        self.assertIsNone(model_disk_bytes(self.spec, self.cache))
+
+    def test_disk_bytes_counts_everything_under_the_model_folder(self) -> None:
+        directory = _install(self.spec, self.cache)
+        old = self.cache / self.spec.id / "oldrevision0"
+        old.mkdir()
+        (old / "model.bin.part").write_bytes(b"y" * 1000)
+        expected = self.tree_bytes(self.cache / self.spec.id)
+        self.assertEqual(model_disk_bytes(self.spec, self.cache), expected)
+        self.assertGreater(expected, self.tree_bytes(directory))
+
+    def test_delete_removes_the_model_and_leftovers(self) -> None:
+        _install(self.spec, self.cache)
+        leftover = self.cache / self.spec.id / "oldrevision0"
+        leftover.mkdir()
+        (leftover / "model.bin.part").write_bytes(b"y" * 1000)
+        other = _install(dataclasses.replace(self.spec, id="other"), self.cache)
+        expected = model_disk_bytes(self.spec, self.cache)
+        self.assertEqual(delete_model(self.spec, self.cache), expected)
+        self.assertFalse((self.cache / self.spec.id).exists())
+        self.assertFalse(is_downloaded(self.spec, self.cache))
+        # 其他模型與快取資料夾本身不動
+        self.assertTrue(self.cache.is_dir())
+        self.assertTrue((other / "model.bin").is_file())
+
+    def test_not_downloaded(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            delete_model(self.spec, self.cache)
+        directory = model_dir(self.spec, self.cache)
+        directory.mkdir(parents=True)
+        (directory / "model.bin.part").write_bytes(b"x")
+        with self.assertRaises(FileNotFoundError):
+            delete_model(self.spec, self.cache)
+        self.assertTrue((directory / "model.bin.part").exists())
+
+    def test_refuses_a_model_folder_that_links_outside_the_cache(self) -> None:
+        outside = self.root / "outside"
+        _install(self.spec, outside)
+        if not _link_dir(self.cache / self.spec.id, outside / self.spec.id):
+            self.skipTest("cannot create directory links here")
+        self.assertTrue(is_downloaded(self.spec, self.cache))
+        with self.assertRaises(UnsafeModelPathError):
+            delete_model(self.spec, self.cache)
+        self.assertTrue((model_dir(self.spec, outside) / "model.bin").is_file())
+
+    def test_refuses_links_inside_the_model_folder(self) -> None:
+        directory = _install(self.spec, self.cache)
+        outside = self.root / "precious"
+        outside.mkdir()
+        (outside / "keep.txt").write_bytes(b"keep")
+        if not _link_dir(directory / "escape", outside):
+            self.skipTest("cannot create directory links here")
+        with self.assertRaises(UnsafeModelPathError):
+            delete_model(self.spec, self.cache)
+        self.assertTrue((outside / "keep.txt").is_file())
+        # 拒絕時什麼都沒刪
+        self.assertTrue(is_downloaded(self.spec, self.cache))
+
+    def test_folder_swapped_for_a_link_after_the_scan_is_not_followed(self) -> None:
+        """掃描之後、刪除之前資料夾被換成連結（TOCTOU）：每次刪除前重新檢查，不刪到外面。"""
+        directory = _install(self.spec, self.cache)
+        sub = directory / "sub"
+        sub.mkdir()
+        (sub / "inner.bin").write_bytes(b"x")
+        outside = self.root / "precious"
+        outside.mkdir()
+        (outside / "inner.bin").write_bytes(b"keep")
+        original_scan = download_module._scan_tree
+        swapped: list[bool] = []
+
+        def scan_then_swap(root: Path, *, strict: bool) -> Any:
+            result = original_scan(root, strict=strict)
+            (sub / "inner.bin").unlink()
+            sub.rmdir()
+            swapped.append(_link_dir(sub, outside))
+            return result
+
+        with (
+            mock.patch.object(download_module, "_scan_tree", scan_then_swap),
+            self.assertRaises(UnsafeModelPathError),
+        ):
+            delete_model(self.spec, self.cache)
+        if not swapped[0]:
+            self.skipTest("cannot create directory links here")
+        self.assertEqual((outside / "inner.bin").read_bytes(), b"keep")
+
+    def test_refuses_ids_that_are_not_a_single_folder_name(self) -> None:
+        for bad in ("../escape", "a/b", "a\\b", "..", ".", "", "C:x"):
+            with self.subTest(bad=bad), self.assertRaises(UnsafeModelPathError):
+                delete_model(dataclasses.replace(self.spec, id=bad), self.cache)
 
 
 if __name__ == "__main__":

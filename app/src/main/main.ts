@@ -4,7 +4,16 @@
  * Role: wires the static markup in index.html to the engine (through `lib/api`)
  * and keeps it in sync with engine/bridge/overlay events. Pure decisions
  * (subtitle ordering, validation, wording, combination-check rules) live in
- * `lib/`; this file only holds UI state and renders it.
+ * `lib/`; this file only holds UI state and renders it. Every text comes from
+ * the i18n dictionary, and every render function can run again after the
+ * interface language changes (`onLocaleChanged`). The language section, the
+ * downloads before starting and the "顯示翻譯" switch follow the same split
+ * (`lib/languages.ts`, `lib/start-downloads.ts`, `lib/translation-toggle.ts`),
+ * as do transcript export, the translation-server guide and the diagnostics
+ * report (`lib/export.ts`, `lib/translation-guide.ts`, `lib/diagnostics.ts`),
+ * the glossary editor, the status-bar metrics, model deletion and the
+ * end-of-session auto-save wait (`lib/glossary.ts`, `lib/metrics.ts`,
+ * `lib/model-delete.ts`, `lib/session-end.ts`).
  */
 
 import { getVersion } from "@tauri-apps/api/app";
@@ -17,7 +26,18 @@ import {
   canSave,
   type CheckView,
 } from "../lib/combination";
-import { byId, h, replace } from "../lib/dom";
+import { RecentLog, buildDiagnostics } from "../lib/diagnostics";
+import { byId, h, replace, setAttributeIfChanged, setIfChanged } from "../lib/dom";
+import {
+  EXPORT_CONTENTS,
+  EXPORT_FORMATS,
+  EXPORT_MAX_LINES,
+  exportTranscript,
+  hasExportableLines,
+  transcriptFileName,
+  type ExportContent,
+  type ExportFormat,
+} from "../lib/export";
 import {
   computeTypeLabel,
   describeStatus,
@@ -27,7 +47,6 @@ import {
   formatMiB,
   formatTimecode,
   htmlLang,
-  languageName,
   languageShort,
   osName,
   percent,
@@ -37,11 +56,83 @@ import {
   tierLabel,
 } from "../lib/format";
 import {
+  NATIVE_NAMES,
+  UI_LOCALES,
+  applyStatic,
+  getLocale,
+  htmlLangForLocale,
+  isUiLocale,
+  joinList,
+  languageName,
+  localeForPreference,
+  onLocaleChange,
+  setLocale,
+  systemLanguages,
+  t,
+  tp,
+  type StringKey,
+  type UiLocalePreference,
+} from "../lib/i18n";
+import {
+  AUTO_LANGUAGE,
+  filterLanguageOptions,
+  languageFormFromSettings,
+  languageOptions,
+  languagesSave,
+  previewMatches,
+  previewNotes,
+  previewRequest,
+  previewRows,
+  previewSummary,
+  validateLanguageForm,
+  type LanguageErrors,
+  type LanguageField,
+  type LanguageForm,
+} from "../lib/languages";
+import {
+  GLOSSARY_MAX_CSV_BYTES,
+  glossaryErrorForEnginePath,
+  glossaryFileName,
+  glossaryPatch,
+  glossaryToCsv,
+  hasGlossaryErrors,
+  mergeGlossary,
+  parseGlossaryCsv,
+  validateGlossary,
+  type GlossaryErrorTarget,
+  type GlossaryField,
+  type GlossaryRowErrors,
+} from "../lib/glossary";
+import { formatEngineMessage, type EngineMessage } from "../lib/messages";
+import {
+  applyMetrics,
+  dismissMetricsWarning,
+  emptyMetrics,
+  metricsSessionState,
+  meterTransform,
+  metricsView,
+  noAudioDueAt,
+  type MetricsState,
+  type MetricsWarning,
+} from "../lib/metrics";
+import { deleteBlockedText, deleteConfirmText, deleteOffer } from "../lib/model-delete";
+import {
+  FURIGANA_DICTIONARY_ID,
+  afterFuriganaDownload,
+  furiganaBlockView,
+  furiganaEnableAction,
+  furiganaSwitchView,
+  isFuriganaDownload,
+  type StatusLine,
+} from "../lib/furigana";
+import { rubyKey, segmentNodes } from "../lib/ruby";
+import {
   FirstRunGate,
-  blockingDownloads,
   dismissedWith,
   missingModels,
   missingModelsView,
+  missingNoticeMode,
+  missingShownByStartPanel,
   offerText,
   runFirstRun,
   shouldOfferRecommendation,
@@ -56,7 +147,9 @@ import {
   devicePatch,
   formFieldForEnginePath,
   formFromSettings,
+  obsOutputFromForm,
   settingsPatchFromForm,
+  uiLocalePatch,
   validateCombinationForm,
   validateSettingsForm,
   type CombinationErrors,
@@ -64,23 +157,40 @@ import {
   type FormErrors,
   type SettingsForm,
 } from "../lib/settings";
-import { applySubtitle, emptySubtitles, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
+import { SessionEndSave } from "../lib/session-end";
+import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
+import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
+import { isTranslationServerLog, translationGuide, type GuideView } from "../lib/translation-guide";
+import { CUSTOM_TRANSLATION_MODEL, translationPicker } from "../lib/translation-picker";
+import { setShowTranslation } from "../lib/translation-toggle";
 import type {
   AboutInfo,
   AppliedRecommendation,
   AsrChoice,
+  AsrModel,
   BridgeStatus,
   DeviceInfo,
   DownloadProgressEvent,
   EngineState,
+  GlossaryEntry,
   HardwareReport,
+  LanguageInfo,
+  LanguagePreview,
   LicenseFolder,
+  MetricsEvent,
   Mode,
   ModelsList,
+  ObsStatus,
+  OutputFolder,
+  OutputInfo,
   OverlaySnapshot,
   RecommendationPreview,
   Settings,
+  ShortcutAction,
 } from "../lib/types";
+import { autoDismiss } from "../lib/auto-dismiss";
+import { SettingsRevision } from "../lib/settings-revision";
+import { updateNotesBlocks, type NotesBlock } from "../lib/update-notes";
 import { asCommandError } from "../lib/validate";
 import { checkForUpdate, type UpdateUi } from "./updater";
 
@@ -124,7 +234,80 @@ interface State {
   closedOffers: Set<string>;
   /** Models the missing-models notice is about (null when it is not shown). */
   missing: MissingModel[] | null;
+  /** Interface language preference shown in the settings page menu. */
+  uiLocale: UiLocalePreference;
+  /** A language chosen while the engine was not ready; saved once it is. */
+  uiLocaleUnsaved: boolean;
+  /** `languages.list` (null until the engine answered). */
+  languages: LanguageInfo[] | null;
+  /** The language section's current choice (selects may be filtered, so it lives here). */
+  langForm: LanguageForm | null;
+  /** The language section differs from the saved settings; reloads keep the edits. */
+  langDirty: boolean;
+  /** Text typed into each language menu's filter. */
+  langFilters: Record<LanguageField, string>;
+  /** What the language section shows below the menus. */
+  langPreview: LanguagePreviewView;
+  /** The "顯示翻譯" switch is being applied. */
+  translationBusy: boolean;
+  /** Every line of the session for export (the visible log keeps only the last 300). */
+  exportLog: SubtitleState;
+  /** When the current (or last) session started, and in which mode: names exported files. */
+  sessionStartedAt: Date | null;
+  sessionMode: Mode;
+  /** Session whose transcript was auto-saved (once per session). */
+  autoSavedSession: string | null;
+  /** `output_info`: where transcripts and the OBS text go. */
+  output: OutputInfo | null;
+  /** Last `obs_set_output` answer. */
+  obs: ObsStatus | null;
+  /** The translation-server guide is shown (its notice appears once per appearance). */
+  guideShown: boolean;
+  appVersion: string | null;
+  /** Level meter, latency and warnings of the running session (lib/metrics.ts). */
+  metrics: MetricsState;
+  /** The glossary editor (settings page). */
+  glossary: GlossaryEditor;
+  /** ASR models with a `models.delete` in flight. */
+  deleting: Set<string>;
+  /** The model whose delete confirmation is open (one at a time). */
+  confirmDelete: string | null;
+  /** Furigana (lib/furigana.ts): a `session.set_furigana` is in flight. */
+  furiganaBusy: boolean;
+  /** The user turned furigana on and the dictionary is downloading for it. */
+  furiganaPendingEnable: boolean;
+  /** Last `download_progress` of the dictionary (cleared when it is done). */
+  furiganaDownload: DownloadProgressEvent | null;
+  furiganaDeleting: boolean;
+  furiganaConfirmDelete: boolean;
 }
+
+/** One table row; `id` keeps the row's elements when others are added or removed. */
+interface GlossaryRow {
+  id: number;
+  entry: GlossaryEntry;
+}
+
+interface GlossaryEditor {
+  builtin: boolean;
+  rows: GlossaryRow[];
+  /** The table differs from the saved settings; reloads keep the edits. */
+  dirty: boolean;
+  /** The engine's rejection of the last save, until the user edits that place. */
+  engineError: { target: GlossaryErrorTarget; message: string } | null;
+  /** A `settings.set` is in flight (Save stays disabled). */
+  saving: boolean;
+  /** Counts edits, so a save does not overwrite rows changed while it was in flight. */
+  revision: number;
+}
+
+/** State of the recommended-combination preview under the language menus. */
+type LanguagePreviewView =
+  | { state: "unavailable" }
+  | { state: "local_errors" }
+  | { state: "checking" }
+  | { state: "ready"; preview: LanguagePreview }
+  | { state: "error"; message: string };
 
 const state: State = {
   bridge: null,
@@ -141,7 +324,7 @@ const state: State = {
   hardware: null,
   downloads: new Map(),
   page: "transcript",
-  check: { state: "unavailable", message: "引擎尚未就緒" },
+  check: { state: "unavailable", message: t("check.engineNotReady") },
   comboDirty: false,
   gpuLicenseAccepted: false,
   about: null,
@@ -150,7 +333,39 @@ const state: State = {
   preview: null,
   closedOffers: new Set(),
   missing: null,
+  uiLocale: "system",
+  uiLocaleUnsaved: false,
+  languages: null,
+  langForm: null,
+  langDirty: false,
+  langFilters: { source: "", target: "", partner: "" },
+  langPreview: { state: "unavailable" },
+  translationBusy: false,
+  exportLog: emptySubtitles(),
+  sessionStartedAt: null,
+  sessionMode: "media",
+  autoSavedSession: null,
+  output: null,
+  obs: null,
+  guideShown: false,
+  appVersion: null,
+  metrics: emptyMetrics(),
+  glossary: { builtin: true, rows: [], dirty: false, engineError: null, saving: false, revision: 0 },
+  deleting: new Set(),
+  confirmDelete: null,
+  furiganaBusy: false,
+  furiganaPendingEnable: false,
+  furiganaDownload: null,
+  furiganaDeleting: false,
+  furiganaConfirmDelete: false,
 };
+
+/** Last engine messages for "複製診斷資訊". */
+const recentLog = new RecentLog();
+const GUIDE_NOTICE = "translation-guide";
+/** An engine warning about the translation server; the guide replaces it when it appears. */
+const TRANSLATION_LOG_NOTICE = "engine-translation-log";
+const EXPORT_NOTICE = "export";
 
 const firstRunGate = new FirstRunGate();
 
@@ -178,6 +393,40 @@ const el = {
   transcriptEmpty: byId("transcript-empty"),
   overlayVisible: byId<HTMLInputElement>("overlay-visible"),
   overlayClick: byId<HTMLInputElement>("overlay-click-through"),
+  showTranslation: byId<HTMLInputElement>("show-translation"),
+  settingsShowTranslation: byId<HTMLInputElement>("f-show-translation"),
+  furiganaSwitch: byId<HTMLInputElement>("f-furigana"),
+  furiganaStatus: byId("furigana-status"),
+  furiganaHelp: byId("furigana-help"),
+  furiganaBlock: byId("furigana-dictionary"),
+  startDownloads: byId("start-downloads"),
+  startDownloadsItems: byId("startdl-items"),
+  startDownloadsMessage: byId("startdl-message"),
+  startDownloadsRetry: byId<HTMLButtonElement>("startdl-retry"),
+  startDownloadsCancel: byId<HTMLButtonElement>("startdl-cancel"),
+  languagesForm: byId<HTMLFormElement>("languages-form"),
+  languagesModeNote: byId("languages-mode-note"),
+  langFields: {
+    source: byId("field-source"),
+    target: byId("field-target"),
+    partner: byId("field-partner"),
+  } as Record<LanguageField, HTMLElement>,
+  langSelects: {
+    source: byId<HTMLSelectElement>("f-source"),
+    target: byId<HTMLSelectElement>("f-target"),
+    partner: byId<HTMLSelectElement>("f-partner"),
+  } as Record<LanguageField, HTMLSelectElement>,
+  langFilters: {
+    source: byId<HTMLInputElement>("f-source-filter"),
+    target: byId<HTMLInputElement>("f-target-filter"),
+    partner: byId<HTMLInputElement>("f-partner-filter"),
+  } as Record<LanguageField, HTMLInputElement>,
+  labelTarget: byId("label-target"),
+  helpTarget: byId("help-target"),
+  languagePreview: byId("language-preview"),
+  applyRecommended: byId<HTMLInputElement>("f-apply-recommended"),
+  languagesSave: byId<HTMLButtonElement>("languages-save"),
+  languagesStatus: byId("languages-status"),
   shortcutNote: byId("shortcut-note"),
   clear: byId<HTMLButtonElement>("clear-transcript"),
   hardware: byId("hardware"),
@@ -188,7 +437,6 @@ const el = {
   modelsRefresh: byId<HTMLButtonElement>("models-refresh"),
   trSource: byId("tr-source"),
   trPresets: byId("tr-presets"),
-  trNames: byId<HTMLDataListElement>("tr-names"),
   comboForm: byId<HTMLFormElement>("combo-form"),
   comboCheck: byId("combo-check"),
   comboSave: byId<HTMLButtonElement>("combo-save"),
@@ -196,6 +444,7 @@ const el = {
   comboStatus: byId("combo-status"),
   settingsForm: byId<HTMLFormElement>("settings-form"),
   settingsPath: byId("settings-path"),
+  uiLocale: byId<HTMLSelectElement>("f-ui-locale"),
   settingsStatus: byId("settings-status"),
   preview: byId("style-preview"),
   oFontSize: byId<HTMLOutputElement>("o-font-size"),
@@ -208,7 +457,57 @@ const el = {
   openEngineLicenses: byId<HTMLButtonElement>("open-engine-licenses"),
   checkUpdate: byId<HTMLButtonElement>("check-update"),
   updateStatus: byId("update-status"),
+  exportMenu: byId<HTMLDetailsElement>("export-menu"),
+  exportContent: byId<HTMLSelectElement>("export-content"),
+  exportFormats: byId("export-formats"),
+  exportHelp: byId("export-help"),
+  transcriptsPath: byId("transcripts-path"),
+  openTranscripts: byId<HTMLButtonElement>("open-transcripts"),
+  obsPath: byId("obs-path"),
+  openObs: byId<HTMLButtonElement>("open-obs"),
+  guide: byId("translation-guide"),
+  guideText: byId("translation-guide-text"),
+  guideInstall: byId<HTMLButtonElement>("guide-install"),
+  guideOriginal: byId<HTMLButtonElement>("guide-original"),
+  guideRecheck: byId<HTMLButtonElement>("guide-recheck"),
+  copyDiagnostics: byId<HTMLButtonElement>("copy-diagnostics"),
+  diagnosticsStatus: byId("diagnostics-status"),
+  diagnosticsText: byId<HTMLTextAreaElement>("diagnostics-text"),
+  metrics: byId("metrics"),
+  levelMeter: byId("level-meter"),
+  levelFill: byId("level-fill"),
+  latency: byId("latency"),
+  glossaryForm: byId<HTMLFormElement>("glossary-form"),
+  glossaryBuiltin: byId<HTMLInputElement>("f-glossary-builtin"),
+  glossaryRows: byId("glossary-rows"),
+  glossaryEmpty: byId("glossary-empty"),
+  glossaryListError: byId("glossary-list-error"),
+  glossaryAdd: byId<HTMLButtonElement>("glossary-add"),
+  glossaryImport: byId<HTMLButtonElement>("glossary-import"),
+  glossaryFile: byId<HTMLInputElement>("glossary-file"),
+  glossaryExport: byId<HTMLButtonElement>("glossary-export"),
+  glossarySave: byId<HTMLButtonElement>("glossary-save"),
+  glossaryReset: byId<HTMLButtonElement>("glossary-reset"),
+  glossaryStatus: byId("glossary-status"),
 };
+
+// ---------------------------------------------------------------- settings answers
+
+const settingsRevision = new SettingsRevision();
+
+/**
+ * Puts an engine answer's settings on screen unless a newer one is already there
+ * (lib/settings-revision.ts). Returns the settings now on screen: forms filled after
+ * a save use it, so a late answer does not put old values back into them either.
+ */
+function adoptSettings(settings: Settings, revision: number | null): Settings {
+  if (settingsRevision.acceptIfNotOlder(revision)) {
+    state.settings = settings;
+    return settings;
+  }
+  console.info(`settings revision ${revision} arrived after a newer one; kept the newer settings`);
+  return state.settings ?? settings;
+}
 
 // ---------------------------------------------------------------- notices
 
@@ -222,6 +521,10 @@ interface NoticeOptions {
   key?: string;
   /** Runs when the user closes the notice with 關閉. */
   onClose?: () => void;
+  /** Extra content under the text (the update notes). */
+  detail?: Node;
+  /** A plain confirmation: closes itself after a few seconds (lib/auto-dismiss.ts). */
+  autoDismiss?: boolean;
 }
 
 /** Shows a dismissible message at the top of the content area; returns it. */
@@ -237,15 +540,30 @@ function notify(
   if (options.key) noticeFor(options.key)?.remove();
   const notice = h("div", { class: "notice", "data-tone": tone, "data-text": text, role: tone === "bad" ? "alert" : "status" });
   if (options.key) notice.dataset.key = options.key;
-  const body = h("p", {}, text);
+  // The text stays the notice's first <p>: progress updates find it with querySelector("p").
+  const body = options.detail ? h("div", { class: "notice-body" }, h("p", {}, text), options.detail) : h("p", {}, text);
   const buttons = h("div", { class: "notice-actions" });
   for (const action of actions) {
     const b = h("button", { type: "button", class: "ghost" }, action.label);
     b.addEventListener("click", action.run);
     buttons.appendChild(b);
   }
-  const close = h("button", { type: "button", class: "ghost", "aria-label": "關閉這則訊息" }, "關閉");
+  const close = h("button", { type: "button", class: "ghost", "aria-label": t("notice.closeLabel") }, t("notice.close"));
+  const timer = options.autoDismiss
+    ? autoDismiss({
+        isBeingRead: () => notice.isConnected && (notice.matches(":hover") || notice.contains(document.activeElement)),
+        dismiss: () => notice.remove(),
+      })
+    : undefined;
+  if (timer) {
+    // A full delay from the moment the reader lets go, not whatever is left of the current check.
+    notice.addEventListener("pointerleave", () => timer.restart());
+    notice.addEventListener("focusout", (e) => {
+      if (!(e.relatedTarget instanceof Node && notice.contains(e.relatedTarget))) timer.restart();
+    });
+  }
   close.addEventListener("click", () => {
+    timer?.cancel();
     notice.remove();
     options.onClose?.();
   });
@@ -261,9 +579,10 @@ function noticeFor(key: string): HTMLElement | null {
   return Array.from(el.notices.children).find((n): n is HTMLElement => n instanceof HTMLElement && n.dataset.key === key) ?? null;
 }
 
-function reportError(context: string, e: unknown): void {
+/** Shows "<context>: <reason>"; `context` is a dictionary key such as `error.start`. */
+function reportError(context: StringKey, e: unknown, params?: Record<string, string>): void {
   console.error(context, e);
-  notify(`${context}：${describeError(e)}`, "bad");
+  notify(t("common.withReason", { context: t(context, params), reason: describeError(e) }), "bad");
 }
 
 function engineCode(e: unknown): string | null {
@@ -281,6 +600,27 @@ function engineReady(): boolean {
   return state.bridge?.phase === "ready";
 }
 
+/** Auto-save waits for the engine's "idle" (or 2 s) so a final sent after Stop is included. */
+const sessionEnd = new SessionEndSave(() => void autoSaveTranscript(), {
+  set: (run, ms) => window.setTimeout(run, ms),
+  clear: (handle) => window.clearTimeout(handle),
+});
+
+/**
+ * Every change of the session state goes through here, so the end of a
+ * session (stop, engine error, engine restart) is noticed in one place.
+ * `fromEngine`: the engine itself reported the state (or is gone), so no
+ * subtitle of the ended session can still arrive.
+ */
+function setSessionState(next: EngineState, fromEngine: boolean): void {
+  const wasActive = sessionActive();
+  state.sessionState = next;
+  if (wasActive && !sessionActive()) sessionEnd.ended(fromEngine);
+  else if (fromEngine && !sessionActive()) sessionEnd.engineIdle();
+  state.metrics = metricsSessionState(state.metrics, next, state.sessionId);
+  renderMetrics();
+}
+
 function renderStatus(): void {
   const view = describeStatus(state.bridge, state.sessionState);
   el.statusDot.dataset.tone = view.tone;
@@ -292,9 +632,11 @@ function renderStatus(): void {
   el.restart.hidden = !(phase === "failed" || phase === "stopped");
 
   const ready = engineReady();
-  el.start.disabled = !ready || state.busy;
-  el.start.dataset.state = state.busy ? "busy" : sessionActive() ? "running" : "idle";
-  el.start.textContent = sessionActive() ? "停止" : "開始";
+  // While models are downloaded for a start, the start happens by itself.
+  const waiting = startFlow.active;
+  el.start.disabled = !ready || state.busy || waiting;
+  el.start.dataset.state = state.busy || waiting ? "busy" : sessionActive() ? "running" : "idle";
+  el.start.textContent = sessionActive() ? t("start.stop") : t("start.start");
   for (const button of el.modes) {
     const mode = button.dataset.mode as Mode;
     button.setAttribute("aria-checked", String(mode === state.mode));
@@ -304,13 +646,95 @@ function renderStatus(): void {
 
   const info = state.bridge?.info;
   el.aboutEngine.textContent = info
-    ? `引擎 ${info.version}，協定第 ${info.protocol_version} 版${info.fake ? "，目前使用假引擎（開發模式）" : ""}。`
-    : "引擎尚未連線。";
+    ? t(info.fake ? "about.engineFake" : "about.engine", { version: info.version, protocol: info.protocol_version })
+    : t("about.engineOffline");
+}
+
+// ---------------------------------------------------------------- status bar metrics
+
+const METRICS_NOTICES: Readonly<Record<MetricsWarning, string>> = { backlog: "metrics-backlog", no_audio: "metrics-no-audio" };
+/**
+ * Warnings whose notice was shown for the current occurrence. A notice pushed
+ * out by newer ones (the list keeps three) is not re-added every second.
+ */
+const shownMetricsWarnings = new Set<MetricsWarning>();
+let noAudioTimer: number | undefined;
+
+function onMetrics(ev: MetricsEvent): void {
+  state.metrics = applyMetrics(state.metrics, ev, Date.now());
+  renderMetrics();
+}
+
+/**
+ * Meter, median latency and the two warnings (lib/metrics.ts). The no-audio
+ * hint is re-checked by a timer too: metrics may stop arriving.
+ */
+function renderMetrics(): void {
+  const now = Date.now();
+  const view = metricsView(state.metrics, now);
+  el.metrics.hidden = !view.visible;
+  const level = view.level ?? 0;
+  // Called every second while a session runs: write only what changed (see setIfChanged).
+  setIfChanged(el.levelFill.style, "transform", meterTransform(view.level));
+  setIfChanged(el.levelMeter.dataset, "quiet", String(view.level === null || level === 0));
+  setAttributeIfChanged(el.levelMeter, "aria-valuenow", String(Math.round(view.levelDbfs ?? -120)));
+  setAttributeIfChanged(
+    el.levelMeter,
+    "aria-valuetext",
+    view.levelDbfs === null ? t("metrics.levelUnknown") : t("metrics.levelValue", { db: Math.round(view.levelDbfs) }),
+  );
+  setIfChanged(el.levelMeter, "title", t("metrics.levelLabel"));
+  setIfChanged(
+    el.latency,
+    "textContent",
+    view.latencyMs === null ? t("metrics.latencyUnknown") : t("metrics.latency", { seconds: (view.latencyMs / 1000).toFixed(1) }),
+  );
+  setIfChanged(el.latency, "title", t("metrics.latencyHelp"));
+
+  for (const warning of ["backlog", "no_audio"] as const) {
+    const key = METRICS_NOTICES[warning];
+    const show = view.warnings.includes(warning);
+    if (!show) {
+      noticeFor(key)?.remove();
+      shownMetricsWarnings.delete(warning);
+      continue;
+    }
+    if (shownMetricsWarnings.has(warning)) continue;
+    shownMetricsWarnings.add(warning);
+    const actions: NoticeAction[] =
+      warning === "backlog" ? [{ label: t("metrics.openModels"), run: () => showPage("models") }] : [];
+    notify(warning === "backlog" ? t("metrics.backlog") : t("metrics.noAudio"), "info", actions, {
+      key,
+      onClose: () => {
+        state.metrics = dismissMetricsWarning(state.metrics, warning);
+      },
+    });
+  }
+
+  window.clearTimeout(noAudioTimer);
+  const due = noAudioDueAt(state.metrics, now);
+  if (due !== null) noAudioTimer = window.setTimeout(renderMetrics, due - now + 50);
 }
 
 function renderModeNotes(): void {
-  const partner = state.settings?.partner_language ?? "ja";
-  if (el.modeNotes.interpret) el.modeNotes.interpret.textContent = `中文與${languageName(partner)}互譯`;
+  const s = state.settings ?? DEFAULT_SETTINGS;
+  const original = !s.translation.enabled;
+  const target = languageName(s.target_language);
+  if (el.modeNotes.media) {
+    const auto = s.source_language === AUTO_LANGUAGE;
+    const source = auto ? t("language.auto") : languageName(s.source_language);
+    el.modeNotes.media.textContent = original
+      ? t("mode.media.noteOriginal", { source })
+      : auto
+        ? t("mode.media.noteAuto", { target })
+        : t("mode.media.note", { source, target });
+  }
+  if (el.modeNotes.interpret) {
+    const params = { own: target, partner: languageName(s.partner_language) };
+    el.modeNotes.interpret.textContent = original
+      ? t("mode.interpret.noteOriginal", params)
+      : t("mode.interpret.note", params);
+  }
 }
 
 function renderDevices(): void {
@@ -319,7 +743,7 @@ function renderDevices(): void {
   const selected = state.mode === "media" ? state.settings?.media_device_id : state.settings?.interpret_device_id;
   const fallback = list.find((d) => d.is_default);
   const options = [
-    h("option", { value: "" }, fallback ? `預設：${fallback.name}` : "系統預設"),
+    h("option", { value: "" }, fallback ? t("device.defaultNamed", { name: fallback.name }) : t("device.systemDefault")),
     ...list.map((d) => h("option", { value: d.id }, d.name)),
   ];
   replace(el.device, ...options);
@@ -327,10 +751,10 @@ function renderDevices(): void {
   el.device.value = selected && known ? selected : "";
   el.deviceHint.textContent =
     selected && !known
-      ? "先前選擇的裝置目前找不到，會改用系統預設。"
+      ? t("device.hint.missing")
       : state.mode === "media"
-        ? "影片翻譯會擷取電腦正在播放的聲音。"
-        : "即時口譯會使用麥克風。";
+        ? t("device.hint.media")
+        : t("device.hint.interpret");
 }
 
 async function setMode(mode: Mode): Promise<void> {
@@ -338,22 +762,26 @@ async function setMode(mode: Mode): Promise<void> {
   state.mode = mode;
   renderStatus();
   renderDevices();
+  // The language section shows the languages of the selected mode.
+  if (state.langForm) state.langForm = { ...state.langForm, mode };
+  renderLanguages();
+  scheduleLanguagePreview(0);
   const deviceId = mode === "media" ? state.settings?.media_device_id : state.settings?.interpret_device_id;
   try {
-    const { settings } = await api.settingsSet(devicePatch(mode, deviceId ?? null));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(devicePatch(mode, deviceId ?? null));
+    adoptSettings(settings, revision);
   } catch (e) {
-    reportError("無法記住模式", e);
+    reportError("error.saveMode", e);
   }
 }
 
 async function setDevice(deviceId: string | null): Promise<void> {
   try {
-    const { settings } = await api.settingsSet(devicePatch(state.mode, deviceId));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(devicePatch(state.mode, deviceId));
+    adoptSettings(settings, revision);
     renderDevices();
   } catch (e) {
-    reportError("無法記住聲音來源", e);
+    reportError("error.saveDevice", e);
   }
 }
 
@@ -364,47 +792,162 @@ async function toggleSession(): Promise<void> {
   try {
     if (sessionActive()) {
       await api.sessionStop();
-      state.sessionState = "idle";
+      setSessionState("idle", false);
     } else {
-      const waiting = state.settings ? blockingDownloads(state.settings.asr, state.downloads) : [];
-      if (waiting.length) {
-        // Starting now would only fail with model_not_downloaded.
-        notify(`${waiting.join("、")} 還在下載，下載完成後再按「開始」。`);
+      startFlow.reset();
+      // Chosen speech models that are not downloaded yet (or still downloading):
+      // fetch them first, then start by itself. Translation models are checked by
+      // the engine (only it knows whether the server is Ollama) and reported as
+      // translation_model_missing, which lands in the same flow.
+      const missing = asrStartItems();
+      if (missing.length) {
+        startFlow.begin(missing);
         return;
       }
-      const deviceId = el.device.value === "" ? null : el.device.value;
-      const sessionId = await api.sessionStart(state.mode, deviceId);
-      state.sessionId = sessionId;
-      state.subtitles = emptySubtitles(sessionId);
-      state.sessionState = "loading";
-      renderTranscript();
-      if (state.overlay && !state.overlay.visible) {
-        await setOverlayVisible(true);
-      }
+      await startSession();
     }
   } catch (e) {
-    reportError(sessionActive() ? "無法停止" : "無法開始", e);
+    reportError(sessionActive() ? "error.stop" : "error.start", e);
   } finally {
     state.busy = false;
     renderStatus();
   }
 }
 
+/** `session.start` with the current mode and device; resets the transcript. */
+async function startSession(): Promise<void> {
+  const deviceId = el.device.value === "" ? null : el.device.value;
+  // A previous session still waiting for its last final is saved before its log is reset.
+  sessionEnd.flush();
+  const sessionId = await api.sessionStart(state.mode, deviceId);
+  state.sessionId = sessionId;
+  state.subtitles = emptySubtitles(sessionId);
+  state.exportLog = emptySubtitles(sessionId);
+  state.sessionStartedAt = new Date();
+  state.sessionMode = state.mode;
+  setSessionState("loading", false);
+  renderTranscript();
+  if (state.overlay && !state.overlay.visible) {
+    await setOverlayVisible(true);
+  }
+}
+
+/** The chosen ASR models the latest model list says are not downloaded. */
+function asrStartItems(): StartItemRequest[] {
+  if (!state.settings || !state.models) return [];
+  return missingModels(state.settings.asr, state.models.asr).map((m) => ({
+    kind: "asr",
+    model: m.id,
+    sizeBytes: m.size_bytes,
+  }));
+}
+
+// ---------------------------------------------------------------- downloads before starting
+
+const startFlow = new StartDownloads({
+  downloadAsr: (model) => api.modelsDownload(model),
+  pullTranslation: (model) => api.modelsPullTranslation(model),
+  start: async () => {
+    // Reported here; the flow only needs to know the round is over.
+    try {
+      await startSession();
+    } catch (e) {
+      reportError("error.start", e);
+    }
+    renderStatus();
+  },
+  errorCode: engineCode,
+  describe: describeError,
+  onChange: () => {
+    renderStartDownloads();
+    renderStatus();
+    renderTranslationGuide();
+    renderMissingNotice();
+  },
+});
+
+/** Approximate size of a translation preset (weights), for the progress before Ollama reports one. */
+function translationSize(model: string): number | null {
+  const gb = state.models?.translation.models.find((m) => m.name === model)?.approx_vram_gb;
+  return gb === undefined || gb === null ? null : Math.round(gb * 1e9);
+}
+
+function renderStartDownloads(): void {
+  const view = startDownloadsView(startFlow.state, state.settings?.translation.base_url ?? "");
+  el.startDownloads.hidden = view === null;
+  if (!view) return;
+  el.startDownloads.dataset.tone = view.tone;
+  replace(
+    el.startDownloadsItems,
+    ...view.items.map((item) =>
+      h(
+        "li",
+        { "data-tone": item.tone },
+        h("span", { class: "model-id" }, item.label),
+        item.percent === null ? h("span") : h("progress", { max: 100, value: item.percent, "aria-label": item.label }),
+        h("span", {}, item.text),
+      ),
+    ),
+  );
+  el.startDownloadsMessage.textContent = view.message;
+  el.startDownloadsRetry.hidden = !view.canRetry;
+  el.startDownloadsRetry.disabled = !engineReady();
+  el.startDownloadsCancel.hidden = !view.canCancel;
+}
+
 // ---------------------------------------------------------------- transcript
 
 const lineElements = new Map<number, HTMLLIElement>();
 
+function showsTranslation(): boolean {
+  return state.settings?.translation.enabled ?? true;
+}
+
+// Called for every row on every subtitle event (several per second): only values that
+// changed are written, or each redraw would replace hundreds of text nodes (renderer memory
+// grew ~8 MiB/min in the v0.2.0 GUI soak).
 function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
+  const shown = lineDisplay(line, showsTranslation());
   li.classList.toggle("is-partial", !line.isFinal);
+  li.classList.toggle("is-original-only", shown.originalOnly);
   const [time, lang, text] = li.children as unknown as [HTMLElement, HTMLElement, HTMLElement];
-  time.textContent = formatTimecode(line.startSample);
-  lang.textContent = languageShort(line.sourceLanguage);
-  lang.title = `${languageName(line.sourceLanguage)}譯成${languageName(line.targetLanguage)}`;
+  setIfChanged(time, "textContent", formatTimecode(line.startSample));
+  setIfChanged(lang, "textContent", languageShort(line.sourceLanguage));
+  setIfChanged(
+    lang,
+    "title",
+    t("transcript.langTitle", {
+      source: languageName(line.sourceLanguage),
+      target: languageName(line.targetLanguage),
+    }),
+  );
   const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
-  orig.textContent = line.original;
-  orig.lang = htmlLang(line.sourceLanguage);
-  tr.textContent = line.translation;
-  tr.lang = htmlLang(line.targetLanguage);
+  // Settled prefix at normal emphasis, the tail that may still change faded (F2).
+  const [stable, unstable] = orig.children as unknown as [HTMLElement, HTMLElement];
+  if (shown.originalRuby) {
+    // Furigana: rebuilt only when the words, readings or the cut changed (same reason as setIfChanged).
+    const key = rubyKey(shown.originalRuby);
+    if (stable.dataset.ruby !== key) {
+      replace(stable, ...segmentNodes(shown.originalRuby.stable));
+      replace(unstable, ...segmentNodes(shown.originalRuby.unstable));
+      stable.dataset.ruby = key;
+    }
+  } else {
+    if (stable.dataset.ruby !== undefined) {
+      // Was drawn with furigana: textContent below replaces the <ruby> children.
+      delete stable.dataset.ruby;
+      stable.textContent = null;
+      unstable.textContent = null;
+    }
+    setIfChanged(stable, "textContent", shown.originalParts.stable);
+    setIfChanged(unstable, "textContent", shown.originalParts.unstable);
+  }
+  setIfChanged(orig, "lang", htmlLang(line.sourceLanguage));
+  setIfChanged(tr, "textContent", shown.translation);
+  setIfChanged(tr, "lang", htmlLang(line.targetLanguage));
+  // Shown by CSS when the translation is empty (not translated yet, or failed).
+  const empty = line.isFinal ? t("transcript.noTranslation") : t("transcript.translating");
+  if (tr.dataset.empty !== empty) tr.dataset.empty = empty;
 }
 
 function newLineElement(): HTMLLIElement {
@@ -413,7 +956,14 @@ function newLineElement(): HTMLLIElement {
     { class: "utt" },
     h("span", { class: "utt-time" }),
     h("span", { class: "utt-lang" }),
-    h("div", { class: "utt-text" }, h("p", { class: "utt-orig" }), h("p", { class: "utt-tr" })),
+    // dir="auto": Arabic runs right to left, line by line.
+    // The two spans carry no dir of their own: the paragraph's direction orders them.
+    h(
+      "div",
+      { class: "utt-text" },
+      h("p", { class: "utt-orig", dir: "auto" }, h("span", { class: "utt-stable" }), h("span", { class: "utt-unstable" })),
+      h("p", { class: "utt-tr", dir: "auto" }),
+    ),
   );
 }
 
@@ -442,6 +992,128 @@ function renderTranscript(): void {
   }
   el.transcriptEmpty.hidden = state.subtitles.lines.length > 0;
   if (nearBottom && scroller) scroller.scrollTop = scroller.scrollHeight;
+  renderExport();
+}
+
+// ---------------------------------------------------------------- transcript export
+
+function exportFormatButtons(): HTMLButtonElement[] {
+  return Array.from(el.exportFormats.querySelectorAll<HTMLButtonElement>("button[data-format]"));
+}
+
+function renderExport(): void {
+  if (exportFormatButtons().length === 0) {
+    // Format names are file types, not interface text.
+    replace(
+      el.exportFormats,
+      ...EXPORT_FORMATS.map((format) => h("button", { type: "button", class: "ghost", "data-format": format }, format.toUpperCase())),
+    );
+    for (const button of exportFormatButtons()) {
+      button.addEventListener("click", () => void exportAs(button.dataset.format as ExportFormat));
+    }
+  }
+  const any = hasExportableLines(state.exportLog.lines);
+  for (const button of exportFormatButtons()) button.disabled = !any;
+  // Runs on every subtitle event (renderTranscript).
+  setIfChanged(el.exportHelp, "textContent", any ? t("export.help") : t("export.empty"));
+}
+
+function exportContent(): ExportContent {
+  const v = el.exportContent.value;
+  return (EXPORT_CONTENTS as readonly string[]).includes(v) ? (v as ExportContent) : "both";
+}
+
+/** What one export writes: taken at once, so a new session starting mid-save cannot mix in. */
+interface TranscriptSnapshot {
+  lines: readonly SubtitleLine[];
+  startedAt: Date;
+  mode: Mode;
+}
+
+function transcriptSnapshot(): TranscriptSnapshot {
+  return { lines: state.exportLog.lines, startedAt: state.sessionStartedAt ?? new Date(), mode: state.sessionMode };
+}
+
+/** Writes one format through Rust; resolves to the saved path. */
+async function saveTranscript(snap: TranscriptSnapshot, format: ExportFormat, content: ExportContent): Promise<string> {
+  const name = transcriptFileName(snap.startedAt, snap.mode, format);
+  return api.transcriptSave(name, exportTranscript(snap.lines, format, content));
+}
+
+function notifySaved(text: string): void {
+  notify(text, "info", [{ label: t("export.openFolder"), run: () => void openOutputFolder("transcripts") }], {
+    key: EXPORT_NOTICE,
+  });
+}
+
+async function exportAs(format: ExportFormat): Promise<void> {
+  if (!hasExportableLines(state.exportLog.lines)) return;
+  for (const button of exportFormatButtons()) button.disabled = true;
+  try {
+    const path = await saveTranscript(transcriptSnapshot(), format, exportContent());
+    el.exportMenu.open = false;
+    notifySaved(t("export.saved", { path }));
+  } catch (e) {
+    reportError("error.export", e);
+  } finally {
+    renderExport();
+  }
+}
+
+/** "每次結束時自動存檔": SRT and TXT (both languages) once per session. */
+async function autoSaveTranscript(): Promise<void> {
+  if (!state.settings?.ui.auto_save_transcripts || !hasExportableLines(state.exportLog.lines)) return;
+  const session = `${state.exportLog.sessionId ?? "-"}@${state.sessionStartedAt?.getTime() ?? 0}`;
+  if (state.autoSavedSession === session) return;
+  state.autoSavedSession = session;
+  const snap = transcriptSnapshot();
+  try {
+    const srt = await saveTranscript(snap, "srt", "both");
+    await saveTranscript(snap, "txt", "both");
+    notifySaved(t("export.savedAuto", { path: srt }));
+  } catch (e) {
+    reportError("error.autoSave", e);
+  }
+}
+
+async function openOutputFolder(folder: OutputFolder): Promise<void> {
+  try {
+    await api.openOutputFolder(folder);
+  } catch (e) {
+    reportError("error.openFolder", e);
+  }
+}
+
+function renderOutputPaths(): void {
+  const o = state.output;
+  el.transcriptsPath.textContent = o?.transcripts_dir
+    ? t("output.transcriptsPath", { path: o.transcripts_dir })
+    : o
+      ? t("output.noDocuments")
+      : "";
+  el.openTranscripts.hidden = !o?.transcripts_dir;
+  const obsFile = state.obs?.path ?? o?.obs_file ?? null;
+  const obsError = state.obs && state.obs.content !== "off" ? state.obs.error : null;
+  el.obsPath.textContent = obsError
+    ? t("output.obsError", { error: obsError })
+    : obsFile
+      ? t("output.obsPath", { path: obsFile })
+      : o
+        ? t("output.noDocuments")
+        : "";
+  el.obsPath.classList.toggle("warning", obsError !== null);
+  el.openObs.hidden = !obsFile;
+}
+
+/** Sends the saved OBS choice to Rust (engine start, settings saved). */
+async function pushObsOutput(): Promise<void> {
+  if (!state.settings) return;
+  try {
+    state.obs = await api.obsSetOutput(state.settings.obs_output);
+  } catch (e) {
+    reportError("error.applyObs", e);
+  }
+  renderOutputPaths();
 }
 
 // ---------------------------------------------------------------- overlay controls
@@ -454,131 +1126,417 @@ function renderOverlay(): void {
     el.shortcutNote.textContent = "";
     return;
   }
-  const keys = o.shortcut.replace("CommandOrControl", "Ctrl（macOS 為 ⌘）");
-  el.shortcutNote.textContent = o.shortcut_registered
-    ? `開啟滑鼠穿透後，點擊會穿過字幕視窗。按 ${keys} 可隨時切換。`
-    : `快速鍵 ${keys} 已被其他程式占用，請用這裡的開關切換滑鼠穿透。`;
+  const label = (raw: string) => raw.replace("CommandOrControl", t("transcript.shortcutCtrl"));
+  const keys = label(o.shortcut);
+  const lines = [o.shortcut_registered ? t("transcript.shortcutOn", { keys }) : t("transcript.shortcutTaken", { keys })];
+  for (const s of o.shortcuts) {
+    if (s.action === "click_through") continue;
+    const action = s.action === "toggle_translation" ? t("shortcut.toggleTranslation") : t("shortcut.clearSubtitles");
+    lines.push(
+      !s.registered
+        ? t("transcript.shortcutActionTaken", { keys: label(s.keys), action })
+        : s.action === "toggle_translation"
+          ? t("transcript.shortcutTranslation", { keys: label(s.keys) })
+          : t("transcript.shortcutClear", { keys: label(s.keys) }),
+    );
+  }
+  replace(el.shortcutNote, ...lines.flatMap((line, i) => (i === 0 ? [line] : [h("br"), line])));
+}
+
+/** A global shortcut handled here (Rust forwards it; see lib.rs `run_shortcut`). */
+function onShortcut(action: ShortcutAction): void {
+  if (action !== "toggle_translation") return;
+  // Same rules as the switches: not while the engine is down or a switch is in flight.
+  if (!engineReady() || state.translationBusy || !state.settings) return;
+  void changeShowTranslation(!showsTranslation());
 }
 
 async function setOverlayVisible(visible: boolean): Promise<void> {
   try {
     state.overlay = await api.overlaySetVisible(visible);
   } catch (e) {
-    reportError(visible ? "無法顯示字幕視窗" : "無法隱藏字幕視窗", e);
+    reportError(visible ? "error.showOverlay" : "error.hideOverlay", e);
   }
   renderOverlay();
 }
 
+// ---------------------------------------------------------------- "顯示翻譯"
+
+function renderTranslationSwitches(): void {
+  const on = showsTranslation();
+  for (const input of [el.showTranslation, el.settingsShowTranslation]) {
+    input.checked = on;
+    input.disabled = state.translationBusy || !engineReady();
+  }
+}
+
+/**
+ * Both switches (subtitle log and settings page) change `translation.enabled`;
+ * a running session switches at once (lib/translation-toggle.ts).
+ */
+async function changeShowTranslation(enabled: boolean): Promise<void> {
+  state.translationBusy = true;
+  renderTranslationSwitches();
+  try {
+    const result = await setShowTranslation(enabled, state.sessionState, {
+      sessionSetTranslation: (on) => api.sessionSetTranslation(on),
+      settingsSet: (patch) => api.settingsSet(patch),
+      overlaySetShowTranslation: (on) => api.overlaySetShowTranslation(on),
+    });
+    adoptSettings(result.settings.settings, result.settings.revision);
+    if (result.overlay) state.overlay = result.overlay;
+    else reportError("error.setTranslation", result.overlayError);
+    renderTranscript();
+    renderModeNotes();
+    renderTranslationGuide();
+    // The preview says whether a translation model is needed at all.
+    scheduleLanguagePreview(0);
+  } catch (e) {
+    reportError("error.setTranslation", e);
+  } finally {
+    state.translationBusy = false;
+    renderTranslationSwitches();
+  }
+}
+
+/** Sends the saved "顯示翻譯" to the overlay (engine start, reconnect). */
+async function pushOverlayShowTranslation(): Promise<void> {
+  if (!state.settings) return;
+  try {
+    state.overlay = await api.overlaySetShowTranslation(state.settings.translation.enabled);
+  } catch (e) {
+    reportError("error.setTranslation", e);
+  }
+}
+
+// ---------------------------------------------------------------- furigana (settings + models page)
+
+function statusText(line: StatusLine): string {
+  return t(line.key, line.params);
+}
+
+/** The settings-page switch and its status line (download progress, errors). */
+function renderFuriganaSwitch(): void {
+  const view = furiganaSwitchView({
+    enabled: state.settings?.furigana.enabled ?? false,
+    dictionary: state.models?.furigana ?? null,
+    modelsLoaded: state.models !== null,
+    download: state.furiganaDownload,
+    pendingEnable: state.furiganaPendingEnable,
+    busy: state.furiganaBusy,
+    engineReady: engineReady(),
+  });
+  el.furiganaSwitch.checked = view.checked;
+  el.furiganaSwitch.disabled = view.disabled;
+  const size = state.models?.furigana?.download_bytes ?? null;
+  setIfChanged(el.furiganaHelp, "textContent", t("settings.furiganaHelp", { size: formatBytes(size) }));
+  if (!view.status) {
+    replace(el.furiganaStatus);
+    el.furiganaStatus.hidden = true;
+    return;
+  }
+  el.furiganaStatus.hidden = false;
+  el.furiganaStatus.classList.toggle("field-error", view.status.error);
+  replace(
+    el.furiganaStatus,
+    view.percent === null
+      ? null
+      : h("progress", { max: 100, value: view.percent, "aria-label": t("furigana.progressLabel") }),
+    h("span", {}, statusText(view.status)),
+  );
+}
+
+/** Models page: version, disk use, license and Delete with an in-page confirmation. */
+function renderFuriganaBlock(): void {
+  const dictionary = state.models?.furigana ?? null;
+  const section = el.furiganaBlock.closest("section");
+  if (section) section.hidden = state.models !== null && dictionary === null;
+  if (!dictionary) {
+    replace(el.furiganaBlock, h("p", { class: "rail-hint" }, t("common.loading")));
+    return;
+  }
+  const view = furiganaBlockView(dictionary, {
+    downloading: state.furiganaDownload?.state === "downloading",
+    deleting: state.furiganaDeleting,
+    engineReady: engineReady(),
+  });
+  const lines = view.lines.map((line) => h("p", { class: "gpu-state" }, statusText(line)));
+  const deletable = view.deletable;
+  if (!deletable) {
+    replace(el.furiganaBlock, ...lines);
+    return;
+  }
+  if (state.furiganaConfirmDelete && !deletable.enabled) state.furiganaConfirmDelete = false;
+  if (state.furiganaConfirmDelete) {
+    const yes = h("button", { type: "button", class: "danger" }, t("asr.deleteYes"));
+    yes.addEventListener("click", () => void deleteFuriganaDictionary());
+    const no = h("button", { type: "button", class: "ghost" }, t("asr.deleteNo"));
+    no.addEventListener("click", () => {
+      state.furiganaConfirmDelete = false;
+      renderFuriganaBlock();
+    });
+    const size = formatBytes(dictionary.disk_bytes ?? dictionary.installed_bytes);
+    replace(
+      el.furiganaBlock,
+      ...lines,
+      h(
+        "div",
+        { class: "delete-confirm", role: "group" },
+        h("p", {}, t("furigana.deleteConfirm", { size })),
+        h("div", { class: "gpu-actions" }, yes, no),
+      ),
+    );
+    return;
+  }
+  const del = h(
+    "button",
+    { type: "button", class: "ghost", title: deletable.reason ? statusText(deletable.reason) : null },
+    state.furiganaDeleting ? t("asr.deleting") : t("furigana.delete"),
+  );
+  del.disabled = !deletable.enabled;
+  del.addEventListener("click", () => {
+    state.furiganaConfirmDelete = true;
+    renderFuriganaBlock();
+    // Keyboard users land on the safe choice (only when it opens, not on every redraw).
+    el.furiganaBlock.querySelector<HTMLButtonElement>(".delete-confirm .ghost")?.focus();
+  });
+  replace(
+    el.furiganaBlock,
+    ...lines,
+    deletable.reason ? h("p", { class: "gpu-state" }, statusText(deletable.reason)) : null,
+    h("div", { class: "gpu-actions" }, del),
+  );
+}
+
+function renderFurigana(): void {
+  renderFuriganaSwitch();
+  renderFuriganaBlock();
+}
+
+/** Re-reads `models.list` (the dictionary's state lives there). */
+async function refreshFuriganaState(): Promise<void> {
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("error.readModels", e);
+  }
+  renderModels();
+}
+
+/** `session.set_furigana`; the running session switches at once. */
+async function setFurigana(enabled: boolean): Promise<void> {
+  state.furiganaBusy = true;
+  renderFuriganaSwitch();
+  try {
+    const result = await api.sessionSetFurigana(enabled);
+    adoptSettings(result.settings, result.revision);
+  } catch (e) {
+    reportError("error.setFurigana", e);
+    if (engineCode(e) === "model_not_downloaded") void refreshFuriganaState();
+  } finally {
+    state.furiganaBusy = false;
+    renderFuriganaSwitch();
+  }
+}
+
+/** The settings switch: turning it on downloads the dictionary first when it is missing. */
+async function changeFurigana(enabled: boolean): Promise<void> {
+  if (!enabled) {
+    state.furiganaPendingEnable = false;
+    await setFurigana(false);
+    return;
+  }
+  const action = furiganaEnableAction(state.models?.furigana ?? null);
+  if (action === "enable") {
+    await setFurigana(true);
+    return;
+  }
+  if (action === "unsupported") {
+    renderFuriganaSwitch();
+    return;
+  }
+  state.furiganaPendingEnable = true;
+  state.furiganaDownload = {
+    model: FURIGANA_DICTIONARY_ID,
+    kind: "furigana",
+    downloaded_bytes: 0,
+    total_bytes: state.models?.furigana?.download_bytes ?? 0,
+    state: "downloading",
+    error: null,
+  };
+  renderFurigana();
+  try {
+    await api.modelsDownload(FURIGANA_DICTIONARY_ID);
+  } catch (e) {
+    if (engineCode(e) === "download_in_progress") return; // progress events follow
+    state.furiganaPendingEnable = false;
+    state.furiganaDownload = null;
+    reportError("error.setFurigana", e);
+    renderFurigana();
+  }
+}
+
+/** `download_progress` of the dictionary: progress, then furigana on (if asked) or the error. */
+function onFuriganaDownload(p: DownloadProgressEvent): void {
+  state.furiganaDownload = p.state === "done" ? null : p;
+  const next = afterFuriganaDownload(p, state.furiganaPendingEnable);
+  if (p.state !== "downloading") state.furiganaPendingEnable = false;
+  if (next === "failed") {
+    notify(t("furigana.downloadFailed", { error: p.error ?? t("common.unknownReason") }), "bad");
+  }
+  if (p.state === "done") {
+    void refreshFuriganaState().then(async () => {
+      if (next !== "enable") return;
+      await setFurigana(true);
+      if (state.settings?.furigana.enabled) notify(t("furigana.ready"), "info", [], { autoDismiss: true });
+    });
+  }
+  renderFurigana();
+}
+
+/** `models.delete` of the dictionary after the user confirmed. */
+async function deleteFuriganaDictionary(): Promise<void> {
+  state.furiganaConfirmDelete = false;
+  state.furiganaDeleting = true;
+  renderFuriganaBlock();
+  try {
+    const result = await api.modelsDelete(FURIGANA_DICTIONARY_ID);
+    notify(t("furigana.deleted", { size: formatBytes(result.freed_bytes) }), "info", [], { autoDismiss: true });
+  } catch (e) {
+    reportError("error.deleteFurigana", e);
+  } finally {
+    state.furiganaDeleting = false;
+  }
+  await refreshFuriganaState();
+}
+
 // ---------------------------------------------------------------- models page: hardware
 
-const CUBLAS_SOURCE: Record<string, string> = {
-  runtime: "kikitori 下載的 GPU 加速元件",
-  configured: "自訂組合指定的資料夾",
-  system: "系統安裝的 CUDA",
+const CUBLAS_SOURCE: Readonly<Record<string, StringKey>> = {
+  runtime: "hw.cublasSource.runtime",
+  configured: "hw.cublasSource.configured",
+  system: "hw.cublasSource.system",
 };
+
+/** "text（note）" in the interface language's punctuation. */
+function withNote(text: string, note: string): string {
+  return t("common.parenthetical", { text, note });
+}
 
 function renderHardware(): void {
   const hw = state.hardware;
   if (!hw) {
-    replace(el.hardware, h("dt", {}, "狀態"), h("dd", {}, "偵測中"));
+    replace(el.hardware, h("dt", {}, t("hw.status")), h("dd", {}, t("hw.detecting")));
     el.hardwareErrors.hidden = true;
-    replace(el.recommendation, h("p", { class: "block-lede" }, "偵測完成後會在這裡列出建議。"));
+    replace(el.recommendation, h("p", { class: "block-lede" }, t("rec.pending")));
     return;
   }
   const x = hw.hardware;
   const cores =
     x.cpu.physical_cores && x.cpu.logical_cores
-      ? `${x.cpu.physical_cores} 核心、${x.cpu.logical_cores} 執行緒`
+      ? t("hw.cores", { physical: x.cpu.physical_cores, logical: x.cpu.logical_cores })
       : x.cpu_count
-        ? `${x.cpu_count} 個執行緒`
-        : "核心數未知";
+        ? tp("hw.threads", x.cpu_count)
+        : t("hw.coresUnknown");
   const gpus = x.apple_silicon
-    ? "Apple Silicon（與處理器共用記憶體）"
+    ? t("hw.appleSilicon")
     : x.gpus.length
-      ? x.gpus
-          .map((g) => {
+      ? joinList(
+          x.gpus.map((g) => {
             const extra = [
-              `顯示記憶體 ${formatMiB(g.memory_total_mb)}`,
-              g.driver_version ? `驅動 ${g.driver_version}` : null,
-              g.compute_capability ? `運算能力 ${g.compute_capability}` : null,
-            ].filter(Boolean);
-            return `${g.name}（${extra.join("，")}）`;
-          })
-          .join("、")
-      : "沒有偵測到 NVIDIA 顯示卡";
+              t("hw.gpuVram", { size: formatMiB(g.memory_total_mb) }),
+              g.driver_version ? t("hw.gpuDriver", { version: g.driver_version }) : null,
+              g.compute_capability ? t("hw.gpuCompute", { capability: g.compute_capability }) : null,
+            ].filter((s): s is string => s !== null);
+            return withNote(g.name, extra.join(t("common.clauseSeparator")));
+          }),
+        )
+      : t("hw.noNvidia");
+  const cublasSource = CUBLAS_SOURCE[x.cublas.source ?? ""];
   const cublas = !x.cublas.supported_platform
-    ? "這個平台不使用"
+    ? t("hw.cublasNotUsed")
     : x.cublas.available
-      ? `可以使用（${CUBLAS_SOURCE[x.cublas.source ?? ""] ?? x.cublas.source ?? "來源不明"}）`
-      : "未安裝";
+      ? t("hw.cublasAvailable", {
+          source: cublasSource ? t(cublasSource) : (x.cublas.source ?? t("hw.cublasSourceUnknown")),
+        })
+      : t("hw.cublasMissing");
   const ts = x.translation_server;
   const server = !ts
-    ? "未偵測"
+    ? t("hw.serverNotDetected")
     : ts.reachable
-      ? `${ts.base_url}（${ts.is_local ? "本機" : "遠端"}，${ts.models === null ? "模型清單未知" : `${ts.models.length} 個模型`}）`
-      : `${ts.base_url}（無法連線${ts.error ? `：${ts.error}` : ""}）`;
+      ? t("hw.serverReachable", {
+          url: ts.base_url,
+          where: ts.is_local ? t("hw.serverLocal") : t("hw.serverRemote"),
+          models: ts.models === null ? t("hw.serverModelsUnknown") : tp("hw.serverModelCount", ts.models.length),
+        })
+      : ts.error
+        ? t("hw.serverUnreachableError", { url: ts.base_url, error: ts.error })
+        : t("hw.serverUnreachable", { url: ts.base_url });
   const memory =
     x.memory.total_bytes === null
-      ? "未知"
+      ? t("common.unknown")
       : x.memory.available_bytes === null
         ? formatBytes(x.memory.total_bytes)
-        : `${formatBytes(x.memory.total_bytes)}（目前可用 ${formatBytes(x.memory.available_bytes)}）`;
+        : t("hw.memoryAvailable", {
+            total: formatBytes(x.memory.total_bytes),
+            available: formatBytes(x.memory.available_bytes),
+          });
   replace(
     el.hardware,
-    h("dt", {}, "作業系統"),
+    h("dt", {}, t("hw.os")),
     h("dd", {}, x.os_version.startsWith(osName(x.os)) ? x.os_version : `${osName(x.os)} ${x.os_version}`.trim()),
-    h("dt", {}, "處理器"),
-    h("dd", {}, `${x.cpu.model ?? x.machine ?? "未知"}，${cores}`),
-    h("dt", {}, "記憶體"),
+    h("dt", {}, t("hw.cpu")),
+    h("dd", {}, t("hw.cpuValue", { model: x.cpu.model ?? x.machine ?? t("common.unknown"), cores })),
+    h("dt", {}, t("hw.memory")),
     h("dd", {}, memory),
-    h("dt", {}, "顯示卡"),
+    h("dt", {}, t("hw.gpu")),
     h("dd", {}, gpus),
-    h("dt", {}, "cuBLAS（GPU 辨識）"),
+    h("dt", {}, t("hw.cublas")),
     h("dd", {}, cublas),
-    h("dt", {}, "翻譯服務"),
+    h("dt", {}, t("hw.server")),
     h("dd", {}, server),
   );
   el.hardwareErrors.hidden = x.errors.length === 0;
-  replace(el.hardwareErrors, ...x.errors.map((e) => h("li", { class: "warning" }, `偵測不完整：${e}`)));
+  replace(el.hardwareErrors, ...x.errors.map((e) => h("li", { class: "warning" }, t("hw.incomplete", { error: e }))));
   renderRecommendation();
 }
 
 function describeChoice(c: AsrChoice): string {
   const parts = [deviceLabel(c.device), computeTypeLabel(c.compute_type)];
   if (c.device !== "cuda") parts.push(threadsLabel(c.cpu_threads));
-  return `${c.model}（${parts.join("，")}）`;
+  return withNote(c.model, parts.join(t("common.clauseSeparator")));
 }
 
 function renderRecommendation(): void {
   const rec = state.hardware?.recommendation;
   if (!rec) return;
-  const notLocal = "無法推薦（翻譯服務不在本機），請在自訂組合選擇";
+  const notLocal = t("rec.notLocal");
   const dl = h(
     "dl",
     { class: "facts" },
-    h("dt", {}, "硬體等級"),
+    h("dt", {}, t("rec.tier")),
     h("dd", {}, tierLabel(rec.tier)),
-    h("dt", {}, "即時字幕的辨識"),
+    h("dt", {}, t("rec.fastAsr")),
     h("dd", {}, describeChoice(rec.fast_asr)),
-    h("dt", {}, "完整翻譯的辨識"),
+    h("dt", {}, t("rec.finalAsr")),
     h("dd", {}, describeChoice(rec.final_asr)),
-    h("dt", {}, "即時字幕的翻譯"),
+    h("dt", {}, t("rec.fastTranslation")),
     h("dd", {}, rec.translation_fast ?? notLocal),
-    h("dt", {}, "完整翻譯的翻譯"),
+    h("dt", {}, t("rec.finalTranslation")),
     h("dd", {}, rec.translation_final ?? notLocal),
-    rec.translation_budget_gb === null ? null : h("dt", {}, "可給翻譯模型的記憶體"),
-    rec.translation_budget_gb === null ? null : h("dd", {}, `約 ${rec.translation_budget_gb.toFixed(1)} GB`),
+    rec.translation_budget_gb === null ? null : h("dt", {}, t("rec.budget")),
+    rec.translation_budget_gb === null
+      ? null
+      : h("dd", {}, t("common.approxGb", { gb: rec.translation_budget_gb.toFixed(1) })),
   );
   const notes = h(
     "ul",
     { class: "notes" },
-    ...rec.reasons.map((r) => h("li", {}, r)),
-    ...rec.warnings.map((w) => h("li", { class: "warning" }, w)),
-    rec.gpu_runtime_missing
-      ? h("li", {}, "下載下方的「GPU 加速元件」後，建議組合會改用顯示卡。")
-      : null,
+    ...rec.reasons.map((r) => h("li", {}, formatEngineMessage(r))),
+    ...rec.warnings.map((w) => h("li", { class: "warning" }, formatEngineMessage(w))),
+    rec.gpu_runtime_missing ? h("li", {}, t("rec.gpuRuntimeMissing")) : null,
   );
-  const apply = h("button", { type: "button", class: "primary", id: "apply-recommendation" }, "套用建議組合");
+  const apply = h("button", { type: "button", class: "primary", id: "apply-recommendation" }, t("rec.apply"));
   apply.disabled = !engineReady();
   apply.addEventListener("click", () => void applyRecommendation(apply));
   replace(
@@ -589,7 +1547,7 @@ function renderRecommendation(): void {
       "div",
       { class: "form-actions" },
       apply,
-      h("span", { class: "form-status" }, "會寫入辨識模型、運算裝置、精度、執行緒與翻譯模型。"),
+      h("span", { class: "form-status" }, t("rec.applyNote")),
     ),
   );
 }
@@ -601,12 +1559,15 @@ async function applyRecommendation(button: HTMLButtonElement | null): Promise<vo
     showAppliedSettings(result, true);
     const r = result.recommendation;
     notify(
-      `已套用建議組合：即時字幕 ${r.fast_asr.model}、完整翻譯 ${r.final_asr.model}（${deviceLabel(r.fast_asr.device)}）。` +
-        (sessionActive() ? "下一次開始時生效。" : ""),
+      t(sessionActive() ? "rec.appliedWhileRunning" : "rec.applied", {
+        fast: r.fast_asr.model,
+        final: r.final_asr.model,
+        device: deviceLabel(r.fast_asr.device),
+      }),
     );
     await offerMissingModels();
   } catch (e) {
-    reportError("無法套用建議組合", e);
+    reportError("error.applyRecommendation", e);
   } finally {
     if (button) button.disabled = !engineReady();
   }
@@ -618,13 +1579,13 @@ async function applyRecommendation(button: HTMLButtonElement | null): Promise<vo
  * "套用", not for the automatic first-run apply.
  */
 function showAppliedSettings(result: AppliedRecommendation, force: boolean): void {
-  state.settings = result.settings;
+  const settings = adoptSettings(result.settings, result.revision);
   if (state.hardware) state.hardware = { ...state.hardware, recommendation: result.recommendation };
   if (result.warnings.length) console.warn("settings fields replaced by defaults:", result.warnings);
   // The saved settings now equal the recommendation: drop the offer, and any
   // preview still in flight (computed against the old settings).
   forgetPreview();
-  fillCombo(result.settings, force);
+  fillCombo(settings, force);
   renderHardware();
   renderModels();
   scheduleCheck(0);
@@ -651,7 +1612,7 @@ function forgetPreview(): void {
  */
 async function firstRunFlow(): Promise<void> {
   state.firstRunActive = true;
-  const reviewAction = { label: "到「模型」頁查看或修改", run: () => showPage("models") };
+  const reviewAction = { label: t("firstRun.review"), run: () => showPage("models") };
   try {
     const outcome = await runFirstRun(
       {
@@ -688,12 +1649,11 @@ async function firstRunFlow(): Promise<void> {
 /** Re-reads the saved settings into the UI (form edits are kept). */
 async function reloadSettings(): Promise<void> {
   try {
-    const { settings } = await api.settingsGet();
-    state.settings = settings;
-    fillCombo(settings);
+    const { settings, revision } = await api.settingsGet();
+    fillCombo(adoptSettings(settings, revision));
     renderModels();
   } catch (e) {
-    reportError("無法讀取設定", e);
+    reportError("error.readSettings", e);
   }
 }
 
@@ -730,8 +1690,8 @@ function renderOffer(): void {
     offerText(preview),
     "update",
     [
-      { label: "套用", run: () => void applyRecommendation(null) },
-      { label: "不要再提醒", run: () => void dismissOffer(preview.fingerprint) },
+      { label: t("offer.apply"), run: () => void applyRecommendation(null) },
+      { label: t("offer.dismiss"), run: () => void dismissOffer(preview.fingerprint) },
     ],
     { key: OFFER_NOTICE, onClose: () => state.closedOffers.add(preview.fingerprint) },
   );
@@ -744,10 +1704,10 @@ async function dismissOffer(fingerprint: string): Promise<void> {
   state.closedOffers.add(fingerprint);
   const current = state.settings?.ui.dismissed_recommendations ?? [];
   try {
-    const { settings } = await api.settingsSet({ ui: { dismissed_recommendations: dismissedWith(current, fingerprint) } });
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet({ ui: { dismissed_recommendations: dismissedWith(current, fingerprint) } });
+    adoptSettings(settings, revision);
   } catch (e) {
-    reportError("無法記住「不要再提醒」", e);
+    reportError("error.saveDismissal", e);
   }
 }
 
@@ -761,7 +1721,7 @@ async function offerMissingModels(): Promise<boolean> {
   try {
     state.models = await api.modelsList();
   } catch (e) {
-    reportError("無法讀取模型清單", e);
+    reportError("error.readModels", e);
     return false;
   }
   renderModels();
@@ -773,9 +1733,39 @@ async function offerMissingModels(): Promise<boolean> {
   return missing.length > 0;
 }
 
+/**
+ * `session.start` reported `model_not_downloaded`: download the chosen ASR
+ * models that are missing and start again. Returns whether any were found.
+ */
+async function downloadMissingThenStart(): Promise<boolean> {
+  if (!state.settings || !engineReady()) return false;
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("error.readModels", e);
+    return false;
+  }
+  renderModels();
+  const items = asrStartItems();
+  if (items.length) startFlow.begin(items);
+  return items.length > 0;
+}
+
+/** The start panel showed the missing models' downloads when the notice was last rendered. */
+let missingInStartPanel = false;
+
 function renderMissingNotice(): void {
   if (!state.missing) return;
   const view = missingModelsView(state.missing, state.models?.asr ?? null, state.downloads);
+  const inPanel = missingShownByStartPanel(state.missing, (id) => startFlow.tracks("asr", id));
+  const mode = missingNoticeMode(view.state, inPanel, missingInStartPanel);
+  missingInStartPanel = inPanel;
+  if (mode !== "notice") {
+    // One progress display is enough: the start panel's (lib/recommend.ts missingNoticeMode).
+    noticeFor(MISSING_NOTICE)?.remove();
+    if (mode === "forget") state.missing = null;
+    return;
+  }
   const shown = noticeFor(MISSING_NOTICE);
   if (shown?.dataset.state === view.state) {
     // Progress updates only change the text; keep the buttons (and focus) in place.
@@ -786,8 +1776,8 @@ function renderMissingNotice(): void {
     return;
   }
   const actions: NoticeAction[] = [];
-  if (view.state === "offer") actions.push({ label: "下載缺少的模型", run: downloadMissingModels });
-  if (view.state === "failed") actions.push({ label: "重新下載", run: downloadMissingModels });
+  if (view.state === "offer") actions.push({ label: t("missing.download"), run: downloadMissingModels });
+  if (view.state === "failed") actions.push({ label: t("common.redownload"), run: downloadMissingModels });
   const notice = notify(view.text, view.state === "failed" ? "bad" : "update", actions, {
     key: MISSING_NOTICE,
     onClose: () => {
@@ -812,17 +1802,13 @@ function downloadMissingModels(): void {
 function renderGpuRuntime(): void {
   const rt = state.models?.gpu_runtime;
   if (!rt) {
-    replace(el.gpuRuntime, h("p", { class: "gpu-state rail-hint" }, "讀取中"));
+    replace(el.gpuRuntime, h("p", { class: "gpu-state rail-hint" }, t("common.loading")));
     return;
   }
   if (!rt.supported) {
     replace(
       el.gpuRuntime,
-      h(
-        "p",
-        { class: "gpu-state" },
-        "這台電腦的平台用不到這個元件：GPU 加速只支援 Windows 與 Linux 的 x86-64 搭配 NVIDIA 顯示卡，其他平台一律用 CPU 辨識。",
-      ),
+      h("p", { class: "gpu-state" }, t("gpu.unsupported")),
     );
     return;
   }
@@ -835,13 +1821,17 @@ function renderGpuRuntime(): void {
       h(
         "div",
         { class: "progress" },
-        h("progress", { max: 100, value: pct, "aria-label": "GPU 加速元件下載進度" }),
+        h("progress", { max: 100, value: pct, "aria-label": t("gpu.progressLabel") }),
         h(
           "span",
           {},
           finishing
-            ? "下載完成，正在驗證與解壓（約數秒）"
-            : `${pct}%，${formatBytes(progress.downloaded_bytes)}／${formatBytes(progress.total_bytes)}`,
+            ? t("gpu.finishing")
+            : t("gpu.progress", {
+                percent: pct,
+                done: formatBytes(progress.downloaded_bytes),
+                total: formatBytes(progress.total_bytes),
+              }),
         ),
       ),
     );
@@ -851,28 +1841,26 @@ function renderGpuRuntime(): void {
     const what = [rt.package ?? "cuBLAS", rt.version].filter(Boolean).join(" ");
     replace(
       el.gpuRuntime,
-      h("p", { class: "gpu-state" }, `已安裝 ${what}${rt.path ? `，位置 ${rt.path}` : ""}。`),
-      rt.cublas_available
-        ? null
-        : h("p", { class: "gpu-state warning" }, "已安裝但目前偵測不到可用的 cuBLAS。請重新啟動引擎後再按「重新偵測」。"),
+      h("p", { class: "gpu-state" }, rt.path ? t("gpu.installedAt", { what, path: rt.path }) : t("gpu.installed", { what })),
+      rt.cublas_available ? null : h("p", { class: "gpu-state warning" }, t("gpu.noCublas")),
     );
     return;
   }
 
   const hw = state.hardware;
-  const size = rt.download_bytes ? `約 ${formatBytes(rt.download_bytes)}` : "數百 MB";
+  const size = rt.download_bytes ? t("gpu.sizeApprox", { size: formatBytes(rt.download_bytes) }) : t("gpu.sizeUnknown");
   const pkg = [rt.package ?? "nvidia-cublas-cu12", rt.version].filter(Boolean).join(" ");
   const situation = hw?.recommendation.gpu_runtime_missing
-    ? "這台電腦的 NVIDIA 顯示卡可以加速辨識，但缺少這個元件，目前改用 CPU。"
+    ? t("gpu.situationMissing")
     : hw && hw.hardware.gpus.length === 0
-      ? "沒有偵測到 NVIDIA 顯示卡；沒有顯示卡時不需要下載。"
+      ? t("gpu.situationNoGpu")
       : null;
   const licenseName = rt.license ?? "NVIDIA CUDA EULA";
-  const read = h("button", { type: "button", class: "ghost" }, "閱讀授權條款");
+  const read = h("button", { type: "button", class: "ghost" }, t("gpu.readLicense"));
   read.addEventListener("click", () => void openEula());
   const consent = h("input", { type: "checkbox", id: "gpu-eula-consent" });
   consent.checked = state.gpuLicenseAccepted;
-  const download = h("button", { type: "button", class: "primary" }, "下載 GPU 加速元件");
+  const download = h("button", { type: "button", class: "primary" }, t("gpu.download"));
   download.disabled = !state.gpuLicenseAccepted || !engineReady();
   consent.addEventListener("change", () => {
     state.gpuLicenseAccepted = consent.checked;
@@ -882,21 +1870,12 @@ function renderGpuRuntime(): void {
   replace(
     el.gpuRuntime,
     situation ? h("p", { class: "gpu-state" }, situation) : null,
-    h(
-      "p",
-      { class: "gpu-state" },
-      `這會從 PyPI 下載 NVIDIA cuBLAS（${pkg}，${size}），使用即表示同意 NVIDIA CUDA EULA（${licenseName}）。`,
-    ),
+    h("p", { class: "gpu-state" }, t("gpu.consentNotice", { package: pkg, size, license: licenseName })),
     rt.license_url ? h("p", { class: "gpu-state eula-url url" }, rt.license_url) : null,
     progress?.state === "error"
-      ? h("p", { class: "field-error" }, `上次下載失敗：${progress.error ?? "未知原因"}`)
+      ? h("p", { class: "field-error" }, t("gpu.lastFailed", { error: progress.error ?? t("common.unknownReason") }))
       : null,
-    h(
-      "label",
-      { class: "consent", for: "gpu-eula-consent" },
-      consent,
-      h("span", {}, "我同意 NVIDIA CUDA EULA"),
-    ),
+    h("label", { class: "consent", for: "gpu-eula-consent" }, consent, h("span", {}, t("gpu.agree"))),
     h("div", { class: "gpu-actions" }, download, canOpenLicenseUrl(rt.license_url) ? read : null),
   );
 }
@@ -905,7 +1884,7 @@ async function openEula(): Promise<void> {
   try {
     await api.openNvidiaEula();
   } catch (e) {
-    reportError("無法開啟授權條款，請複製網址到瀏覽器開啟", e);
+    reportError("error.openEula", e);
   }
 }
 
@@ -913,7 +1892,7 @@ async function downloadGpuRuntime(): Promise<void> {
   // The engine refuses without the flag too; this keeps the button honest.
   if (!state.gpuLicenseAccepted) return;
   const id = state.models?.gpu_runtime.id ?? GPU_RUNTIME_ID;
-  state.downloads.set(id, { model: id, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
+  state.downloads.set(id, { model: id, kind: null, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
   // Agreement is per download: a later retry asks again.
   state.gpuLicenseAccepted = false;
   renderGpuRuntime();
@@ -927,7 +1906,7 @@ async function downloadGpuRuntime(): Promise<void> {
       return;
     }
     state.downloads.delete(id);
-    reportError("無法下載 GPU 加速元件", e);
+    reportError("error.downloadGpuRuntime", e);
     if (code === "gpu_runtime_unsupported") void loadModels();
     renderGpuRuntime();
   }
@@ -939,66 +1918,146 @@ function onGpuRuntimeInstalled(): void {
     (d) => d.state === "downloading" && d.model !== GPU_RUNTIME_ID,
   ).length;
   if (afterGpuRuntimeInstalled(sessionActive(), others) === "restart") {
-    notify("GPU 加速元件已安裝。正在重新啟動引擎以啟用 GPU。");
+    notify(t("gpu.installedRestarting"));
     void restartEngine();
     return;
   }
-  notify(
-    "GPU 加速元件已安裝。目前有工作在進行，所以沒有自動重新啟動引擎；完成後請重新啟動引擎，才會使用 GPU。",
-    "update",
-    [{ label: "重新啟動引擎", run: () => void restartEngine() }],
-  );
+  notify(t("gpu.installedBusy"), "update", [{ label: t("engine.restart"), run: () => void restartEngine() }]);
   void loadModels();
 }
 
 // ---------------------------------------------------------------- models page: lists
 
-function downloadCell(model: { id: string; downloaded: boolean }): HTMLElement {
+/** "Downloaded", the space it takes, and Delete with an in-page confirmation (F7). */
+function downloadedCell(model: AsrModel): HTMLElement {
+  const offer = deleteOffer(model, {
+    fastModel: state.settings?.asr.fast_model ?? null,
+    finalModel: state.settings?.asr.final_model ?? null,
+    sessionActive: sessionActive(),
+    downloading: state.downloads.get(model.id)?.state === "downloading",
+    deleting: state.deleting.has(model.id),
+    engineReady: engineReady(),
+  });
+  const wrap = h(
+    "div",
+    { class: "model-state" },
+    h("span", { class: "ok" }, t("asr.downloaded")),
+    model.disk_bytes === null ? null : h("span", { class: "model-disk" }, t("asr.diskUse", { size: formatBytes(model.disk_bytes) })),
+  );
+  if (!offer) return wrap;
+  // A confirmation interrupted by a block (session start, engine restart) is dropped,
+  // so it never reappears without a click.
+  if (state.confirmDelete === model.id && offer.blocked !== null) state.confirmDelete = null;
+  if (state.confirmDelete === model.id) {
+    const yes = h("button", { type: "button", class: "danger" }, t("asr.deleteYes"));
+    yes.addEventListener("click", () => void deleteModel(model));
+    const no = h("button", { type: "button", class: "ghost" }, t("asr.deleteNo"));
+    no.addEventListener("click", () => {
+      state.confirmDelete = null;
+      renderModels();
+    });
+    wrap.append(
+      h("div", { class: "delete-confirm", role: "group" }, h("p", {}, deleteConfirmText(model, offer)), h("div", { class: "gpu-actions" }, yes, no)),
+    );
+    return wrap;
+  }
+  const del = h(
+    "button",
+    { type: "button", class: "ghost", title: offer.blocked ? deleteBlockedText(offer.blocked) : null },
+    offer.blocked === "deleting" ? t("asr.deleting") : t("asr.delete"),
+  );
+  del.disabled = offer.blocked !== null;
+  del.addEventListener("click", () => {
+    state.confirmDelete = model.id;
+    renderModels();
+    // Keyboard users land on the safe choice (only when it opens, not on every redraw).
+    el.asrModels.querySelector<HTMLButtonElement>(".delete-confirm .ghost")?.focus();
+  });
+  wrap.append(del);
+  return wrap;
+}
+
+/** `models.delete` after the user confirmed; the list is reloaded either way. */
+async function deleteModel(model: AsrModel): Promise<void> {
+  state.confirmDelete = null;
+  state.deleting.add(model.id);
+  renderModels();
+  try {
+    const result = await api.modelsDelete(model.id);
+    notify(t("asr.deleted", { model: result.model, size: formatBytes(result.freed_bytes) }), "info", [], { autoDismiss: true });
+  } catch (e) {
+    // model_not_downloaded / model_in_use / unknown_model have their own sentences;
+    // the reload below shows the list as the engine sees it now.
+    reportError("error.deleteModel", e, { model: model.id });
+  } finally {
+    state.deleting.delete(model.id);
+  }
+  try {
+    state.models = await api.modelsList();
+  } catch (e) {
+    reportError("error.readModels", e);
+  }
+  renderModels();
+  renderMissingNotice();
+}
+
+function downloadCell(model: AsrModel): HTMLElement {
   const progress = state.downloads.get(model.id);
   if (progress && progress.state === "downloading") {
     const pct = percent(progress.downloaded_bytes, progress.total_bytes);
     return h(
       "div",
       { class: "progress" },
-      h("progress", { max: 100, value: pct, "aria-label": `${model.id} 下載進度` }),
-      h("span", {}, `${pct}%，${formatBytes(progress.downloaded_bytes)}`),
+      h("progress", { max: 100, value: pct, "aria-label": t("asr.progressLabel", { model: model.id }) }),
+      h("span", {}, t("asr.progress", { percent: pct, done: formatBytes(progress.downloaded_bytes) })),
     );
   }
-  if (model.downloaded) return h("span", { class: "ok" }, "已下載");
+  if (model.downloaded) return downloadedCell(model);
   const wrap = h("div", {});
   if (progress?.state === "error") {
-    wrap.append(h("p", { class: "field-error" }, `下載失敗：${progress.error ?? "未知原因"}`));
+    wrap.append(
+      h("p", { class: "field-error" }, t("asr.downloadFailed", { error: progress.error ?? t("common.unknownReason") })),
+    );
   }
-  const button = h("button", { type: "button", class: "ghost" }, progress?.state === "error" ? "重新下載" : "下載");
+  const button = h(
+    "button",
+    { type: "button", class: "ghost" },
+    progress?.state === "error" ? t("common.redownload") : t("asr.download"),
+  );
   button.addEventListener("click", () => void downloadModel(model.id));
   wrap.append(button);
   return wrap;
 }
 
 function roleNames(roles: readonly string[]): string {
-  return roles.map((r) => (r === "fast" ? "即時" : "完整")).join("、");
+  return joinList(roles.map((r) => (r === "fast" ? t("role.fast") : t("role.final"))));
 }
 
 function memoryCell(cpu: number | null, gpu: number | null): string {
-  const parts = [cpu === null ? null : `CPU ${formatMiB(cpu)}`, gpu === null ? null : `GPU ${formatMiB(gpu)}`];
-  const known = parts.filter(Boolean);
-  return known.length ? known.join("／") : "未知";
+  const parts = [
+    cpu === null ? null : t("asr.memoryCpu", { size: formatMiB(cpu) }),
+    gpu === null ? null : t("asr.memoryGpu", { size: formatMiB(gpu) }),
+  ];
+  const known = parts.filter((p): p is string => p !== null);
+  return known.length ? known.join(t("common.altSeparator")) : t("common.unknown");
 }
 
 function renderModels(): void {
   const m = state.models;
   const s = state.settings;
   renderGpuRuntime();
+  renderFurigana();
   if (!m) {
-    replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, "讀取中")));
+    replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, t("common.loading"))));
+    renderTranslationPickers();
     return;
   }
   replace(
     el.asrModels,
     ...m.asr.map((model) => {
       const uses: string[] = [];
-      if (s?.asr.fast_model === model.id) uses.push("即時");
-      if (s?.asr.final_model === model.id) uses.push("完整");
+      if (s?.asr.fast_model === model.id) uses.push(t("role.fast"));
+      if (s?.asr.final_model === model.id) uses.push(t("role.final"));
       return h(
         "tr",
         {},
@@ -1006,19 +2065,12 @@ function renderModels(): void {
           "td",
           {},
           h("span", { class: "model-id" }, model.id),
-          uses.length ? h("span", { class: "tag" }, `使用中：${uses.join("、")}`) : null,
+          uses.length ? h("span", { class: "tag" }, t("asr.inUse", { roles: joinList(uses) })) : null,
           model.recommended_for.length
-            ? h("span", { class: "tag tag-quiet" }, `建議：${roleNames(model.recommended_for)}`)
+            ? h("span", { class: "tag tag-quiet" }, t("common.recommendedFor", { roles: roleNames(model.recommended_for) }))
             : null,
           model.no_speech_reliable === false
-            ? h(
-                "span",
-                {
-                  class: "tag tag-quiet",
-                  title: "這個模型無法可靠判斷「不是人聲」，用在完整翻譯時改用即時字幕模型的判斷過濾雜音。",
-                },
-                "不判斷非人聲",
-              )
+            ? h("span", { class: "tag tag-quiet", title: t("asr.noSpeechHelp") }, t("asr.noSpeech"))
             : null,
         ),
         h("td", {}, formatBytes(model.size_bytes)),
@@ -1030,37 +2082,115 @@ function renderModels(): void {
     }),
   );
 
-  const t = m.translation;
-  const installed = t.models.filter((x) => x.installed === true).length;
-  el.trSource.textContent = !t.server.reachable
-    ? `無法連到翻譯服務 ${t.server.base_url}${t.server.error ? `（${t.server.error}）` : ""}。如果使用本機 Ollama，請先啟動它。`
-    : `翻譯服務 ${t.server.base_url}${t.server.is_local ? "（本機）" : ""}上已安裝 ${installed} 個模型。`;
+  // `tr`, not `t`: `t` is the translation function.
+  const tr = m.translation;
+  const installed = tr.models.filter((x) => x.installed === true).length;
+  el.trSource.textContent = !tr.server.reachable
+    ? tr.server.error
+      ? t("tr.unreachableError", { url: tr.server.base_url, error: tr.server.error })
+      : t("tr.unreachable", { url: tr.server.base_url })
+    : tp(tr.server.is_local ? "tr.installedCountLocal" : "tr.installedCount", installed, { url: tr.server.base_url });
   replace(
     el.trPresets,
-    ...t.models.map((p) =>
+    ...tr.models.map((p) =>
       h(
         "li",
         {},
         h("span", { class: "preset-name" }, p.label),
         p.label !== p.name ? h("span", { class: "preset-meta" }, p.name) : null,
-        p.recommended_for.length ? h("span", { class: "tag tag-quiet" }, `建議：${roleNames(p.recommended_for)}`) : null,
-        p.commercial_use === false ? h("span", { class: "tag tag-warn" }, "不可商用") : null,
+        p.recommended_for.length
+          ? h("span", { class: "tag tag-quiet" }, t("common.recommendedFor", { roles: roleNames(p.recommended_for) }))
+          : null,
+        p.commercial_use === false ? h("span", { class: "tag tag-warn" }, t("tr.nonCommercial")) : null,
         p.excluded_regions.length
-          ? h("span", { class: "tag tag-warn" }, `授權不適用於${regionNames(p.excluded_regions)}`)
+          ? h("span", { class: "tag tag-warn" }, t("tr.regionExcluded", { regions: regionNames(p.excluded_regions) }))
           : null,
         h(
           "span",
           { class: "preset-meta" },
-          p.known ? `授權 ${p.license ?? "未知"}` : "不在 kikitori 的清單中，授權請自行確認",
+          p.known ? t("tr.license", { license: p.license ?? t("common.unknown") }) : t("tr.unlisted"),
         ),
-        p.approx_vram_gb === null ? null : h("span", { class: "preset-meta" }, `約 ${p.approx_vram_gb.toFixed(1)} GB`),
-        h("span", { class: "preset-meta" }, p.installed === null ? "安裝狀態未知" : p.installed ? "已安裝" : "未安裝"),
+        p.approx_vram_gb === null
+          ? null
+          : h("span", { class: "preset-meta" }, t("common.approxGb", { gb: p.approx_vram_gb.toFixed(1) })),
+        h(
+          "span",
+          { class: "preset-meta" },
+          p.installed === null ? t("tr.stateUnknown") : p.installed ? t("tr.stateInstalled") : t("tr.stateMissing"),
+        ),
         p.license_url ? h("span", { class: "preset-meta url" }, p.license_url) : null,
       ),
     ),
   );
-  replace(el.trNames, ...t.models.map((x) => h("option", { value: x.name })));
   renderComboOptions();
+  renderTranslationGuide();
+}
+
+// ---------------------------------------------------------------- translation server guide
+
+/** The guide that applies now (lib/translation-guide.ts), or null. */
+function currentGuide(): GuideView | null {
+  const server = state.models?.translation.server ?? state.hardware?.hardware.translation_server ?? null;
+  return translationGuide(
+    {
+      translationEnabled: showsTranslation(),
+      server,
+      startBlockedUnreachable: startFlow.state.blocker === "server_unreachable",
+    },
+    state.settings?.translation.base_url ?? DEFAULT_SETTINGS.translation.base_url,
+  );
+}
+
+/**
+ * "Install Ollama" / "Use original only" when the translation server cannot be
+ * reached: on the settings page, and once as a notice each time it appears, so
+ * it is seen before starting.
+ */
+function renderTranslationGuide(): void {
+  const guide = currentGuide();
+  el.guide.hidden = guide === null;
+  if (!guide) {
+    state.guideShown = false;
+    noticeFor(GUIDE_NOTICE)?.remove();
+    return;
+  }
+  // The guide says the same in the interface language; the engine's raw text stays in diagnostics.
+  noticeFor(TRANSLATION_LOG_NOTICE)?.remove();
+  const text = t(guide.offerInstall ? "guide.local" : "guide.remote", { url: guide.url });
+  el.guideText.textContent = text;
+  el.guideInstall.hidden = !guide.offerInstall;
+  el.guideRecheck.disabled = !engineReady();
+  el.guideOriginal.disabled = !engineReady() || state.translationBusy;
+  if (state.guideShown) return;
+  state.guideShown = true;
+  const actions = [
+    ...(guide.offerInstall ? [{ label: t("guide.install"), run: () => void openOllamaDownload() }] : []),
+    { label: t("guide.originalOnly"), run: () => void changeShowTranslation(false) },
+  ];
+  notify(text, "info", actions, { key: GUIDE_NOTICE });
+}
+
+async function openOllamaDownload(): Promise<void> {
+  try {
+    await api.openOllamaDownload();
+  } catch (e) {
+    reportError("error.openOllama", e);
+  }
+}
+
+/** Probes the translation server again (models.list) after the user installed or started it. */
+async function recheckTranslationServer(): Promise<void> {
+  if (!engineReady()) return;
+  el.guideRecheck.disabled = true;
+  try {
+    state.models = await api.modelsList();
+    renderModels();
+    renderMissingNotice();
+  } catch (e) {
+    reportError("error.readModels", e);
+  } finally {
+    renderTranslationGuide();
+  }
 }
 
 async function loadModels(): Promise<void> {
@@ -1070,9 +2200,9 @@ async function loadModels(): Promise<void> {
   // by id, so neither waits on the other's position in the reply stream.
   const [hardware, models] = await Promise.allSettled([api.hardwareDetect(), api.modelsList()]);
   if (hardware.status === "fulfilled") state.hardware = hardware.value;
-  else reportError("無法偵測硬體", hardware.reason);
+  else reportError("error.detectHardware", hardware.reason);
   if (models.status === "fulfilled") state.models = models.value;
-  else reportError("無法讀取模型清單", models.reason);
+  else reportError("error.readModels", models.reason);
   el.modelsRefresh.disabled = false;
   renderHardware();
   renderModels();
@@ -1081,7 +2211,7 @@ async function loadModels(): Promise<void> {
 }
 
 async function downloadModel(id: string): Promise<void> {
-  state.downloads.set(id, { model: id, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
+  state.downloads.set(id, { model: id, kind: null, downloaded_bytes: 0, total_bytes: 0, state: "downloading", error: null });
   renderModels();
   try {
     await api.modelsDownload(id);
@@ -1093,7 +2223,7 @@ async function downloadModel(id: string): Promise<void> {
     state.downloads.delete(id);
     renderModels();
     renderMissingNotice();
-    reportError(`無法下載 ${id}`, e);
+    reportError("error.downloadModel", e, { model: id });
   }
 }
 
@@ -1134,7 +2264,7 @@ function readCombo(): CombinationForm {
 function setOptions(select: HTMLSelectElement, options: { value: string; label: string }[], value: string): void {
   // An empty value only happens before settings are loaded; nothing to preserve then.
   const keep = value === "" || options.some((o) => o.value === value);
-  const all = keep ? options : [{ value, label: `${value}（不在清單中）` }, ...options];
+  const all = keep ? options : [{ value, label: t("combo.notInList", { value }) }, ...options];
   replace(select, ...all.map((o) => h("option", { value: o.value }, o.label)));
   select.value = value;
 }
@@ -1143,14 +2273,57 @@ function renderComboOptions(): void {
   const current = readCombo();
   const asr = (state.models?.asr ?? []).map((x) => ({
     value: x.id,
-    label: `${x.id}${x.downloaded ? "" : "（未下載）"}`,
+    label: x.downloaded ? x.id : t("combo.notDownloaded", { id: x.id }),
   }));
   for (const key of ["fast_model", "final_model"] as const) {
     setOptions(namedField(el.comboForm, key) as HTMLSelectElement, asr, current[key]);
   }
-  const precisions = [{ value: "", label: "自動" }, ...COMPUTE_TYPES.map((c) => ({ value: c, label: c }))];
+  const precisions = [{ value: "", label: t("common.auto") }, ...COMPUTE_TYPES.map((c) => ({ value: c, label: c }))];
   for (const key of ["fast_compute_type", "final_compute_type"] as const) {
     setOptions(namedField(el.comboForm, key) as HTMLSelectElement, precisions, current[key]);
+  }
+  renderTranslationPickers();
+}
+
+const TRANSLATION_FIELDS = ["translation_fast", "translation_final"] as const;
+type TranslationField = (typeof TRANSLATION_FIELDS)[number];
+/** Fields where the user picked "other": the text field stays open while they type. */
+const translationCustomOpen: Record<TranslationField, boolean> = { translation_fast: false, translation_final: false };
+
+function translationSelect(field: TranslationField): HTMLSelectElement {
+  const select = el.comboForm.querySelector<HTMLSelectElement>(`select[data-pick-for="${field}"]`);
+  if (!select) throw new Error(`combo form has no picker for ${field}`);
+  return select;
+}
+
+/** Dropdowns from `models.list`; the hidden text field keeps the value that is validated and saved. */
+function renderTranslationPickers(): void {
+  const models = state.models?.translation.models ?? [];
+  for (const field of TRANSLATION_FIELDS) {
+    const textField = namedField(el.comboForm, field);
+    const picker = translationPicker(models, textField.value, translationCustomOpen[field]);
+    const select = translationSelect(field);
+    replace(select, ...picker.options.map((o) => h("option", { value: o.value }, o.label)));
+    select.value = picker.selected;
+    textField.hidden = !picker.showTextField;
+  }
+}
+
+/**
+ * Runs on the select's `input` event, before the form's listener re-validates, so the text
+ * field already holds the picked name. Arrow keys on a closed select fire `input` on every
+ * step, so "other" only reveals the text field; taking focus would trap keyboard users.
+ */
+function onTranslationPicked(field: TranslationField): void {
+  const select = translationSelect(field);
+  const textField = namedField(el.comboForm, field);
+  if (select.value === CUSTOM_TRANSLATION_MODEL) {
+    translationCustomOpen[field] = true;
+    textField.hidden = false;
+  } else {
+    translationCustomOpen[field] = false;
+    textField.value = select.value;
+    textField.hidden = true;
   }
 }
 
@@ -1162,10 +2335,11 @@ function fillCombo(settings: Settings, force = false): void {
   for (const key of ["fast_model", "final_model", "fast_compute_type", "final_compute_type"] as const) {
     const select = namedField(el.comboForm, key) as HTMLSelectElement;
     if (!Array.from(select.options).some((o) => o.value === form[key])) {
-      select.append(h("option", { value: form[key] }, form[key] || "自動"));
+      select.append(h("option", { value: form[key] }, form[key] || t("common.auto")));
     }
   }
   for (const name of COMBO_FIELDS) namedField(el.comboForm, name).value = form[name];
+  for (const field of TRANSLATION_FIELDS) translationCustomOpen[field] = false;
   state.comboDirty = false;
   renderComboOptions();
   showComboErrors({});
@@ -1185,6 +2359,8 @@ function showFieldErrors<K extends string>(form: HTMLFormElement, fields: readon
 
 function showComboErrors(errors: CombinationErrors): void {
   showFieldErrors(el.comboForm, COMBO_FIELDS, errors);
+  // The text field is hidden unless "other" is picked; the select is what the user sees.
+  for (const field of TRANSLATION_FIELDS) translationSelect(field).setAttribute("aria-invalid", String(Boolean(errors[field])));
   // Advanced fields are hidden by default; open the section when one is wrong.
   const advanced = el.comboForm.querySelector("details");
   const advancedKeys: (keyof CombinationForm)[] = [
@@ -1199,14 +2375,14 @@ function showComboErrors(errors: CombinationErrors): void {
 
 function renderCheck(): void {
   const v = state.check;
-  const list = (items: string[], cls: string | null) =>
-    h("ul", {}, ...items.map((m) => h("li", cls ? { class: cls } : {}, m)));
+  const list = (items: readonly EngineMessage[], cls: string | null) =>
+    h("ul", {}, ...items.map((m) => h("li", cls ? { class: cls } : {}, formatEngineMessage(m))));
   switch (v.state) {
     case "local_errors":
-      replace(el.comboCheck, h("p", { class: "is-error" }, "請先修正標示的欄位。"));
+      replace(el.comboCheck, h("p", { class: "is-error" }, t("check.fixFirst")));
       break;
     case "checking":
-      replace(el.comboCheck, h("p", {}, "正在檢查這個組合"));
+      replace(el.comboCheck, h("p", {}, t("check.checking")));
       break;
     case "checked": {
       const { ok, errors, warnings } = v.check;
@@ -1215,11 +2391,7 @@ function renderCheck(): void {
         h(
           "p",
           ok ? {} : { class: "is-error" },
-          ok
-            ? warnings.length
-              ? "這台電腦可以使用這個組合，但請留意："
-              : "這台電腦可以使用這個組合。"
-            : "這個組合目前無法使用：",
+          ok ? (warnings.length ? t("check.okWithWarnings") : t("check.ok")) : t("check.notOk"),
         ),
         errors.length ? list(errors, "is-error") : null,
         warnings.length ? list(warnings, null) : null,
@@ -1227,13 +2399,10 @@ function renderCheck(): void {
       break;
     }
     case "rejected":
-      replace(el.comboCheck, h("p", { class: "is-error" }, `引擎不接受這個設定：${v.message}`));
+      replace(el.comboCheck, h("p", { class: "is-error" }, t("check.rejected", { message: v.message })));
       break;
     case "unavailable":
-      replace(
-        el.comboCheck,
-        h("p", {}, `暫時無法檢查組合（${v.message}）。仍可儲存，引擎會在儲存時檢查設定格式。`),
-      );
+      replace(el.comboCheck, h("p", {}, t("check.unavailable", { reason: v.message })));
       break;
   }
   el.comboSave.disabled = !canSave(v) || !engineReady();
@@ -1253,7 +2422,7 @@ function scheduleCheck(delay = CHECK_DEBOUNCE_MS): void {
     state.check = { state: "local_errors" };
   } else if (!engineReady()) {
     checks.invalidate();
-    state.check = { state: "unavailable", message: "引擎尚未就緒" };
+    state.check = { state: "unavailable", message: t("check.engineNotReady") };
   } else {
     state.check = { state: "checking" };
     checkTimer = window.setTimeout(() => void runCheck(form), delay);
@@ -1270,7 +2439,7 @@ async function runCheck(form: CombinationForm): Promise<void> {
     const ce = asCommandError(e);
     if (ce?.kind === "engine" && ce.code === "invalid_settings") {
       const field = combinationFieldForEnginePath(ce.message);
-      if (checks.isCurrent(token) && field) showComboErrors({ [field]: `引擎拒絕這個值：${ce.message}` });
+      if (checks.isCurrent(token) && field) showComboErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
       next = { state: "rejected", message: ce.message };
     } else {
       console.error("models.validate failed", e);
@@ -1289,17 +2458,17 @@ async function submitCombo(): Promise<void> {
   showComboErrors(errors);
   if (Object.keys(errors).length > 0 || !canSave(state.check)) return;
   el.comboSave.disabled = true;
-  el.comboStatus.textContent = "儲存中";
+  el.comboStatus.textContent = t("common.saving");
   try {
-    const { settings } = await api.settingsSet(combinationPatch(form));
-    state.settings = settings;
+    const { settings: saved, revision } = await api.settingsSet(combinationPatch(form));
+    const settings = adoptSettings(saved, revision);
     // A deliberate choice: never auto-applied over, and no offer right after saving
     // (it comes back on the next start or visit to this page if still different).
     state.userChoseModels = true;
     forgetPreview();
     fillCombo(settings, true);
     renderModels();
-    el.comboStatus.textContent = sessionActive() ? "已儲存，下一次開始時生效。" : "已儲存組合。";
+    el.comboStatus.textContent = sessionActive() ? t("combo.savedNextStart") : t("combo.saved");
     // The new combination may need other models (and an old prompt may be stale).
     void offerMissingModels();
   } catch (e) {
@@ -1307,8 +2476,8 @@ async function submitCombo(): Promise<void> {
     const field =
       ce?.kind === "engine" && ce.code === "invalid_settings" ? combinationFieldForEnginePath(ce.message) : null;
     if (field && ce?.kind === "engine") {
-      showComboErrors({ [field]: `引擎拒絕這個值：${ce.message}` });
-      el.comboStatus.textContent = "請修正標示的欄位。";
+      showComboErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      el.comboStatus.textContent = t("form.fixFields");
     } else {
       el.comboStatus.textContent = describeError(e);
     }
@@ -1323,11 +2492,14 @@ const FORM_FIELDS: (keyof SettingsForm)[] = [
   "base_url",
   "api_key_env",
   "allow_restricted",
-  "partner_language",
   "font_size",
   "background_opacity_percent",
   "position",
   "max_lines",
+  "min_display_secs",
+  "idle_clear_secs",
+  "obs_output",
+  "auto_save_transcripts",
 ];
 
 function readForm(): SettingsForm {
@@ -1336,11 +2508,14 @@ function readForm(): SettingsForm {
     base_url: field("base_url").value,
     api_key_env: field("api_key_env").value,
     allow_restricted: (field("allow_restricted") as HTMLInputElement).checked,
-    partner_language: field("partner_language").value,
     font_size: field("font_size").value,
     background_opacity_percent: field("background_opacity_percent").value,
     position: field("position").value,
     max_lines: field("max_lines").value,
+    min_display_secs: field("min_display_secs").value,
+    idle_clear_secs: field("idle_clear_secs").value,
+    obs_output: field("obs_output").value,
+    auto_save_transcripts: (field("auto_save_transcripts") as HTMLInputElement).checked,
   };
 }
 
@@ -1372,7 +2547,7 @@ function renderPreview(): void {
 }
 
 function renderSettingsPath(): void {
-  el.settingsPath.textContent = state.settingsPath ? `設定檔：${state.settingsPath}` : "";
+  el.settingsPath.textContent = state.settingsPath ? t("settings.path", { path: state.settingsPath }) : "";
 }
 
 async function submitSettings(): Promise<void> {
@@ -1380,26 +2555,25 @@ async function submitSettings(): Promise<void> {
   const errors = validateSettingsForm(form);
   showFormErrors(errors);
   if (Object.keys(errors).length > 0) {
-    el.settingsStatus.textContent = "請修正標示的欄位。";
+    el.settingsStatus.textContent = t("form.fixFields");
     return;
   }
-  el.settingsStatus.textContent = "儲存中";
+  el.settingsStatus.textContent = t("common.saving");
   const restrictedChanged = state.settings?.translation.allow_restricted !== form.allow_restricted;
   try {
-    const { settings } = await api.settingsSet(settingsPatchFromForm(form));
-    state.settings = settings;
+    const { settings, revision } = await api.settingsSet(settingsPatchFromForm(form));
+    adoptSettings(settings, revision);
     await pushOverlayStyle();
+    if (state.obs?.content !== obsOutputFromForm(form)) await pushObsOutput();
     renderModeNotes();
     renderModels();
-    el.settingsStatus.textContent = restrictedChanged
-      ? "已儲存設定。建議組合會依新的授權地區重新計算（到「模型」頁查看）。"
-      : "已儲存設定。";
+    el.settingsStatus.textContent = restrictedChanged ? t("settings.savedRegion") : t("settings.saved");
   } catch (e) {
     const ce = asCommandError(e);
     const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? formFieldForEnginePath(ce.message) : null;
     if (field && ce?.kind === "engine") {
-      showFormErrors({ [field]: `引擎拒絕這個值：${ce.message}` });
-      el.settingsStatus.textContent = "請修正標示的欄位。";
+      showFormErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      el.settingsStatus.textContent = t("form.fixFields");
     } else {
       el.settingsStatus.textContent = describeError(e);
     }
@@ -1413,7 +2587,491 @@ async function pushOverlayStyle(): Promise<void> {
     state.overlay = await api.overlaySetStyle(state.settings.subtitle);
     renderOverlay();
   } catch (e) {
-    reportError("無法套用字幕外觀", e);
+    reportError("error.applyStyle", e);
+  }
+}
+
+// ---------------------------------------------------------------- settings page: glossary
+
+let nextGlossaryRowId = 1;
+/** Rows added in this window and not edited yet: their "required" errors wait for a save attempt. */
+const freshGlossaryRows = new Set<number>();
+const GLOSSARY_FIELDS: readonly GlossaryField[] = ["source", "target", "target_language"];
+
+function glossaryEntries(): GlossaryEntry[] {
+  return state.glossary.rows.map((r) => r.entry);
+}
+
+function toGlossaryRows(entries: readonly GlossaryEntry[]): GlossaryRow[] {
+  return entries.map((entry) => ({ id: nextGlossaryRowId++, entry: { ...entry } }));
+}
+
+/** Puts the saved glossary into the editor unless the user has unsaved edits (or `force`). */
+function fillGlossary(settings: Settings, force = false): void {
+  if (state.glossary.dirty && !force) return;
+  const g = settings.translation.glossary;
+  state.glossary = {
+    builtin: g.builtin,
+    rows: toGlossaryRows(g.entries),
+    dirty: false,
+    engineError: null,
+    saving: false,
+    revision: state.glossary.revision,
+  };
+  freshGlossaryRows.clear();
+  el.glossaryStatus.textContent = "";
+  renderGlossary();
+}
+
+/** Local problems plus the engine's last rejection, placed on its row (or the list). */
+function glossaryErrors(): { rows: Map<number, GlossaryRowErrors>; list: string | null } {
+  const local = validateGlossary(glossaryEntries(), state.languages?.map((l) => l.code) ?? null);
+  const rows = new Map(local.rows);
+  let list = local.list;
+  const rejected = state.glossary.engineError;
+  if (rejected) {
+    const message = t("form.engineRejected", { message: rejected.message });
+    if (rejected.target.kind === "entry" && rejected.target.index < state.glossary.rows.length) {
+      const field = rejected.target.field ?? "source";
+      const current = rows.get(rejected.target.index) ?? {};
+      if (!current[field]) rows.set(rejected.target.index, { ...current, [field]: message });
+    } else {
+      list = list ?? message;
+    }
+  }
+  return { rows, list };
+}
+
+function glossaryLanguageSelect(value: string | null, label: string): HTMLSelectElement {
+  const options = [h("option", { value: "" }, t("glossary.allLanguages"))];
+  const list = state.languages ?? [];
+  for (const o of languageOptions(list)) options.push(h("option", { value: o.value, dir: "auto" }, o.label));
+  // A code the list does not have (older settings) stays visible instead of silently changing.
+  if (value !== null && !list.some((l) => l.code === value)) options.push(h("option", { value }, value));
+  const select = h("select", { "data-field": "target_language", "aria-label": label }, ...options);
+  select.value = value ?? "";
+  return select;
+}
+
+function glossaryRowElement(row: GlossaryRow, index: number): HTMLTableRowElement {
+  const n = index + 1;
+  const input = (field: "source" | "target", label: string) => {
+    const i = h("input", { "data-field": field, "aria-label": label, autocomplete: "off", spellcheck: "false", dir: "auto" });
+    i.value = row.entry[field];
+    return i;
+  };
+  const cell = (control: HTMLElement, field: GlossaryField) =>
+    h("td", { "data-cell": field }, control, h("p", { class: "field-error", "data-error-for": field }));
+  const remove = h(
+    "button",
+    { type: "button", class: "ghost", "aria-label": t("glossary.removeLabel", { row: n }) },
+    t("glossary.remove"),
+  );
+  remove.addEventListener("click", () => removeGlossaryRow(row.id));
+  return h(
+    "tr",
+    { "data-row": row.id },
+    cell(input("source", t("glossary.sourceLabel", { row: n })), "source"),
+    cell(input("target", t("glossary.targetLabel", { row: n })), "target"),
+    cell(glossaryLanguageSelect(row.entry.target_language, t("glossary.languageLabel", { row: n })), "target_language"),
+    h("td", { class: "glossary-actions" }, remove),
+  );
+}
+
+/** Rebuilds the table (rows added, removed, imported, reloaded or relabelled). */
+function renderGlossary(): void {
+  el.glossaryBuiltin.checked = state.glossary.builtin;
+  replace(el.glossaryRows, ...state.glossary.rows.map((row, i) => glossaryRowElement(row, i)));
+  el.glossaryEmpty.hidden = state.glossary.rows.length > 0;
+  renderGlossaryErrors();
+}
+
+/** Updates only error texts and buttons, so typing never loses focus. */
+function renderGlossaryErrors(): void {
+  const errors = glossaryErrors();
+  state.glossary.rows.forEach((row, i) => {
+    const tr = el.glossaryRows.querySelector<HTMLElement>(`tr[data-row="${row.id}"]`);
+    if (!tr) return;
+    const rowErrors = freshGlossaryRows.has(row.id) ? {} : (errors.rows.get(i) ?? {});
+    for (const field of GLOSSARY_FIELDS) {
+      const message = rowErrors[field] ?? "";
+      const slot = tr.querySelector<HTMLElement>(`[data-error-for="${field}"]`);
+      if (slot) slot.textContent = message;
+      tr.querySelector(`[data-field="${field}"]`)?.setAttribute("aria-invalid", String(message !== ""));
+      tr.querySelector(`[data-cell="${field}"]`)?.classList.toggle("has-error", message !== "");
+    }
+  });
+  el.glossaryListError.textContent = errors.list ?? "";
+  el.glossarySave.disabled = !engineReady() || !state.settings || !state.glossary.dirty || state.glossary.saving;
+  el.glossaryReset.disabled = !state.glossary.dirty;
+  el.glossaryExport.disabled = state.glossary.rows.length === 0;
+}
+
+function markGlossaryEdited(): void {
+  state.glossary.dirty = true;
+  state.glossary.revision++;
+  el.glossaryStatus.textContent = "";
+}
+
+function addGlossaryRow(): void {
+  const [row] = toGlossaryRows([{ source: "", target: "", target_language: null }]);
+  if (!row) return;
+  state.glossary.rows.push(row);
+  freshGlossaryRows.add(row.id);
+  // Row positions changed: an engine error by index no longer points at the right row.
+  state.glossary.engineError = null;
+  markGlossaryEdited();
+  renderGlossary();
+  el.glossaryRows.querySelector<HTMLInputElement>(`tr[data-row="${row.id}"] [data-field="source"]`)?.focus();
+}
+
+function removeGlossaryRow(id: number): void {
+  const index = state.glossary.rows.findIndex((r) => r.id === id);
+  if (index < 0) return;
+  state.glossary.rows.splice(index, 1);
+  freshGlossaryRows.delete(id);
+  state.glossary.engineError = null;
+  markGlossaryEdited();
+  renderGlossary();
+  // Keep the keyboard in the table: the next row's (or the previous row's) remove button.
+  const next = state.glossary.rows[Math.min(index, state.glossary.rows.length - 1)];
+  const focus = next
+    ? el.glossaryRows.querySelector<HTMLButtonElement>(`tr[data-row="${next.id}"] .glossary-actions button`)
+    : el.glossaryAdd;
+  focus?.focus();
+}
+
+function onGlossaryInput(e: Event): void {
+  const control = e.target;
+  if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement)) return;
+  const id = Number(control.closest<HTMLElement>("tr[data-row]")?.dataset.row);
+  const index = state.glossary.rows.findIndex((r) => r.id === id);
+  const row = state.glossary.rows[index];
+  const field = control.dataset.field;
+  if (!row || (field !== "source" && field !== "target" && field !== "target_language")) return;
+  row.entry =
+    field === "target_language"
+      ? { ...row.entry, target_language: control.value === "" ? null : control.value }
+      : { ...row.entry, [field]: control.value };
+  freshGlossaryRows.delete(row.id);
+  const rejected = state.glossary.engineError?.target;
+  if (rejected && (rejected.kind !== "entry" || rejected.index === index)) state.glossary.engineError = null;
+  markGlossaryEdited();
+  renderGlossaryErrors();
+}
+
+async function submitGlossary(): Promise<void> {
+  freshGlossaryRows.clear();
+  const entries = glossaryEntries();
+  const local = validateGlossary(entries, state.languages?.map((l) => l.code) ?? null);
+  renderGlossaryErrors();
+  if (hasGlossaryErrors(local)) {
+    el.glossaryStatus.textContent = t("form.fixFields");
+    el.glossaryRows.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    return;
+  }
+  const revision = state.glossary.revision;
+  state.glossary.saving = true;
+  renderGlossaryErrors();
+  el.glossaryStatus.textContent = t("common.saving");
+  try {
+    const { settings: saved, revision: settingsRev } = await api.settingsSet(glossaryPatch({ builtin: state.glossary.builtin, entries }));
+    const settings = adoptSettings(saved, settingsRev);
+    state.glossary.saving = false;
+    // Rows edited (or imported) while saving stay as they are, still unsaved.
+    if (state.glossary.revision === revision) fillGlossary(settings, true);
+    el.glossaryStatus.textContent = sessionActive() ? t("glossary.savedNextStart") : t("glossary.saved");
+  } catch (e) {
+    state.glossary.saving = false;
+    const ce = asCommandError(e);
+    const target = ce?.kind === "engine" && ce.code === "invalid_settings" ? glossaryErrorForEnginePath(ce.message) : null;
+    if (target && ce?.kind === "engine") {
+      state.glossary.engineError = { target, message: ce.message };
+      el.glossaryStatus.textContent = t("form.fixFields");
+    } else {
+      el.glossaryStatus.textContent = describeError(e);
+    }
+    renderGlossaryErrors();
+  }
+}
+
+/** Writes the table as it is now (saved or not) to `<Documents>/kikitori/transcripts/`. */
+async function exportGlossary(): Promise<void> {
+  el.glossaryExport.disabled = true;
+  try {
+    const path = await api.transcriptSave(glossaryFileName(new Date()), glossaryToCsv(glossaryEntries()));
+    notify(t("glossary.exported", { path }), "info", [{ label: t("export.openFolder"), run: () => void openOutputFolder("transcripts") }], {
+      key: EXPORT_NOTICE,
+    });
+  } catch (e) {
+    reportError("error.exportGlossary", e);
+  } finally {
+    renderGlossaryErrors();
+  }
+}
+
+/** Adds the rows of a CSV file to the table (saved with "儲存術語表" like typed rows). */
+async function importGlossary(file: File): Promise<void> {
+  if (file.size > GLOSSARY_MAX_CSV_BYTES) {
+    el.glossaryStatus.textContent = t("glossary.importTooLarge", { size: formatBytes(GLOSSARY_MAX_CSV_BYTES) });
+    return;
+  }
+  let text: string;
+  try {
+    text = await file.text();
+  } catch (e) {
+    reportError("error.importGlossary", e);
+    return;
+  }
+  const parsed = parseGlossaryCsv(text);
+  const merged = mergeGlossary(glossaryEntries(), parsed.entries);
+  state.glossary.rows.push(...toGlossaryRows(merged.entries.slice(state.glossary.rows.length)));
+  state.glossary.engineError = null;
+  if (merged.added > 0) markGlossaryEdited();
+  renderGlossary();
+  const parts = [t("glossary.imported", { added: merged.added, skipped: merged.skipped })];
+  if (parsed.badLines.length) {
+    const shown = parsed.badLines.slice(0, 10).map(String);
+    if (parsed.badLines.length > shown.length) shown.push("…");
+    parts.push(t("glossary.importBadLines", { lines: joinList(shown) }));
+  }
+  el.glossaryStatus.textContent = parts.join(" ");
+}
+
+// ---------------------------------------------------------------- settings page: languages
+
+const LANGUAGE_FIELDS: readonly LanguageField[] = ["source", "target", "partner"];
+const LANGUAGE_PREVIEW_DEBOUNCE_MS = 250;
+const languagePreviews = new Latest();
+let languagePreviewTimer: number | undefined;
+
+/** Fields of the current mode: media uses source + target, interpret target + partner. */
+function languageFieldsFor(mode: Mode): readonly LanguageField[] {
+  return mode === "media" ? ["source", "target"] : ["target", "partner"];
+}
+
+/** Puts the saved languages into the section unless the user has unsaved edits (or `force`). */
+function fillLanguageForm(settings: Settings, force = false): void {
+  if (state.langDirty && !force) return;
+  state.langForm = languageFormFromSettings(settings, state.mode, el.applyRecommended.checked);
+  state.langDirty = false;
+  for (const f of LANGUAGE_FIELDS) {
+    state.langFilters[f] = "";
+    el.langFilters[f].value = "";
+  }
+  el.languagesStatus.textContent = "";
+  showLanguageErrors({});
+  renderLanguages();
+}
+
+function renderLanguageOptions(field: LanguageField): void {
+  const form = state.langForm;
+  const select = el.langSelects[field];
+  const list = state.languages;
+  if (!form || !list) {
+    replace(select);
+    return;
+  }
+  const value = form[field];
+  const options = filterLanguageOptions(languageOptions(list, field === "source"), state.langFilters[field], value);
+  replace(select, ...options.map((o) => h("option", { value: o.value, dir: "auto" }, o.label)));
+  select.value = value;
+}
+
+function renderLanguages(): void {
+  const form = state.langForm;
+  const mode = form?.mode ?? state.mode;
+  const used = languageFieldsFor(mode);
+  for (const f of LANGUAGE_FIELDS) {
+    el.langFields[f].hidden = !used.includes(f);
+    renderLanguageOptions(f);
+    const usable = !!form && !!state.languages && engineReady();
+    el.langSelects[f].disabled = !usable;
+    el.langFilters[f].disabled = !usable;
+  }
+  el.languagesModeNote.textContent = mode === "media" ? t("settings.languageModeMedia") : t("settings.languageModeInterpret");
+  el.labelTarget.textContent = mode === "media" ? t("settings.target") : t("settings.own");
+  el.helpTarget.textContent = mode === "media" ? t("settings.targetHelp") : t("settings.ownHelp");
+  const labels: Record<LanguageField, string> = {
+    source: t("settings.source"),
+    target: el.labelTarget.textContent,
+    partner: t("settings.partner"),
+  };
+  for (const f of LANGUAGE_FIELDS) el.langFilters[f].setAttribute("aria-label", t("settings.languageFilterLabel", { field: labels[f] }));
+  renderLanguagePreview();
+}
+
+function showLanguageErrors(errors: LanguageErrors): void {
+  for (const f of LANGUAGE_FIELDS) {
+    const message = errors[f] ?? "";
+    const slot = el.languagesForm.querySelector<HTMLElement>(`[data-error-for="${f}"]`);
+    if (slot) slot.textContent = message;
+    el.langFields[f].classList.toggle("has-error", message !== "");
+    el.langSelects[f].setAttribute("aria-invalid", String(message !== ""));
+  }
+}
+
+function renderLanguagePreview(): void {
+  const v = state.langPreview;
+  switch (v.state) {
+    case "unavailable":
+      replace(el.languagePreview, h("p", {}, t("settings.languagesUnavailable")));
+      break;
+    case "local_errors":
+      replace(el.languagePreview);
+      break;
+    case "checking":
+      replace(el.languagePreview, h("p", {}, t("preview.checking")));
+      break;
+    case "error":
+      replace(el.languagePreview, h("p", { class: "is-error" }, t("preview.unavailable", { reason: v.message })));
+      break;
+    case "ready": {
+      const rows = previewRows(v.preview);
+      const notes = previewNotes(v.preview);
+      replace(
+        el.languagePreview,
+        h("h3", {}, t("preview.title")),
+        h(
+          "dl",
+          { class: "facts" },
+          ...rows.flatMap((r) => [
+            h("dt", {}, r.label),
+            h("dd", { "data-tone": r.tone }, r.model ? withNote(r.model, r.status) : r.status),
+          ]),
+        ),
+        h("p", {}, previewSummary(v.preview)),
+        notes.length ? h("ul", { class: "notes" }, ...notes.map((m) => h("li", {}, formatEngineMessage(m)))) : null,
+      );
+      break;
+    }
+  }
+  const checking = v.state === "checking" && !!state.langForm?.applyRecommended;
+  el.languagesSave.disabled =
+    !engineReady() || !state.languages || !state.langForm || v.state === "local_errors" || checking;
+}
+
+/** Local checks now, then (debounced) `settings.preview_languages` for the current choice. */
+function scheduleLanguagePreview(delay = LANGUAGE_PREVIEW_DEBOUNCE_MS): void {
+  window.clearTimeout(languagePreviewTimer);
+  const form = state.langForm;
+  if (!form || !state.languages || !engineReady()) {
+    languagePreviews.invalidate();
+    state.langPreview = { state: "unavailable" };
+    renderLanguagePreview();
+    return;
+  }
+  const errors = validateLanguageForm(form, state.languages);
+  showLanguageErrors(errors);
+  if (Object.keys(errors).length > 0) {
+    languagePreviews.invalidate();
+    state.langPreview = { state: "local_errors" };
+  } else {
+    state.langPreview = { state: "checking" };
+    languagePreviewTimer = window.setTimeout(() => void runLanguagePreview(form), delay);
+  }
+  renderLanguagePreview();
+}
+
+/** Maps the engine's `invalid_settings` path to the language field it is about. */
+function languageFieldForEnginePath(message: string): LanguageField | null {
+  const path = message.split(":", 1)[0]?.trim();
+  if (path === "source_language") return "source";
+  if (path === "target_language") return "target";
+  if (path === "partner_language") return "partner";
+  return null;
+}
+
+async function runLanguagePreview(form: LanguageForm): Promise<void> {
+  const token = languagePreviews.next();
+  let next: LanguagePreviewView;
+  try {
+    next = { state: "ready", preview: await api.previewLanguages(previewRequest(form)) };
+  } catch (e) {
+    const ce = asCommandError(e);
+    const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? languageFieldForEnginePath(ce.message) : null;
+    if (field && ce?.kind === "engine" && languagePreviews.isCurrent(token)) {
+      showLanguageErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      next = { state: "local_errors" };
+    } else {
+      console.error("settings.preview_languages failed", e);
+      next = { state: "error", message: describeError(e) };
+    }
+  }
+  // An answer for an earlier choice must not replace the one for the current choice.
+  if (!languagePreviews.isCurrent(token)) return;
+  state.langPreview = next;
+  renderLanguagePreview();
+}
+
+function chooseLanguage(field: LanguageField, value: string): void {
+  if (!state.langForm) return;
+  state.langForm = { ...state.langForm, [field]: value };
+  state.langDirty = true;
+  el.languagesStatus.textContent = "";
+  scheduleLanguagePreview();
+}
+
+async function loadLanguages(): Promise<void> {
+  try {
+    state.languages = await api.languagesList();
+  } catch (e) {
+    reportError("error.readLanguages", e);
+  }
+  renderLanguages();
+  // The glossary's language menus list the engine's languages.
+  renderGlossary();
+  scheduleLanguagePreview(0);
+}
+
+async function submitLanguages(): Promise<void> {
+  const form = state.langForm;
+  const list = state.languages;
+  if (!form || !list) return;
+  const errors = validateLanguageForm(form, list);
+  showLanguageErrors(errors);
+  if (Object.keys(errors).length > 0) {
+    el.languagesStatus.textContent = t("form.fixFields");
+    return;
+  }
+  const preview = state.langPreview.state === "ready" ? state.langPreview.preview : null;
+  const save = languagesSave(form, list, preview);
+  el.languagesSave.disabled = true;
+  el.languagesStatus.textContent = t("common.saving");
+  try {
+    const { settings: saved, revision } = await api.settingsSet(save.patch);
+    const settings = adoptSettings(saved, revision);
+    state.langDirty = false;
+    if (save.withModels) {
+      // A deliberate model choice: never auto-applied over, and the combination
+      // form and the "better combination" offer follow the new settings.
+      state.userChoseModels = true;
+      forgetPreview();
+      fillCombo(settings, true);
+      renderModels();
+    }
+    fillLanguageForm(settings, true);
+    renderModeNotes();
+    el.languagesStatus.textContent = sessionActive()
+      ? t("settings.languagesSavedNextStart")
+      : save.withModels
+        ? t("settings.languagesSavedWithModels")
+        : form.applyRecommended && !previewMatches(preview, form)
+          ? t("settings.languagesSavedNoPreview")
+          : t("settings.languagesSaved");
+    // `differs` and the download sizes changed with the saved settings.
+    scheduleLanguagePreview(0);
+  } catch (e) {
+    const ce = asCommandError(e);
+    const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? languageFieldForEnginePath(ce.message) : null;
+    if (field && ce?.kind === "engine") {
+      showLanguageErrors({ [field]: t("form.engineRejected", { message: ce.message }) });
+      el.languagesStatus.textContent = t("form.fixFields");
+    } else {
+      el.languagesStatus.textContent = describeError(e);
+    }
+  } finally {
+    renderLanguagePreview();
   }
 }
 
@@ -1421,36 +3079,180 @@ async function pushOverlayStyle(): Promise<void> {
 
 function renderAbout(): void {
   const a = state.about;
-  el.aboutLicense.textContent = a ? `kikitori 以 ${a.license} 授權發布。` : "";
+  el.aboutLicense.textContent = a ? t("about.license", { license: a.license }) : "";
   const app = a?.app_licenses ?? null;
   const engine = a?.engine_licenses ?? null;
   if (app || engine) {
     // Each folder is listed on its own line so its path stays selectable.
     replace(
       el.aboutThirdParty,
-      "第三方元件的授權全文：",
+      t("about.thirdPartyHead"),
       app && h("br"),
-      app && "程式本身（Tauri／Rust 套件、前端套件，以及 kikitori 的 LICENSE）：",
+      app && t("about.thirdPartyApp"),
       app && h("span", { class: "url" }, app),
       engine && h("br"),
-      engine && "語音引擎（Python 套件）：",
+      engine && t("about.thirdPartyEngine"),
       engine && h("span", { class: "url" }, engine),
     );
   } else {
-    el.aboutThirdParty.textContent =
-      "開發版沒有內附授權資料夾。正式版的授權全文在安裝目錄的 licenses（程式本身）與 " +
-      "kikitori-engine/THIRD_PARTY_LICENSES（語音引擎）資料夾。";
+    el.aboutThirdParty.textContent = t("about.thirdPartyDev");
   }
   el.openAppLicenses.hidden = !app;
   el.openEngineLicenses.hidden = !engine;
+}
+
+/**
+ * "複製診斷資訊": builds the redacted report (lib/diagnostics.ts) from what this
+ * window already knows — no engine call, so the click's user activation is
+ * still valid for the clipboard. If the clipboard is refused, the text is
+ * shown for copying by hand.
+ */
+async function copyDiagnostics(): Promise<void> {
+  const text = buildDiagnostics({
+    appVersion: state.appVersion,
+    uiLocale: getLocale(),
+    userAgent: navigator.userAgent,
+    bridgePhase: state.bridge?.phase ?? null,
+    bridgeDetail: state.bridge?.detail ?? null,
+    engine: state.bridge?.info ?? null,
+    sessionState: state.sessionState,
+    hardware: state.hardware?.hardware ?? null,
+    settings: state.settings,
+    settingsPath: state.settingsPath,
+    recentLog: recentLog.entries(),
+    now: new Date(),
+  });
+  try {
+    await navigator.clipboard.writeText(text);
+    el.diagnosticsText.hidden = true;
+    el.diagnosticsStatus.textContent = t("about.diagnosticsCopied");
+  } catch (e) {
+    console.error("clipboard write failed:", e);
+    el.diagnosticsText.value = text;
+    el.diagnosticsText.hidden = false;
+    el.diagnosticsText.select();
+    el.diagnosticsStatus.textContent = t("about.diagnosticsManual");
+  }
 }
 
 async function openLicenses(folder: LicenseFolder): Promise<void> {
   try {
     await api.openThirdPartyLicenses(folder);
   } catch (e) {
-    reportError("無法開啟授權資料夾，請依上面的路徑自行開啟", e);
+    reportError("error.openLicenses", e);
   }
+}
+
+// ---------------------------------------------------------------- interface language
+
+/** Per-viewer cache of `ui.locale`, so the first paint already uses the chosen language. */
+const UI_LOCALE_CACHE_KEY = "kikitori.uiLocale";
+
+function readCachedUiLocale(): UiLocalePreference {
+  try {
+    const v = window.localStorage.getItem(UI_LOCALE_CACHE_KEY);
+    if (v === "system" || isUiLocale(v)) return v;
+  } catch (e) {
+    // localStorage 可能被停用；只是少了快取，設定檔讀到後仍會套用正確的語系。
+    console.warn("cannot read the cached interface language:", e);
+  }
+  return "system";
+}
+
+function cacheUiLocale(pref: UiLocalePreference): void {
+  try {
+    window.localStorage.setItem(UI_LOCALE_CACHE_KEY, pref);
+  } catch (e) {
+    console.warn("cannot cache the interface language:", e);
+  }
+}
+
+/** Switches to `pref` (re-rendering everything through `onLocaleChanged`). */
+function applyUiLocale(pref: UiLocalePreference): void {
+  state.uiLocale = pref;
+  cacheUiLocale(pref);
+  setLocale(localeForPreference(pref, systemLanguages()));
+}
+
+/**
+ * The saved `ui.locale` arrived (engine start): it wins over the cache, unless
+ * the user picked a language while the engine was not ready — then that choice
+ * is saved now instead.
+ */
+async function syncUiLocale(saved: UiLocalePreference): Promise<void> {
+  if (state.uiLocaleUnsaved) {
+    await saveUiLocale(state.uiLocale);
+    return;
+  }
+  if (saved !== state.uiLocale) applyUiLocale(saved);
+}
+
+async function saveUiLocale(pref: UiLocalePreference): Promise<void> {
+  if (!engineReady()) {
+    state.uiLocaleUnsaved = true;
+    return;
+  }
+  try {
+    const { settings, revision } = await api.settingsSet(uiLocalePatch(pref));
+    adoptSettings(settings, revision);
+    state.uiLocaleUnsaved = false;
+  } catch (e) {
+    state.uiLocaleUnsaved = true;
+    reportError("error.saveUiLocale", e);
+  }
+}
+
+/** The user picked a language in the settings page: apply at once, then save. */
+async function chooseUiLocale(pref: UiLocalePreference): Promise<void> {
+  applyUiLocale(pref);
+  await saveUiLocale(pref);
+}
+
+function renderUiLocaleOptions(): void {
+  replace(
+    el.uiLocale,
+    h("option", { value: "system" }, t("settings.uiLocaleSystem")),
+    ...UI_LOCALES.map((l) => h("option", { value: l, lang: htmlLangForLocale(l) }, NATIVE_NAMES[l])),
+  );
+  el.uiLocale.value = state.uiLocale;
+}
+
+/** The overlay window follows the main window's language (through Rust, see overlay.rs). */
+async function pushOverlayLocale(): Promise<void> {
+  try {
+    state.overlay = await api.overlaySetLocale(getLocale());
+  } catch (e) {
+    reportError("error.setOverlayLocale", e);
+  }
+}
+
+/** Redraws every text from state in the new language; notices already shown keep theirs. */
+function onLocaleChanged(): void {
+  applyStatic(document);
+  renderUiLocaleOptions();
+  if (state.check.state === "unavailable" && !engineReady()) {
+    state.check = { state: "unavailable", message: t("check.engineNotReady") };
+  }
+  renderStatus();
+  renderModeNotes();
+  renderDevices();
+  renderTranscript();
+  renderOverlay();
+  renderTranslationSwitches();
+  renderFurigana();
+  renderLanguages();
+  renderStartDownloads();
+  renderHardware();
+  renderModels();
+  renderCheck();
+  renderSettingsPath();
+  renderAbout();
+  renderMissingNotice();
+  renderOutputPaths();
+  renderTranslationGuide();
+  renderGlossary();
+  renderMetrics();
+  void pushOverlayLocale();
 }
 
 // ---------------------------------------------------------------- navigation
@@ -1463,6 +3265,34 @@ function showPage(page: Page): void {
     else item.removeAttribute("aria-current");
   }
   if (page === "models") void loadModels().then(checkRecommendation);
+  // The diagnostics report and the guide use the hardware summary; detect it once.
+  if (page === "settings" && !state.hardware && engineReady()) void detectHardwareQuietly();
+}
+
+async function detectHardwareQuietly(): Promise<void> {
+  try {
+    state.hardware = await api.hardwareDetect();
+    renderHardware();
+    renderTranslationGuide();
+  } catch (e) {
+    console.error("hardware.detect failed:", e);
+  }
+}
+
+/**
+ * `models.list` at engine start, so an unreachable translation server is noticed
+ * (and the guide shown) before the user presses Start. Failures are only logged:
+ * the models page reports them when opened.
+ */
+async function loadModelsQuietly(): Promise<void> {
+  if (state.models || state.page === "models") return;
+  try {
+    state.models = await api.modelsList();
+    renderModels();
+    renderMissingNotice();
+  } catch (e) {
+    console.error("models.list failed:", e);
+  }
 }
 
 // ---------------------------------------------------------------- engine data
@@ -1470,25 +3300,35 @@ function showPage(page: Page): void {
 async function loadEngineData(): Promise<void> {
   let isNew = false;
   try {
-    const { settings, path, warnings, isNew: fresh } = await api.settingsGet();
+    // A (re)started engine counts its settings revisions from the beginning.
+    settingsRevision.reset();
+    const { settings, path, warnings, isNew: fresh, revision } = await api.settingsGet();
     isNew = fresh;
     if (warnings.length) {
-      notify(`設定檔中有 ${warnings.length} 個欄位無法讀取，暫時使用預設值：${warnings.join("、")}`, "bad");
+      notify(tp("notice.settingsFieldsUnreadable", warnings.length, { fields: joinList(warnings) }), "bad");
     }
-    state.settings = settings;
+    adoptSettings(settings, revision);
+    await syncUiLocale(settings.ui.locale);
     state.settingsPath = path;
     state.mode = settings.mode;
     fillForm(settings);
     fillCombo(settings);
+    fillLanguageForm(settings);
+    fillGlossary(settings);
     renderSettingsPath();
+    renderTranslationSwitches();
+    renderFuriganaSwitch();
     await pushOverlayStyle();
+    await pushOverlayShowTranslation();
+    await pushObsOutput();
   } catch (e) {
-    reportError("無法讀取設定", e);
+    reportError("error.readSettings", e);
   }
+  await loadLanguages();
   try {
     state.devices = await api.devicesList();
   } catch (e) {
-    reportError("無法列出音訊裝置", e);
+    reportError("error.listDevices", e);
   }
   renderModeNotes();
   renderDevices();
@@ -1497,6 +3337,7 @@ async function loadEngineData(): Promise<void> {
   // Runs on every engine (re)start, e.g. after the GPU runtime install restarts it.
   if (firstRunGate.claim({ isNew, userChoseModels: state.userChoseModels })) void firstRunFlow();
   else void checkRecommendation();
+  void loadModelsQuietly();
 }
 
 function onBridge(status: BridgeStatus): void {
@@ -1504,15 +3345,26 @@ function onBridge(status: BridgeStatus): void {
   state.bridge = status;
   if (status.phase !== "ready") {
     // A restarted engine has no session and no downloads in flight.
-    state.sessionState = "idle";
+    setSessionState("idle", true);
     for (const [id, d] of state.downloads) if (d.state === "downloading") state.downloads.delete(id);
+    if (state.furiganaDownload?.state === "downloading") state.furiganaDownload = null;
+    state.furiganaPendingEnable = false;
   }
   renderStatus();
   renderCheck();
+  renderTranslationSwitches();
+  renderFurigana();
+  renderGlossaryErrors();
+  if (status.phase !== "ready") {
+    // A restarted engine has no downloads for the start in flight any more.
+    startFlow.cancel();
+    scheduleLanguagePreview(0);
+  }
   if (status.phase === "ready" && !wasReady) void loadEngineData();
   if (status.phase === "failed") {
-    notify(`引擎無法啟動：${status.detail ?? "原因不明"}`, "bad", [
-      { label: "重新啟動引擎", run: () => void restartEngine() },
+    recentLog.push("bridge", `engine failed: ${status.detail ?? "unknown"}`);
+    notify(t("engine.failedNotice", { reason: status.detail ?? t("common.unknownCause") }), "bad", [
+      { label: t("engine.restart"), run: () => void restartEngine() },
     ]);
   }
 }
@@ -1522,7 +3374,7 @@ async function restartEngine(): Promise<void> {
   try {
     onBridge(await api.restartEngine());
   } catch (e) {
-    reportError("無法重新啟動引擎", e);
+    reportError("error.restartEngine", e);
   } finally {
     el.restart.disabled = false;
   }
@@ -1530,29 +3382,56 @@ async function restartEngine(): Promise<void> {
 
 // ---------------------------------------------------------------- updates
 
+/**
+ * The release notes as a collapsed "see what's new" section, or null when there
+ * are none. Built with text nodes only: the notes come from the network.
+ */
+function updateNotesDetail(notes: string | null, version: string): HTMLElement | null {
+  const blocks = updateNotesBlocks(notes, version);
+  if (!blocks.length) return null;
+  const render = (b: NotesBlock): HTMLElement =>
+    b.kind === "heading"
+      ? h("p", { class: "update-notes-heading" }, b.text)
+      : b.kind === "list"
+        ? h("ul", {}, ...b.items.map((item) => h("li", {}, item)))
+        : h("p", {}, b.text);
+  return h(
+    "details",
+    { class: "update-notes" },
+    h("summary", {}, t("update.showNotes")),
+    h("div", { class: "update-notes-body", tabindex: 0 }, ...blocks.map(render)),
+  );
+}
+
 function updateUi(): UpdateUi {
   let notice: HTMLElement | null = null;
   return {
-    offer(version, _notes, install) {
-      notice = notify(`kikitori ${version} 已經推出，可以下載並安裝。`, "update", [
-        {
-          label: "下載並安裝",
-          run: () => {
-            notice?.remove();
-            notice = notify("正在下載更新。", "update");
-            void install();
+    offer(version, notes, install) {
+      const detail = updateNotesDetail(notes, version) ?? undefined;
+      notice = notify(
+        t("update.available", { version }),
+        "update",
+        [
+          {
+            label: t("update.install"),
+            run: () => {
+              notice?.remove();
+              notice = notify(t("update.downloading"), "update");
+              void install();
+            },
           },
-        },
-      ]);
+        ],
+        { detail },
+      );
     },
     progress(pct) {
       const p = notice?.querySelector("p");
-      if (p) p.textContent = pct === null ? "正在下載更新。" : `正在下載更新：${pct}%`;
+      if (p) p.textContent = pct === null ? t("update.downloading") : t("update.progress", { percent: pct });
     },
     installed(version, restart) {
       notice?.remove();
-      notice = notify(`kikitori ${version} 已安裝，重新啟動後生效。`, "update", [
-        { label: "立即重新啟動", run: () => void restart() },
+      notice = notify(t("update.installed", { version }), "update", [
+        { label: t("update.restartNow"), run: () => void restart() },
       ]);
     },
     failed(message) {
@@ -1565,11 +3444,13 @@ function updateUi(): UpdateUi {
 
 async function manualUpdateCheck(): Promise<void> {
   el.checkUpdate.disabled = true;
-  el.updateStatus.textContent = "檢查中";
+  const checking = t("update.checking");
+  el.updateStatus.textContent = checking;
   try {
     const version = await checkForUpdate(updateUi(), true);
-    if (version) el.updateStatus.textContent = `有新版本 ${version}。`;
-    else if (el.updateStatus.textContent === "檢查中") el.updateStatus.textContent = "目前已是最新版本。";
+    if (version) el.updateStatus.textContent = t("update.found", { version });
+    // A failure already replaced the text (UpdateUi.failed); keep that message.
+    else if (el.updateStatus.textContent === checking) el.updateStatus.textContent = t("update.latest");
   } finally {
     el.checkUpdate.disabled = false;
   }
@@ -1577,7 +3458,22 @@ async function manualUpdateCheck(): Promise<void> {
 
 // ---------------------------------------------------------------- wiring
 
+/**
+ * The notices stick to the top of the scrolling content and would cover whatever
+ * focus or scrolling brings to the top (the settings form's first row). Their
+ * height becomes the scroller's scroll padding (`--notices-h` in main.css).
+ */
+function keepContentBelowNotices(): void {
+  const scroller = el.notices.closest<HTMLElement>(".content");
+  if (!scroller) return;
+  new ResizeObserver(() => {
+    const height = el.notices.childElementCount > 0 ? el.notices.getBoundingClientRect().height : 0;
+    scroller.style.setProperty("--notices-h", `${Math.ceil(height)}px`);
+  }).observe(el.notices);
+}
+
 function wire(): void {
+  keepContentBelowNotices();
   for (const button of el.modes) {
     button.addEventListener("click", () => void setMode(button.dataset.mode as Mode));
   }
@@ -1592,15 +3488,81 @@ function wire(): void {
     try {
       state.overlay = await api.overlaySetClickThrough(el.overlayClick.checked);
     } catch (e) {
-      reportError("無法切換滑鼠穿透", e);
+      reportError("error.toggleClickThrough", e);
     }
     renderOverlay();
   });
+  for (const input of [el.showTranslation, el.settingsShowTranslation]) {
+    input.addEventListener("change", () => void changeShowTranslation(input.checked));
+  }
+  el.furiganaSwitch.addEventListener("change", () => void changeFurigana(el.furiganaSwitch.checked));
+  el.startDownloadsRetry.addEventListener("click", () => startFlow.retry());
+  el.startDownloadsCancel.addEventListener("click", () => startFlow.cancel());
+  for (const f of LANGUAGE_FIELDS) {
+    el.langSelects[f].addEventListener("change", () => chooseLanguage(f, el.langSelects[f].value));
+    el.langFilters[f].addEventListener("input", () => {
+      state.langFilters[f] = el.langFilters[f].value;
+      renderLanguageOptions(f);
+    });
+    // Enter in the filter picks the first match instead of submitting the form.
+    el.langFilters[f].addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const current = state.langForm?.[f];
+      const first = Array.from(el.langSelects[f].options).find((o) => o.value !== current) ?? null;
+      if (first && state.langFilters[f].trim() !== "") {
+        chooseLanguage(f, first.value);
+        renderLanguageOptions(f);
+      }
+    });
+  }
+  el.applyRecommended.addEventListener("change", () => {
+    if (state.langForm) state.langForm = { ...state.langForm, applyRecommended: el.applyRecommended.checked };
+    renderLanguagePreview();
+  });
+  el.languagesForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void submitLanguages();
+  });
   el.clear.addEventListener("click", () => {
     state.subtitles = emptySubtitles(state.subtitles.sessionId);
+    // Export follows the log: what was cleared is not exported later.
+    state.exportLog = emptySubtitles(state.exportLog.sessionId);
     renderTranscript();
   });
+  el.openTranscripts.addEventListener("click", () => void openOutputFolder("transcripts"));
+  el.openObs.addEventListener("click", () => void openOutputFolder("obs"));
+  el.guideInstall.addEventListener("click", () => void openOllamaDownload());
+  el.guideOriginal.addEventListener("click", () => void changeShowTranslation(false));
+  el.guideRecheck.addEventListener("click", () => void recheckTranslationServer());
+  el.copyDiagnostics.addEventListener("click", () => void copyDiagnostics());
+  el.glossaryRows.addEventListener("input", onGlossaryInput);
+  el.glossaryBuiltin.addEventListener("change", () => {
+    state.glossary.builtin = el.glossaryBuiltin.checked;
+    if (state.glossary.engineError?.target.kind === "builtin") state.glossary.engineError = null;
+    markGlossaryEdited();
+    renderGlossaryErrors();
+  });
+  el.glossaryAdd.addEventListener("click", addGlossaryRow);
+  el.glossaryImport.addEventListener("click", () => el.glossaryFile.click());
+  el.glossaryFile.addEventListener("change", () => {
+    const file = el.glossaryFile.files?.[0];
+    // Cleared so picking the same file again (after fixing it) imports it again.
+    el.glossaryFile.value = "";
+    if (file) void importGlossary(file);
+  });
+  el.glossaryExport.addEventListener("click", () => void exportGlossary());
+  el.glossaryReset.addEventListener("click", () => {
+    if (state.settings) fillGlossary(state.settings, true);
+  });
+  el.glossaryForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void submitGlossary();
+  });
   el.modelsRefresh.addEventListener("click", () => void loadModels().then(checkRecommendation));
+  for (const field of TRANSLATION_FIELDS) {
+    translationSelect(field).addEventListener("input", () => onTranslationPicked(field));
+  }
   el.comboForm.addEventListener("input", () => {
     state.comboDirty = true;
     el.comboStatus.textContent = "";
@@ -1626,6 +3588,10 @@ function wire(): void {
   el.openAppLicenses.addEventListener("click", () => void openLicenses("app"));
   el.openEngineLicenses.addEventListener("click", () => void openLicenses("engine"));
   el.checkUpdate.addEventListener("click", () => void manualUpdateCheck());
+  el.uiLocale.addEventListener("change", () => {
+    const v = el.uiLocale.value;
+    if (v === "system" || isUiLocale(v)) void chooseUiLocale(v);
+  });
 }
 
 async function subscribe(): Promise<void> {
@@ -1634,10 +3600,16 @@ async function subscribe(): Promise<void> {
     events.status((s) => {
       if (s.session_id !== null && state.sessionId !== null && s.session_id < state.sessionId) return;
       if (s.session_id !== null) state.sessionId = s.session_id;
-      state.sessionState = s.state;
-      if (s.state === "error" && s.code === "model_not_downloaded") {
-        // Offer exactly the missing models; fall back to the generic message.
-        void offerMissingModels().then((found) => {
+      setSessionState(s.state, true);
+      if (s.state === "error") recentLog.push("status", `${s.code ?? "error"}: ${s.detail ?? ""}`);
+      if (s.state === "error" && s.code === "translation_model_missing" && s.missing_translation_models.length) {
+        // Pull them on the user's Ollama, then start again (lib/start-downloads.ts).
+        startFlow.begin(
+          s.missing_translation_models.map((model) => ({ kind: "translation", model, sizeBytes: translationSize(model) })),
+        );
+      } else if (s.state === "error" && s.code === "model_not_downloaded") {
+        // Download exactly the missing models and start again; fall back to the generic message.
+        void downloadMissingThenStart().then((found) => {
           if (!found) notify(describeStatusError(s.code, s.detail), "bad");
         });
       } else if (s.state === "error") {
@@ -1647,9 +3619,24 @@ async function subscribe(): Promise<void> {
     }),
     events.subtitle((ev) => {
       state.subtitles = applySubtitle(state.subtitles, ev, TRANSCRIPT_MAX_LINES);
+      state.exportLog = applySubtitle(state.exportLog, ev, EXPORT_MAX_LINES);
       renderTranscript();
     }),
     events.download((p) => {
+      // The furigana dictionary has its own switch and block; it is not an ASR model.
+      if (isFuriganaDownload(p)) {
+        onFuriganaDownload(p);
+        return;
+      }
+      startFlow.onProgress(p);
+      // Translation pulls only matter to the start flow; the models page lists
+      // ASR models and the GPU runtime by name.
+      if (p.kind === "translation") {
+        if (p.state === "done" && state.page === "models") void loadModels();
+        return;
+      }
+      // Downloads for a start are shown in their own panel, not as notices too.
+      const quiet = startFlow.tracks("asr", p.model);
       state.downloads.set(p.model, p);
       if (p.state === "done") {
         state.downloads.delete(p.model);
@@ -1660,30 +3647,45 @@ async function subscribe(): Promise<void> {
           // "still needed" while the list is being reloaded.
           const listed = state.models?.asr.find((m) => m.id === p.model);
           if (listed) listed.downloaded = true;
-          notify(`${p.model} 下載完成。`);
+          if (!quiet) notify(t("download.done", { model: p.model }), "info", [], { autoDismiss: true });
           void loadModels();
         }
-      } else if (p.state === "error") {
-        const what = p.model === GPU_RUNTIME_ID ? "GPU 加速元件" : p.model;
-        notify(`${what}下載失敗：${p.error ?? "未知原因"}`, "bad");
+      } else if (p.state === "error" && !quiet) {
+        const what = p.model === GPU_RUNTIME_ID ? t("gpu.name") : p.model;
+        notify(t("download.failed", { what, error: p.error ?? t("common.unknownReason") }), "bad");
       }
       if (state.page === "models") renderModels();
       renderMissingNotice();
     }),
     events.log((l) => {
+      if (l.level !== "debug") recentLog.push(l.level, l.message);
       if (l.level === "warning" || l.level === "error") {
         console.warn(`engine ${l.level}: ${l.message}`);
-        notify(`引擎提醒：${l.message}`, l.level === "error" ? "bad" : "info");
+        const translationLog = isTranslationServerLog(l.message);
+        // A translation-server failure the localized guide already explains is not repeated as raw engine text.
+        if (translationLog && currentGuide() !== null) return;
+        notify(
+          t("engine.log", { message: l.message }),
+          l.level === "error" ? "bad" : "info",
+          [],
+          translationLog ? { key: TRANSLATION_LOG_NOTICE } : {},
+        );
       }
     }),
+    events.metrics(onMetrics),
     events.overlay((o) => {
       state.overlay = o;
       renderOverlay();
     }),
+    events.shortcut(onShortcut),
   ]);
 }
 
 async function init(): Promise<void> {
+  // Before anything is rendered: the last choice (cached) or the OS language,
+  // so the window never shows the wrong language while the engine starts.
+  onLocaleChange(onLocaleChanged);
+  applyUiLocale(readCachedUiLocale());
   wire();
   renderStatus();
   renderTranscript();
@@ -1691,10 +3693,17 @@ async function init(): Promise<void> {
   renderModels();
   renderCheck();
   try {
-    el.aboutVersion.textContent = `kikitori ${await getVersion()}`;
+    state.appVersion = await getVersion();
+    el.aboutVersion.textContent = `kikitori ${state.appVersion}`;
   } catch (e) {
     console.error("getVersion failed:", e);
   }
+  try {
+    state.output = await api.outputInfo();
+  } catch (e) {
+    console.error("output_info failed:", e);
+  }
+  renderOutputPaths();
   try {
     state.about = await api.about();
   } catch (e) {
@@ -1707,12 +3716,12 @@ async function init(): Promise<void> {
     state.overlay = await api.overlayState();
     renderOverlay();
   } catch (e) {
-    reportError("無法讀取字幕視窗狀態", e);
+    reportError("error.readOverlayState", e);
   }
   try {
     onBridge(await api.bridgeStatus());
   } catch (e) {
-    reportError("無法讀取引擎狀態", e);
+    reportError("error.readBridge", e);
   }
   if (import.meta.env.PROD) {
     // Silent on failure: being offline at startup is normal.
@@ -1722,5 +3731,5 @@ async function init(): Promise<void> {
 
 init().catch((e: unknown) => {
   console.error("main window failed to initialise", e);
-  notify(`畫面初始化失敗：${describeError(e)}`, "bad");
+  notify(t("notice.initFailed", { reason: describeError(e) }), "bad");
 });

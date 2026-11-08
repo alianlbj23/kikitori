@@ -15,6 +15,8 @@
  * - events from an older session are dropped, a newer session starts afresh.
  */
 
+import { rubyParts, type RubyParts, type RubySpan } from "./ruby";
+import { splitStable, type TextParts } from "./stable";
 import type { SubtitleEvent } from "./types";
 
 export interface SubtitleLine {
@@ -26,6 +28,10 @@ export interface SubtitleLine {
   readonly isFinal: boolean;
   readonly startSample: number;
   readonly endSample: number;
+  /** Partials: code points of `original` that have settled (null = none known). */
+  readonly stableChars: number | null;
+  /** Furigana over the original (docs/specs/furigana.md); null = none. */
+  readonly ruby: readonly RubySpan[] | null;
 }
 
 export interface SubtitleState {
@@ -49,6 +55,8 @@ function toLine(ev: SubtitleEvent): SubtitleLine {
     isFinal: ev.is_final,
     startSample: ev.start_sample,
     endSample: ev.end_sample,
+    stableChars: ev.stable_chars,
+    ruby: ev.ruby,
   };
 }
 
@@ -114,6 +122,38 @@ export function applySubtitle(
   }
   if (lines.length > maxLines) lines = lines.slice(lines.length - maxLines);
   return { sessionId: current.sessionId, lines, lastFinalId };
+}
+
+/** What one line shows, given the "顯示翻譯" switch. */
+export interface LineDisplay {
+  original: string;
+  /** `original` split into its settled prefix and the tail that may change (F2). */
+  originalParts: TextParts;
+  /**
+   * The same split with furigana (`<ruby>` segments); null when the line has
+   * none, and the renderers then use `originalParts` exactly as before.
+   */
+  originalRuby: RubyParts | null;
+  /** Empty when translations are hidden; the translation line is then left out. */
+  translation: string;
+  /**
+   * Translations are off: the original takes the translation's primary style
+   * (size, colour, weight) instead of sitting small above an empty line.
+   */
+  originalOnly: boolean;
+}
+
+/**
+ * The text of `line` with translations shown or hidden. Lines translated before
+ * the switch was turned off keep their translation in the state, so turning it
+ * back on shows them again; the engine sends an empty translation while off.
+ */
+export function lineDisplay(line: SubtitleLine, showTranslation: boolean): LineDisplay {
+  const originalParts = splitStable(line.original, line.stableChars, line.isFinal);
+  const originalRuby = rubyParts(line.original, line.ruby, line.stableChars, line.isFinal);
+  return showTranslation
+    ? { original: line.original, originalParts, originalRuby, translation: line.translation, originalOnly: false }
+    : { original: line.original, originalParts, originalRuby, translation: "", originalOnly: true };
 }
 
 /** Trims to a new limit (e.g. after the user changes "lines on screen"). */

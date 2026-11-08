@@ -177,3 +177,22 @@
   - 後半結果：`app.yml`（三平台前端／Rust 檢查、cargo-deny、第三方授權產生）；`release.yml`（main 上版本號為新才發布；測試、三平台打包、安裝後 smoke、minisign 驗簽全過才建立 Release；`[release-dry-run]` 在分支上完整演練）；Rust／npm 第三方授權聲明隨安裝檔散布；最後 CI（dde4c88）test／app／release dry run 全綠。
 - [x] 里程碑 9：自動更新
   - 結果：tauri-plugin-updater 接 GitHub Releases `latest.json`（自行產生，含 deb 專用 key）；正式公鑰已寫入、私鑰只在本機；dry run 以拋棄式金鑰完整演練簽章與驗簽。真正的「v(n) → v(n+1)」自動更新需發布兩個版本後實機驗證。
+
+## v0.2：多國語言、介面多語系、只顯示原文、VTuber 特化（規格：`docs/specs/languages-i18n.md`；VTuber 規格待調查報告完成後撰寫）
+
+- [x] 里程碑 10：語言核心（語言清單、設定檔 v3、辨識語言指定、翻譯路由、提示詞、繁簡轉換、依語言的幻覺過濾架構）
+  - 結果：20 語言清單（`kikitori.languages`）、設定檔 v3（`source_language`、`translation.enabled`、遷移）、指定辨識語言、路由 translate／copy／off、20 種目標語言提示詞、zh-CN `t2s`；幻覺過濾 hard 不分語言、soft 依語言；code review 1 高 1 中 2 低＋命名已修；Python 1125、vitest 135、cargo 61 通過。
+- [x] 里程碑 11：各語言非語音幻覺片語實測（`experiments/hallucination_lexicon/`）
+  - 結果：221 段非語音 × 19 語言 × small／turbo／large-v3（21,812 次解碼）；hard 111＋soft 126 片語接入引擎；VAD 通過片段上 turbo 完整路徑的幻覺率 52.8% → 10.3%（交叉驗證 11.0%）。
+- [x] 里程碑 12：依語言推薦＋引擎訊息改為 `{code, params}`＋`languages.list`／`settings.preview_languages`
+  - 結果：各語言 Whisper 品質等級、依語言挑翻譯模型、67 個訊息碼（UI 13 語系皆有翻譯）、語言預覽不寫設定不下載。
+- [x] 里程碑 13：延後下載（Ollama `/api/pull`、開始字幕時自動下載缺少的模型）
+  - 結果：本機 Ollama 0.40.14 實測 pull 格式並寫成重播測試；開始時依序下載缺少的辨識／翻譯模型後自動開始；認證失敗、非 Ollama、連不上各有說明。GUI 實操待里程碑 17 驗收。
+- [x] 里程碑 14：只顯示原文（`translation.enabled`、`session.set_translation`、字幕視窗樣式）
+  - 結果：關閉時不呼叫翻譯伺服器（計數測試）、執行中即時切換、字幕視窗原文升為主要字幕。GUI 實操待里程碑 17 驗收。
+- [x] 里程碑 15：介面多語系（i18n 機制、13 語系字典、語言選單）
+  - 結果：13 語系各 516 鍵（型別保證齊全、佔位符與複數測試）、程式碼無寫死中日韓文字（測試掃描）；vitest 1165、cargo 68 通過。
+- [x] 里程碑 16：VTuber 直播特化（依調查報告：模型、過濾、評測）
+  - 結果：GPU 即時 turbo／完整 large-v3（12 GB 與本機 LLM 共用時兩者 int8_float16＋qwen3.5:9b）、翻譯溫度 0＋前文保險、內建直播術語表 53 詞、特殊 token 清除與選擇性繁簡轉換；依據見 `docs/specs/vtuber-profile.md`。
+- [x] 里程碑 17：文件、CI、端到端驗收、驗收報告
+  - 結果：`tasks/acceptance-report-v0.2.0.md`（VRAM 10.8／12.2 GB、GUI a–j PASS、記憶體壓力測試 1–7 PASS；WebView2 成長修正後 +0.67 MiB／分）；啟動 11.8 → 7.3 s；CI test／app／release dry-run 三平台通過（`0fa20ba`）。

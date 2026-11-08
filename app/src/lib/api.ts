@@ -3,7 +3,7 @@
  *
  * Role: the only module that calls `invoke` / `listen`. Every result and event
  * payload goes through a validator from `validate.ts` before the UI sees it, and
- * every failure is turned into a Traditional Chinese sentence by `describeError`.
+ * every failure is turned into a sentence in the interface language by `describeError`.
  */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -11,6 +11,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { NVIDIA_EULA_URL } from "./combination";
+import { t, tp, type StringKey } from "./i18n";
+import { OLLAMA_DOWNLOAD_URL } from "./translation-guide";
 import type {
   AboutInfo,
   AppliedRecommendation,
@@ -19,18 +21,29 @@ import type {
   DeviceInfo,
   DownloadProgressEvent,
   HardwareReport,
+  LanguageChoice,
+  LanguageInfo,
+  LanguagePreview,
   LicenseFolder,
   LogEvent,
+  MetricsEvent,
   Mode,
+  ModelDeleteResult,
   ModelsList,
+  ObsContent,
+  ObsStatus,
+  OutputFolder,
+  OutputInfo,
   OverlaySnapshot,
   OverlayStyle,
   RecommendationPreview,
+  ShortcutAction,
   StatusEvent,
   SubtitleEvent,
   UpdateDownloadEvent,
   UpdateInfo,
 } from "./types";
+import { parseLanguageList, parseLanguagePreview } from "./languages";
 import { parseAppliedRecommendation, parseSettingsResult, type SettingsResult } from "./settings";
 import {
   asCommandError,
@@ -41,9 +54,15 @@ import {
   parseDownloadProgress,
   parseHardware,
   parseLog,
+  parseMetrics,
+  parseModelDeleteResult,
   parseModels,
+  parseObsStatus,
+  parseOutputInfo,
   parseOverlaySnapshot,
   parseRecommendationPreview,
+  parseSavedPath,
+  parseShortcutAction,
   parseStatus,
   parseSubtitle,
   parseUpdateDownloadEvent,
@@ -55,8 +74,14 @@ export const EVENTS = {
   status: "engine://status",
   download: "engine://download-progress",
   log: "engine://log",
+  /** Input level, backlog and latency, about once a second (main window only). */
+  metrics: "engine://metrics",
   bridge: "bridge://state",
   overlay: "overlay://state",
+  /** A global shortcut the main window handles (`toggle_translation`). */
+  shortcut: "shortcut://action",
+  /** The "clear subtitles" shortcut: the overlay empties its lines. */
+  overlayClear: "overlay://clear",
 } as const;
 
 export const api = {
@@ -79,6 +104,13 @@ export const api = {
   async modelsDownload(model: string, acceptLicense = false): Promise<void> {
     await invoke("models_download", acceptLicense ? { model, acceptLicense } : { model });
   },
+  /**
+   * Deletes a downloaded speech recognition model (F7). Rejects with
+   * `unknown_model`, `model_not_downloaded` or `model_in_use`.
+   */
+  async modelsDelete(model: string): Promise<ModelDeleteResult> {
+    return parseModelDeleteResult(await invoke("models_delete", { model }));
+  },
   /** Checks partial settings against this machine without saving them. */
   async modelsValidate(settings: Record<string, unknown> | null): Promise<CombinationCheck> {
     return parseCombinationCheck(await invoke("models_validate", settings ? { settings } : {}));
@@ -100,6 +132,23 @@ export const api = {
   async previewRecommendation(): Promise<RecommendationPreview> {
     return parseRecommendationPreview(await invoke("settings_preview_recommendation"));
   },
+  /**
+   * Downloads a translation model on the user's Ollama server. Rejects with
+   * `pull_unsupported` (not Ollama), `translation_server_unreachable` or
+   * `translation_server_auth_failed`; progress arrives as `download_progress`
+   * events with `kind: "translation"`.
+   */
+  async modelsPullTranslation(model: string): Promise<void> {
+    await invoke("models_pull_translation", { model });
+  },
+  /** The engine's listening / subtitle language list (the UI keeps no copy). */
+  async languagesList(): Promise<LanguageInfo[]> {
+    return parseLanguageList(await invoke("languages_list"));
+  },
+  /** The models a language combination would use and what is not installed yet (nothing is saved). */
+  async previewLanguages(languages: Partial<LanguageChoice>): Promise<LanguagePreview> {
+    return parseLanguagePreview(await invoke("settings_preview_languages", { languages }));
+  },
   async devicesList(): Promise<DeviceInfo[]> {
     return parseDevices(await invoke("devices_list"));
   },
@@ -116,6 +165,18 @@ export const api = {
   },
   async sessionStop(): Promise<void> {
     await invoke("session_stop");
+  },
+  /** "顯示翻譯": saves `translation.enabled` and switches a running session at once. */
+  async sessionSetTranslation(enabled: boolean): Promise<SettingsResult> {
+    return parseSettingsResult(await invoke("session_set_translation", { enabled }));
+  },
+  /**
+   * Furigana: saves `furigana.enabled` and switches a running session at once.
+   * Turning it on rejects with `model_not_downloaded` until the dictionary
+   * (`models.download` of `furigana-dictionary`) is downloaded.
+   */
+  async sessionSetFurigana(enabled: boolean): Promise<SettingsResult> {
+    return parseSettingsResult(await invoke("session_set_furigana", { enabled }));
   },
   async about(): Promise<AboutInfo> {
     return parseAbout(await invoke("app_about"));
@@ -149,9 +210,32 @@ export const api = {
     };
     await invoke("update_install", { onEvent: channel, timeoutMs });
   },
-  /** Opens the NVIDIA CUDA EULA; the opener permission allows no other URL. */
+  /** Opens the NVIDIA CUDA EULA (one of the two URLs the opener permission allows). */
   async openNvidiaEula(): Promise<void> {
     await openUrl(NVIDIA_EULA_URL);
+  },
+  /** Opens Ollama's official download page (the other allowed URL). */
+  async openOllamaDownload(): Promise<void> {
+    await openUrl(OLLAMA_DOWNLOAD_URL);
+  },
+  /** Where transcripts and the OBS text file go. */
+  async outputInfo(): Promise<OutputInfo> {
+    return parseOutputInfo(await invoke("output_info"));
+  },
+  /**
+   * Saves a transcript into `<Documents>/kikitori/transcripts/`; Rust validates
+   * the name and picks the folder. Resolves to the saved file's full path.
+   */
+  async transcriptSave(fileName: string, contents: string): Promise<string> {
+    return parseSavedPath(await invoke("transcript_save", { fileName, contents }));
+  },
+  /** Opens the transcripts or OBS folder; Rust computes the path from the name. */
+  async openOutputFolder(folder: OutputFolder): Promise<void> {
+    await invoke("open_output_folder", { folder });
+  },
+  /** Turns the OBS text file on or off and chooses what it holds. */
+  async obsSetOutput(content: ObsContent): Promise<ObsStatus> {
+    return parseObsStatus(await invoke("obs_set_output", { content }));
   },
   async overlayState(): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_get_state"));
@@ -164,6 +248,14 @@ export const api = {
   },
   async overlaySetVisible(visible: boolean): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_set_visible", { visible }));
+  },
+  /** Tells the overlay window which interface language to use. */
+  async overlaySetLocale(locale: string): Promise<OverlaySnapshot> {
+    return parseOverlaySnapshot(await invoke("overlay_set_locale", { locale }));
+  },
+  /** Tells the overlay whether translations are shown (originals are promoted when not). */
+  async overlaySetShowTranslation(enabled: boolean): Promise<OverlaySnapshot> {
+    return parseOverlaySnapshot(await invoke("overlay_set_show_translation", { enabled }));
   },
 };
 
@@ -189,25 +281,33 @@ export const events = {
   status: (h: (v: StatusEvent) => void) => on(EVENTS.status, parseStatus, h),
   download: (h: (v: DownloadProgressEvent) => void) => on(EVENTS.download, parseDownloadProgress, h),
   log: (h: (v: LogEvent) => void) => on(EVENTS.log, parseLog, h),
+  metrics: (h: (v: MetricsEvent) => void) => on(EVENTS.metrics, parseMetrics, h),
   bridge: (h: (v: BridgeStatus) => void) => on(EVENTS.bridge, parseBridgeStatus, h),
   overlay: (h: (v: OverlaySnapshot) => void) => on(EVENTS.overlay, parseOverlaySnapshot, h),
+  shortcut: (h: (v: ShortcutAction) => void) => on(EVENTS.shortcut, parseShortcutAction, h),
+  overlayClear: (h: () => void) => on(EVENTS.overlayClear, () => undefined, () => h()),
 };
 
-const ENGINE_CODES: Record<string, string> = {
-  invalid_settings: "設定值不正確",
-  settings_io_error: "無法儲存設定檔，請確認磁碟空間與權限",
-  session_active: "已經在執行中，請先停止",
-  device_not_found: "找不到選擇的音訊裝置，請重新選擇",
-  capture_unavailable: "這台電腦無法擷取這種聲音來源",
-  capture_error: "擷取聲音時發生錯誤",
-  unknown_model: "引擎不認得這個模型",
-  download_in_progress: "這個項目已經在下載中，請等它完成",
-  license_not_accepted: "需要先勾選同意 NVIDIA CUDA EULA 才能下載 GPU 加速元件",
-  gpu_runtime_unsupported: "這台電腦的平台不支援 GPU 加速元件（只支援 Windows 與 Linux 的 x86-64）",
-  unknown_method: "引擎版本與程式不相符，不支援這個操作",
-  invalid_params: "傳給引擎的參數不正確",
-  invalid_request: "傳給引擎的請求格式不正確",
-  internal_error: "引擎內部錯誤",
+const ENGINE_CODES: Readonly<Record<string, StringKey>> = {
+  invalid_settings: "error.code.invalid_settings",
+  settings_io_error: "error.code.settings_io_error",
+  session_active: "error.code.session_active",
+  device_not_found: "error.code.device_not_found",
+  capture_unavailable: "error.code.capture_unavailable",
+  capture_error: "error.code.capture_error",
+  unknown_model: "error.code.unknown_model",
+  model_not_downloaded: "error.code.model_not_downloaded",
+  model_in_use: "error.code.model_in_use",
+  download_in_progress: "error.code.download_in_progress",
+  license_not_accepted: "error.code.license_not_accepted",
+  gpu_runtime_unsupported: "error.code.gpu_runtime_unsupported",
+  pull_unsupported: "error.code.pull_unsupported",
+  translation_server_unreachable: "error.code.translation_server_unreachable",
+  translation_server_auth_failed: "error.code.translation_server_auth_failed",
+  unknown_method: "error.code.unknown_method",
+  invalid_params: "error.code.invalid_params",
+  invalid_request: "error.code.invalid_request",
+  internal_error: "error.code.internal_error",
 };
 
 /** User-facing explanation for any error thrown by the wrappers above. */
@@ -216,17 +316,20 @@ export function describeError(e: unknown): string {
   if (ce) {
     switch (ce.kind) {
       case "engine": {
-        const head = ENGINE_CODES[ce.code] ?? `引擎回報錯誤（${ce.code}）`;
-        return ce.code === "invalid_settings" ? `${head}：${ce.message}` : `${head}。`;
+        const key = ENGINE_CODES[ce.code];
+        const head = key ? t(key) : t("error.code.other", { code: ce.code });
+        return ce.code === "invalid_settings"
+          ? t("error.engineDetail", { head, message: ce.message })
+          : t("error.engineSentence", { head });
       }
       case "timeout":
-        return `引擎在 ${Math.round(ce.timeout_ms / 1000)} 秒內沒有回應。請稍後再試，或重新啟動引擎。`;
+        return tp("error.timeout", Math.round(ce.timeout_ms / 1000));
       case "disconnected":
-        return "引擎目前沒有執行。請等它重新啟動，或在狀態列按「重新啟動引擎」。";
+        return t("error.disconnected");
       case "invalid_input":
-        return `輸入的值不正確：${ce.message}`;
+        return t("error.invalidInput", { message: ce.message });
     }
   }
-  if (e instanceof Error) return `發生錯誤：${e.message}`;
-  return `發生錯誤：${String(e)}`;
+  if (e instanceof Error) return t("error.generic", { message: e.message });
+  return t("error.generic", { message: String(e) });
 }

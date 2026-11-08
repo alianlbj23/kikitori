@@ -27,6 +27,7 @@ from kikitori.pipeline import (
     default_transcript_filter,
     route,
 )
+from kikitori.pipeline.languages import display_original
 from kikitori.translate.errors import TranslationConnectionError
 from kikitori.translate.types import TranslationRequest
 
@@ -228,11 +229,42 @@ class RouteTest(unittest.TestCase):
         self.assertEqual((r.target, r.action), ("zh-TW", "translate"))
 
     def test_unsupported_language(self) -> None:
-        r = route("media", "ko", "zh-TW", "ja")
+        # 不在語言清單內的 Whisper 語言（例如挪威語的幻覺）不送翻譯
+        r = route("media", "nn", "zh-TW", "ja")
         self.assertEqual((r.target, r.action), ("zh-TW", "unsupported"))
 
     def test_language_code_normalization(self) -> None:
         self.assertEqual(route("interpret", "ZH_tw", "zh-TW", "en").target, "en")
+
+    def test_media_any_catalog_pair(self) -> None:
+        r = route("media", "ko", "es", "ja")
+        self.assertEqual((r.source, r.target, r.action), ("ko", "es", "translate"))
+
+    def test_same_whisper_language_is_copied_for_both_chinese_scripts(self) -> None:
+        for target in ("zh-TW", "zh-CN"):
+            with self.subTest(target=target):
+                r = route("media", "zh", target, "ja")
+                self.assertEqual((r.target, r.action), (target, "copy"))
+        self.assertEqual(route("media", "ja", "ja", "en").action, "copy")
+
+    def test_interpret_between_any_two_languages(self) -> None:
+        # 我的語言 ja、對方語言 ko
+        r = route("interpret", "ja", "ja", "ko")
+        self.assertEqual((r.source, r.target, r.action), ("ja", "ko", "translate"))
+        r = route("interpret", "ko", "ja", "ko")
+        self.assertEqual((r.source, r.target, r.action), ("ko", "ja", "translate"))
+
+    def test_interpret_simplified_chinese_user(self) -> None:
+        r = route("interpret", "zh", "zh-CN", "en")
+        self.assertEqual((r.target, r.action), ("en", "translate"))
+        r = route("interpret", "en", "zh-CN", "en")
+        self.assertEqual((r.target, r.action), ("zh-CN", "translate"))
+
+    def test_translation_disabled_never_translates(self) -> None:
+        for mode, detected in (("media", "ja"), ("media", "zh"), ("interpret", "zh")):
+            with self.subTest(mode=mode, detected=detected):
+                r = route(mode, detected, "zh-TW", "ja", translation_enabled=False)  # type: ignore[arg-type]
+                self.assertEqual(r.action, "off")
 
 
 class FilterTest(unittest.TestCase):
@@ -256,10 +288,21 @@ class ConfigValidationTest(unittest.TestCase):
             {"partial_interval_ms": 0},
             {"final_queue_size": 0},
             {"context_lines": -1},
+            {"target_language": "zh"},
+            {"target_language": "zh-tw"},  # 必須是正規化後的語言碼
+            {"partner_language": "sv"},
+            {"source_language": "xx"},
         ):
             params = {"mode": "media", "pause_secs": 0.6, "max_secs": 10.0, **kwargs}
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 PipelineConfig(**params)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            PipelineConfig(
+                mode="media",
+                pause_secs=0.6,
+                max_secs=10.0,
+                translation_enabled=1,  # type: ignore[arg-type]
+            )
 
 
 class SteppedSchedulingTest(unittest.TestCase):
@@ -408,13 +451,363 @@ class LanguageRoutingTest(unittest.TestCase):
         h.pipeline.run_pending()
         self.assertEqual(h.finals()[0].original, "駅の天気が気になる")
 
+    def test_media_korean_to_spanish(self) -> None:
+        h = Harness("media", target_language="es", source_language="ko")
+        h.final.language = "ko"
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        req = h.final_tr.requests[0]
+        self.assertEqual((req.source_language, req.target_language), ("ko", "es"))
+        self.assertEqual(h.finals()[0].translation, "<es>final1")
+        self.assertEqual(h.finals()[0].target_language, "es")
+
+    def test_chinese_to_simplified_target_is_converted_not_translated(self) -> None:
+        h = Harness("media", target_language="zh-CN")
+        h.final.script = lambda n: transcript("這個軟體很好用", "zh")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(h.final_tr.requests, [])
+        final = h.finals()[0]
+        self.assertEqual(final.original, "这个软体很好用")
+        self.assertEqual(final.translation, "这个软体很好用")
+
+    def test_traditional_source_simplified_target_keeps_original_script(self) -> None:
+        # 聽繁中、看簡中：原文照收聽語言顯示正體，譯文是簡體
+        h = Harness("media", source_language="zh-TW", target_language="zh-CN")
+        h.final.script = lambda n: transcript("这个视频", "zh")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        final = h.finals()[0]
+        self.assertEqual((final.original, final.translation), ("這個影片", "这个视频"))
+        self.assertEqual(h.final_tr.requests, [])
+
+    def test_interpret_partner_chinese_shown_in_partner_script(self) -> None:
+        h = Harness("interpret", target_language="ja", partner_language="zh-TW")
+        h.final.script = lambda n: transcript("请问附近有便利商店吗", "zh")
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(h.finals()[0].original, "請問附近有便利商店嗎")
+        self.assertEqual(h.final_tr.requests[0].target_language, "ja")
+
     def test_unsupported_language_shows_original(self) -> None:
-        h = self.run_final("media", "ko")
+        h = self.run_final("media", "nn")
         self.assertEqual(h.final_tr.requests, [])
         self.assertEqual(
             (h.finals()[0].original, h.finals()[0].translation), ("final1", "")
         )
         self.assertEqual([lvl for lvl, _ in h.logs], ["warning"])
+
+
+class TranslationDisabledTest(unittest.TestCase):
+    """只顯示原文：不呼叫翻譯器（以計數的假翻譯器確認），譯文為空字串。"""
+
+    def test_no_translator_calls_and_empty_translation(self) -> None:
+        for mode, language in (("media", "ja"), ("media", "zh"), ("interpret", "zh")):
+            with self.subTest(mode=mode, language=language):
+                h = Harness(mode, translation_enabled=False)
+                h.fast.language = h.final.language = language
+                h.pipeline.feed(ONE_UTTERANCE[: 2 * SR])
+                h.pipeline.run_pending()
+                h.pipeline.feed(ONE_UTTERANCE[2 * SR :])
+                h.pipeline.run_pending()
+                self.assertTrue(h.partials())
+                self.assertEqual(h.fast_tr.requests, [])
+                self.assertEqual(h.final_tr.requests, [])
+                for update in h.updates:
+                    self.assertEqual(update.translation, "")
+                    self.assertTrue(update.original)
+                # 關閉翻譯是使用者的選擇，不是錯誤：不發警告
+                self.assertEqual(h.logs, [])
+
+
+class TranslationToggleTest(unittest.TestCase):
+    """執行中切換「顯示翻譯」：之後的句子依新狀態處理，已送出的句子不補翻。"""
+
+    def run_utterance(self, h: Harness) -> None:
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+
+    def calls(self, h: Harness) -> int:
+        return len(h.fast_tr.requests) + len(h.final_tr.requests)
+
+    def test_turning_translation_on_resumes_translator_calls(self) -> None:
+        h = Harness(translation_enabled=False)
+        self.assertFalse(h.pipeline.translation_enabled)
+        self.run_utterance(h)
+        self.assertEqual(self.calls(h), 0)
+        h.pipeline.set_translation_enabled(True)
+        self.assertTrue(h.pipeline.translation_enabled)
+        self.run_utterance(h)
+        self.assertGreater(len(h.final_tr.requests), 0)
+        first, second = h.finals()
+        self.assertEqual((first.utterance_id, first.translation), (1, ""))
+        self.assertEqual(second.translation, "<zh-TW>final2")
+        # 第一句沒有被補翻：之後沒有任何 utterance 1 的更新
+        later = h.updates[h.updates.index(first) + 1 :]
+        self.assertNotIn(1, [u.utterance_id for u in later])
+
+    def test_turning_translation_off_stops_translator_calls(self) -> None:
+        h = Harness()
+        self.run_utterance(h)
+        before = self.calls(h)
+        self.assertGreater(before, 0)
+        h.pipeline.set_translation_enabled(False)
+        self.run_utterance(h)
+        self.assertEqual(self.calls(h), before)
+        self.assertEqual(h.finals()[0].translation, "<zh-TW>final1")
+        self.assertEqual(h.finals()[1].translation, "")
+        self.assertEqual(h.logs, [])
+
+    def test_toggle_controls_the_keep_warm_task(self) -> None:
+        keep = RecordingKeepWarm()
+        h = Harness(keep_warm=keep, translation_enabled=False)
+        h.pipeline.set_translation_enabled(True)
+        h.pipeline.set_translation_enabled(False)
+        self.assertEqual(keep.calls, ["active:True", "active:False"])
+
+    def test_keep_warm_without_set_active_is_fine(self) -> None:
+        class NoToggle:
+            # 只實作 BackgroundTask 的 start／stop（沒有 set_active）：切換照樣生效
+            def start(self) -> None:
+                pass
+
+            def stop(self, timeout: float = 0.5) -> None:
+                pass
+
+        h = Harness(keep_warm=NoToggle())  # type: ignore[arg-type]
+        h.pipeline.set_translation_enabled(False)
+        self.assertFalse(h.pipeline.translation_enabled)
+
+    def test_rejects_non_bool(self) -> None:
+        h = Harness()
+        with self.assertRaises(TypeError):
+            h.pipeline.set_translation_enabled(1)  # type: ignore[arg-type]
+
+    def test_threaded_toggle_while_running(self) -> None:
+        h = Harness(translation_enabled=False)
+        source = StoppableSource()
+        h.pipeline.start(source)
+        h.pipeline.set_translation_enabled(True)
+        h.pipeline.stop(timeout=WAIT)
+        self.assertTrue(h.pipeline.translation_enabled)
+
+
+class PartialStabilityTest(unittest.TestCase):
+    """`PartialStability` 的即時譯文：只能經 `record_translation()` 改變，換句子時清空。"""
+
+    def test_translation_is_recorded_and_reset_per_utterance(self) -> None:
+        from kikitori.pipeline.stability import PartialStability
+
+        stability = PartialStability()
+        stability.observe(1, "こんに")
+        self.assertEqual(stability.translation, "")
+        stability.record_translation("你好")
+        stability.observe(1, "こんにちは")
+        self.assertEqual(stability.translation, "你好")  # 同一句：沿用，不閃爍
+        stability.observe(2, "さようなら")
+        self.assertEqual(stability.translation, "")
+        with self.assertRaises(AttributeError):
+            stability.translation = "x"  # type: ignore[misc]
+
+
+class StablePartialTest(unittest.TestCase):
+    """F2：LocalAgreement-2 的穩定前綴（`stable_chars`）與減少即時翻譯請求。"""
+
+    LONG = track(silence(1.0), speech(8.0), silence(1.5))
+
+    def run_partials(self, h: Harness, texts: list[str], language: str = "ja") -> None:
+        """每次餵 0.7 s（一次觸發）就跑一次，讓每個辨識結果都被處理。"""
+        h.fast.script = lambda n: transcript(texts[n - 1], language)
+        step = round(0.7 * SR)
+        h.pipeline.feed(self.LONG[: SR + step])
+        h.pipeline.run_pending()
+        offset = SR + step
+        while len(h.fast.calls) < len(texts):
+            h.pipeline.feed(self.LONG[offset : offset + step])
+            offset += step
+            h.pipeline.run_pending()
+        self.offset = offset
+
+    def last_per_call(self, h: Harness) -> list[SubtitleUpdate]:
+        """每次即時辨識的最後一則即時字幕（串流翻譯會送出多則）。"""
+        last: list[SubtitleUpdate] = []
+        for update in h.partials():
+            if (
+                last
+                and last[-1].original == update.original
+                and (last[-1].stable_chars == update.stable_chars)
+            ):
+                last[-1] = update
+            else:
+                last.append(update)
+        return last
+
+    def test_stable_chars_is_the_common_prefix_with_the_previous_partial(self) -> None:
+        h = Harness()
+        texts = ["あいう", "あいえ", "あいお", "あいか", "あいかき", "あ"]
+        self.run_partials(h, texts)
+        updates = self.last_per_call(h)
+        self.assertEqual([u.original for u in updates], texts)
+        # 第一則 0；之後與上一則的最長共同前綴，且不超過本則原文的長度
+        self.assertEqual([u.stable_chars for u in updates], [0, 2, 2, 2, 3, 1])
+        for update in h.partials():
+            assert update.stable_chars is not None
+            self.assertLessEqual(update.stable_chars, len(update.original))
+            self.assertIsNone(update.latency_ms)
+
+    def test_flickering_partials_request_fewer_translations(self) -> None:
+        h = Harness()
+        texts = ["あいう", "あいえ", "あいお", "あいか", "あいかき"]
+        self.run_partials(h, texts)
+        # 以前每則都翻譯（5 次）；穩定前綴只在第 1、2（0→2）、5（2→3）則變長
+        self.assertEqual(
+            [r.text for r in h.fast_tr.requests], ["あいう", "あいえ", "あいかき"]
+        )
+        updates = self.last_per_call(h)
+        # 沒有重新翻譯的即時字幕沿用上一次的譯文（不閃爍、不清空）
+        self.assertEqual(
+            [u.translation for u in updates],
+            [
+                "<zh-TW>あいう",
+                "<zh-TW>あいえ",
+                "<zh-TW>あいえ",
+                "<zh-TW>あいえ",
+                "<zh-TW>あいかき",
+            ],
+        )
+        # 句子結束時完整路徑一定翻譯，且完整字幕沒有 stable_chars
+        h.pipeline.feed(self.LONG[self.offset :])
+        h.pipeline.run_pending()
+        final = h.finals()[-1]
+        self.assertEqual(len(h.final_tr.requests), 1)
+        self.assertEqual(final.translation, "<zh-TW>final1")
+        self.assertIsNone(final.stable_chars)
+
+    def test_identical_partial_is_not_translated_again(self) -> None:
+        h = Harness()
+        self.run_partials(h, ["あいう", "あいう"])
+        self.assertEqual([r.text for r in h.fast_tr.requests], ["あいう"])
+        self.assertEqual(h.partials()[-1].stable_chars, 3)
+
+    def test_new_utterance_starts_from_zero(self) -> None:
+        h = Harness()
+        h.fast.script = lambda n: transcript("同じ文")
+        audio = track(ONE_UTTERANCE, ONE_UTTERANCE)
+        first_end = len(ONE_UTTERANCE)
+        h.pipeline.feed(audio[: 2 * SR])
+        h.pipeline.run_pending()
+        h.pipeline.feed(audio[2 * SR : first_end + 2 * SR])
+        h.pipeline.run_pending()
+        partials = h.partials()
+        self.assertEqual({u.utterance_id for u in partials}, {1, 2})
+        second = [u for u in partials if u.utterance_id == 2]
+        self.assertEqual(second[0].stable_chars, 0)
+        # 新的一句重新翻譯（不沿用上一句的譯文）
+        self.assertEqual(len(h.fast_tr.requests), 2)
+
+    def test_stable_chars_uses_the_displayed_original(self) -> None:
+        # 原文先經過與顯示相同的處理（去頭尾空白、字形轉換）再比較
+        h = Harness(source_language="zh-TW", target_language="ja")
+        self.run_partials(h, [" 这个问题", "这个问 "], language="zh")
+        updates = self.last_per_call(h)
+        expected = [
+            display_original(text.strip(), "zh", ("zh-TW", "ja"))
+            for text in (" 这个问题", "这个问 ")
+        ]
+        self.assertNotEqual(expected[0], "这个问题")  # 確實轉成繁體
+        self.assertEqual([u.original for u in updates], expected)
+        # 比較的是顯示的原文：開頭空白與字形差異不會讓穩定前綴變成 0
+        self.assertEqual(updates[-1].stable_chars, 3)
+
+    def test_not_translating_partials_still_get_stable_chars(self) -> None:
+        h = Harness(translation_enabled=False)
+        self.run_partials(h, ["あいう", "あいえ"])
+        self.assertEqual([u.stable_chars for u in self.last_per_call(h)], [0, 2])
+        self.assertEqual(h.fast_tr.requests, [])
+
+
+class LatencyMetricsTest(unittest.TestCase):
+    """F4：完整字幕的 latency_ms 與 `Pipeline.metrics()`。"""
+
+    def test_final_latency_is_measured_from_the_vad_end(self) -> None:
+        now = [100.0]
+        h = Harness(clock=lambda: now[0])
+
+        def slow_final(n: int) -> Transcript:
+            now[0] += 0.25  # 完整辨識 250 ms
+            return transcript(f"final{n}")
+
+        h.final.script = slow_final
+        h.pipeline.feed(ONE_UTTERANCE)  # VAD 在這裡判定句子結束（時鐘 100.0）
+        now[0] += 0.5  # 排隊 500 ms
+        h.pipeline.run_pending()
+        final = h.finals()[0]
+        self.assertEqual(final.latency_ms, 750)
+        self.assertEqual(h.pipeline.metrics().latency_ms_median, 750)
+
+    def test_median_of_the_last_20_finals(self) -> None:
+        now = [0.0]
+        h = Harness(clock=lambda: now[0])
+        delays = iter([0.1 * (i + 1) for i in range(25)])
+
+        def final(n: int) -> Transcript:
+            now[0] += next(delays)
+            return transcript(f"final{n}")
+
+        h.final.script = final
+        self.assertIsNone(h.pipeline.metrics().latency_ms_median)
+        for _ in range(25):
+            h.pipeline.feed(ONE_UTTERANCE)
+            h.pipeline.run_pending()
+        latencies = [u.latency_ms for u in h.finals()]
+        self.assertEqual(latencies[:3], [100, 200, 300])
+        # 最後 20 句是 600…2500 ms，中位數 (1500 + 1600) / 2
+        self.assertEqual(h.pipeline.metrics().latency_ms_median, 1550)
+
+    def test_cleared_final_has_latency_but_is_not_in_the_median(self) -> None:
+        h = Harness()
+        h.final.script = lambda n: transcript("", no_speech=0.99)
+        h.pipeline.feed(ONE_UTTERANCE[: 2 * SR])
+        h.pipeline.run_pending()
+        h.pipeline.feed(ONE_UTTERANCE[2 * SR :])
+        h.pipeline.run_pending()
+        cleared = h.finals()[0]
+        self.assertEqual((cleared.original, cleared.latency_ms), ("", 0))
+        self.assertIsNone(h.pipeline.metrics().latency_ms_median)
+
+    def test_backlog_counts_utterances_waiting_for_the_final_path(self) -> None:
+        h = Harness()
+        self.assertEqual(h.pipeline.metrics().backlog, 0)
+        h.pipeline.feed(track(*(ONE_UTTERANCE for _ in range(3))))
+        self.assertEqual(h.pipeline.metrics().backlog, 3)
+        h.pipeline.run_pending()
+        self.assertEqual(h.pipeline.metrics().backlog, 0)
+
+    def test_level_dbfs_of_the_last_second(self) -> None:
+        h = Harness()
+        self.assertEqual(h.pipeline.metrics().level_dbfs, -120.0)
+        h.pipeline.feed(silence(0.5))
+        self.assertEqual(h.pipeline.metrics().level_dbfs, -120.0)
+        # 振幅 5000 的方波：RMS 5000 → 20·log10(5000/32768) ≈ −16.3 dBFS
+        h.pipeline.feed(speech(1.0))
+        self.assertAlmostEqual(h.pipeline.metrics().level_dbfs, -16.3, places=1)
+        # 只看最後約 1 秒：之後 1 秒的靜音蓋掉人聲
+        h.pipeline.feed(silence(1.0))
+        self.assertEqual(h.pipeline.metrics().level_dbfs, -120.0)
+        # 半秒人聲、半秒靜音：功率減半（−3 dB）
+        h.pipeline.feed(speech(0.5))
+        self.assertAlmostEqual(h.pipeline.metrics().level_dbfs, -19.3, places=1)
+
+    def test_level_is_capped_at_full_scale(self) -> None:
+        h = Harness()
+        h.pipeline.feed(np.full(SR, -32768, dtype=np.int16))
+        self.assertEqual(h.pipeline.metrics().level_dbfs, 0.0)
+
+    def test_threaded_mode_meters_the_captured_audio(self) -> None:
+        h = Harness()
+        h.pipeline.start(ArraySource(speech(1.0)))
+        self.assertTrue(h.pipeline.wait(WAIT))
+        self.assertAlmostEqual(h.pipeline.metrics().level_dbfs, -16.3, places=1)
 
 
 class ContextTest(unittest.TestCase):
@@ -798,6 +1191,9 @@ class RecordingKeepWarm:
 
     def stop(self, timeout: float = 0.5) -> None:
         self.calls.append("stop")
+
+    def set_active(self, active: bool) -> None:
+        self.calls.append(f"active:{active}")
 
 
 class KeepWarmLifecycleTest(unittest.TestCase):

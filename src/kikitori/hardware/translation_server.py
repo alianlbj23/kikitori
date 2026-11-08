@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit
 
 from kikitori.hardware.types import TranslationServerInfo
+from kikitori.translate.client import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +29,10 @@ ConnectionFactory = Callable[[str, str, int, float], http.client.HTTPConnection]
 """`(scheme, host, port, timeout)` → 尚未連線的 HTTP(S) 連線；測試可替換。"""
 
 
-def _default_connection(
+def default_connection(
     scheme: str, host: str, port: int, timeout: float
 ) -> http.client.HTTPConnection:
+    """建立（尚未連線的）HTTP 或 HTTPS 連線；HTTPS 驗證憑證。"""
     if scheme == "https":
         return http.client.HTTPSConnection(
             host, port, timeout=timeout, context=ssl.create_default_context()
@@ -52,7 +54,13 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-def _valid_model_name(name: object) -> bool:
+def is_listed_model_name(name: object) -> bool:
+    """伺服器列出的模型名稱能不能採用（寬鬆）：可列印、不含頭尾空白、長度有限。
+
+    只用來顯示與比對「已安裝」，不會再送回伺服器，所以接受任何可列印字元（其他
+    OpenAI 相容服務的模型 id 可能含空白或 `@`）。要送給 Ollama `/api/pull` 的名稱
+    改用較嚴格的 `kikitori.hardware.ollama.validate_pull_model_name()`。
+    """
     return (
         isinstance(name, str)
         and 0 < len(name) <= MAX_MODEL_NAME_CHARS
@@ -78,12 +86,17 @@ def parse_model_list(raw: bytes) -> tuple[str, ...]:
     names: list[str] = []
     for item in items[:MAX_MODELS]:
         name = item.get("id") if isinstance(item, dict) else None
-        if _valid_model_name(name) and name not in names:
+        if is_listed_model_name(name) and name not in names:
             names.append(name)
     return tuple(names)
 
 
-def _api_key(env: Mapping[str, str], api_key_env: str) -> str | None:
+def read_api_key(env: Mapping[str, str], api_key_env: str) -> str | None:
+    """環境變數中的 API 金鑰（去頭尾空白）；沒設定時 None。
+
+    Raises:
+        ValueError: 金鑰含非 ASCII 或控制字元（不能放進 HTTP 標頭）。
+    """
     key = env.get(api_key_env, "").strip()
     if not key:
         return None
@@ -98,7 +111,7 @@ def probe_translation_server(
     *,
     timeout: float = PROBE_TIMEOUT_SECS,
     env: Mapping[str, str] | None = None,
-    connect: ConnectionFactory = _default_connection,
+    connect: ConnectionFactory = default_connection,
 ) -> TranslationServerInfo:
     """`GET {base_url}/models`，回傳伺服器狀態；任何錯誤都記在 `error`，不丟例外。
 
@@ -110,8 +123,10 @@ def probe_translation_server(
         connect: 建立連線的函式（測試用）。
     """
     env = os.environ if env is None else env
-    text = base_url.strip() if isinstance(base_url, str) else ""
-    parts = urlsplit(text)
+    raw = base_url.strip() if isinstance(base_url, str) else ""
+    parts = urlsplit(raw)
+    # 結果會回到 UI（`hardware.detect`、推薦理由）並寫進 log：帳密一律遮蔽
+    text = redact_url(raw)
     try:
         port = parts.port
     except ValueError:
@@ -135,7 +150,7 @@ def probe_translation_server(
     )
 
     try:
-        key = _api_key(env, api_key_env) if api_key_env else None
+        key = read_api_key(env, api_key_env) if api_key_env else None
     except ValueError as exc:
         return TranslationServerInfo(text, local, reachable=False, error=str(exc))
     headers = {"Accept": "application/json", "User-Agent": "kikitori"}

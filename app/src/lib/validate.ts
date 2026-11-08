@@ -16,26 +16,36 @@ import type {
   CombinationCheck,
   CommandError,
   DeviceInfo,
+  DownloadKind,
   DownloadProgressEvent,
   EngineInfo,
+  FuriganaDictionary,
   GpuInfo,
   GpuRuntime,
   HardwareInfo,
   HardwareReport,
   LogEvent,
+  MetricsEvent,
+  ModelDeleteResult,
   ModelRole,
   ModelsList,
+  ObsStatus,
+  OutputInfo,
   OverlaySnapshot,
   OverlayStyle,
+  ShortcutInfo,
   Recommendation,
   RecommendationPreview,
   StatusEvent,
   SubtitleEvent,
   TranslationModel,
   TranslationServerInfo,
+  TranslationStatus,
   UpdateDownloadEvent,
   UpdateInfo,
 } from "./types";
+import { parseEngineMessages } from "./messages";
+import { validRuby, type RubySpan } from "./ruby";
 
 export class ValidationError extends Error {
   constructor(path: string, problem: string) {
@@ -137,29 +147,66 @@ export function parseSubtitle(v: unknown): SubtitleEvent {
     start_sample: uint(o, "start_sample", p),
     end_sample: uint(o, "end_sample", p),
     session_id: optUint(o, "session_id", p),
+    // Partial-only and final-only hints; dropped where they do not belong so
+    // the renderers never have to second-guess them.
+    stable_chars: o.is_final === false ? optUint(o, "stable_chars", p) : null,
+    latency_ms: o.is_final === true ? optUint(o, "latency_ms", p) : null,
+    ruby: null,
   };
+  ev.ruby = parseRuby(o.ruby, ev.original);
   if (ev.end_sample < ev.start_sample) {
     throw new ValidationError(`${p}.end_sample`, "before start_sample");
   }
   return ev;
 }
 
+/**
+ * `subtitle.ruby` (furigana). Like Rust, an invalid list only loses the
+ * annotation, never the subtitle: it is a display hint.
+ */
+function parseRuby(v: unknown, original: string): RubySpan[] | null {
+  if (!Array.isArray(v)) return null;
+  const spans: RubySpan[] = [];
+  for (const item of v) {
+    if (!Array.isArray(item) || item.length !== 3) return null;
+    const [start, end, reading] = item as unknown[];
+    if (typeof start !== "number" || typeof end !== "number" || typeof reading !== "string") return null;
+    spans.push([start, end, reading]);
+  }
+  return validRuby(spans, Array.from(original).length) ? spans : null;
+}
+
+/** Translation model names as the engine accepts them (`models.pull_translation`). */
+export const TRANSLATION_MODEL_NAME = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
+
 export function parseStatus(v: unknown): StatusEvent {
   const p = "status";
   const o = obj(v, p);
+  const code = optStr(o, "code", p);
+  const data = typeof o.data === "object" && o.data !== null && !Array.isArray(o.data) ? (o.data as Obj) : {};
+  // Only names the engine could pull are kept: they are sent back to it as-is.
+  const missing =
+    code === "translation_model_missing"
+      ? strList(data.models, 10, 200).filter((m) => TRANSLATION_MODEL_NAME.test(m))
+      : [];
   return {
     state: oneOf(o, "state", p, ["idle", "loading", "running", "error"] as const),
     detail: optStr(o, "detail", p),
     session_id: optUint(o, "session_id", p),
-    code: optStr(o, "code", p),
+    code,
+    missing_translation_models: [...new Set(missing)],
   };
 }
+
+const DOWNLOAD_KINDS: readonly DownloadKind[] = ["asr", "gpu_runtime", "translation", "furigana"];
 
 export function parseDownloadProgress(v: unknown): DownloadProgressEvent {
   const p = "download_progress";
   const o = obj(v, p);
   return {
     model: str(o, "model", p, 200),
+    // Unknown kinds (a newer engine) are treated like none: matched by name only.
+    kind: (DOWNLOAD_KINDS as readonly unknown[]).includes(o.kind) ? (o.kind as DownloadKind) : null,
     downloaded_bytes: uint(o, "downloaded_bytes", p),
     total_bytes: uint(o, "total_bytes", p),
     state:
@@ -167,6 +214,22 @@ export function parseDownloadProgress(v: unknown): DownloadProgressEvent {
         ? "downloading"
         : oneOf(o, "state", p, ["downloading", "done", "error"] as const),
     error: optStr(o, "error", p),
+  };
+}
+
+/** `metrics` (F4). Rust has checked the ranges; the level is clamped again for the meter. */
+export function parseMetrics(v: unknown): MetricsEvent {
+  const p = "metrics";
+  const o = obj(v, p);
+  const level = o.level_dbfs;
+  if (typeof level !== "number" || !Number.isFinite(level)) {
+    throw new ValidationError(`${p}.level_dbfs`, "expected a number");
+  }
+  return {
+    session_id: optUint(o, "session_id", p),
+    level_dbfs: Math.min(0, Math.max(-120, level)),
+    backlog: uint(o, "backlog", p),
+    latency_ms_median: optUint(o, "latency_ms_median", p),
   };
 }
 
@@ -209,6 +272,19 @@ export function parseBridgeStatus(v: unknown): BridgeStatus {
 
 export const FONT_SIZE_RANGE = [14, 96] as const;
 export const MAX_LINES_RANGE = [1, 3] as const;
+/** Same bounds as Rust `MIN_DISPLAY_MS_RANGE` / `IDLE_CLEAR_SECS_RANGE`. */
+export const MIN_DISPLAY_MS_RANGE = [0, 10_000] as const;
+export const IDLE_CLEAR_SECS_RANGE = [0, 600] as const;
+export const DEFAULT_MIN_DISPLAY_MS = 1500;
+export const DEFAULT_IDLE_CLEAR_SECS = 8;
+
+/** An optional integer in `range`; `fallback` when absent (older Rust builds). */
+function rangedOr(o: Obj, key: string, path: string, range: readonly [number, number], fallback: number): number {
+  if (o[key] === undefined) return fallback;
+  const v = uint(o, key, path);
+  if (v < range[0] || v > range[1]) throw new ValidationError(`${path}.${key}`, "out of range");
+  return v;
+}
 
 export function parseOverlayStyle(v: unknown): OverlayStyle {
   const p = "style";
@@ -230,7 +306,61 @@ export function parseOverlayStyle(v: unknown): OverlayStyle {
     background_opacity: opacity,
     position: oneOf(o, "position", p, ["top", "bottom"] as const),
     max_lines: maxLines,
+    min_display_ms: rangedOr(o, "min_display_ms", p, MIN_DISPLAY_MS_RANGE, DEFAULT_MIN_DISPLAY_MS),
+    idle_clear_secs: rangedOr(o, "idle_clear_secs", p, IDLE_CLEAR_SECS_RANGE, DEFAULT_IDLE_CLEAR_SECS),
   };
+}
+
+const SHORTCUT_ACTIONS = ["click_through", "toggle_translation", "clear_subtitles"] as const;
+
+/** `OverlaySnapshot.shortcuts`; unknown actions (a newer Rust build) are dropped. */
+function parseShortcuts(v: unknown, path: string): ShortcutInfo[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new ValidationError(path, "expected an array");
+  const out: ShortcutInfo[] = [];
+  v.forEach((item, i) => {
+    const ip = `${path}[${i}]`;
+    const o = obj(item, ip);
+    if (!(SHORTCUT_ACTIONS as readonly unknown[]).includes(o.action)) return;
+    out.push({
+      action: oneOf(o, "action", ip, SHORTCUT_ACTIONS),
+      keys: str(o, "keys", ip, 100),
+      registered: bool(o, "registered", ip),
+    });
+  });
+  return out;
+}
+
+/** Payload of `shortcut://action` (the main window handles these). */
+export function parseShortcutAction(v: unknown): ShortcutInfo["action"] {
+  if (typeof v !== "string" || !(SHORTCUT_ACTIONS as readonly string[]).includes(v)) {
+    throw new ValidationError("shortcut", `expected one of ${SHORTCUT_ACTIONS.join(", ")}`);
+  }
+  return v as ShortcutInfo["action"];
+}
+
+export function parseObsStatus(v: unknown): ObsStatus {
+  const p = "obs_set_output";
+  const o = obj(v, p);
+  return {
+    content: oneOf(o, "content", p, ["off", "original", "translation", "both"] as const),
+    path: optStr(o, "path", p),
+    error: optStr(o, "error", p),
+  };
+}
+
+export function parseOutputInfo(v: unknown): OutputInfo {
+  const p = "output_info";
+  const o = obj(v, p);
+  return { transcripts_dir: optStr(o, "transcripts_dir", p), obs_file: optStr(o, "obs_file", p) };
+}
+
+/** `transcript_save`: the full path of the saved file. */
+export function parseSavedPath(v: unknown): string {
+  if (typeof v !== "string" || v.length === 0 || v.length > 4096) {
+    throw new ValidationError("transcript_save", "expected a path");
+  }
+  return v;
 }
 
 export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
@@ -242,6 +372,11 @@ export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
     visible: bool(o, "visible", p),
     shortcut: str(o, "shortcut", p, 100),
     shortcut_registered: bool(o, "shortcut_registered", p),
+    // Older Rust builds have no locale; a malformed one is ignored (the overlay follows the OS).
+    locale: typeof o.locale === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(o.locale) ? o.locale : null,
+    // Older Rust builds have no flag: translations were always shown then.
+    show_translation: o.show_translation !== false,
+    shortcuts: parseShortcuts(o.shortcuts, `${p}.shortcuts`),
   };
 }
 
@@ -297,10 +432,15 @@ export function parseRecommendation(v: unknown, p = "recommendation"): Recommend
     translation_final: optStr(o, "translation_final", p),
     translation_budget_gb: optNum(o, "translation_budget_gb", p),
     gpu_runtime_missing: bool(o, "gpu_runtime_missing", p),
-    reasons: strList(o.reasons),
-    warnings: strList(o.warnings),
+    reasons: parseEngineMessages(o.reasons),
+    warnings: parseEngineMessages(o.warnings),
+    translation_status: (TRANSLATION_STATUSES as readonly unknown[]).includes(o.translation_status)
+      ? (o.translation_status as TranslationStatus)
+      : null,
   };
 }
+
+const TRANSLATION_STATUSES: readonly TranslationStatus[] = ["recommended", "remote", "not_needed", "unsupported"];
 
 /**
  * `settings.preview_recommendation`. The fingerprint ends up in the settings
@@ -401,7 +541,16 @@ function parseAsrModel(v: unknown, path: string): AsrModel {
     vram_mb: optUint(o, "vram_mb", path),
     vram_int8_mb: optUint(o, "vram_int8_mb", path),
     recommended_for: roles(o.recommended_for),
+    // Older engines do not report it.
+    disk_bytes: optUint(o, "disk_bytes", path),
   };
+}
+
+/** `models.delete`: `{model, freed_bytes}`. */
+export function parseModelDeleteResult(v: unknown): ModelDeleteResult {
+  const p = "models.delete";
+  const o = obj(v, p);
+  return { model: str(o, "model", p, 100), freed_bytes: uint(o, "freed_bytes", p) };
 }
 
 function parseGpuRuntime(v: unknown, p: string): GpuRuntime {
@@ -439,6 +588,26 @@ function parseTranslationModel(v: unknown, path: string): TranslationModel {
   };
 }
 
+/** `models.list.furigana` (docs/specs/furigana.md). */
+function parseFuriganaDictionary(v: unknown, p: string): FuriganaDictionary | null {
+  // Engines without furigana send nothing; the models page then hides the section.
+  if (v === undefined || v === null) return null;
+  const o = obj(v, p);
+  return {
+    id: str(o, "id", p, 100),
+    installed: bool(o, "installed", p),
+    edition: str(o, "edition", p, 32),
+    version: str(o, "version", p, 32),
+    download_bytes: uint(o, "download_bytes", p),
+    installed_bytes: uint(o, "installed_bytes", p),
+    disk_bytes: optUint(o, "disk_bytes", p),
+    path: optStr(o, "path", p),
+    license: str(o, "license", p, 500),
+    license_url: str(o, "license_url", p, 500),
+    in_use: optBool(o, "in_use", p) ?? false,
+  };
+}
+
 /**
  * `models.list` (hardware.md `models_overview()`). The first-version fields the
  * engine still sends (`translation.base_url/installed/error/presets`) are
@@ -454,6 +623,7 @@ export function parseModels(v: unknown): ModelsList {
   return {
     asr: arr(o, "asr", p).map((m, i) => parseAsrModel(m, `${p}.asr[${i}]`)),
     gpu_runtime: parseGpuRuntime(o.gpu_runtime, `${p}.gpu_runtime`),
+    furigana: parseFuriganaDictionary(o.furigana, `${p}.furigana`),
     translation: {
       server: {
         base_url: str(server, "base_url", sp, 2000),
@@ -470,10 +640,10 @@ export function parseModels(v: unknown): ModelsList {
 export function parseCombinationCheck(v: unknown): CombinationCheck {
   const p = "models.validate";
   const o = obj(v, p);
-  const errors = strList(o.errors);
+  const errors = parseEngineMessages(o.errors);
   // The engine sets ok=false exactly when there are errors; if the two ever
   // disagree, trust the errors so saving is never offered next to one.
-  return { ok: bool(o, "ok", p) && errors.length === 0, errors, warnings: strList(o.warnings) };
+  return { ok: bool(o, "ok", p) && errors.length === 0, errors, warnings: parseEngineMessages(o.warnings) };
 }
 
 export function parseAbout(v: unknown): AboutInfo {

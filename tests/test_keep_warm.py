@@ -7,7 +7,11 @@ import threading
 import unittest
 from collections.abc import Iterator
 
-from kikitori.pipeline.keep_warm import ActivityTranslator, KeepWarm
+from kikitori.pipeline.keep_warm import (
+    ActivityTranslator,
+    KeepWarm,
+    WarmUpOnEnable,
+)
 from kikitori.translate import TranslationRequest, TranslationTimeoutError
 
 WAIT = 5.0
@@ -205,6 +209,76 @@ class ThreadTest(unittest.TestCase):
             keep.start()
 
 
+class ActiveTest(unittest.TestCase):
+    """只顯示原文時保溫不動作；執行中開啟翻譯時在背景立即預熱一次（不阻塞）。"""
+
+    def test_inactive_never_pings_even_when_idle(self) -> None:
+        clock = FakeClock()
+        ping = Pinger(clock)
+        keep = KeepWarm(ping, INTERVAL, clock=clock, active=False)
+        self.assertFalse(keep.active)
+        clock.advance(10 * INTERVAL)
+        self.assertEqual(keep.tick(), INTERVAL)
+        self.assertEqual(ping.at, [])
+
+    def test_inactive_start_creates_no_thread(self) -> None:
+        keep = KeepWarm(lambda: None, 3600.0, active=False)
+        keep.start()
+        self.addCleanup(keep.stop, WAIT)
+        self.assertFalse(keep.is_running)
+
+    def test_activating_pings_promptly_in_the_background(self) -> None:
+        pinged = threading.Event()
+        keep = KeepWarm(pinged.set, 3600.0, active=False)
+        keep.start()
+        self.addCleanup(keep.stop, WAIT)
+        keep.set_active(True)  # 不等預熱完成就返回
+        self.assertTrue(pinged.wait(WAIT))
+        self.assertTrue(keep.is_running)
+
+    def test_reactivating_a_running_task_pings_again(self) -> None:
+        count = 0
+        second = threading.Event()
+
+        def ping() -> None:
+            nonlocal count
+            count += 1
+            if count == 2:
+                second.set()
+
+        keep = KeepWarm(ping, 3600.0, active=False)
+        keep.start()
+        self.addCleanup(keep.stop, WAIT)
+        keep.set_active(True)
+        keep.set_active(False)
+        keep.set_active(True)
+        self.assertTrue(second.wait(WAIT))
+
+    def test_deactivated_stops_scheduled_pings(self) -> None:
+        clock = FakeClock()
+        ping = Pinger(clock)
+        keep = KeepWarm(ping, INTERVAL, clock=clock)
+        keep.set_active(False)
+        clock.advance(INTERVAL)
+        keep.tick()
+        self.assertEqual(ping.at, [])
+        keep.set_active(True)  # 尚未 start：只記下要預熱，不建立執行緒
+        self.assertFalse(keep.is_running)
+        keep.tick()
+        self.assertEqual(len(ping.at), 1)
+
+    def test_activating_before_start_or_after_stop(self) -> None:
+        pinged = threading.Event()
+        keep = KeepWarm(pinged.set, 3600.0, active=False)
+        keep.set_active(True)
+        keep.start()  # start 時已是 active：照常建立執行緒並先預熱
+        self.assertTrue(pinged.wait(WAIT))
+        keep.stop(timeout=WAIT)
+        keep.set_active(False)
+        keep.set_active(True)  # 停止後不再建立執行緒
+        self.assertFalse(keep.is_running)
+
+
 class _Translator:
     def __init__(self) -> None:
         self.error: Exception | None = None
@@ -290,6 +364,57 @@ class InFlightTest(unittest.TestCase):
                 keep.tick()
         self.assertEqual([r.levelname for r in logs.records], ["ERROR"])
         self.assertIsNotNone(logs.records[0].exc_info)
+
+
+class WarmUpOnEnableTest(unittest.TestCase):
+    """keep_warm_secs = 0：不定期送請求，只在執行中開啟翻譯時於背景預熱一次。"""
+
+    def make(self, active: bool) -> tuple[WarmUpOnEnable, list[int], threading.Event]:
+        calls: list[int] = []
+        pinged = threading.Event()
+
+        def ping() -> None:
+            calls.append(1)
+            pinged.set()
+
+        task = WarmUpOnEnable(ping, active=active)
+        self.addCleanup(task.stop)
+        return task, calls, pinged
+
+    def test_turning_on_warms_up_once_in_the_background(self) -> None:
+        task, calls, pinged = self.make(active=False)
+        task.start()
+        self.assertEqual(calls, [])  # start 不送請求
+        task.set_active(True)
+        self.assertTrue(pinged.wait(5.0))
+        task.set_active(True)  # 已開啟：不是「從關閉變成開啟」
+        self.assertTrue(task.active)
+
+    def test_nothing_before_start_or_after_stop(self) -> None:
+        task, calls, _ = self.make(active=False)
+        task.set_active(True)  # 尚未 start：pipeline 還沒開始
+        task.set_active(False)
+        task.start()
+        task.stop()
+        task.set_active(True)
+        self.assertEqual(calls, [])
+
+    def test_failures_are_logged_not_raised(self) -> None:
+        failed = threading.Event()
+
+        def ping() -> None:
+            failed.set()
+            raise TranslationTimeoutError("no response")
+
+        task = WarmUpOnEnable(ping, active=False)
+        task.start()
+        with self.assertLogs("kikitori.pipeline.keep_warm", "WARNING") as logs:
+            task.set_active(True)
+            self.assertTrue(failed.wait(5.0))
+            thread = task._thread
+            assert thread is not None
+            thread.join(5.0)
+        self.assertIn("cannot warm up", logs.output[-1])
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@
 
 執行（互動選單）：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py
 非互動：uv run python -X utf8 experiments/e2e_acceptance/gui_acceptance.py
-        --batch run|first-run|installed|missing-models|better-combo
+        --batch run|first-run|installed|missing-models|better-combo|v020-ui|v020-languages|v020-original|v020-session
 工具路徑以環境變數指定：KIKITORI_E2E_APP（kikitori-app.exe）、KIKITORI_E2E_TAURI_DRIVER、
 KIKITORI_E2E_EDGEDRIVER、KIKITORI_E2E_INSTALLER（`installed` 用）。
 """
@@ -1058,9 +1058,15 @@ def run_first_run() -> int:
             asr, tr = settings["asr"], settings["translation"]
             run.check(
                 "first launch auto-applies the GPU combination without a click",
+                # v0.2.0（Milestone 16）：12 GB＋本機翻譯 → turbo int8 ／ large-v3 int8 ＋ 9B
                 asr["device"] == "cuda"
-                and asr["fast_model"] == "small"
-                and asr["final_model"] in ("large-v3-turbo", "large-v3")
+                and asr["fast_model"] == "large-v3-turbo"
+                and asr["final_model"] == "large-v3"
+                and asr.get("fast_compute_type") == "int8_float16"
+                and asr.get("final_compute_type") == "int8_float16"
+                and tr["final_model"] == "qwen3.5:9b"
+                and "large-v3-turbo" in notice["text"]
+                and "qwen3.5:9b" in notice["text"]
                 and "RTX 5070" in notice["text"]
                 and asr["final_model"] in notice["text"]
                 and "GPU" in notice["text"],
@@ -1799,7 +1805,11 @@ kikitori 桌面程式驗收（WebDriver）
   3) CI 的安裝檔：靜默安裝 → 第一次啟動＋影片翻譯、缺少模型、更適合的組合 → 解除安裝
   4) 缺少模型：建議組合選到沒下載的模型 → 一鍵下載 → 開始（下載約 140 MB）
   5) 更適合的組合：存成 CPU 組合 → 提示 → 套用／不要再提醒 → 再啟動不再提示
-  6) 離開
+  6) v0.2.0：13 個介面語系＋術語表編輯器（不播放聲音）
+  7) v0.2.0：語言 ko → es 預覽、開始前下載（隔離的模型快取，約 0.6 GB）、刪除模型
+  8) v0.2.0：只顯示原文（翻譯服務連不上）、執行中打開翻譯的引導
+  9) v0.2.0：匯出、自動存檔、OBS 文字檔、穩定前綴、音量與延遲、快速鍵
+  0) 離開
 """
 
 BATCH = {
@@ -1808,7 +1818,18 @@ BATCH = {
     "installed": lambda: run_installed(),
     "missing-models": lambda: run_single("missing-models", scenario_missing_models),
     "better-combo": lambda: run_single("better-combo", scenario_better_combo),
+    # v0.2.0 的情境在 gui_v020.py（延遲匯入：它會匯入本模組）
+    "v020-ui": lambda: _v020("v020-ui"),
+    "v020-languages": lambda: _v020("v020-languages"),
+    "v020-original": lambda: _v020("v020-original"),
+    "v020-session": lambda: _v020("v020-session"),
 }
+
+
+def _v020(name: str) -> int:
+    import gui_v020
+
+    return gui_v020.BATCH[name]()
 
 
 def main(argv: list[str]) -> int:
@@ -1820,7 +1841,7 @@ def main(argv: list[str]) -> int:
     if argv:
         print(f"usage: gui_acceptance.py [--batch {'|'.join(BATCH)}]", file=sys.stderr)
         return 2
-    choices = dict(zip("12345", BATCH.values(), strict=True))
+    choices = dict(zip("123456789", BATCH.values(), strict=True))
     while True:
         print(MENU)
         try:
@@ -1829,7 +1850,7 @@ def main(argv: list[str]) -> int:
             return 0
         if choice in choices:
             return choices[choice]()
-        if choice == "6":
+        if choice == "0":
             return 0
         print(f"無效的選項：{choice!r}")
 

@@ -399,6 +399,16 @@ class EntryPointsTest(unittest.TestCase):
             self.assertEqual(entry.main([]), 0)
         run_engine.assert_called_once_with()
 
+    def test_entry_prequantize_flag_runs_the_child(self) -> None:
+        # 打包後引擎以「自己的執行檔 + 這個旗標」啟動衍生快取子行程，兩邊的字串要一致
+        from kikitori.asr import prequantize_child, prequantize_process
+
+        self.assertEqual(entry.PREQUANTIZE_FLAG, prequantize_process.PREQUANTIZE_FLAG)
+        self.assertNotIn(entry.PREQUANTIZE_FLAG, entry.USAGE)  # 隱藏，不給使用者用
+        with mock.patch.object(prequantize_child, "run", return_value=3) as child:
+            self.assertEqual(entry.main([entry.PREQUANTIZE_FLAG]), 3)
+        child.assert_called_once_with()
+
     def test_self_check_reports_every_failure(self) -> None:
         def fail() -> str:
             raise FileNotFoundError("model missing")

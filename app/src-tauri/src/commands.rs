@@ -16,15 +16,20 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::connection::RequestError;
 use crate::engine::{BridgeStatus, EngineBridge, third_party_licenses_dir};
+use crate::obs::{ObsContent, ObsOutput, ObsStatus};
+use crate::output::{self, OutputFolder};
 use crate::overlay::{OVERLAY_LABEL, OverlaySnapshot, OverlayState, OverlayStyle};
 
 type CmdResult<T> = Result<T, RequestError>;
 
 const QUICK: Duration = Duration::from_secs(10);
 /// Background methods (`hardware.detect`, `models.list`, `models.validate`,
-/// `settings.apply_recommendation`, `settings.preview_recommendation`) run `nvidia-smi` and probe the translation
-/// server (2 s timeout per address), and the engine runs them one at a time in
-/// arrival order, so a request may first wait for the ones queued before it.
+/// `settings.apply_recommendation`, `settings.preview_recommendation`,
+/// `settings.preview_languages`, `models.pull_translation`) run `nvidia-smi` and
+/// probe the translation server (2 s timeout per address), and the engine runs
+/// them one at a time in arrival order, so a request may first wait for the
+/// ones queued before it. `models.delete` uses the same deadline: removing a
+/// multi-GB model folder can take seconds on a slow disk.
 const BACKGROUND: Duration = Duration::from_secs(45);
 /// The engine answers `session.start` after validating, before loading models.
 const SESSION_START: Duration = Duration::from_secs(30);
@@ -32,6 +37,10 @@ const SESSION_START: Duration = Duration::from_secs(30);
 const SESSION_STOP: Duration = Duration::from_secs(15);
 
 const MAX_MODEL_ID_CHARS: usize = 100;
+/// Translation model names follow the engine's rule (`models.pull_translation`).
+const MAX_TRANSLATION_MODEL_CHARS: usize = 200;
+/// Language list codes (`zh-TW`) and aliases the engine normalizes (`zh_Hant`).
+const MAX_LANGUAGE_CHARS: usize = 16;
 /// `models.download` id of the optional NVIDIA cuBLAS runtime (hardware.md).
 pub const GPU_RUNTIME_ID: &str = "gpu-runtime";
 const MAX_DEVICE_ID_CHARS: usize = 512;
@@ -59,6 +68,32 @@ pub fn validate_model_id(model: &str) -> Result<(), RequestError> {
     {
         return Err(invalid(
             "model id may only contain letters, digits, '.', '_' and '-'",
+        ));
+    }
+    Ok(())
+}
+
+/// Translation model names are server tags such as `qwen3.5:9b` or
+/// `hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS`; same rule as the engine
+/// (letters, digits and `._:/-`, starting with a letter or digit, no `..`), so
+/// nothing path-like reaches the Ollama pull.
+pub fn validate_translation_model(model: &str) -> Result<(), RequestError> {
+    let count = model.chars().count();
+    if count == 0 || count > MAX_TRANSLATION_MODEL_CHARS {
+        return Err(invalid(format!(
+            "translation model must be 1–{MAX_TRANSLATION_MODEL_CHARS} characters"
+        )));
+    }
+    let first_ok = model
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    let chars_ok = model
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'));
+    if !first_ok || !chars_ok || model.contains("..") {
+        return Err(invalid(
+            "translation model may only contain letters, digits and '._:/-', start with a letter or digit, and not contain '..'",
         ));
     }
     Ok(())
@@ -107,6 +142,58 @@ impl Mode {
     }
 }
 
+/// The language combination the settings page previews (`settings.preview_languages`).
+/// Every field is optional; the engine fills the rest from the saved settings and
+/// validates the codes against its language list.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageChoice {
+    pub mode: Option<Mode>,
+    pub source_language: Option<String>,
+    pub target_language: Option<String>,
+    pub partner_language: Option<String>,
+}
+
+/// Only the shape of a language code is checked here (letters, digits, `-`,
+/// `_`): the list of supported languages lives in the engine, so a new language
+/// does not need a new app build.
+fn validate_language_code(field: &str, code: &str) -> Result<(), RequestError> {
+    if code.is_empty()
+        || code.len() > MAX_LANGUAGE_CHARS
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(invalid(format!(
+            "{field} must be a language code of 1–{MAX_LANGUAGE_CHARS} letters, digits, '-' or '_'"
+        )));
+    }
+    Ok(())
+}
+
+pub fn preview_languages_params(choice: &LanguageChoice) -> Result<Value, RequestError> {
+    let mut params = Map::new();
+    if let Some(mode) = choice.mode {
+        params.insert("mode".into(), json!(mode.as_str()));
+    }
+    for (field, value) in [
+        ("source_language", &choice.source_language),
+        ("target_language", &choice.target_language),
+        ("partner_language", &choice.partner_language),
+    ] {
+        if let Some(code) = value {
+            validate_language_code(field, code)?;
+            params.insert(field.into(), json!(code));
+        }
+    }
+    Ok(Value::Object(params))
+}
+
+pub fn pull_translation_params(model: &str) -> Result<Value, RequestError> {
+    validate_translation_model(model)?;
+    Ok(json!({ "model": model }))
+}
+
 pub fn session_start_params(mode: Mode, device_id: Option<&str>) -> Result<Value, RequestError> {
     validate_device_id(device_id)?;
     // `device_id: null` explicitly means "system default device"; the UI always
@@ -128,6 +215,21 @@ pub fn models_download_params(model: &str, accept_license: bool) -> Result<Value
     }
     if accept_license {
         return Err(invalid("accept_license only applies to the GPU runtime"));
+    }
+    Ok(json!({ "model": model }))
+}
+
+/// `models.delete` parameters (competitive-features.md F7). Only downloaded
+/// speech recognition models and the furigana dictionary (`furigana-dictionary`,
+/// docs/specs/furigana.md) can be deleted; the GPU runtime is refused here so
+/// a misbehaving webview cannot even ask, and the engine re-checks the rest
+/// (registry id, not in use, path inside the model cache).
+pub fn models_delete_params(model: &str) -> Result<Value, RequestError> {
+    validate_model_id(model)?;
+    if model == GPU_RUNTIME_ID {
+        return Err(invalid(
+            "models.delete only applies to speech recognition models",
+        ));
     }
     Ok(json!({ "model": model }))
 }
@@ -171,6 +273,13 @@ pub async fn models_download(
     bridge.request("models.download", params, QUICK).await
 }
 
+/// Deletes a downloaded ASR model; answers `{model, freed_bytes}`.
+#[tauri::command]
+pub async fn models_delete(bridge: State<'_, EngineBridge>, model: String) -> CmdResult<Value> {
+    let params = models_delete_params(&model)?;
+    bridge.request("models.delete", params, BACKGROUND).await
+}
+
 #[tauri::command]
 pub async fn models_validate(
     bridge: State<'_, EngineBridge>,
@@ -178,6 +287,36 @@ pub async fn models_validate(
 ) -> CmdResult<Value> {
     let params = models_validate_params(settings.as_ref())?;
     bridge.request("models.validate", params, BACKGROUND).await
+}
+
+/// Starts downloading a translation model on the user's Ollama server; progress
+/// arrives as `download_progress` events with `kind: "translation"`.
+#[tauri::command]
+pub async fn models_pull_translation(
+    bridge: State<'_, EngineBridge>,
+    model: String,
+) -> CmdResult<Value> {
+    let params = pull_translation_params(&model)?;
+    bridge
+        .request("models.pull_translation", params, BACKGROUND)
+        .await
+}
+
+#[tauri::command]
+pub async fn languages_list(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("languages.list", json!({}), QUICK).await
+}
+
+/// What choosing these languages would use and download, without saving.
+#[tauri::command]
+pub async fn settings_preview_languages(
+    bridge: State<'_, EngineBridge>,
+    languages: LanguageChoice,
+) -> CmdResult<Value> {
+    let params = preview_languages_params(&languages)?;
+    bridge
+        .request("settings.preview_languages", params, BACKGROUND)
+        .await
 }
 
 #[tauri::command]
@@ -240,6 +379,35 @@ pub async fn session_start(
 pub async fn session_stop(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
     bridge
         .request("session.stop", json!({}), SESSION_STOP)
+        .await
+}
+
+/// The "show translation" switch: saved in the settings and applied to a
+/// running session at once.
+#[tauri::command]
+pub async fn session_set_translation(
+    bridge: State<'_, EngineBridge>,
+    enabled: bool,
+) -> CmdResult<Value> {
+    bridge
+        .request(
+            "session.set_translation",
+            json!({ "enabled": enabled }),
+            QUICK,
+        )
+        .await
+}
+
+/// Turns furigana on or off (saved as `furigana.enabled`, applied to the
+/// running session). The engine answers `model_not_downloaded` when turning it
+/// on before the dictionary is downloaded.
+#[tauri::command]
+pub async fn session_set_furigana(
+    bridge: State<'_, EngineBridge>,
+    enabled: bool,
+) -> CmdResult<Value> {
+    bridge
+        .request("session.set_furigana", json!({ "enabled": enabled }), QUICK)
         .await
 }
 
@@ -357,6 +525,86 @@ pub fn open_third_party_licenses(app: AppHandle, folder: LicenseFolder) -> CmdRe
         })
 }
 
+/// The user's Documents folder (Tauri path API); `None` when the OS has none.
+pub fn documents_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .document_dir()
+        .map_err(|e| log::error!("cannot resolve the Documents folder: {e}"))
+        .ok()
+}
+
+/// Where transcripts and the OBS text go, for the settings page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutputInfo {
+    /// `<Documents>/kikitori/transcripts`; `None` without a Documents folder.
+    pub transcripts_dir: Option<String>,
+    /// `<Documents>/kikitori/obs/subtitle.txt`.
+    pub obs_file: Option<String>,
+}
+
+pub fn output_info_for(documents: Option<&Path>) -> OutputInfo {
+    OutputInfo {
+        transcripts_dir: documents
+            .map(|d| display_path(&output::folder_path(d, OutputFolder::Transcripts))),
+        obs_file: documents.map(|d| display_path(&output::obs_file_path(d))),
+    }
+}
+
+#[tauri::command]
+pub fn output_info(app: AppHandle) -> OutputInfo {
+    output_info_for(documents_dir(&app).as_deref())
+}
+
+/// Saves an exported transcript into `<Documents>/kikitori/transcripts/` and
+/// returns its full path. The webview only names the file (validated by
+/// [`output::validate_transcript_name`]); the folder is decided here.
+#[tauri::command]
+pub async fn transcript_save(
+    app: AppHandle,
+    file_name: String,
+    contents: String,
+) -> CmdResult<String> {
+    // Checked before touching the disk, so a bad name never creates folders.
+    output::validate_transcript_name(&file_name).map_err(invalid)?;
+    let documents =
+        documents_dir(&app).ok_or_else(|| invalid("the Documents folder could not be found"))?;
+    let dir = output::folder_path(&documents, OutputFolder::Transcripts);
+    // File I/O off the async runtime's workers.
+    tauri::async_runtime::spawn_blocking(move || {
+        output::save_transcript(&dir, &file_name, &contents)
+    })
+    .await
+    .map_err(|e| invalid(format!("the save task failed: {e}")))?
+    .map(|path| display_path(&path))
+    .map_err(invalid)
+}
+
+/// Opens the transcripts or OBS folder in the file manager (created first, so
+/// the button works before anything was saved). Takes only a folder name.
+#[tauri::command]
+pub fn open_output_folder(app: AppHandle, folder: OutputFolder) -> CmdResult<()> {
+    let documents =
+        documents_dir(&app).ok_or_else(|| invalid("the Documents folder could not be found"))?;
+    let dir = output::folder_path(&documents, folder);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        log::error!("cannot create {}: {e}", dir.display());
+        invalid(format!("cannot create the folder: {e}"))
+    })?;
+    let shown = display_path(&dir);
+    app.opener()
+        .open_path(shown.clone(), None::<String>)
+        .map_err(|e| {
+            log::error!("cannot open {shown}: {e}");
+            invalid(format!("cannot open the folder: {e}"))
+        })
+}
+
+/// Turns the OBS text output on or off (`settings.subtitle.obs_output`).
+#[tauri::command]
+pub fn obs_set_output(obs: State<'_, ObsOutput>, content: ObsContent) -> ObsStatus {
+    obs.set_content(content)
+}
+
 #[tauri::command]
 pub fn overlay_get_state(overlay: State<'_, OverlayState>) -> OverlaySnapshot {
     overlay.snapshot()
@@ -372,11 +620,42 @@ fn broadcast_overlay(app: &AppHandle, overlay: &OverlayState) {
 pub fn overlay_set_style(
     app: AppHandle,
     overlay: State<'_, OverlayState>,
+    obs: State<'_, ObsOutput>,
     style: OverlayStyle,
 ) -> CmdResult<OverlaySnapshot> {
-    overlay.set_style(style).map_err(invalid)?;
+    overlay.set_style(style.clone()).map_err(invalid)?;
+    // The OBS text mirrors the overlay: same line count and idle clearing.
+    obs.set_style(&style);
     broadcast_overlay(&app, &overlay);
     Ok(overlay.snapshot())
+}
+
+/// Tells the overlay which UI locale the main window uses, so its labels and
+/// title follow the language chosen on the settings page.
+#[tauri::command]
+pub fn overlay_set_locale(
+    app: AppHandle,
+    overlay: State<'_, OverlayState>,
+    locale: String,
+) -> CmdResult<OverlaySnapshot> {
+    overlay.set_locale(locale).map_err(invalid)?;
+    broadcast_overlay(&app, &overlay);
+    Ok(overlay.snapshot())
+}
+
+/// Tells the overlay whether translations are shown; without them it promotes
+/// the original to the primary subtitle style (settings `translation.enabled`).
+#[tauri::command]
+pub fn overlay_set_show_translation(
+    app: AppHandle,
+    overlay: State<'_, OverlayState>,
+    obs: State<'_, ObsOutput>,
+    enabled: bool,
+) -> OverlaySnapshot {
+    overlay.set_show_translation(enabled);
+    obs.set_show_translation(enabled);
+    broadcast_overlay(&app, &overlay);
+    overlay.snapshot()
 }
 
 /// Applies click-through to the overlay window; shared with the global shortcut.
@@ -484,6 +763,18 @@ mod tests {
             json!({"model": "gpu-runtime"})
         );
         assert!(models_download_params("../x", false).is_err());
+    }
+
+    #[test]
+    fn delete_params_only_take_asr_model_ids() {
+        assert_eq!(
+            models_delete_params("large-v3").unwrap(),
+            json!({"model": "large-v3"})
+        );
+        for bad in ["", "../x", "a/b", GPU_RUNTIME_ID] {
+            assert!(models_delete_params(bad).is_err(), "{bad:?}");
+        }
+        assert!(models_delete_params(&"m".repeat(MAX_MODEL_ID_CHARS + 1)).is_err());
     }
 
     #[test]
@@ -610,6 +901,67 @@ mod tests {
     }
 
     #[test]
+    fn translation_model_names() {
+        for ok in [
+            "qwen3.5:9b",
+            "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+            "hy-mt1.5-7b:latest",
+        ] {
+            assert!(validate_translation_model(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            ":latest",
+            "a..b",
+            "../x",
+            "qwen 9b",
+            "qwen;rm",
+            "\u{6a21}\u{578b}",
+        ] {
+            assert!(validate_translation_model(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_translation_model(&"a".repeat(201)).is_err());
+        assert_eq!(
+            pull_translation_params("qwen3.5:9b").unwrap(),
+            json!({"model": "qwen3.5:9b"})
+        );
+    }
+
+    #[test]
+    fn preview_languages_params_send_only_the_given_fields() {
+        assert_eq!(
+            preview_languages_params(&LanguageChoice::default()).unwrap(),
+            json!({})
+        );
+        let choice: LanguageChoice = serde_json::from_value(json!({
+            "mode": "interpret", "target_language": "zh-TW", "partner_language": "ko"
+        }))
+        .unwrap();
+        assert_eq!(
+            preview_languages_params(&choice).unwrap(),
+            json!({"mode": "interpret", "target_language": "zh-TW", "partner_language": "ko"})
+        );
+        let auto = LanguageChoice {
+            source_language: Some("auto".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            preview_languages_params(&auto).unwrap(),
+            json!({"source_language": "auto"})
+        );
+        for bad in ["", "zh TW", "<b>", "abcdefghijklmnopq"] {
+            let choice = LanguageChoice {
+                target_language: Some(bad.into()),
+                ..Default::default()
+            };
+            assert!(preview_languages_params(&choice).is_err(), "{bad:?}");
+        }
+        // Unknown fields and modes are refused while deserializing the argument.
+        assert!(serde_json::from_value::<LanguageChoice>(json!({"language": "ja"})).is_err());
+        assert!(serde_json::from_value::<LanguageChoice>(json!({"mode": "karaoke"})).is_err());
+    }
+
+    #[test]
     fn session_params_send_explicit_null_device() {
         assert_eq!(
             session_start_params(Mode::Media, None).unwrap(),
@@ -620,5 +972,31 @@ mod tests {
             json!({"mode": "interpret", "device_id": "mic-1"})
         );
         assert!(serde_json::from_value::<Mode>(json!("karaoke")).is_err());
+    }
+
+    #[test]
+    fn output_paths_live_under_documents_or_are_absent() {
+        assert_eq!(
+            output_info_for(None),
+            OutputInfo {
+                transcripts_dir: None,
+                obs_file: None
+            }
+        );
+        let docs = Path::new("Docs");
+        let info = output_info_for(Some(docs));
+        assert_eq!(
+            info.transcripts_dir.as_deref(),
+            Some(display_path(&docs.join("kikitori").join("transcripts")).as_str())
+        );
+        assert_eq!(
+            info.obs_file.as_deref(),
+            Some(display_path(&docs.join("kikitori").join("obs").join("subtitle.txt")).as_str())
+        );
+        assert_eq!(
+            serde_json::from_value::<ObsContent>(json!("both")).unwrap(),
+            ObsContent::Both
+        );
+        assert!(serde_json::from_value::<ObsContent>(json!("everything")).is_err());
     }
 }

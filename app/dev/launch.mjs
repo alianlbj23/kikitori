@@ -2,8 +2,9 @@
 //
 // Role: picks which engine the Tauri app talks to and starts `tauri dev` (or a
 // debug build) with the right environment, so nobody has to remember
-// KIKITORI_ENGINE_CMD / KIKITORI_ENGINE_FAKE. No shell is involved: commands are
-// spawned with argument arrays.
+// KIKITORI_ENGINE_CMD / KIKITORI_ENGINE_FAKE. It also runs the two test-data
+// generators (engine message codes, real-engine fake-mode capture). No shell is
+// involved: commands are spawned with argument arrays.
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -16,6 +17,7 @@ const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(appDir, "..");
 const tauriCli = join(appDir, "node_modules", "@tauri-apps", "cli", "tauri.js");
 const fakeEngine = join(appDir, "dev", "fake_engine.py");
+const devScript = (name) => ["uv", "run", "--no-project", "python", "-I", join(appDir, "dev", name)];
 
 const fakeCmd = (extra = []) =>
   JSON.stringify(["uv", "run", "--no-project", "python", fakeEngine, ...extra]);
@@ -47,6 +49,26 @@ const choices = [
     env: { KIKITORI_ENGINE_CMD: fakeCmd(["--garbage-every", "3", "--crash-after", "25"]) },
   },
   {
+    label: "開發模式：假引擎，翻譯服務不是 Ollama（看「無法替你下載翻譯模型」的說明）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_CMD: fakeCmd(["--translation-server", "openai"]) },
+  },
+  {
+    label: "開發模式：假引擎，翻譯服務沒有開（看「請先啟動 Ollama」的說明）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_CMD: fakeCmd(["--translation-server", "offline"]) },
+  },
+  {
+    label: "開發模式：假引擎，輸入一直沒有聲音（看狀態列音量表與「沒有收到聲音」提示）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_CMD: fakeCmd(["--metrics", "silent"]) },
+  },
+  {
+    label: "開發模式：假引擎，辨識跟不上（待處理句數超過 3，看「建議改用較小的模型」提示）",
+    args: ["dev"],
+    env: { KIKITORI_ENGINE_CMD: fakeCmd(["--metrics", "backlog"]) },
+  },
+  {
     label: "開發模式：正式引擎（實際擷取聲音、載入模型）",
     args: ["dev"],
     env: {},
@@ -55,6 +77,14 @@ const choices = [
     label: "建置除錯版執行檔（不打包安裝檔）",
     args: ["build", "--debug", "--no-bundle"],
     env: {},
+  },
+  {
+    label: "工具：更新引擎訊息碼清單（messages.py → src/lib/testdata/engine-message-codes.json）",
+    command: devScript("extract_message_codes.py"),
+  },
+  {
+    label: "工具：重新擷取引擎測試資料（正式引擎假模式 → src/lib/testdata/engine-fake-nvidia.json）",
+    command: devScript("capture_engine_fake.py"),
   },
 ];
 
@@ -83,16 +113,23 @@ async function main() {
   const n = await ask();
   if (n === choices.length + 1) return 0;
   const choice = choices[n - 1];
-  console.log(`\n執行 tauri ${choice.args.join(" ")}`);
-  for (const [k, v] of Object.entries(choice.env)) console.log(`  ${k}=${v}`);
-  const child = spawn(process.execPath, [tauriCli, ...choice.args], {
-    cwd: appDir,
-    stdio: "inherit",
-    env: { ...process.env, KIKITORI_ENGINE_CWD: repoRoot, ...choice.env },
-  });
+  let child;
+  if (choice.command) {
+    // Tools run from the repository root, where uv finds the project.
+    console.log(`\n執行 ${choice.command.join(" ")}`);
+    child = spawn(choice.command[0], choice.command.slice(1), { cwd: repoRoot, stdio: "inherit" });
+  } else {
+    console.log(`\n執行 tauri ${choice.args.join(" ")}`);
+    for (const [k, v] of Object.entries(choice.env)) console.log(`  ${k}=${v}`);
+    child = spawn(process.execPath, [tauriCli, ...choice.args], {
+      cwd: appDir,
+      stdio: "inherit",
+      env: { ...process.env, KIKITORI_ENGINE_CWD: repoRoot, ...choice.env },
+    });
+  }
   return new Promise((resolveExit) => {
     child.on("error", (e) => {
-      console.error(`無法啟動 Tauri CLI：${e.message}`);
+      console.error(`無法啟動：${e.message}`);
       resolveExit(1);
     });
     child.on("exit", (code, signal) => resolveExit(code ?? (signal ? 1 : 0)));

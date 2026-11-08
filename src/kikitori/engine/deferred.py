@@ -28,9 +28,15 @@ class Deferred:
 
     Attributes:
         job: 在工作執行緒上執行，回傳結果物件；丟 `ProtocolError` 會變成錯誤回應。
+        after: 成功回應寫出之後才執行（同一條工作執行緒）；例如啟動背景下載，讓 UI
+            一定先拿到回應、才收到進度事件。工作失敗時不執行。
+        unsent: `job` 成功、但回應沒能寫出時執行（`after` 不會執行）：撤銷 `job` 預先
+            保留的東西（例如登記好、還沒啟動的下載），否則它會一直留著。
     """
 
     job: Job
+    after: Callable[[], None] | None = None
+    unsent: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,8 @@ class _Task:
     request_id: int
     method: str
     job: Job
+    after: Callable[[], None] | None = None
+    unsent: Callable[[], None] | None = None
 
 
 class DeferredRunner:
@@ -61,7 +69,14 @@ class DeferredRunner:
         self._thread: threading.Thread | None = None
         self._closed = False
 
-    def submit(self, request_id: int, method: str, job: Job) -> None:
+    def submit(
+        self,
+        request_id: int,
+        method: str,
+        job: Job,
+        after: Callable[[], None] | None = None,
+        unsent: Callable[[], None] | None = None,
+    ) -> None:
         """排入一個工作；第一次呼叫時才啟動執行緒（大多數 session 用不到它）。
 
         Raises:
@@ -75,7 +90,7 @@ class DeferredRunner:
                     target=self._run, name=self._name, daemon=True
                 )
                 self._thread.start()
-            self._queue.put(_Task(request_id, method, job))
+            self._queue.put(_Task(request_id, method, job, after, unsent))
 
     def close(self, timeout: float) -> None:
         """不再接受新工作；等目前的工作在 `timeout` 秒內結束，尚未開始的直接丟棄。
@@ -107,12 +122,18 @@ class DeferredRunner:
             task = self._queue.get()
             if task is None:
                 return
+            response: dict[str, Any] | None = None
             try:
-                self._send(self._execute(task))
+                response = self._execute(task)
+                self._send(response)
+                if task.after is not None and "result" in response:
+                    self._run_after(task)
             except ChannelClosedError:
+                self._run_unsent(task, response)
                 logger.error("%s: protocol output closed", task.method)
                 return
             except (TypeError, ValueError) as exc:
+                self._run_unsent(task, response)
                 # 結果無法序列化（例如 NaN）是程式錯誤；仍要回應這個請求，且工作執行緒
                 # 不能因此結束，否則之後的背景請求永遠等不到回應。
                 logger.exception("%s: cannot encode the result", task.method)
@@ -127,6 +148,29 @@ class DeferredRunner:
                 except ChannelClosedError:
                     logger.error("%s: protocol output closed", task.method)
                     return
+
+    def _run_after(self, task: _Task) -> None:
+        assert task.after is not None
+        try:
+            task.after()
+        except Exception:
+            # 回應已經寫出，無法再改成錯誤；記錄下來，工作執行緒繼續服務之後的請求
+            logger.exception("%s: follow-up after the response failed", task.method)
+
+    def _run_unsent(self, task: _Task, response: dict[str, Any] | None) -> None:
+        """成功的結果沒寫出去：`after` 不會執行，改執行 `unsent` 撤銷 `job` 保留的東西。
+
+        `_send` 失敗前一定已經拿到 `response`；它是錯誤回應（`job` 失敗）時 `job` 沒有
+        保留任何東西，不必撤銷。`after` 本身失敗不會走到這裡（`_run_after` 已處理）。
+        """
+        if task.unsent is None or response is None or "result" not in response:
+            return
+        try:
+            task.unsent()
+        except Exception:
+            logger.exception(
+                "%s: cleanup after the unsent response failed", task.method
+            )
 
     def _execute(self, task: _Task) -> dict[str, Any]:
         try:

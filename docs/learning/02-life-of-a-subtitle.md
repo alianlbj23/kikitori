@@ -7,7 +7,8 @@
 
 （這句與譯文取自 `experiments/translate_benchmark/README.md` 的 `qwen3.5:9b` 實測結果。）
 
-模式是 `media`（影片翻譯），全部用預設設定。
+模式是 `media`（影片翻譯），收聽語言日語、字幕語言繁體中文（`source_language: "ja"`、`target_language: "zh-TW"`，也是設定檔的預設值）。
+其他語言組合走的是同一條路，差別只在 ④ 的辨識語言與 ⑤ 的路由，見 [07-languages-and-i18n.md](07-languages-and-i18n.md)。
 
 ```text
 ① capture  →  ② VAD 切句  →  ③ 分成兩條路  →  ④ 辨識＋過濾  →  ⑤ 翻譯  →  ⑥ 送出事件  →  ⑦ 畫面
@@ -159,9 +160,13 @@ UtteranceAudio 累積音訊 ─┤
 | 溫度重試 | 不重試 | 結果重複或信心太低時，用溫度 0.2、0.4 重試 |
 | 最長輸出 | 128 token（避免陷入「と、と、と…」迴圈） | 不限 |
 | 前文 prompt | 不帶 | media 模式帶前 3 句定稿原文（以空白串接） |
-| 候選語言 | media：`ja`、`en`；interpret：`zh` 與對方語言 | 同左 |
+| 辨識語言 | media：固定為收聽語言（這裡是 `ja`，不做語言偵測）；收聽語言是「自動偵測」時在 19 個 Whisper 語言中偵測；interpret：在（我的語言, 對方語言）兩者中偵測 | 同左 |
 
-預設模型（設定檔）：即時 `base`、完整 `small`，裝置 `auto`（有 NVIDIA GPU 且載得到 cuBLAS 就用 GPU，否則退回 CPU）。這組在沒有 GPU 的電腦也跑得動。硬體偵測後可「套用建議組合」，例如 NVIDIA 8 GB 以上改成即時 `small`、完整 `large-v3-turbo`，都在 GPU 跑。
+辨識語言由 `pipeline/factory.py` 的 `asr_languages()` 決定：指定語言時用 `DecodeOptions.forced_language` 固定，避免短句被誤判成別的語言。
+
+預設模型（設定檔）：即時 `base`、完整 `small`，裝置 `auto`（有 NVIDIA GPU 且載得到 cuBLAS 就用 GPU，否則退回 CPU）。這組在沒有 GPU 的電腦也跑得動。第一次啟動時會依硬體自動套用建議組合（`settings.apply_recommendation`），例如 NVIDIA 12 GB 是即時 `large-v3-turbo`、完整 `large-v3`（兩者 `int8_float16`），都在 GPU 跑。各等級的組合見 `docs/specs/hardware.md`「8 GB 以上等級的組合」，選擇的依據見 [08-evaluation-methods.md](08-evaluation-methods.md)。
+
+模型物件不是每次都重新建立：session 結束時卸載權重、放回模型池，下次再取回（`asr/whisper.py` 的 `MODEL_POOL`；原因見 [09-memory-and-resource-release.md](09-memory-and-resource-release.md)）。
 
 ### 4-2 幻覺過濾（`asr/filtering.py` 的 `rejection_reason()`）
 
@@ -174,10 +179,11 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 | `no_speech_probability` > 0.8 | 0.8 | 實測：語音最高 0.43，非語音最低 0.51 |
 | `avg_logprob` < −1.5（信心太低） | −1.5 | 歌聲、BGM 常見 |
 | 壓縮比 > 2.4（一直重複） | 2.4 | Whisper 的重複判斷 |
-| 整句等於已知幻覺句 | 清單 `DEFAULT_HALLUCINATIONS` | 例：「ご視聴ありがとうございました」「Teksting av Nicolai Winther」 |
-| 整句等於「真人也常說」的短句，且 `no_speech` > 0.3 | 清單 `DEFAULT_SOFT_HALLUCINATIONS` | 例：「Thank you.」「おやすみなさい」 |
+| 整句等於任何語言的 **hard** 片語（字幕套話） | `DEFAULT_HALLUCINATIONS` 各語言的 `hard` | 例：「ご視聴ありがとうございました」「Thanks for watching!」「Teksting av Nicolai Winther」 |
+| 整句等於**辨識出的語言**的 **soft** 片語（真人也常說的短句），且 `no_speech` > 0.3 | 同一張表的 `soft` | 例：「Thank you.」「おやすみなさい」 |
 
 - 比對前做 NFKC、轉小寫、去標點，而且要**整句相等**，避免誤刪真的說了「ありがとう」的句子。
+- 片語表依 Whisper 語言分表（19 種語言加不分語言的 `"*"`），資料在 `asr/hallucination_lexicon.py`，由 `experiments/hallucination_lexicon/lexicon.json` 產生：對每個語言餵確定沒有人聲的 BGM、噪音、靜音，收集 Whisper 重複輸出的句子。hard 片語不論辨識語言都套用，因為 Whisper 常把套話標成別的語言（例如英文套話標成 `nl`）。
 - `large-v3-turbo` 的 `no_speech_probability` 實測永遠是 0，前三條規則對它無效。所以完整模型是它時，pipeline 改用**即時模型對同一句的 no_speech** 來過濾；句子太短沒跑過即時辨識時，補跑一次（`Pipeline._for_filter()`）。
 - **定稿被濾掉**時：如果這句已經顯示過草稿，就送一筆「原文、譯文都是空字串」的定稿，讓畫面把草稿清掉（`Pipeline._emit_cleared()`）。
 
@@ -187,13 +193,20 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 
 ### 5-1 決定譯成什麼語言（`pipeline/languages.py` 的 `route()`）
 
-| 模式 | 辨識出的語言 | 譯文 |
+| 模式 | 辨識出的語言 | 譯文語言 |
 |---|---|---|
-| media | 任何 | `zh-TW` |
-| interpret | 中文 | 對方語言（`ja` 或 `en`） |
-| interpret | 其他 | `zh-TW` |
+| media | 任何 | 字幕語言 `target_language`（這裡是 `zh-TW`） |
+| interpret | 我的語言（`target_language`） | 對方語言 `partner_language` |
+| interpret | 其他 | 我的語言 `target_language` |
 
-原文本來就是譯文語言時不翻（譯文＝原文）；不支援的組合（例如偵測到韓文）譯文留空並送 warning。
+`route()` 回傳四種動作之一：
+
+- `translate`：呼叫翻譯模型。
+- `copy`：辨識語言與譯文語言是同一個 Whisper 語言（例如聽簡中看繁中），不呼叫模型，只用 OpenCC 轉字形。
+- `unsupported`：辨識出清單外的語言，譯文留空並送 warning。
+- `off`：關閉了「顯示翻譯」，完全不呼叫翻譯伺服器。
+
+即時與完整路徑共用同一個 `route()`，所以同一句的草稿與定稿一定譯成同一種語言。細節與例子見 [07-languages-and-i18n.md](07-languages-and-i18n.md)。
 
 ### 5-2 組提示詞（`translate/prompts.py`）
 
@@ -214,7 +227,9 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 待って待って、今のなし！もう一回やらせて！
 ```
 
-- 為什麼用中文寫指示：英文指示下 `qwen3.5:9b` 有 11/18 次直接輸出日文，改成中文後 0/18（`experiments/translate_benchmark/README.md`）。
+- 為什麼用中文寫指示：英文指示下 `qwen3.5:9b` 有 11/18 次直接輸出日文，改成中文後 0/18（`experiments/translate_benchmark/README.md`）。所以 zh-TW、zh-CN、ja、en 四種譯文語言的指示都用**譯文語言**寫；其他 16 種語言用英文指示，並寫出目標語言的英文名與原生名（`_GENERIC_TEMPLATES`）。
+- **術語表**：這句原文出現了內建直播用語（例如 スパチャ）或使用者自訂的詞，就在「請翻譯成…」之前多一段「術語（原文出現時請用這些譯法）：」與「スパチャ → 超級留言」這樣的行，最多 8 條（`translate/glossary.py`）。沒出現就不放，提示詞與沒有術語表時完全相同。
+- Qwen3.5 與 HY-MT 的溫度是 0（`translate/presets.py`）：同一句重翻得到同一個譯文，評測中品質也較好（`experiments/translate_eval/README.md`）。
 - HY-MT 模型用官方範本、**不帶前文**（實測 1.8B 有 11/12 次把前文一起翻出來）；Sakura 模型只做日翻中。
 - 前文只放「與本句同語言」的最近幾句定稿原文（`Pipeline._context()`）。
 
@@ -225,6 +240,8 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 - Qwen3.5 送 `reasoning_effort: "none"` 關掉「思考」，否則會先輸出一大段推理。
 - `localhost` 先連 `127.0.0.1`：Windows 先試 IPv6 被拒要等約 2 秒，實測每個請求都慢 2.06 秒（`OpenAICompatibleTranslator._connect()`）。
 - 即時路徑：不重試、讀取逾時 10 s；完整路徑：最多重試 2 次、讀取逾時 30 s（`pipeline/factory.py` 的 `create_translators()`）。
+- 兩個翻譯器外面都包了**前文保險**（`translate/context_guard.py` 的 `ContextFallbackTranslator`）：帶前文的譯文過長（超過原文 3 倍且超過 40 字）或抄出前文原句時，改成不帶前文重翻一次。
+- 即時路徑不是每一則都送翻譯：只在原文「已穩定的開頭」變長時才重送，其他時候沿用上一次的即時譯文（`pipeline/stability.py`，見 [10-live-subtitle-stability-and-latency.md](10-live-subtitle-stability-and-latency.md)）。
 - 翻譯失敗不會讓整個 session 停掉：字幕照送，譯文空白，送一筆 warning（同樣的訊息連續只報一次）。
 
 ### 5-4 後處理（`translate/postprocess.py` 的 `finalize_translation()`）
@@ -232,21 +249,26 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 ```text
 模型原始輸出
   │ strip_thinking()：去掉 <think>…</think>
-  │ clean_subtitle()：去掉 <|eos|> 之類的特殊 token、「譯文：」標籤、整句外層引號
-  │ to_taiwan_traditional()：有「簡體專用字」才用 OpenCC s2twp 轉台灣正體
+  │ clean_subtitle()：去掉 <|eos|> 與沒有收尾的 <|… 特殊 token 碎片、「譯文：」標籤、整句外層引號
+  │ 字形轉換（依語言清單的 script_conversion）：
+  │   zh-TW → to_taiwan_traditional()：有「簡體專用字」才轉；只漏出幾個簡體字時只轉那幾個字附近的片段
+  │   zh-CN → OpenCC t2s 整句轉簡體；其他語言不轉
   ▼
 字幕譯文
 ```
 
-「簡體專用字」＝ OpenCC 會改、又不在 Big5 字集裡的字。這樣才不會把正確的「那個傢伙」改成「傢夥」、「台灣」改成「臺灣」。
+「簡體專用字」＝ OpenCC 會改、又不在 Big5 字集裡的字。這樣才不會把正確的「那個傢伙」改成「傢夥」、「台灣」改成「臺灣」、「好吃」改成「好喫」。
+
+特殊 token 碎片：`<|` 在一般字幕裡不會出現，所以看到就當成碎片。在開頭的只去掉 token 本身；在其他位置的連同後面的文字一起丟掉——模型已經越過回合結尾，後面通常是重複或憑空續寫的內容（`experiments/translate_eval/README.md` 的錯誤清單）。
 
 ## ⑥ 送出事件：引擎 → Rust
 
-- `engine/server.py` 的 `_on_subtitle()` 把 `SubtitleUpdate` 轉成 dict，加上 `session_id`，寫成一行 JSON。
+- `engine/server.py` 的 `_on_subtitle()` 把 `SubtitleUpdate` 轉成 dict，加上 `session_id`，寫成一行 JSON。即時字幕另帶 `stable_chars`（原文開頭幾個字已穩定），完整字幕另帶 `latency_ms`（VAD 判定句子結束 → 送出完整字幕的毫秒數）。
+- 另外每秒送一則 `metrics` 事件（音量 `level_dbfs`、等待中的完整句數 `backlog`、延遲中位數），給主視窗的狀態列（見 [10](10-live-subtitle-stability-and-latency.md)）。
 - `engine/io.py` 的 `MessageWriter` 有鎖（多執行緒不會寫成交錯的半行），寫完立刻 flush。
 - Rust 端（`app/src-tauri/src/`）：
   1. `line_reader.rs`：逐行讀，每行上限 1 MiB；超長就丟掉並讀到行尾，不會失去同步。
-  2. `protocol.rs` 的 `parse_line()`：驗證 UTF-8、JSON、欄位型別；字幕文字 ≤ 10,000 字、語言碼只允許合法字元、`end_sample ≥ start_sample`。
+  2. `protocol.rs` 的 `parse_line()`：驗證 UTF-8、JSON、欄位型別；字幕文字 ≤ 10,000 字、語言碼只允許合法字元、`end_sample ≥ start_sample`；超過原文長度的 `stable_chars` 夾到原文長度、超過一天的 `latency_ms` 改成 null（輔助欄位出錯不該讓整句被丟掉）。
   3. `connection.rs` 的 `dispatch()`：有 `id` 的交給等待中的請求；事件交給 sink。
   4. `lib.rs`：發出 Tauri 事件 `engine://subtitle`。
 
@@ -259,7 +281,9 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
   3. 原文、譯文都空白的定稿 → 移除這句。
   4. 依 `utterance_id` 排序，只留最新 N 句（字幕視窗 1–3 句、主視窗 300 句）。
   5. 舊 session 的事件丟掉。
-- 字幕視窗（`app/src/overlay/overlay.ts`）：草稿加 `is-partial` 樣式（較淡、譯文白色）；定稿到達時譯文用 220 ms 轉成字幕黃（`app/src/styles/overlay.css`）。
+- 字幕視窗（`app/src/overlay/overlay.ts`）：草稿加 `is-partial` 樣式；原文只有**還沒穩定的尾巴**淡色（`lib/stable.ts` 的 `splitStable()` 依 `stable_chars` 切開）；定稿到達時譯文用 220 ms 轉成字幕黃（`app/src/styles/overlay.css`）。關閉「顯示翻譯」時，原文改用譯文的字級與顏色當主要字幕。
+- **閱讀節奏**（`lib/rhythm.ts`）：新句要擠掉最舊的句子時，舊句至少已顯示 `min_display_ms`（預設 1.5 秒）；畫面 `idle_clear_secs`（預設 8 秒）沒有變化就淡出。
+- 同一套字幕狀態規則也在 Rust 的 `obs.rs` 實作一份：開啟「OBS 文字檔」時，把目前的句子寫到 `<文件>/kikitori/obs/subtitle.txt`。主視窗另外保留整個 session 的完整字幕（最多 20 000 句），供匯出 SRT／VTT／TXT／CSV（`lib/export.ts`）。
 
 我們的例句在畫面上大致是這樣：
 
@@ -277,7 +301,18 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 
 ## 延遲總表
 
-### 端到端（`experiments/pipeline_smoke/README.md`）
+### 端到端：GPU（`experiments/e2e_acceptance/README.md`）
+
+環境：RTX 5070 12 GB，**v0.1.0 的推薦組合**：即時 `small`、完整 `large-v3-turbo`（CUDA float16），翻譯 `qwen3.5:9b`；打包好的引擎、真實擷取、Ollama 冷啟動。
+
+| 模式 | 首個即時字幕（中位數／P90） | 即時字幕延遲（中位數／P90） | 完整字幕，從說完（中位數／P90） |
+|---|---|---|---|
+| 影片翻譯（日文動畫／VTuber） | 0.94／1.70 s | 0.33／0.49 s | 0.69／0.92 s |
+| 口譯（中文、英文） | 0.86／0.89 s | 0.22／0.31 s | 0.71／0.80 s |
+
+「完整字幕，從說完」包含句尾判斷必須等的靜音。v0.2.0 的新組合（即時 `large-v3-turbo`、完整 `large-v3`，兩者 `int8_float16`）在同一張卡上的端到端延遲**還沒有量**；執行中可以看狀態列的延遲（`metrics` 的 `latency_ms_median`，不含句尾靜音）。
+
+### 端到端：CPU（`experiments/pipeline_smoke/README.md`）
 
 環境：Ryzen 7 5700X，**沒有 cuBLAS，ASR 全在 CPU**；翻譯 `qwen3.5:4b`（Ollama，GPU）；33 秒、8 句的動漫音軌。
 
@@ -299,10 +334,12 @@ Whisper 在沒有人聲時會編句子。依序檢查，命中任一條就丟掉
 | 完整辨識 `small` CPU int8（beam 5） | 中位數 1305 ms | 同上 |
 | 即時辨識 `small` CUDA float16 | 中位數 130 ms | 同上 |
 | 完整辨識 `large-v3-turbo` CUDA float16 | 中位數 151 ms | 同上 |
+| 完整辨識 `large-v3` CUDA float16 | 中位數 0.33 s | 同上 |
+| 即時辨識 `large-v3-turbo` greedy（GPU 與其他程式共用時） | 中位數 161 ms | `experiments/vtuber_eval/README.md` |
 | 翻譯首字（Ollama，RTX 5070） | 中位數 0.04–0.10 s | `experiments/translate_benchmark/README.md` |
 | 翻譯整句（Ollama，RTX 5070） | 中位數 0.11–0.23 s | 同上 |
 
 注意：
 
-- 有 GPU 時的**端到端**延遲沒有量過；上表 GPU 數字是單獨跑一個模型時的值。兩個 ASR 模型與翻譯 LLM 同時搶 GPU 時會更慢（未量測）。
+- 上表 GPU 的單項數字是單獨跑一個模型時的值。GPU 的端到端只有 v0.1.0 組合的數字（上面）；v0.2.0 組合兩個大模型與翻譯 LLM 同時搶 GPU 時的延遲未量測。
 - CPU 被其他程式搶走時，同一設定曾量到定稿延遲中位數 16.7 秒：完整佇列會累積（`experiments/pipeline_smoke/README.md`）。之後才加上「即時辨識太慢就自動拉長間隔」。

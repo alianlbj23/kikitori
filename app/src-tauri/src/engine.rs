@@ -825,8 +825,8 @@ mod tests {
     mod fake_engine {
         use super::*;
         use crate::commands::{
-            GPU_RUNTIME_ID, apply_recommendation_params, models_download_params,
-            models_validate_params,
+            GPU_RUNTIME_ID, apply_recommendation_params, models_delete_params,
+            models_download_params, models_validate_params,
         };
         use crate::protocol::{DownloadProgressPayload, DownloadState, SubtitlePayload};
 
@@ -994,6 +994,20 @@ mod tests {
                     .iter()
                     .all(|s| s.utterance_id == 1 && !s.is_final)
             );
+            // F2/F4: partials say how much has settled, finals how long they took.
+            assert!(
+                subs[..first_final]
+                    .iter()
+                    .all(|s| s.stable_chars.is_some() && s.latency_ms.is_none())
+            );
+            assert!(subs[first_final].latency_ms.is_some());
+            assert!(subs[first_final].stable_chars.is_none());
+            wait_until("a metrics event", || {
+                lock(&rec.events)
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::Metrics(m) if m.session_id == Some(1)))
+            })
+            .await;
 
             bridge
                 .request("session.stop", json!({}), Duration::from_secs(10))
@@ -1001,6 +1015,48 @@ mod tests {
                 .unwrap();
             bridge.shutdown().await;
             wait_until("stopped", || bridge.status().phase == BridgePhase::Stopped).await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn models_delete_frees_a_downloaded_model_once() {
+            let rec = Arc::new(Recorder::default());
+            let bridge = EngineBridge::new(Ok(fake_command(&[])), rec.clone());
+            bridge.start().await.expect("handshake");
+            let quick = Duration::from_secs(10);
+            let deleted = bridge
+                .request(
+                    "models.delete",
+                    models_delete_params("tiny").unwrap(),
+                    quick,
+                )
+                .await
+                .unwrap();
+            assert_eq!(deleted["model"], json!("tiny"));
+            assert!(deleted["freed_bytes"].as_u64().unwrap() > 0);
+            let again = bridge
+                .request(
+                    "models.delete",
+                    models_delete_params("tiny").unwrap(),
+                    quick,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(again, RequestError::Engine { ref code, .. } if code == "model_not_downloaded")
+            );
+            let listed = bridge
+                .request("models.list", json!({}), SLOW)
+                .await
+                .unwrap();
+            let tiny = listed["asr"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == json!("tiny"))
+                .unwrap();
+            assert_eq!(tiny["downloaded"], json!(false));
+            assert_eq!(tiny["disk_bytes"], json!(null));
+            bridge.shutdown().await;
         }
 
         /// Runs [`EngineBridge::shutdown_blocking`] the way the updater's
@@ -1113,7 +1169,7 @@ mod tests {
             let bad = bridge
                 .request(
                     "settings.set",
-                    json!({"partner_language": "ko"}),
+                    json!({"partner_language": "xx"}),
                     Duration::from_secs(10),
                 )
                 .await

@@ -4,7 +4,15 @@
  * Role: renders the newest utterances on a transparent, always-on-top window.
  * It only listens — subtitles and status from the engine, style and
  * click-through from the main window via Rust — and can move, resize and hide
- * itself. It cannot control the engine (see capabilities/overlay.json).
+ * itself. It cannot control the engine (see capabilities/overlay.json). Its
+ * interface language is the one the main window pushes through Rust
+ * (`OverlaySnapshot.locale`), or the OS language until then. With "顯示翻譯"
+ * off (`OverlaySnapshot.show_translation`) each line is the original alone, in
+ * the primary subtitle style. Which lines are on screen follows the reading
+ * rhythm (`lib/rhythm.ts`): a minimum time per line and an idle fade-out. The
+ * "clear subtitles" shortcut (`overlay://clear`) empties the screen. A line
+ * still being heard fades only the part of the original that may change
+ * (`lib/stable.ts`).
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -12,8 +20,27 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, events } from "../lib/api";
 import { byId, h, replace } from "../lib/dom";
 import { htmlLang } from "../lib/format";
+import {
+  applyStatic,
+  isUiLocale,
+  onLocaleChange,
+  resolveLocale,
+  setLocale,
+  systemLanguages,
+  t,
+  type UiLocale,
+} from "../lib/i18n";
+import { bufferLines, emptyRhythm, stepRhythm, type RhythmState } from "../lib/rhythm";
+import { segmentNodes } from "../lib/ruby";
 import { DEFAULT_OVERLAY_STYLE } from "../lib/settings";
-import { applySubtitle, emptySubtitles, trimSubtitles, type SubtitleState } from "../lib/subtitles";
+import {
+  applySubtitle,
+  emptySubtitles,
+  lineDisplay,
+  trimSubtitles,
+  type SubtitleLine,
+  type SubtitleState,
+} from "../lib/subtitles";
 import type { OverlaySnapshot, OverlayStyle } from "../lib/types";
 
 const frame = byId("frame");
@@ -22,37 +49,127 @@ const hint = byId("hint");
 const hideButton = byId<HTMLButtonElement>("hide");
 const resizeGrip = byId("resize");
 const appWindow = getCurrentWindow();
+/** Matches the CSS fade-out of `.lines.is-fading`. */
+const FADE_MS = 400;
 
+/** Every line the engine sent, a few beyond the screen (waiting or faded). */
 let subtitles: SubtitleState = emptySubtitles();
 let style: OverlayStyle = DEFAULT_OVERLAY_STYLE;
 let clickThrough = false;
+let showTranslation = true;
+let rhythm: RhythmState = emptyRhythm();
+/** Lines on screen (decided by the reading rhythm). */
+let shown: SubtitleLine[] = [];
+let wakeTimer: number | undefined;
+let fadeTimer: number | undefined;
 
 function applyStyle(next: OverlayStyle): void {
   style = next;
   frame.style.setProperty("--fs", `${next.font_size}px`);
   frame.style.setProperty("--plate", String(next.background_opacity));
   frame.dataset.position = next.position;
-  subtitles = trimSubtitles(subtitles, next.max_lines);
+  subtitles = trimSubtitles(subtitles, bufferLines(next.max_lines));
+  refresh();
+}
+
+/** Re-decides what is on screen now and when to look again. */
+function refresh(): void {
+  window.clearTimeout(wakeTimer);
+  const result = stepRhythm(rhythm, subtitles.lines, Date.now(), {
+    maxLines: style.max_lines,
+    minDisplayMs: style.min_display_ms,
+    idleClearMs: style.idle_clear_secs * 1000,
+  });
+  rhythm = result.state;
+  if (result.wakeAt !== null) {
+    wakeTimer = window.setTimeout(refresh, Math.max(0, result.wakeAt - Date.now()));
+  }
+  if (result.fadedNow) {
+    // Keep the old lines while they fade, then draw the empty screen.
+    lines.classList.add("is-fading");
+    window.clearTimeout(fadeTimer);
+    fadeTimer = window.setTimeout(() => {
+      shown = result.lines;
+      render();
+    }, FADE_MS);
+    return;
+  }
+  if (lines.classList.contains("is-fading") && result.lines.length === 0) return;
+  window.clearTimeout(fadeTimer);
+  shown = result.lines;
   render();
 }
 
+/** Starts over (new session, or the "clear subtitles" shortcut). */
+function resetScreen(next: SubtitleState): void {
+  subtitles = next;
+  rhythm = emptyRhythm(Date.now());
+  window.clearTimeout(fadeTimer);
+  shown = [];
+  refresh();
+}
+
+/** Re-labels the overlay and its window title in the current locale. */
+function relabel(): void {
+  applyStatic(document);
+  const title = t("overlay.title");
+  document.title = title;
+  // 字幕視窗沒有標題列，但標題會出現在工作切換、螢幕閱讀器等地方。
+  appWindow.setTitle(title).catch((err: unknown) => console.error("setTitle failed:", err));
+}
+
+let appliedLocale: UiLocale | null = null;
+
+function applyLocale(locale: string | null): void {
+  // Before the main window has sent a locale (or for one this build does not know), follow the OS.
+  const next = isUiLocale(locale) ? locale : resolveLocale(systemLanguages());
+  // Every style or click-through change re-sends the snapshot; relabel only on a real change.
+  if (next === appliedLocale) return;
+  appliedLocale = next;
+  setLocale(next);
+}
+
 function applySnapshot(s: OverlaySnapshot): void {
+  applyLocale(s.locale);
   clickThrough = s.click_through;
+  showTranslation = s.show_translation;
   frame.classList.toggle("is-interactive", !clickThrough);
   applyStyle(s.style);
 }
 
 function render(): void {
+  lines.classList.remove("is-fading");
   replace(
     lines,
-    ...subtitles.lines.map((line) =>
-      h(
+    ...shown.map((line) => {
+      const display = lineDisplay(line, showTranslation);
+      const classes = ["line", line.isFinal ? "" : "is-partial", display.originalOnly ? "is-original-only" : ""];
+      // dir="auto": Arabic lines run right to left, each span on its own.
+      return h(
         "div",
-        { class: line.isFinal ? "line" : "line is-partial" },
-        h("span", { class: "orig", lang: htmlLang(line.sourceLanguage) }, line.original),
-        h("span", { class: "tr", lang: htmlLang(line.targetLanguage) }, line.translation),
-      ),
-    ),
+        { class: classes.filter(Boolean).join(" ") },
+        // Settled prefix and the tail that may still change (F2); the inner spans take
+        // their direction from the outer one.
+        h(
+          "span",
+          { class: "orig", lang: htmlLang(line.sourceLanguage), dir: "auto" },
+          // Furigana (docs/specs/furigana.md): <ruby> segments in the same two spans.
+          display.originalRuby
+            ? h("span", { class: "stable" }, ...segmentNodes(display.originalRuby.stable))
+            : h("span", { class: "stable" }, display.originalParts.stable),
+          display.originalRuby
+            ? display.originalRuby.unstable.length
+              ? h("span", { class: "unstable" }, ...segmentNodes(display.originalRuby.unstable))
+              : null
+            : display.originalParts.unstable
+              ? h("span", { class: "unstable" }, display.originalParts.unstable)
+              : null,
+        ),
+        display.originalOnly
+          ? null
+          : h("span", { class: "tr", lang: htmlLang(line.targetLanguage), dir: "auto" }, display.translation),
+      );
+    }),
   );
   // The hint helps place an empty window; with subtitles or click-through on
   // it would only cover the video.
@@ -82,21 +199,26 @@ function wire(): void {
 }
 
 async function init(): Promise<void> {
+  onLocaleChange(relabel);
+  applyLocale(null);
   wire();
   render();
   await Promise.all([
     events.subtitle((ev) => {
-      subtitles = applySubtitle(subtitles, ev, style.max_lines);
-      render();
+      const before = subtitles.sessionId;
+      subtitles = applySubtitle(subtitles, ev, bufferLines(style.max_lines));
+      if (subtitles.sessionId !== before) rhythm = emptyRhythm(Date.now());
+      refresh();
     }),
     events.status((s) => {
       // A new session starts with a clean slate.
       if (s.state === "loading" && s.session_id !== null && s.session_id !== subtitles.sessionId) {
-        subtitles = emptySubtitles(s.session_id);
-        render();
+        resetScreen(emptySubtitles(s.session_id));
       }
     }),
     events.overlay(applySnapshot),
+    // Keeps lastFinalId, so late partials of cleared lines stay away.
+    events.overlayClear(() => resetScreen({ ...subtitles, lines: [] })),
   ]);
   try {
     applySnapshot(await api.overlayState());

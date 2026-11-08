@@ -4,8 +4,12 @@
 
 - 不帶參數：啟動 stdio 引擎，等同 `kikitori engine`（Tauri 以這種方式啟動 sidecar）。
 - `--self-check`：在打包好的執行環境裡確認原生函式庫與資料檔都在、真的載得起來
-  （Silero VAD 模型、onnxruntime、CTranslate2、OpenCC、平台音訊後端），把結果以一行
+  （Silero VAD 模型、onnxruntime、CTranslate2、OpenCC、SudachiPy、平台音訊後端），把結果以一行
   JSON 寫到 stdout。CI 與 `smoke_test.py` 用它驗證打包內容，不屬於引擎協定。
+- `--prequantize`（隱藏，不列在用法裡）：引擎自己啟動的衍生快取子行程
+  （`kikitori.asr.prequantize_child`，stdin 一行 JSON 請求、stdout 一行 JSON 結果）。打包後沒有
+  `python -m` 可用，所以引擎以自己的執行檔加這個旗標啟動子行程；`--self-check` 的
+  `prequantize_child` 項目實際走一次這條路徑。
 
 `kikitori` 的互動選單不放進執行檔：sidecar 只給程式呼叫。
 """
@@ -24,6 +28,9 @@ from typing import Any
 USAGE = "usage: kikitori-engine [--self-check]\n  (no arguments: stdio engine)\n"
 
 SELF_CHECK_FLAG = "--self-check"
+PREQUANTIZE_FLAG = "--prequantize"
+"""與 `kikitori.asr.prequantize_process.PREQUANTIZE_FLAG` 相同（測試檢查）；這裡寫死，
+判斷參數時不必先匯入 kikitori。"""
 
 Check = Callable[[], str]
 """一項檢查：成功時回傳簡短說明，失敗時拋例外。"""
@@ -86,7 +93,64 @@ def _check_opencc() -> str:
     converted = opencc.OpenCC("s2twp.json").convert("软件")
     if converted != "軟體":
         raise RuntimeError(f"OpenCC s2twp converted '软件' to {converted!r}")
-    return "opencc s2twp ok"
+    # 字幕語言 zh-CN 用 t2s（kikitori.languages 的 script_conversion）。
+    converted = opencc.OpenCC("t2s.json").convert("軟體")
+    if converted != "软体":
+        raise RuntimeError(f"OpenCC t2s converted '軟體' to {converted!r}")
+    return "opencc s2twp, t2s ok"
+
+
+SUDACHI_RESOURCES = ("char.def", "unk.def", "rewrite.def", "sudachi.json")
+
+
+def _check_sudachipy() -> str:
+    """振假名的 SudachiPy：Rust 擴充、`resources/` 與 `sudachipy.errors` 都要打包進來。
+
+    辭典不打包（使用者打開振假名時才下載）。這台機器已下載辭典時真的分析一句；否則給它一個
+    不是辭典的檔案，確認 Rust 擴充讀了設定與檔案、以 `SudachiError` 回報格式錯誤。
+    """
+    import tempfile
+
+    import sudachipy
+
+    from kikitori.furigana.analyzer import FuriganaAnalyzer
+    from kikitori.furigana.dictionary import default_root, dictionary_path, is_installed
+
+    resource_dir = _module_dir("sudachipy") / "resources"
+    missing = [n for n in SUDACHI_RESOURCES if not (resource_dir / n).is_file()]
+    if missing:
+        raise FileNotFoundError(f"sudachipy/resources is missing {missing}")
+    root = default_root()
+    if is_installed(root):
+        analyzer = FuriganaAnalyzer(dictionary_path(root))
+        try:
+            ruby = analyzer.ruby("今日は食べる")
+        finally:
+            analyzer.close()
+        if ruby != [(0, 2, "きょう"), (3, 4, "た")]:
+            raise RuntimeError(f"unexpected furigana for a test sentence: {ruby}")
+        return f"sudachipy {sudachipy.__version__}, installed dictionary ok"
+    with tempfile.TemporaryDirectory() as tmp:
+        junk = Path(tmp) / "not-a-dictionary.dic"
+        junk.write_bytes(b"\0" * 4096)
+        try:
+            sudachipy.Dictionary(dict=str(junk))
+        except sudachipy.errors.SudachiError as exc:
+            if "header" not in str(exc).lower():
+                raise RuntimeError(f"unexpected SudachiError: {exc}") from exc
+        else:
+            raise RuntimeError("sudachipy accepted a file that is not a dictionary")
+    return f"sudachipy {sudachipy.__version__}, resources ok (no dictionary downloaded)"
+
+
+def _check_prequantize_child() -> str:
+    """以引擎啟動衍生快取子行程的方式（打包後是本執行檔加 `--prequantize`）跑一次自我測試。"""
+    from kikitori.asr.prequantize_process import child_command, run_child
+
+    result = run_child({"version": 1, "action": "self_test"}, timeout=120.0)
+    return (
+        f"{' '.join(child_command()[1:])}: converted {result['model_bin_bytes']} bytes"
+    )
 
 
 def _module_dir(name: str) -> Path:
@@ -134,6 +198,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("onnxruntime", _check_onnxruntime),
     ("ctranslate2", _check_ctranslate2),
     ("opencc", _check_opencc),
+    ("sudachipy", _check_sudachipy),
+    ("prequantize_child", _check_prequantize_child),
     ("audio_backend", _check_audio_backend),
 )
 
@@ -182,6 +248,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_engine()
     if args == [SELF_CHECK_FLAG]:
         return _self_check()
+    if args == [PREQUANTIZE_FLAG]:
+        from kikitori.asr.prequantize_child import run as prequantize_run
+
+        return prequantize_run()
     sys.stderr.write(USAGE)
     return 2
 

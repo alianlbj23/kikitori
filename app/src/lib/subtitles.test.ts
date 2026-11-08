@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applySubtitle, emptySubtitles, trimSubtitles, type SubtitleState } from "./subtitles";
+import { applySubtitle, emptySubtitles, lineDisplay, trimSubtitles, type SubtitleState } from "./subtitles";
 import type { SubtitleEvent } from "./types";
 
 function ev(id: number, text: string, isFinal: boolean, session: number | null = 1): SubtitleEvent {
@@ -14,6 +14,9 @@ function ev(id: number, text: string, isFinal: boolean, session: number | null =
     start_sample: id * 16000,
     end_sample: id * 16000 + 8000,
     session_id: session,
+    stable_chars: null,
+    ruby: null,
+    latency_ms: null,
   };
 }
 
@@ -101,5 +104,52 @@ describe("trimSubtitles", () => {
     const s = run([1, 2, 3].map((i) => ev(i, `t${i}`, true)));
     expect(texts(trimSubtitles(s, 1))).toEqual(["3:t3:F"]);
     expect(trimSubtitles(s, 5)).toBe(s);
+  });
+});
+
+describe("stable prefix of live lines (F2)", () => {
+  it("follows the newest partial and is dropped by the final", () => {
+    const p1 = { ...ev(1, "今日は寒い", false), stable_chars: 2 };
+    const p2 = { ...ev(1, "今日は寒いね", false), stable_chars: 4 };
+    let s = run([p1]);
+    expect(lineDisplay(s.lines[0]!, true).originalParts).toEqual({ stable: "今日", unstable: "は寒い" });
+    s = applySubtitle(s, p2, 10);
+    expect(s.lines[0]!.stableChars).toBe(4);
+    expect(lineDisplay(s.lines[0]!, false).originalParts).toEqual({ stable: "今日は寒", unstable: "いね" });
+    s = applySubtitle(s, ev(1, "今日は寒いね。", true), 10);
+    expect(s.lines[0]!.stableChars).toBeNull();
+    expect(lineDisplay(s.lines[0]!, true).originalParts).toEqual({ stable: "今日は寒いね。", unstable: "" });
+  });
+
+  it("shows a partial without stable_chars entirely as unstable", () => {
+    const s = run([ev(1, "abc", false)]);
+    expect(lineDisplay(s.lines[0]!, true).originalParts).toEqual({ stable: "", unstable: "abc" });
+  });
+});
+
+describe("furigana on live and final lines", () => {
+  it("keeps the newest ruby with the stable prefix, and none without it", () => {
+    const ruby = [
+      [0, 2, "きょう"],
+      [3, 4, "さむ"],
+    ] as const;
+    let s = run([{ ...ev(1, "今日は寒い", false), stable_chars: 3, ruby }]);
+    expect(s.lines[0]!.ruby).toEqual(ruby);
+    expect(lineDisplay(s.lines[0]!, true).originalRuby).toEqual({
+      stable: [
+        { text: "今日", reading: "きょう" },
+        { text: "は", reading: null },
+      ],
+      unstable: [
+        { text: "寒", reading: "さむ" },
+        { text: "い", reading: null },
+      ],
+    });
+    // The plain split is still there for the renderers' plain path.
+    expect(lineDisplay(s.lines[0]!, true).originalParts).toEqual({ stable: "今日は", unstable: "寒い" });
+    // Furigana turned off mid-sentence: the final has no ruby and is drawn as plain text.
+    s = applySubtitle(s, ev(1, "今日は寒いね。", true), 10);
+    expect(s.lines[0]!.ruby).toBeNull();
+    expect(lineDisplay(s.lines[0]!, true).originalRuby).toBeNull();
   });
 });

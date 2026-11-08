@@ -1,15 +1,18 @@
 //! kikitori desktop app entry point.
 //!
 //! Role: assembles the Tauri app — plugins (log, window state, updater, process,
-//! opener, global shortcut), managed state (the engine bridge, overlay state and the
-//! pending update), command handlers and the app lifecycle (start the engine on
-//! launch, shut it down on exit — and before a Windows update exits the app, see
-//! `updater.rs` — and quit when the main window closes).
+//! opener, global shortcut), managed state (the engine bridge, overlay state, the
+//! OBS text output and the pending update), command handlers, the global
+//! shortcuts and the app lifecycle (start the engine on launch, shut it down on
+//! exit — and before a Windows update exits the app, see `updater.rs` — and quit
+//! when the main window closes).
 
 mod commands;
 mod connection;
 mod engine;
 mod line_reader;
+mod obs;
+mod output;
 mod overlay;
 mod protocol;
 mod updater;
@@ -22,15 +25,23 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_window_state::StateFlags;
 
 use crate::connection::EventSink;
-use crate::engine::{BridgeSink, BridgeStatus, EngineBridge, ResolveInput};
-use crate::overlay::{CLICK_THROUGH_SHORTCUT, MAIN_LABEL, OverlayState};
-use crate::protocol::EngineEvent;
+use crate::engine::{BridgePhase, BridgeSink, BridgeStatus, EngineBridge, ResolveInput};
+use crate::obs::ObsOutput;
+use crate::overlay::{MAIN_LABEL, OverlayState, ShortcutAction};
+use crate::protocol::{EngineEvent, EngineState};
 
 const EVENT_SUBTITLE: &str = "engine://subtitle";
 const EVENT_STATUS: &str = "engine://status";
 const EVENT_DOWNLOAD: &str = "engine://download-progress";
 const EVENT_LOG: &str = "engine://log";
+/// Input level, backlog and latency once a second (main window status bar).
+const EVENT_METRICS: &str = "engine://metrics";
 const EVENT_BRIDGE: &str = "bridge://state";
+/// Sent to the main window by the "toggle translation" shortcut: switching
+/// needs an engine call and the settings, which live there.
+const EVENT_SHORTCUT: &str = "shortcut://action";
+/// Sent to every window by the "clear subtitles" shortcut (the overlay listens).
+const EVENT_OVERLAY_CLEAR: &str = "overlay://clear";
 
 /// Forwards engine events to every window as Tauri events.
 struct TauriSink {
@@ -43,15 +54,38 @@ impl TauriSink {
             log::error!("cannot emit {name}: {e}");
         }
     }
+
+    fn obs(&self) -> Option<tauri::State<'_, ObsOutput>> {
+        self.app.try_state::<ObsOutput>()
+    }
 }
 
 impl EventSink for TauriSink {
     fn engine_event(&self, event: EngineEvent) {
         match event {
-            EngineEvent::Subtitle(p) => self.emit(EVENT_SUBTITLE, p),
-            EngineEvent::Status(p) => self.emit(EVENT_STATUS, p),
+            EngineEvent::Subtitle(p) => {
+                if let Some(obs) = self.obs() {
+                    obs.on_subtitle(&p);
+                }
+                self.emit(EVENT_SUBTITLE, p)
+            }
+            EngineEvent::Status(p) => {
+                // The session ended (or failed): OBS must not keep the last line.
+                if matches!(p.state, EngineState::Idle | EngineState::Error)
+                    && let Some(obs) = self.obs()
+                {
+                    obs.clear();
+                }
+                self.emit(EVENT_STATUS, p)
+            }
             EngineEvent::DownloadProgress(p) => self.emit(EVENT_DOWNLOAD, p),
             EngineEvent::Log(p) => self.emit(EVENT_LOG, p),
+            // Only the main window shows it; the overlay never listens.
+            EngineEvent::Metrics(p) => {
+                if let Err(e) = self.app.emit_to(MAIN_LABEL, EVENT_METRICS, p) {
+                    log::error!("cannot emit {EVENT_METRICS}: {e}");
+                }
+            }
             // Filtered out by the connection already; nothing to forward.
             EngineEvent::Unknown { name } => log::debug!("unknown event {name} reached the sink"),
         }
@@ -60,6 +94,12 @@ impl EventSink for TauriSink {
 
 impl BridgeSink for TauriSink {
     fn bridge_state(&self, status: &BridgeStatus) {
+        // A restarting or stopped engine has no session.
+        if status.phase != BridgePhase::Ready
+            && let Some(obs) = self.obs()
+        {
+            obs.clear();
+        }
         self.emit(EVENT_BRIDGE, status.clone());
     }
 }
@@ -86,27 +126,50 @@ fn build_bridge(app: &AppHandle) -> EngineBridge {
     EngineBridge::new(command, Arc::new(TauriSink { app: app.clone() }))
 }
 
-fn register_click_through_shortcut(app: &AppHandle) {
-    let result =
-        app.global_shortcut()
-            .on_shortcut(CLICK_THROUGH_SHORTCUT, |app, _shortcut, event| {
-                if event.state != ShortcutState::Pressed {
-                    return;
-                }
-                let overlay = app.state::<OverlayState>();
-                let enabled = !overlay.snapshot().click_through;
-                if let Err(e) = commands::apply_click_through(app, &overlay, enabled) {
-                    log::error!("shortcut could not toggle click-through: {e}");
+fn run_shortcut(app: &AppHandle, action: ShortcutAction) {
+    match action {
+        ShortcutAction::ClickThrough => {
+            let overlay = app.state::<OverlayState>();
+            let enabled = !overlay.snapshot().click_through;
+            if let Err(e) = commands::apply_click_through(app, &overlay, enabled) {
+                log::error!("shortcut could not toggle click-through: {e}");
+            }
+        }
+        ShortcutAction::ToggleTranslation => {
+            if let Err(e) = app.emit_to(MAIN_LABEL, EVENT_SHORTCUT, action) {
+                log::error!("cannot emit {EVENT_SHORTCUT}: {e}");
+            }
+        }
+        ShortcutAction::ClearSubtitles => {
+            app.state::<ObsOutput>().clear();
+            if let Err(e) = app.emit(EVENT_OVERLAY_CLEAR, ()) {
+                log::error!("cannot emit {EVENT_OVERLAY_CLEAR}: {e}");
+            }
+        }
+    }
+}
+
+fn register_shortcuts(app: &AppHandle) {
+    for action in ShortcutAction::ALL {
+        let keys = action.keys();
+        let result = app
+            .global_shortcut()
+            .on_shortcut(keys, move |app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    run_shortcut(app, action);
                 }
             });
-    let overlay = app.state::<OverlayState>();
-    match result {
-        Ok(()) => overlay.set_shortcut_registered(true),
-        Err(e) => {
-            // Another app may own the combination; the in-app toggle still works.
-            log::error!("cannot register global shortcut {CLICK_THROUGH_SHORTCUT}: {e}");
-            overlay.set_shortcut_registered(false);
-        }
+        let ok = match result {
+            Ok(()) => true,
+            Err(e) => {
+                // Another app may own the combination; the in-app switches
+                // still work and the UI says the key is taken.
+                log::error!("cannot register global shortcut {keys}: {e}");
+                false
+            }
+        };
+        app.state::<OverlayState>()
+            .set_shortcut_registered(action, ok);
     }
 }
 
@@ -135,7 +198,9 @@ pub fn run() {
         .manage(updater::PendingUpdate::default())
         .setup(|app| {
             let handle = app.handle().clone();
-            register_click_through_shortcut(&handle);
+            let obs_file = commands::documents_dir(&handle).map(|d| output::obs_file_path(&d));
+            app.manage(ObsOutput::spawn(obs_file));
+            register_shortcuts(&handle);
             let bridge = build_bridge(&handle);
             app.manage(bridge.clone());
             tauri::async_runtime::spawn(async move {
@@ -160,22 +225,34 @@ pub fn run() {
             commands::models_list,
             commands::models_download,
             commands::models_validate,
+            commands::models_pull_translation,
+            commands::models_delete,
+            commands::languages_list,
             commands::devices_list,
             commands::settings_get,
             commands::settings_set,
             commands::settings_apply_recommendation,
             commands::settings_preview_recommendation,
+            commands::settings_preview_languages,
             commands::session_start,
             commands::session_stop,
+            commands::session_set_translation,
+            commands::session_set_furigana,
             commands::engine_shutdown,
             commands::engine_restart,
             commands::bridge_status,
             commands::app_about,
             commands::open_third_party_licenses,
+            commands::output_info,
+            commands::transcript_save,
+            commands::open_output_folder,
+            commands::obs_set_output,
             commands::overlay_get_state,
             commands::overlay_set_style,
             commands::overlay_set_click_through,
             commands::overlay_set_visible,
+            commands::overlay_set_locale,
+            commands::overlay_set_show_translation,
             updater::update_check,
             updater::update_install,
         ])
@@ -191,12 +268,15 @@ pub fn run() {
     };
 
     app.run(|handle, event| {
-        if let RunEvent::Exit = event
-            && let Some(bridge) = handle.try_state::<EngineBridge>()
-        {
-            let bridge = bridge.inner().clone();
-            // Bounded by the shutdown/kill timeouts inside `shutdown`.
-            tauri::async_runtime::block_on(bridge.shutdown());
+        if let RunEvent::Exit = event {
+            if let Some(obs) = handle.try_state::<ObsOutput>() {
+                obs.finish();
+            }
+            if let Some(bridge) = handle.try_state::<EngineBridge>() {
+                let bridge = bridge.inner().clone();
+                // Bounded by the shutdown/kill timeouts inside `shutdown`.
+                tauri::async_runtime::block_on(bridge.shutdown());
+            }
         }
     });
 }

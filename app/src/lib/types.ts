@@ -7,8 +7,11 @@
  * validators in `validate.ts`.
  */
 
+import type { UiLocalePreference } from "./i18n";
+import type { EngineMessage } from "./messages";
+import type { RubySpan } from "./ruby";
+
 export type Mode = "media" | "interpret";
-export type PartnerLanguage = "ja" | "en";
 
 export interface SubtitleEvent {
   utterance_id: number;
@@ -20,6 +23,31 @@ export interface SubtitleEvent {
   start_sample: number;
   end_sample: number;
   session_id: number | null;
+  /**
+   * Partials only: code points at the start of `original` that will not change
+   * any more (competitive-features.md F2). null for finals and older engines.
+   */
+  stable_chars: number | null;
+  /** Finals only: end of speech → final sent, in ms (F4); null when unknown. */
+  latency_ms: number | null;
+  /**
+   * Furigana over the kanji of a Japanese `original` (docs/specs/furigana.md):
+   * code-point offsets and hiragana readings. null when the engine did not
+   * annotate the line (furigana off, not Japanese, older engine) or sent an
+   * invalid list.
+   */
+  ruby: readonly RubySpan[] | null;
+}
+
+/** `metrics` event (F4): about once a second while a session runs. */
+export interface MetricsEvent {
+  session_id: number | null;
+  /** Input level (RMS), -120 (silence) to 0 dBFS. */
+  level_dbfs: number;
+  /** Complete sentences waiting for the final pass. */
+  backlog: number;
+  /** Median of recent final latencies in ms; null before the first final. */
+  latency_ms_median: number | null;
 }
 
 export type EngineState = "idle" | "loading" | "running" | "error";
@@ -29,12 +57,22 @@ export interface StatusEvent {
   detail: string | null;
   session_id: number | null;
   code: string | null;
+  /**
+   * Translation models the session needs but the Ollama server lacks
+   * (`code: "translation_model_missing"`, `data.models`); empty otherwise.
+   */
+  missing_translation_models: string[];
 }
 
 export type DownloadState = "downloading" | "done" | "error";
 
+/** What a `download_progress` event is about; null from engines older than Milestone 13. */
+export type DownloadKind = "asr" | "gpu_runtime" | "translation" | "furigana";
+
 export interface DownloadProgressEvent {
   model: string;
+  /** ASR and translation models may share a name, so the kind tells them apart. */
+  kind: DownloadKind | null;
   downloaded_bytes: number;
   total_bytes: number;
   state: DownloadState;
@@ -73,7 +111,41 @@ export interface OverlayStyle {
   background_opacity: number;
   position: OverlayPosition;
   max_lines: number;
+  /** A line stays at least this long before a newer one pushes it out (0 = never wait). */
+  min_display_ms: number;
+  /** Seconds after the last change before the overlay fades out; 0 = never. */
+  idle_clear_secs: number;
 }
+
+/** What a global shortcut does (Rust `ShortcutAction`). */
+export type ShortcutAction = "click_through" | "toggle_translation" | "clear_subtitles";
+
+export interface ShortcutInfo {
+  action: ShortcutAction;
+  keys: string;
+  /** False when another app owns the combination. */
+  registered: boolean;
+}
+
+/** Which text the OBS file holds (`settings.subtitle.obs_output`). */
+export type ObsContent = "off" | "original" | "translation" | "both";
+
+/** `obs_set_output` result. */
+export interface ObsStatus {
+  content: ObsContent;
+  /** Full path of the text file; null when the Documents folder is unknown. */
+  path: string | null;
+  error: string | null;
+}
+
+/** `output_info`: where transcripts and the OBS text go (null without a Documents folder). */
+export interface OutputInfo {
+  transcripts_dir: string | null;
+  obs_file: string | null;
+}
+
+/** Argument of `open_output_folder`. */
+export type OutputFolder = "transcripts" | "obs";
 
 export interface OverlaySnapshot {
   style: OverlayStyle;
@@ -81,6 +153,12 @@ export interface OverlaySnapshot {
   visible: boolean;
   shortcut: string;
   shortcut_registered: boolean;
+  /** UI locale the main window chose; null until it has sent one (follow the OS). */
+  locale: string | null;
+  /** Settings `translation.enabled`; false = show originals in the primary style. */
+  show_translation: boolean;
+  /** Every global shortcut; older Rust builds list only `shortcut` (click-through). */
+  shortcuts: ShortcutInfo[];
 }
 
 export interface DeviceInfo {
@@ -163,9 +241,18 @@ export interface Recommendation {
   /** GB of (V)RAM left for the translation model; null when unknown. */
   translation_budget_gb: number | null;
   gpu_runtime_missing: boolean;
-  reasons: string[];
-  warnings: string[];
+  /** Plain strings from older engines, `{code, params, message}` from newer ones. */
+  reasons: EngineMessage[];
+  warnings: EngineMessage[];
+  /**
+   * Why translation models are (not) recommended: `recommended`, `remote`
+   * (server not on this computer), `not_needed` (same spoken language) or
+   * `unsupported` (no model supports the pair); null from older engines.
+   */
+  translation_status: TranslationStatus | null;
 }
+
+export type TranslationStatus = "recommended" | "remote" | "not_needed" | "unsupported";
 
 export interface HardwareReport {
   hardware: HardwareInfo;
@@ -187,6 +274,14 @@ export interface AsrModel {
   vram_int8_mb: number | null;
   /** Paths the hardware recommendation picks this model for. */
   recommended_for: ModelRole[];
+  /** Space the downloaded model takes on disk (F7); null when not downloaded or unknown. */
+  disk_bytes: number | null;
+}
+
+/** `models.delete` result. */
+export interface ModelDeleteResult {
+  model: string;
+  freed_bytes: number;
 }
 
 /** Optional NVIDIA cuBLAS runtime the engine can download (hardware.md). */
@@ -222,20 +317,40 @@ export interface TranslationModel {
   approx_vram_gb: number | null;
 }
 
+/** `models.list.furigana`: the furigana dictionary (docs/specs/furigana.md). */
+export interface FuriganaDictionary {
+  /** `models.download` / `models.delete` id (`furigana-dictionary`). */
+  id: string;
+  installed: boolean;
+  edition: string;
+  version: string;
+  download_bytes: number;
+  installed_bytes: number;
+  /** Measured disk use when installed, else null. */
+  disk_bytes: number | null;
+  path: string | null;
+  license: string;
+  license_url: string;
+  /** Opened by the running session (cannot be deleted until furigana is off). */
+  in_use: boolean;
+}
+
 export interface ModelsList {
   asr: AsrModel[];
   gpu_runtime: GpuRuntime;
+  /** null from engines without furigana. */
+  furigana: FuriganaDictionary | null;
   translation: {
     server: { base_url: string; is_local: boolean; reachable: boolean; error: string | null };
     models: TranslationModel[];
   };
 }
 
-/** `models.validate` result. Messages are already in Traditional Chinese. */
+/** `models.validate` result; messages are shown with `formatEngineMessage`. */
 export interface CombinationCheck {
   ok: boolean;
-  errors: string[];
-  warnings: string[];
+  errors: EngineMessage[];
+  warnings: EngineMessage[];
 }
 
 export type ComputeType =
@@ -248,11 +363,15 @@ export type ComputeType =
   | "bfloat16"
   | "float32";
 
-/** The subset of the engine settings (pipeline-engine.md "config", schema 2) the UI edits. */
+/** The subset of the engine settings (pipeline-engine.md "config", schema 3) the UI edits. */
 export interface Settings {
   mode: Mode;
+  /** Media mode's listening language (language list code) or "auto". */
+  source_language: string;
+  /** Media mode's subtitle language; in interpret mode, "my language". */
   target_language: string;
-  partner_language: PartnerLanguage;
+  /** Interpret mode's other language. */
+  partner_language: string;
   media_device_id: string | null;
   interpret_device_id: string | null;
   asr: {
@@ -269,16 +388,38 @@ export interface Settings {
     cuda_library_dirs: string[];
   };
   translation: {
+    /** false = original only: the engine translates nothing. */
+    enabled: boolean;
     base_url: string;
     fast_model: string;
     final_model: string;
     api_key_env: string;
     /** User confirmed they are outside the EU, UK and South Korea. */
     allow_restricted: boolean;
+    /** `translation.glossary` (docs/specs/vtuber-profile.md); edited on the settings page. */
+    glossary: GlossarySettings;
   };
+  /** Furigana over Japanese originals; switched at once with `session.set_furigana`. */
+  furigana: { enabled: boolean };
   subtitle: OverlayStyle;
+  /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
+  obs_output: ObsContent;
   /** The UI's own state in the engine's opaque `ui` object (the engine never reads it). */
   ui: UiState;
+}
+
+/** One user glossary entry (`translation.glossary.entries[]`). */
+export interface GlossaryEntry {
+  source: string;
+  target: string;
+  /** Subtitle language the entry applies to; null = every language. */
+  target_language: string | null;
+}
+
+export interface GlossarySettings {
+  /** The engine's built-in livestream glossary is used. */
+  builtin: boolean;
+  entries: GlossaryEntry[];
 }
 
 export interface UiState {
@@ -287,6 +428,10 @@ export interface UiState {
    * (`settings.preview_recommendation`); a different recommendation prompts again.
    */
   dismissed_recommendations: string[];
+  /** Interface language (`ui.locale`); "system" follows the OS. */
+  locale: UiLocalePreference;
+  /** Save SRT and TXT of every session when it ends (`ui.auto_save_transcripts`). */
+  auto_save_transcripts: boolean;
 }
 
 /** `settings.preview_recommendation`: what applying would write, without saving. */
@@ -308,12 +453,65 @@ export interface AppliedRecommendation {
   warnings: string[];
   /** Always false after a save; kept so the shape matches `settings.get`. */
   isNew: boolean;
+  /** The engine's settings revision (see lib/settings-revision.ts); null when not reported. */
+  revision: number | null;
   /**
    * The partial settings the engine actually wrote; null when `only_if_new`
    * was sent and settings had already been saved (nothing written).
    */
   applied: Record<string, unknown> | null;
   recommendation: Recommendation;
+}
+
+/** One entry of `languages.list` (the engine's language catalog). */
+export interface LanguageInfo {
+  /** Language list code used in settings and subtitles (e.g. `zh-TW`). */
+  code: string;
+  english_name: string;
+  native_name: string;
+  /** Whisper's code; zh-TW and zh-CN are both `zh`. */
+  whisper_code: string;
+  /** Written right to left (Arabic). */
+  rtl: boolean;
+  /** Written without spaces between words (ja, zh, th). */
+  no_space: boolean;
+}
+
+/** A language combination as `settings.preview_languages` normalized it. */
+export interface LanguageChoice {
+  mode: Mode;
+  source_language: string;
+  target_language: string;
+  partner_language: string;
+}
+
+/** One model of a previewed combination. */
+export interface PreviewModel {
+  model: string;
+  roles: ModelRole[];
+  /** null when the translation server could not be asked. */
+  installed: boolean | null;
+  size_bytes: number | null;
+  /** Bytes to download before first use; 0 when installed. */
+  download_bytes: number | null;
+  /** Translation sizes are the preset's weight size, so only approximate. */
+  size_approximate: boolean;
+}
+
+/** `settings.preview_languages`: what choosing these languages would use (nothing is saved). */
+export interface LanguagePreview {
+  languages: LanguageChoice;
+  recommendation: Recommendation;
+  /** Model settings that applying the recommendation would write. */
+  patch: Record<string, unknown>;
+  asr: PreviewModel[];
+  translation: PreviewModel[];
+  /** false when only originals are shown or both languages are the same spoken language. */
+  translation_needed: boolean;
+  download_bytes: number;
+  download_size_known: boolean;
+  /** Notes about the preview itself (e.g. `translation_disabled`). */
+  messages: EngineMessage[];
 }
 
 /** `app_about`: license facts for the settings page. */

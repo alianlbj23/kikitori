@@ -1,6 +1,7 @@
 """ASR 模型下載：續傳、進度回報、逾時、大小與 SHA-256 驗證。
 
-位於 asr 模組的下載層：引擎的 `models.download` 方法呼叫 `download_model()`，
+位於 asr 模組的下載層：引擎的 `models.download` 方法呼叫 `download_model()`
+（`models.delete` 呼叫 `delete_model()`），
 把 `registry` 中固定 revision 的檔案放進使用者快取目錄；`load_transcriber()`
 用 `model_dir()`／`is_downloaded()` 找到模型。網路存取透過 `Fetcher` Protocol，
 測試可注入假的實作，不需連網。
@@ -414,3 +415,136 @@ def download_model(
 def _is_complete(path: Path, file: ModelFile) -> bool:
     # 正式檔名只會在雜湊驗證通過後出現，所以大小相符即可視為完成
     return path.is_file() and path.stat().st_size == file.size
+
+
+class UnsafeModelPathError(ValueError):
+    """模型資料夾不是快取內的普通資料夾（連結、junction、跑出快取外），拒絕刪除。"""
+
+
+def _model_root(spec: ModelSpec, cache_dir: Path) -> Path:
+    """模型在快取中的根資料夾 `<cache>/<id>`（含所有 revision 與續傳殘留）。
+
+    Raises:
+        UnsafeModelPathError: id 不是單一個資料夾名稱（含分隔符號、`..`、磁碟代號）。
+    """
+    name = spec.id
+    if (
+        not name
+        or name in (".", "..")
+        or any(sep in name for sep in ("/", "\\", ":", "\0"))
+    ):
+        raise UnsafeModelPathError(f"model id {name!r} is not a plain folder name")
+    return cache_dir / name
+
+
+def _is_link(path: Path) -> bool:
+    # junction 不是 symlink（`is_symlink()` 為 False），但同樣會把刪除帶到別處
+    return path.is_symlink() or path.is_junction()
+
+
+def _check_no_links(path: Path, root: Path) -> None:
+    """`path` 與它到 `root`（含）之間的每一層都不是連結，否則丟 `UnsafeModelPathError`。"""
+    current = path
+    while True:
+        if _is_link(current):
+            raise UnsafeModelPathError(
+                f"{current} became a link while deleting; refusing to follow it"
+            )
+        if current == root or current.parent == current:
+            return
+        current = current.parent
+
+
+def _scan_tree(root: Path, *, strict: bool) -> tuple[int, list[Path], list[Path]]:
+    """`root` 底下普通檔案的大小合計、檔案與資料夾（上層在前）；不跟隨連結。
+
+    Args:
+        strict: True 時遇到任何連結就丟 `UnsafeModelPathError`（刪除前的檢查）；
+            False 時略過連結（只是列出用量）。
+    """
+    total = 0
+    files: list[Path] = []
+    dirs: list[Path] = []
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=fail):
+        directory = Path(dirpath)
+        dirs.append(directory)
+        for name in list(dirnames):
+            if _is_link(directory / name):
+                if strict:
+                    raise UnsafeModelPathError(
+                        f"{directory / name} is a link; refusing to delete through it"
+                    )
+                dirnames.remove(name)
+        for name in filenames:
+            path = directory / name
+            if _is_link(path):
+                if strict:
+                    raise UnsafeModelPathError(
+                        f"{path} is a link; refusing to delete through it"
+                    )
+                continue
+            total += path.lstat().st_size
+            files.append(path)
+    return total, files, dirs
+
+
+def model_disk_bytes(spec: ModelSpec, cache_dir: Path) -> int | None:
+    """已下載模型在磁碟上實際佔用的位元組數；沒有下載時 None。
+
+    算的是 `<cache>/<id>` 底下的普通檔案（含續傳用的 `.part` 與其他 revision 的殘留，
+    也就是 `delete_model()` 會釋放的量），不跟隨連結。讀取失敗時記 warning 並回傳
+    registry 的大小（模型確實已下載，只是量不到）。
+    """
+    if not is_downloaded(spec, cache_dir):
+        return None
+    try:
+        root = _model_root(spec, cache_dir)
+        return _scan_tree(root, strict=False)[0]
+    except (OSError, UnsafeModelPathError) as exc:
+        logger.warning("cannot measure ASR model %s on disk: %s", spec.id, exc)
+        return spec.total_bytes
+
+
+def delete_model(spec: ModelSpec, cache_dir: Path) -> int:
+    """刪除已下載的模型（`<cache>/<id>` 整個資料夾），回傳釋放的位元組數。
+
+    安全檢查（全部通過才刪任何東西）：id 是單一資料夾名稱；`<cache>/<id>` 不是連結或
+    junction；解析後的位置就在解析後的快取資料夾正下方；整棵樹裡沒有任何連結。刪除每個
+    檔案與資料夾之前，再檢查它與到 `<cache>/<id>` 為止的每一層都不是連結：掃描之後才被
+    換成連結的資料夾不會被跟隨。先刪完成標記，中途失敗時模型就不會被當成「已下載」。
+
+    剩下的限制：重新檢查與刪除之間仍有極短的空檔（Windows 的 Python 沒有以資料夾 handle
+    為基準的 unlink／rmdir，無法完全消除）；要利用它，攻擊者必須已經能寫入使用者自己的
+    模型快取資料夾。
+
+    Raises:
+        FileNotFoundError: 模型沒有下載（只有續傳殘留時也是；殘留留給之後的下載續傳）。
+        UnsafeModelPathError: 上述檢查不通過（刪除途中才發現時，已刪的部分不會復原）。
+        OSError: 刪除失敗（例如檔案被其他程式開著）；已刪的部分不會復原。
+    """
+    root = _model_root(spec, cache_dir)
+    if not is_downloaded(spec, cache_dir):
+        raise FileNotFoundError(f"ASR model {spec.id} is not downloaded to {cache_dir}")
+    if _is_link(root):
+        raise UnsafeModelPathError(f"{root} is a link; refusing to delete it")
+    cache_real = cache_dir.resolve(strict=True)
+    root_real = root.resolve(strict=True)
+    if root_real.parent != cache_real:
+        raise UnsafeModelPathError(
+            f"{root} resolves outside the model cache {cache_real}"
+        )
+    total, files, dirs = _scan_tree(root, strict=True)
+    marker = model_dir(spec, cache_dir) / MARKER_NAME
+    files.sort(key=lambda path: path != marker)
+    for path in files:
+        _check_no_links(path, root)
+        path.unlink()
+    for directory in reversed(dirs):
+        _check_no_links(directory, root)
+        directory.rmdir()
+    logger.info("deleted ASR model %s (%d bytes) from %s", spec.id, total, root)
+    return total

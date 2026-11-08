@@ -21,6 +21,7 @@ from kikitori.translate import (
     TranslationError,
     TranslationRequest,
     TranslatorConfig,
+    supports,
 )
 from kikitori.translate.postprocess import simplified_characters, to_taiwan_traditional
 
@@ -46,7 +47,7 @@ def run_model(model: str, lines: list[dict[str, Any]]) -> dict[str, Any]:
     preset = PRESETS[model]
     # 關掉簡轉繁，才能量到模型原始輸出的簡體字；轉換後的結果另外計算。
     translator = OpenAICompatibleTranslator(
-        TranslatorConfig(model=model, read_timeout=120.0, convert_to_traditional=False)
+        TranslatorConfig(model=model, read_timeout=120.0, convert_script=False)
     )
     print(f"\n=== {model}：暖機（載入模型）…")
     start = time.perf_counter()
@@ -61,7 +62,7 @@ def run_model(model: str, lines: list[dict[str, Any]]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     history: dict[str, list[str]] = {}
     for line in lines:
-        if (line["source"], line["target"]) not in preset.language_pairs:
+        if not supports(preset, line["source"], line["target"]):
             continue
         scene = history.setdefault(line["scene"], [])
         context = tuple(scene[-CONTEXT_LINES:])

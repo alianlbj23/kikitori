@@ -61,7 +61,9 @@ def validate_version(version: object, source: str) -> str:
 
 def _toml_section_span(text: str, header: str) -> tuple[int, int]:
     """`[header]` 區段內容（不含標題行）在文字中的起訖位置。"""
-    match = re.search(rf"(?m)^\[{re.escape(header)}\][ \t]*(?:#.*)?$", text)
+    # `\r?`：Windows 上 git 的 core.autocrlf 會把 TOML checkout 成 CRLF，
+    # 而 `(?m)$` 只在 `\n` 之前成立。
+    match = re.search(rf"(?m)^\[{re.escape(header)}\][ \t]*(?:#.*)?\r?$", text)
     if match is None:
         raise VersionError(f"no [{header}] section")
     start = match.end()

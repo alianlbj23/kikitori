@@ -246,6 +246,42 @@ select {
   gap: 8px;
 }
 
+/* Input level and median latency of the running session (lib/metrics.ts). */
+.metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: var(--t-xs);
+  color: var(--on-ai-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.meter {
+  flex: 1;
+  max-width: 96px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.14);
+  overflow: hidden;
+}
+
+/* Scaled, not resized: a width transition re-runs layout on every frame of
+   every metrics update (once a second), a transform only re-composites. */
+.meter-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--kihada);
+  transition: transform 300ms linear;
+}
+
+.meter[data-quiet="true"] .meter-fill {
+  background: var(--on-ai-dim);
+}
+
 .engine-detail {
   margin-top: 4px !important;
   color: var(--on-ai-dim);
@@ -292,6 +328,8 @@ select {
   overflow-y: auto;
   padding: 30px 40px 48px;
   position: relative;
+  /* Focus and scrolling stop below the sticky notices (height set by main.ts). */
+  scroll-padding-top: calc(var(--notices-h, 0px) + 12px);
 }
 
 .page {
@@ -349,7 +387,9 @@ legend {
   min-width: 0;
 }
 
-.block + .block {
+.block + .block,
+/* The interface-language block sits outside the settings form; keep the rule line before the form's first block. */
+.block + form > .block:first-child {
   border-top: 1px solid var(--rule);
   margin-top: 22px;
 }
@@ -383,10 +423,32 @@ legend {
   border-color: var(--nezumi);
 }
 
+/* Irreversible actions (deleting a model) after a confirmation. */
+.danger {
+  padding: 8px 18px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: var(--beni);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .primary:disabled,
-.ghost:disabled {
+.ghost:disabled,
+.danger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Text only for screen readers (e.g. the header of the glossary's button column). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .switch {
@@ -484,12 +546,159 @@ input[type="range"] {
   gap: 8px;
 }
 
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Release notes in the update notice: collapsed by default, scrolls instead of
+   pushing the page down (the notices stick to the top of the content). */
+.update-notes {
+  margin-top: 6px;
+  font-size: var(--t-sm);
+}
+
+.update-notes summary {
+  cursor: pointer;
+  color: var(--nezumi);
+  width: max-content;
+}
+
+.update-notes[open] summary {
+  color: var(--sumi);
+}
+
+.update-notes-body {
+  max-height: min(16rem, 40vh);
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 4px 12px 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.notice .update-notes-body p {
+  margin: 0 0 6px;
+  white-space: pre-line;
+}
+
+.notice .update-notes-body .update-notes-heading {
+  margin-top: 10px;
+  font-weight: 600;
+}
+
+.update-notes-body ul {
+  margin: 0 0 6px;
+  padding-left: 1.4em;
+}
+
+/* ---------- Downloads before starting ---------- */
+
+.start-downloads {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  border-left: 4px solid var(--kihada);
+  box-shadow: 0 6px 18px rgb(24 32 58 / 0.08);
+  max-width: 80ch;
+}
+
+.start-downloads[data-tone="bad"] {
+  border-left-color: var(--beni);
+}
+
+.start-downloads h2 {
+  margin: 0 0 8px;
+  font-size: var(--t-md);
+}
+
+.startdl-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.startdl-items li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px minmax(0, 1.2fr);
+  gap: 10px;
+  align-items: center;
+  font-size: var(--t-sm);
+}
+
+.startdl-items li[data-tone="bad"] {
+  color: var(--beni);
+}
+
+.startdl-items .model-id {
+  overflow-wrap: anywhere;
+}
+
+.startdl-message {
+  margin: 10px 0 0;
+  max-width: 70ch;
+}
+
+.start-downloads[data-tone="bad"] .startdl-message {
+  color: var(--beni);
+}
+
 /* ---------- Transcript ---------- */
 
 .shortcut-note {
   margin: 10px 0 0;
   font-size: var(--t-sm);
   color: var(--nezumi);
+}
+
+/* Export menu: a disclosure in the page tools, its panel floats below it. */
+.export-menu {
+  position: relative;
+}
+
+.export-menu summary {
+  list-style: none;
+  padding: 8px 18px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.export-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.export-menu summary:hover,
+.export-menu[open] summary {
+  border-color: var(--nezumi);
+}
+
+.export-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  width: min(320px, 80vw);
+  padding: 14px;
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  box-shadow: 0 6px 18px rgb(24 32 58 / 0.14);
+}
+
+.export-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.export-panel .field-help {
+  margin: 0;
 }
 
 .transcript {
@@ -505,6 +714,21 @@ input[type="range"] {
   padding: 14px 0 14px 12px;
   border-bottom: 1px solid var(--rule);
   position: relative;
+  /*
+   * Rows off screen are not laid out, shaped or painted. Otherwise every change
+   * that touches all rows (顯示翻譯, interface language) re-lays out and reshapes
+   * up to 300 rows while subtitles keep arriving, and the renderer held ~80 MiB
+   * per such pass until the session stopped (memory_soak README「CDP soak」).
+   * `auto` remembers each row's real height once it has been on screen.
+   */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}
+
+/* Following the subtitles scrolls to scrollHeight right after a row is added; the
+   newest rows must already have their real height there, not the 88 px estimate. */
+.utt:nth-last-child(-n + 3) {
+  content-visibility: visible;
 }
 
 .utt-time {
@@ -543,10 +767,31 @@ input[type="range"] {
   overflow-wrap: anywhere;
 }
 
-/* The utterance still being heard: lighter text, yellow edge. */
-.utt.is-partial .utt-orig,
+/*
+ * The utterance still being heard: yellow edge, lighter translation. Of the
+ * original only the tail that may still change is faded; the settled prefix
+ * (`stable_chars`, lib/stable.ts) is already final-looking.
+ */
+.utt.is-partial .utt-unstable,
 .utt.is-partial .utt-tr {
   opacity: 0.5;
+}
+
+/* Furigana (docs/specs/furigana.md): readings over the kanji of Japanese originals.
+ * The ruby text is not selectable, so copying a line copies the original only. */
+.utt-orig rt {
+  font-size: 0.55em;
+  font-weight: 400;
+  color: var(--nezumi);
+  user-select: none;
+}
+
+.utt-orig:has(ruby) {
+  line-height: 2;
+}
+
+.furigana-status {
+  margin-top: 6px;
 }
 
 .utt.is-partial::before {
@@ -560,13 +805,15 @@ input[type="range"] {
   background: var(--kihada);
 }
 
+/* Placeholder words come from the dictionary (data-empty, set in main.ts). */
 .utt-tr:empty::before {
-  content: "（沒有譯文）";
+  content: attr(data-empty);
   color: var(--nezumi);
 }
 
-.utt.is-partial .utt-tr:empty::before {
-  content: "翻譯中";
+/* "顯示翻譯" off: the original is the only line, so no translation slot at all. */
+.utt.is-original-only .utt-tr {
+  display: none;
 }
 
 .empty {
@@ -876,6 +1123,25 @@ textarea {
   accent-color: var(--ai-soft);
 }
 
+/* Translation server unreachable: what to do next (lib/translation-guide.ts). */
+.guide {
+  margin: 14px 0 4px;
+  padding: 12px 14px;
+  border-left: 4px solid var(--ai-soft);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+  max-width: 70ch;
+}
+
+.guide p {
+  margin: 0 0 10px;
+}
+
+.diagnostics-text {
+  margin-top: 10px;
+  font-size: var(--t-sm);
+}
+
 .advanced {
   margin: 4px 0 8px;
 }
@@ -890,6 +1156,48 @@ textarea {
 
 .advanced[open] summary {
   color: var(--sumi);
+}
+
+/* ---------- Language section ---------- */
+
+.lang-filter {
+  margin-bottom: 4px;
+  font-size: var(--t-sm);
+}
+
+/* Fields of the other mode are hidden, not removed: their values are kept. */
+.field[hidden] {
+  display: none;
+}
+
+.language-preview {
+  margin: 4px 0 12px;
+  max-width: 70ch;
+  font-size: var(--t-sm);
+}
+
+.language-preview h3 {
+  margin: 0 0 6px;
+  font-size: var(--t-sm);
+  font-weight: 600;
+}
+
+.language-preview .facts dd[data-tone="download"] {
+  color: var(--sumi);
+}
+
+.language-preview .facts dd[data-tone="ok"],
+.language-preview .facts dd[data-tone="muted"] {
+  color: var(--nezumi);
+}
+
+.language-preview .facts dd[data-tone="warn"],
+.language-preview .is-error {
+  color: var(--beni);
+}
+
+.language-preview p {
+  margin: 8px 0 0;
 }
 
 /* Live result of models.validate, under the combination form. */
@@ -956,4 +1264,86 @@ textarea {
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* ---------- Models: disk use and deletion (F7) ---------- */
+
+.model-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.model-disk {
+  color: var(--nezumi);
+  font-size: var(--t-sm);
+}
+
+.delete-confirm {
+  flex-basis: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  background: var(--beni-soft);
+}
+
+.delete-confirm p {
+  margin: 0 0 8px;
+}
+
+/* ---------- Settings: glossary (F3) ---------- */
+
+.glossary-wrap {
+  max-height: 420px;
+  overflow: auto;
+  margin: 12px 0 6px;
+}
+
+.glossary {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.glossary th {
+  position: sticky;
+  top: 0;
+  background: var(--paper);
+  text-align: left;
+  font-weight: 400;
+  font-size: var(--t-sm);
+  color: var(--nezumi);
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.glossary td {
+  padding: 6px 8px 6px 0;
+  vertical-align: top;
+}
+
+.glossary td:nth-child(1),
+.glossary td:nth-child(2) {
+  width: 36%;
+}
+
+/* As wide as its longest language name ("English（英文）" was cut off at the
+   column's share); the two text columns give up the space. */
+.glossary td[data-cell="target_language"] {
+  width: 1%;
+}
+
+.glossary td[data-cell="target_language"] select {
+  width: auto;
+  min-width: 10em;
+  max-width: 18em;
+}
+
+.glossary td.has-error input,
+.glossary td.has-error select {
+  border-color: var(--beni);
+}
+
+.glossary-actions {
+  width: 1%;
+  white-space: nowrap;
 }

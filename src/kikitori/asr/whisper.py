@@ -6,6 +6,12 @@ beam search／溫度 fallback → 解碼成文字。pipeline 透過 `load_transc
 解碼流程與參數移植自 faster-whisper v1.2.1（MIT License, Copyright (c) 2023 SYSTRAN）
 的 `WhisperModel.generate_with_fallback()`／`get_prompt()`，讓結果與 faster-whisper
 一致；不直接用 faster-whisper 的原因見 `docs/specs/asr.md`。
+
+CTranslate2 的模型物件由行程內的 `MODEL_POOL` 重複使用：每建立一個新物件並在 GPU 上推論過，
+`del` 之後仍漏約 8 MiB 顯示記憶體與 8–10 MiB 主記憶體（memory_soak #2，上游行為）；
+session 結束時 `WhisperTranscriber.close()` 把模型卸載（權重離開 GPU；CPU 上也會釋放 RAM，
+實測見 `docs/specs/asr.md`）並放回池中，
+下一個相同設定的 session 以 `load_model()` 重用同一個物件。
 """
 
 import ctypes
@@ -21,6 +27,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
+from kikitori.asr import derived
 from kikitori.asr.audio import to_float32, validate_audio
 from kikitori.asr.download import (
     ProgressCallback,
@@ -86,8 +93,11 @@ class DecodeOptions:
         compression_ratio_threshold: 壓縮比高於此值就用下一個溫度重試。
         log_prob_threshold: 平均對數機率低於此值就用下一個溫度重試。
         no_speech_threshold: no_speech 高於此值且 logprob 過低時視為靜音，不重試。
-        candidate_languages: 自動偵測時只在這些語言中選（例如口譯模式 ("zh", "ja")）。
+        candidate_languages: 偵測範圍：自動偵測時只在這些語言中選（例如口譯模式
+            ("zh", "ja")）。None 表示不限制。
         max_new_tokens: 最多產生的 token 數；None 表示到 448 為止。
+        forced_language: 固定的辨識語言（Whisper 語言碼）；設定時不做語言偵測，
+            `transcribe(language=...)` 另外指定時以呼叫端為準。None 表示自動偵測。
     """
 
     beam_size: int = 5
@@ -102,6 +112,7 @@ class DecodeOptions:
     no_speech_threshold: float | None = 0.6
     candidate_languages: tuple[str, ...] | None = None
     max_new_tokens: int | None = None
+    forced_language: str | None = None
 
     def __post_init__(self) -> None:
         if self.beam_size < 1 or self.best_of < 1:
@@ -112,6 +123,10 @@ class DecodeOptions:
             raise ValueError("candidate_languages must be None or non-empty")
         if self.max_new_tokens is not None and self.max_new_tokens < 1:
             raise ValueError("max_new_tokens must be >= 1")
+        if self.forced_language is not None and (
+            not isinstance(self.forced_language, str) or not self.forced_language
+        ):
+            raise ValueError("forced_language must be None or a non-empty str")
 
 
 FAST_DECODE = DecodeOptions(beam_size=1, max_new_tokens=128)
@@ -139,10 +154,186 @@ def _default_storage(array: npt.NDArray[np.float32]) -> Any:
     return ctranslate2.StorageView.from_array(array)
 
 
+CLOSE_TIMEOUT = 2.0
+"""`close()` 等進行中的推論結束的上限（秒）；逾時就不放回模型池（不能在推論途中卸載）。"""
+MAX_IDLE_MODELS = 10
+"""模型池最多保留幾個卸載後的空殼物件（每個約 8 MiB 顯示記憶體與一條 CTranslate2 工作
+執行緒）。實務上用過的不同組合（模型 × 裝置 × 精度 × 執行緒數）不到 10 個；超過時丟掉最久
+沒用的那個——那一個之後再用到時會建立新物件，漏一次 8 MiB，與沒有池時相同。
+丟掉的物件在 CTranslate2 中本來就會漏掉它佔的那 8 MiB，所以保留不比丟掉貴；上限只是防止
+無限成長。原本是 4：v0.2.0 驗收的 memory_soak 情境 2（4 組語言／模型輪流、6 個不同的鍵）
+因此每個 session 仍多 10.7 MiB 顯示記憶體與 13 MiB 主記憶體。"""
+
+
+@dataclass(frozen=True)
+class ModelKey:
+    """模型池的鍵：相同的鍵才能重用同一個 CTranslate2 物件（建立後這些參數不能改）。"""
+
+    path: str
+    """模型目錄（`realpath` + `normcase`）。"""
+    device: str
+    device_index: int
+    compute_type: str
+    intra_threads: int
+    inter_threads: int
+
+    def is_under(self, folder: Path) -> bool:
+        """模型目錄是否在 `folder` 之內（或就是它）。"""
+        root = _normalized(folder)
+        return self.path == root or self.path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _normalized(path: Path) -> str:
+    # realpath：同一個資料夾的短檔名（ALIANL~1）、連結與大小寫寫法都對應到同一個鍵
+    return os.path.normcase(os.path.realpath(path))
+
+
+class ModelPool:
+    """行程內的 CTranslate2 模型物件池（執行緒安全）。
+
+    只保存「已卸載」的物件：權重不在 GPU／RAM 上，只剩建立時的執行環境。取用時
+    `load_model()` 把權重載回；歸還時 `unload_model()` 後放回。一個物件同時只會借給一個
+    使用者（即時與完整路徑共用時由 `_ModelLease` 計數，兩邊都關閉才歸還）。
+    """
+
+    def __init__(self, max_idle: int = MAX_IDLE_MODELS) -> None:
+        """
+        Args:
+            max_idle: 最多保留的閒置物件數；超過時丟掉最久沒用的。
+
+        Raises:
+            ValueError: `max_idle` 不是正整數。
+        """
+        if isinstance(max_idle, bool) or not isinstance(max_idle, int) or max_idle < 1:
+            raise ValueError(f"max_idle must be a positive integer, got {max_idle!r}")
+        self._max_idle = max_idle
+        self._lock = threading.Lock()
+        self._idle: list[tuple[ModelKey, Any]] = []
+        """最舊的在前（LRU）。"""
+
+    def acquire(self, key: ModelKey, create: Callable[[], Any]) -> Any:
+        """取出 `key` 的閒置物件並 `load_model()`；沒有、或重新載入失敗時呼叫 `create()`。
+
+        Raises:
+            RuntimeError、OSError: `create()` 建立失敗。
+        """
+        model = None
+        with self._lock:
+            for index in range(len(self._idle) - 1, -1, -1):
+                if self._idle[index][0] == key:
+                    model = self._idle.pop(index)[1]
+                    break
+        if model is None:
+            return create()
+        # 在鎖外載入（可能要數秒）。失敗時記錄並丟掉這個物件（狀態不明，不再重用），改建立
+        # 新的：結果與池中沒有物件時相同，只是多漏一次建立物件的 8 MiB。若是真的資源不足
+        # （例如 VRAM），create() 會以同樣的原因失敗並往上拋。
+        try:
+            model.load_model()
+        except Exception:
+            logger.exception(
+                "reloading a pooled ASR model object for %s failed; creating a new one",
+                key.path,
+            )
+            del model
+            return create()
+        logger.debug("reusing a pooled ASR model object for %s", key.path)
+        return model
+
+    def release(self, key: ModelKey, model: Any) -> None:
+        """卸載 `model` 並放回池中；卸載失敗或沒有卸載時記錄並丟掉它。"""
+        try:
+            model.unload_model()
+        except Exception:
+            logger.exception("unloading the ASR model failed; dropping it")
+            return
+        # CTranslate2 的 unload_model() 在還有進行中的 batch、或拿不到模型的鎖時直接返回
+        # 而不丟例外（python/cpp/replica_pool.h）；權重仍在記憶體中，留在池裡就等於一直
+        # 佔著。這時不放回池中，交給參照計數釋放。
+        if getattr(model, "model_is_loaded", False) is True:
+            logger.warning(
+                "the ASR model %s is still loaded after unload_model(); dropping it",
+                key.path,
+            )
+            return
+        with self._lock:
+            self._idle.append((key, model))
+            evicted = self._idle[: -self._max_idle]
+            del self._idle[: -self._max_idle]
+        if evicted:
+            logger.info(
+                "dropping %d idle ASR model object(s) from the pool", len(evicted)
+            )
+        # evicted 離開作用域時才真正釋放（在鎖外，避免解構很慢時擋住其他執行緒）
+
+    def evict_under(self, folder: Path) -> int:
+        """丟掉模型目錄在 `folder` 之內的閒置物件（刪除模型之前），回傳丟掉的數量。"""
+        with self._lock:
+            evicted = [entry for entry in self._idle if entry[0].is_under(folder)]
+            self._idle = [
+                entry for entry in self._idle if not entry[0].is_under(folder)
+            ]
+        return len(evicted)
+
+    def clear(self) -> int:
+        """丟掉所有閒置物件（引擎結束時），回傳丟掉的數量。"""
+        with self._lock:
+            evicted, self._idle = self._idle, []
+        return len(evicted)
+
+    def idle_count(self) -> int:
+        """目前保留的閒置物件數。"""
+        with self._lock:
+            return len(self._idle)
+
+
+MODEL_POOL = ModelPool()
+"""行程內共用的模型池（`load_transcriber()` 使用）。"""
+
+
+class _ModelLease:
+    """一個借出的模型物件與共用它的 transcriber 數；最後一個關閉時歸還模型池。"""
+
+    def __init__(self, pool: ModelPool, key: ModelKey, model: Any) -> None:
+        self._pool = pool
+        self._key = key
+        self._model = model
+        self._lock = threading.Lock()
+        self._users = 1
+        self._reusable = True
+        # 背景預先量化只在沒有模型開著時進行（derived.DerivedCacheWorker）
+        derived.ASR_ACTIVITY.begin()
+
+    def retain(self) -> None:
+        """多一個共用者（`with_options()`）。"""
+        with self._lock:
+            self._users += 1
+
+    def release(self, *, reusable: bool) -> None:
+        """一個共用者關閉；`reusable=False`（推論可能還在進行）時之後不歸還、交給參照計數。"""
+        with self._lock:
+            self._users -= 1
+            self._reusable = self._reusable and reusable
+            if self._users > 0:
+                return
+            model, self._model = self._model, None
+            reusable = self._reusable
+        try:
+            if model is not None and reusable:
+                self._pool.release(self._key, model)
+        finally:
+            if model is not None:
+                derived.ASR_ACTIVITY.end()
+
+
 class WhisperTranscriber:
     """CTranslate2 Whisper 的 `Transcriber` 實作。
 
-    同一個實例的呼叫以 lock 串行化；即時與完整路徑要並行就各建一個實例。
+    同一個實例的呼叫以 lock 串行化。即時與完整路徑要並行：模型不同就各載入一個；
+    模型、裝置、精度都相同時，以 `load_transcriber(workers=2)` 載入一次，再用
+    `with_options()` 建立共用權重的另一個實例（各自的 lock 與解碼參數）。
+
+    用完要 `close()`：模型卸載並放回 `MODEL_POOL`（共用時兩個實例都關閉才歸還）。
     """
 
     def __init__(
@@ -155,6 +346,7 @@ class WhisperTranscriber:
         name: str = "whisper",
         device: str = "cpu",
         compute_type: str = "default",
+        lease: _ModelLease | None = None,
     ) -> None:
         """包裝已載入的模型。一般用 `load_transcriber()` 建立。
 
@@ -166,8 +358,12 @@ class WhisperTranscriber:
             name: 模型名稱（log 用）。
             device: 實際使用的裝置（"cpu" 或 "cuda"）。
             compute_type: 實際使用的精度。
+            lease: 模型池的借用紀錄；`close()` 時歸還（None 表示模型不屬於池）。
         """
         self._model = model
+        self._lease = lease
+        self._closed = False
+        self._close_lock = threading.Lock()
         self._tokenizer = tokenizer
         self.options = DecodeOptions() if options is None else options
         self._storage = storage
@@ -178,6 +374,81 @@ class WhisperTranscriber:
         if self.options.candidate_languages is not None:
             for code in self.options.candidate_languages:
                 self._check_language(code)
+        if self.options.forced_language is not None:
+            self._check_language(self.options.forced_language)
+
+    def with_options(self, options: DecodeOptions) -> "WhisperTranscriber":
+        """共用同一個已載入模型、只換解碼參數的新實例（有自己的 lock）。
+
+        CTranslate2 官方文件（Parallel execution）：同一個裝置上的多個 worker 共用模型
+        權重，計算方法釋放 GIL，可以從多個 Python 執行緒呼叫；原始碼中同一裝置的
+        replica 都指向同一個 `Model` 物件。所以載入時 `inter_threads` 要等於共用的實例數，
+        兩條路徑才會真的並行，而不是在同一個 worker 上排隊。
+
+        Raises:
+            ValueError: 新參數指定的語言模型不支援。
+            RuntimeError: 這個實例已經 `close()`。
+        """
+        # 檢查與 retain() 都在 _close_lock 之內（close() 也在同一把鎖內設定旗標）：否則
+        # 檢查之後、retain() 之前 close() 跑完，模型會在新實例還在用時被放回池中，
+        # 甚至借給下一個 session。
+        with self._close_lock:
+            if self._closed:
+                raise RuntimeError(f"transcriber {self.name} is closed")
+            if self._lease is not None:
+                self._lease.retain()
+        try:
+            return WhisperTranscriber(
+                self._model,
+                self._tokenizer,
+                options,
+                storage=self._storage,
+                name=self.name,
+                device=self.device,
+                compute_type=self.compute_type,
+                lease=self._lease,
+            )
+        except BaseException:
+            # 例如新參數的語言不支援：模型本身沒問題，撤銷上面的 retain()
+            if self._lease is not None:
+                self._lease.release(reusable=True)
+            raise
+
+    def close(self, timeout: float = CLOSE_TIMEOUT) -> None:
+        """不再使用：之後的呼叫丟 `RuntimeError`，模型卸載並放回模型池（可重複呼叫）。
+
+        先等進行中的推論結束（最多 `timeout` 秒）：不能在推論途中卸載權重。逾時（例如推論
+        卡住）時記 warning、不放回池中，模型物件交給參照計數釋放。
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        acquired = self._lock.acquire(timeout=timeout)
+        if acquired:
+            self._lock.release()
+        else:
+            logger.warning(
+                "ASR model %s still busy after %.1f s; not returning it to the pool",
+                self.name,
+                timeout,
+            )
+        if self._lease is not None:
+            self._lease.release(reusable=acquired)
+
+    def _discard(self) -> None:
+        """關閉但不把模型放回池中（例如 GPU 上暖機失敗：物件狀態不明，交給參照計數）。"""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        if self._lease is not None:
+            self._lease.release(reusable=False)
+
+    def _check_open(self) -> None:
+        # 在 self._lock 之內呼叫：close() 設定旗標之後開始的推論一律拒絕
+        if self._closed:
+            raise RuntimeError(f"transcriber {self.name} is closed")
 
     @property
     def languages(self) -> tuple[str, ...]:
@@ -201,6 +472,7 @@ class WhisperTranscriber:
         zeros = np.zeros((1, self._model.n_mels, FRAMES_PER_WINDOW), dtype=np.float32)
         prompt = self._build_prompt("en", [])
         with self._lock:
+            self._check_open()
             encoded = self._model.encode(self._storage(zeros), to_cpu=False)
             self._model.generate(
                 encoded, [prompt], beam_size=1, max_length=len(prompt) + 1
@@ -217,6 +489,8 @@ class WhisperTranscriber:
             RuntimeError: CTranslate2 推論失敗（原樣往上拋）。
         """
         samples = validate_audio(audio)
+        if language is None:
+            language = self.options.forced_language
         if language is not None:
             self._check_language(language)
         prompt_tokens = self._prompt_tokens(prompt)
@@ -224,6 +498,7 @@ class WhisperTranscriber:
         windows = split_windows(features)
 
         with self._lock:
+            self._check_open()
             decoded: list[_Decoded] = []
             language_probability = 1.0
             for index, window in enumerate(windows):
@@ -424,16 +699,126 @@ def _validate_model_path(path: Path) -> Path:
     return path
 
 
-def _create_model(path: Path, device: str, compute_type: str, cpu_threads: int) -> Any:
+MAX_WORKERS = 4
+
+
+def _create_model(
+    path: Path, device: str, compute_type: str, cpu_threads: int, workers: int
+) -> Any:
     import ctranslate2
 
+    # inter_threads 個 worker 在同一個裝置上共用權重（官方 Parallel execution 文件）；
+    # CPU 上每個 worker 各用 intra_threads 個執行緒，所以總數與分開載入兩個模型相同。
     return ctranslate2.models.Whisper(
         os.fspath(path),
         device=device,
         compute_type=compute_type,
         intra_threads=cpu_threads,
-        inter_threads=1,
+        inter_threads=workers,
     )
+
+
+@dataclass(frozen=True)
+class _DerivedSource:
+    """可用的預先量化衍生檔（`derived.py`）；載入失敗時改用原始檔並記下失敗。"""
+
+    path: Path
+    mark_failed: Callable[[str], None]
+
+
+def _acquire_model(
+    path: Path,
+    device: str,
+    compute_type: str,
+    cpu_threads: int,
+    workers: int,
+    prequantized: _DerivedSource | None = None,
+) -> tuple[Any, _ModelLease]:
+    """從 `MODEL_POOL` 取用（或建立）模型物件，回傳物件與借用紀錄。
+
+    有 `prequantized` 時先從衍生檔載入；失敗時記錄、改從原始檔 `path` 載入，原始檔成功才把
+    衍生檔標記為失敗（兩者都失敗表示是環境問題，例如顯示記憶體不足，原始檔的錯誤往上拋）。
+    """
+    if prequantized is not None:
+        try:
+            return _acquire_model(
+                prequantized.path, device, compute_type, cpu_threads, workers
+            )
+        except Exception as exc:
+            logger.exception(
+                "loading the pre-quantized model %s failed; using the original",
+                prequantized.path,
+            )
+            result = _acquire_model(path, device, compute_type, cpu_threads, workers)
+            try:
+                prequantized.mark_failed(f"loading failed: {type(exc).__name__}: {exc}")
+            except OSError:
+                logger.exception("cannot record the pre-quantized model failure")
+            return result
+    pool = MODEL_POOL
+    key = ModelKey(
+        path=_normalized(path),
+        device=device,
+        device_index=0,
+        compute_type=compute_type,
+        intra_threads=cpu_threads,
+        inter_threads=workers,
+    )
+    model = pool.acquire(
+        key, lambda: _create_model(path, device, compute_type, cpu_threads, workers)
+    )
+    return model, _ModelLease(pool, key, model)
+
+
+def _pooled_transcriber(
+    path: Path,
+    tokenizer: WhisperTokenizer,
+    options: DecodeOptions | None,
+    *,
+    name: str,
+    device: Literal["cpu", "cuda"],
+    compute_type: str,
+    cpu_threads: int,
+    workers: int,
+    warmup: bool,
+    prequantized: _DerivedSource | None = None,
+) -> WhisperTranscriber:
+    """從模型池取得模型並建立 transcriber；之後任何一步失敗都歸還借用紀錄。
+
+    CPU 與 CUDA 路徑共用，失敗時的處理才會一致：建構時的 `ValueError`（參數不合法，模型
+    本身沒問題）放回池中；暖機失敗（GPU 函式庫或顯示記憶體的問題）不放回池中——物件可能
+    處在壞掉的 CUDA 狀態，交給參照計數釋放。
+
+    Raises:
+        ValueError: 解碼參數指定的語言模型不支援。
+        RuntimeError、OSError: 建立、載入或暖機失敗。
+    """
+    model, lease = _acquire_model(
+        path, device, compute_type, cpu_threads, workers, prequantized
+    )
+    try:
+        transcriber = WhisperTranscriber(
+            model,
+            tokenizer,
+            options,
+            name=name,
+            device=device,
+            compute_type=compute_type,
+            lease=lease,
+        )
+    except ValueError:
+        lease.release(reusable=True)
+        raise
+    except BaseException:
+        lease.release(reusable=False)
+        raise
+    if warmup:
+        try:
+            transcriber.warmup()
+        except BaseException:
+            transcriber._discard()
+            raise
+    return transcriber
 
 
 def default_compute_type(device: Literal["cpu", "cuda"]) -> str:
@@ -457,6 +842,8 @@ def load_transcriber(
     cuda_library_dirs: Sequence[Path] = (),
     download: bool = False,
     progress: ProgressCallback | None = None,
+    workers: int = 1,
+    derived_cache: bool = False,
 ) -> WhisperTranscriber:
     """載入模型並回傳 `WhisperTranscriber`。
 
@@ -471,6 +858,11 @@ def load_transcriber(
         cuda_library_dirs: cuBLAS 所在目錄（見 `preload_cuda_libraries()`）。
         download: 模型不在快取時是否下載；False 時丟 `FileNotFoundError`。
         progress: 下載進度回報。
+        workers: 可並行的解碼數（CTranslate2 `inter_threads`）；要用 `with_options()`
+            讓即時與完整路徑共用這個模型時設 2。權重只載入一份。
+        derived_cache: registry 模型以 int8 系列精度載入時使用預先量化的衍生檔
+            （`derived.py`）：有可用的就從它載入（免即時量化）；沒有就照常從原始檔載入，
+            成功後排入背景轉換（ASR 閒置時才做）。`model_path` 時不適用。
 
     Raises:
         ValueError: 參數組合不合法。
@@ -483,7 +875,10 @@ def load_transcriber(
         raise ValueError(f"device must be auto, cpu or cuda, got {device!r}")
     if cpu_threads < 0:
         raise ValueError(f"cpu_threads must be >= 0, got {cpu_threads}")
+    if not 1 <= workers <= MAX_WORKERS:
+        raise ValueError(f"workers must be in [1, {MAX_WORKERS}], got {workers}")
 
+    spec: ModelSpec | None = None
     if model_path is not None:
         path = _validate_model_path(Path(model_path))
         name = path.name
@@ -502,6 +897,42 @@ def load_transcriber(
             download_model(spec, cache_dir, progress=progress)
         path = model_dir(spec, cache_dir)
         name = spec.id
+
+    def load_on(
+        device: Literal["cpu", "cuda"], compute_type: str, warmup: bool
+    ) -> WhisperTranscriber:
+        plan = (
+            _plan_prequantized(
+                spec, cache_dir, device, compute_type, cpu_threads, cuda_library_dirs
+            )
+            if derived_cache and spec is not None and cache_dir is not None
+            else None
+        )
+        # 載入期間也算使用中（借用紀錄要載入完才建立）：背景轉換在下一個檢查點就停下，
+        # 不與 session 的載入搶 CPU 與顯示記憶體
+        derived.ASR_ACTIVITY.begin()
+        try:
+            transcriber = _pooled_transcriber(
+                path,
+                tokenizer,
+                options,
+                name=name,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=cpu_threads,
+                workers=workers,
+                warmup=warmup,
+                prequantized=None if plan is None else plan.source,
+            )
+        finally:
+            derived.ASR_ACTIVITY.end()
+        if plan is not None and plan.job is not None:
+            # 原始檔載入成功之後才排入：載入失敗（例如 CUDA 不能用）時轉換也沒有意義
+            try:
+                derived.DERIVED_CACHE.request(plan.job)
+            except OSError:
+                logger.exception("cannot queue pre-quantization of %s", name)
+        return transcriber
 
     tokenizer = WhisperTokenizer.from_file(path / "tokenizer.json")
 
@@ -535,16 +966,7 @@ def load_transcriber(
             else:
                 cuda_type = compute_type or default_compute_type("cuda")
                 try:
-                    transcriber = WhisperTranscriber(
-                        _create_model(path, "cuda", cuda_type, cpu_threads),
-                        tokenizer,
-                        options,
-                        name=name,
-                        device="cuda",
-                        compute_type=cuda_type,
-                    )
-                    transcriber.warmup()
-                    return transcriber
+                    return load_on("cuda", cuda_type, warmup=True)
                 except (RuntimeError, OSError) as exc:
                     _record_cuda_failure(str(exc))
                     if device == "cuda":
@@ -554,12 +976,62 @@ def load_transcriber(
                     )
 
     cpu_type = compute_type or default_compute_type("cpu")
-    transcriber = WhisperTranscriber(
-        _create_model(path, "cpu", cpu_type, cpu_threads),
-        tokenizer,
-        options,
-        name=name,
-        device="cpu",
-        compute_type=cpu_type,
-    )
-    return transcriber
+    # CPU 不暖機：沒有要提早發現的 GPU 函式庫問題，也沒有 CUDA kernel 初始化的延遲
+    return load_on("cpu", cpu_type, warmup=False)
+
+
+@dataclass(frozen=True)
+class _PrequantizedPlan:
+    source: _DerivedSource | None
+    """可用的衍生檔；None 表示從原始檔載入。"""
+    job: derived.DerivationJob | None
+    """原始檔載入成功後要排入背景的轉換；None 表示不需要（已有、之前失敗過）。"""
+
+
+def _plan_prequantized(
+    spec: ModelSpec,
+    cache_dir: Path,
+    device: Literal["cpu", "cuda"],
+    compute_type: str,
+    cpu_threads: int,
+    cuda_library_dirs: Sequence[Path] = (),
+) -> _PrequantizedPlan | None:
+    """決定從衍生檔或原始檔載入；這個精度不需要衍生檔時 None。
+
+    查詢失敗（例如版本字串異常）只記錄，照常從原始檔載入：衍生檔只是加速，不能讓 session
+    因此開不了。
+    """
+    try:
+        key = derived.derived_key(spec, compute_type)
+        if key is None:
+            return None
+        # 失敗標記優先：載入衍生檔失敗過的鍵，資料夾還在也不再使用
+        reason = derived.failure_reason(spec, cache_dir, key)
+        if reason is not None:
+            logger.debug("pre-quantized %s skipped: %s", spec.id, reason)
+            return None
+        found = derived.find_derived(spec, cache_dir, key)
+        if found is not None:
+            logger.info(
+                "loading pre-quantized %s (%s) from %s", spec.id, compute_type, found
+            )
+
+            def record_failure(detail: str) -> None:
+                derived.mark_failed(spec, cache_dir, key, detail)
+
+            return _PrequantizedPlan(_DerivedSource(found, record_failure), None)
+        # 子行程要自己預載 cuBLAS，所以把目錄一起交給它
+        job = derived.DerivationJob(
+            spec,
+            cache_dir,
+            key,
+            device,
+            cpu_threads,
+            tuple(os.fspath(d) for d in cuda_library_dirs),
+        )
+        return _PrequantizedPlan(None, job)
+    except (OSError, ValueError, TypeError):
+        logger.exception(
+            "cannot look up the pre-quantized %s; using the original", spec.id
+        )
+        return None

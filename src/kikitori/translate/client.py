@@ -27,6 +27,7 @@ from kikitori.translate.errors import (
     TranslationResponseError,
     TranslationTimeoutError,
 )
+from kikitori.translate.glossary import Glossary
 from kikitori.translate.languages import DEFAULT_MAX_CONTEXT_LINES, validate_request
 from kikitori.translate.postprocess import finalize_translation
 from kikitori.translate.presets import ModelPreset, preset_for_model
@@ -48,6 +49,26 @@ MAX_RETRY_DELAY = 8.0
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _USER_AGENT = "kikitori-translate"
+_AUTHORITY = re.compile(r"([^/?#]*)(.*)", re.DOTALL)
+
+
+def redact_url(url: object) -> str:
+    """把網址的 userinfo（`user:pass@`）換成 `***@`，才放進錯誤訊息、log 與回應。
+
+    使用者可能把反向代理的帳密寫在 base URL 裡；kikitori 不使用它（金鑰只從環境變數
+    讀），但錯誤訊息會回到 UI、寫進 log，不能原樣帶出去。不靠 `urlsplit`：網址不合法
+    （例如連接埠錯誤）時正是要回報錯誤的時候，也必須遮蔽。不是字串時回傳空字串。
+    """
+    text = url.strip() if isinstance(url, str) else ""
+    scheme, sep, rest = text.partition("://")
+    if not sep:
+        scheme, rest = "", text
+    match = _AUTHORITY.match(rest)
+    assert match is not None  # 兩個群組都可以是空字串，必定符合
+    authority, tail = match.groups()
+    if "@" in authority:
+        authority = "***@" + authority.rpartition("@")[2]
+    return f"{scheme}{sep}{authority}{tail}"
 
 
 def _check_positive(name: str, value: object, upper: float) -> None:
@@ -84,11 +105,12 @@ class TranslatorConfig:
         retry_backoff: 指數退避的基數（秒）。
         max_tokens: 回應長度上限，避免模型失控輸出長文。
         max_context_lines: 前文最多帶幾句。
-        convert_to_traditional: 目標為 zh-TW 時是否以 OpenCC 轉成台灣正體。
+        convert_script: 是否依譯文語言做 OpenCC 字形轉換（zh-TW 轉台灣正體、
+            zh-CN 轉簡體）。
 
     Raises:
         ValueError: 欄位值超出範圍或格式不對（數值欄位型別不對也算）。
-        TypeError: `base_url` 不是字串或 `convert_to_traditional` 不是 bool。
+        TypeError: `base_url` 不是字串或 `convert_script` 不是 bool。
     """
 
     model: str
@@ -101,7 +123,7 @@ class TranslatorConfig:
     retry_backoff: float = 0.5
     max_tokens: int = 256
     max_context_lines: int = DEFAULT_MAX_CONTEXT_LINES
-    convert_to_traditional: bool = True
+    convert_script: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -136,8 +158,8 @@ class TranslatorConfig:
             )
         _check_int("max_tokens", self.max_tokens, 1, 8192)
         _check_int("max_context_lines", self.max_context_lines, 0, 20)
-        if not isinstance(self.convert_to_traditional, bool):
-            raise TypeError("convert_to_traditional must be bool")
+        if not isinstance(self.convert_script, bool):
+            raise TypeError("convert_script must be bool")
 
 
 @dataclass(frozen=True)
@@ -154,16 +176,18 @@ def _parse_base_url(base_url: object) -> _Endpoint:
     parts = urlsplit(base_url.strip())
     if parts.scheme not in ("http", "https"):
         raise ValueError(
-            f"base_url must start with http:// or https://, got {base_url!r}"
+            f"base_url must start with http:// or https://, got {redact_url(base_url)!r}"
         )
     if parts.query or parts.fragment:
         raise ValueError("base_url must not contain a query or fragment")
     try:
         port = parts.port
     except ValueError as exc:
-        raise ValueError(f"base_url has an invalid port: {base_url!r}") from exc
+        raise ValueError(
+            f"base_url has an invalid port: {redact_url(base_url)!r}"
+        ) from exc
     if not parts.hostname:
-        raise ValueError(f"base_url has no host: {base_url!r}")
+        raise ValueError(f"base_url has no host: {redact_url(base_url)!r}")
     https = parts.scheme == "https"
     return _Endpoint(
         https=https,
@@ -193,6 +217,7 @@ class OpenAICompatibleTranslator:
         preset: ModelPreset | None = None,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        glossary: Glossary | None = None,
     ) -> None:
         """
         Args:
@@ -200,14 +225,16 @@ class OpenAICompatibleTranslator:
             preset: 提示詞格式與取樣參數；None 時依 `config.model` 查預設組，
                 不認得的模型用通用格式。
             sleep: 重試等待用的函式；測試時換成不真的等待的版本。
+            glossary: 術語表；每句只把原文出現的詞放進提示詞。None 表示不用術語表。
         """
         self.config = config
         self.preset = preset or preset_for_model(config.model)
+        self.glossary = glossary
         self._endpoint = _parse_base_url(config.base_url)
         self._sleep = sleep
 
     def __repr__(self) -> str:
-        return f"OpenAICompatibleTranslator(model={self.config.model!r}, base_url={self.config.base_url!r})"
+        return f"OpenAICompatibleTranslator(model={self.config.model!r}, base_url={redact_url(self.config.base_url)!r})"
 
     def translate(self, request: TranslationRequest) -> str:
         """送出非串流請求，回傳整理後的完整譯文。
@@ -229,7 +256,7 @@ class OpenAICompatibleTranslator:
                 "translation truncated by max_tokens=%d", self.config.max_tokens
             )
         text = finalize_translation(
-            content, req.target_language, self.config.convert_to_traditional
+            content, req.target_language, self.config.convert_script
         )
         if not text:
             raise TranslationResponseError("model returned an empty translation")
@@ -254,8 +281,17 @@ class OpenAICompatibleTranslator:
         context_lines = (
             self.config.max_context_lines if self.preset.supports_context else 0
         )
-        req = validate_request(request, self.preset.language_pairs, context_lines)
-        return req, build_messages(self.preset.prompt_style, req)
+        req = validate_request(
+            request, self.preset.languages, self.preset.pairs, context_lines
+        )
+        terms = (
+            ()
+            if self.glossary is None
+            else self.glossary.lookup(
+                req.text, req.source_language, req.target_language
+            )
+        )
+        return req, build_messages(self.preset.prompt_style, req, terms)
 
     def _payload(
         self, prepared: tuple[TranslationRequest, list[dict[str, str]]], stream: bool
@@ -301,7 +337,7 @@ class OpenAICompatibleTranslator:
                 if len(raw) > MAX_RESPONSE_BYTES:
                     raise TranslationResponseError("streamed response too large")
                 text = finalize_translation(
-                    raw, req.target_language, self.config.convert_to_traditional
+                    raw, req.target_language, self.config.convert_script
                 )
                 if text and text != last:
                     last = text

@@ -133,7 +133,7 @@ assemble 在 publish 模式以 `tauri.conf.json` 的公鑰（app 內建、用來
 ```json
 {
   "version": "0.2.0",
-  "notes": "kikitori v0.2.0",
+  "notes": "這一版讓 kikitori 從「日／英 → 繁中」變成 20 種語言任意組合…",
   "pub_date": "2026-11-05T08:30:15Z",
   "platforms": {
     "darwin-aarch64":        { "signature": "<.sig 的內容>", "url": "https://github.com/alianlbj23/kikitori/releases/download/v0.2.0/kikitori_0.2.0_aarch64.app.tar.gz" },
@@ -152,10 +152,11 @@ assemble 在 publish 模式以 `tauri.conf.json` 的公鑰（app 內建、用來
 - `url` 指向 `releases/download/v<版本>/`（不是 `latest/download/`），舊的 `latest.json` 永遠指向它自己那一版的檔案。
 - `createUpdaterArtifacts: true`（v2 格式）：Windows 直接用 NSIS 安裝檔、Linux 直接用 AppImage，macOS 是 `.app.tar.gz`。`tauri build` 會把版本號寫進簽章的 trusted comment（`requireSignedVersion` 可據此拒絕版本號被竄改的 manifest；目前未開啟，deb 補簽時也帶 `--app-version`，所以之後可以開）。
 - `release.py manifest` 檢查三個必要平台都在、每個檔案恰好出現一次、簽章是 base64 的 minisign 格式。
+- `notes`：workflow 以 `release.py manifest --notes-from-version` 產生（publish 與 dry-run 相同），取自 `docs/release-notes/v<版本>.md`，與 Release 頁面共用同一套檢查（不是 UTF-8、含 NUL、空白或超過 100 KB 時 assemble 失敗；去掉含版本號的開頭 H1）。檔案不存在時是 `kikitori v<版本>`。超過 4,000 個字元（code point，`LATEST_NOTES_MAX_CHARS`）時盡量在整行處截斷，結尾加上「…（以下省略，完整說明：<Release 頁面網址>）」。上限的理由：app 的 `validate.ts` 拒絕超過 10,000 個 UTF-16 單位的字串，而且是整個 `update_check` 失敗、使用者看不到更新；4,000 個 code point 即使全是 BMP 以外的字元也在上限內。每個已安裝的 app 啟動時都會下載 `latest.json`，也不該讓它無限變大。`--notes <文字>` 仍可直接指定（兩者擇一）。
 
 ### app 端流程（`app/src/main/updater.ts`，見 `ui.md`）
 
-正式版啟動時檢查一次（15 秒逾時，失敗不打擾）；設定頁「關於」可手動檢查。找到新版 →「下載並安裝」→ 下載進度 → 外掛以內建公鑰驗證簽章 → 安裝 →「立即重新啟動」（`relaunch`）。檢查與安裝經由 app 自己的 `update_check`／`update_install` 指令（`app/src-tauri/src/updater.rs`）呼叫外掛的 Rust API，而不是外掛的 JavaScript API：只有這樣才能換掉 `on_before_exit`，在 Windows 安裝程式覆寫檔案前先關閉引擎（細節見 `ui.md`「自動更新」）。
+正式版啟動時檢查一次（15 秒逾時，失敗不打擾）；設定頁「關於」可手動檢查。找到新版（提示可展開「看更新內容」，顯示 `latest.json` 的 `notes`）→「下載並安裝」→ 下載進度 → 外掛以內建公鑰驗證簽章 → 安裝 →「立即重新啟動」（`relaunch`）。檢查與安裝經由 app 自己的 `update_check`／`update_install` 指令（`app/src-tauri/src/updater.rs`）呼叫外掛的 Rust API，而不是外掛的 JavaScript API：只有這樣才能換掉 `on_before_exit`，在 Windows 安裝程式覆寫檔案前先關閉引擎（細節見 `ui.md`「自動更新」）。
 
 | 平台 | 安裝方式 |
 |---|---|
@@ -200,7 +201,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 
 ## 給使用者的安裝說明（未簽章程式）
 
-Release 頁面的說明由 `release.py notes --tag v<版本> --out <檔案>` 產生：下載表（檔名取自 `ASSETS`，與實際附件一致）加上「安裝提示」——下面每一點的精簡版。說明不放在 `release-files` 裡（那個資料夾的每個檔案都會成為附件），另存成 `release-notes` artifact；試建置也會產生，可在該次 run 的 job summary 或 artifact 先看到。`tests/test_release.py` 檢查說明含各平台的提示，且關鍵事實（「其他資訊 → 仍要執行」、「強制打開」、`xattr` 指令、`fuse3`、`--appimage-extract-and-run`、不需要 libfuse2、`fonts-noto-cjk`、`apt install` 指令）在本節與說明裡都出現；改其中一邊時兩邊一起改。
+Release 頁面的說明由 `release.py notes --tag v<版本> --out <檔案>` 產生：若 `docs/release-notes/v<版本>.md` 存在（必須 commit），它的內容放在最前面（去掉含版本號的開頭 H1；檔案不是 UTF-8、含 NUL、空白或超過 100 KB 時 assemble 失敗，不會悄悄略過），接著是 `## 下載`、下載表（檔名取自 `ASSETS`，與實際附件一致）加上「安裝提示」——下面每一點的精簡版。同一份說明也寫進 `latest.json` 的 `notes`（`release.py manifest --notes-from-version`，見「`latest.json`」），App 內的更新提示可展開「看更新內容」顯示（`ui.md`「自動更新」）；它只有說明本身，沒有下載表與安裝提示。說明不放在 `release-files` 裡（那個資料夾的每個檔案都會成為附件），另存成 `release-notes` artifact；試建置也會產生，可在該次 run 的 job summary 或 artifact 先看到。`tests/test_release.py` 檢查說明含各平台的提示，且關鍵事實（「其他資訊 → 仍要執行」、「強制打開」、`xattr` 指令、`fuse3`、`--appimage-extract-and-run`、不需要 libfuse2、`fonts-noto-cjk`、`apt install` 指令）在本節與說明裡都出現；改其中一邊時兩邊一起改。
 
 - **macOS**：沒有 Apple 開發者簽章與公證（只有 ad-hoc 簽章），從瀏覽器下載的 DMG 第一次開啟會被 Gatekeeper 擋下。把 kikitori 拖到「應用程式」後開啟一次，再到「系統設定 → 隱私權與安全性」，在下方找到 kikitori 按「強制打開」（macOS 15 起不能再用右鍵「打開」略過）。進階使用者也可以執行 `xattr -dr com.apple.quarantine /Applications/kikitori.app`。之後的自動更新不會再出現這個警告。若出現「已損毀，無法打開」而不是「無法驗證開發者」，代表簽章有問題，請回報。
 - **Windows**：安裝檔沒有 Authenticode 簽章，SmartScreen 會顯示「Windows 已保護您的電腦」，選「其他資訊 → 仍要執行」。

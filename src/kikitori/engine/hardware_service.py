@@ -1,9 +1,10 @@
-"""引擎的硬體與模型方法：偵測快取、推薦、模型總覽、組合驗證、設定與組合的轉換。
+"""引擎的硬體與模型方法：偵測快取、推薦、模型總覽、組合驗證、語言預覽、設定與組合的轉換。
 
 位於 engine 的方法層（server 在背景工作執行緒上呼叫），把 `kikitori.hardware`
 的純函式（`recommend()`、`validate_combination()`）與 `HardwareProvider` 的 I/O
 （偵測、總覽）接到設定上：設定檔是 config 的格式（`asr.fast_model`…），hardware
-用 `ModelCombination` 的格式（`fast_asr.model`…），兩者的對應只寫在這裡。
+用 `ModelCombination` 的格式（`fast_asr.model`…），兩者的對應只寫在這裡。推薦一律
+依設定中的語言（`language_selection()`），換語言就會得到新的推薦與新的指紋。
 """
 
 import hashlib
@@ -18,11 +19,18 @@ from kikitori.config import Settings
 from kikitori.engine.services import HardwareProvider, ModelCatalog
 from kikitori.hardware import (
     HardwareInfo,
+    LanguageSelection,
+    Message,
     ModelCombination,
+    message,
     recommend,
     validate_combination,
 )
+from kikitori.pipeline.types import Mode
 from kikitori.translate.presets import PRESETS, normalize_model_name
+
+TRANSLATION_BYTES_PER_GB = 1000**3
+"""翻譯預設組的 `approx_vram_gb` 是權重檔大小（Ollama 以十進位 GB 顯示），換算成位元組用。"""
 
 DETECTION_CACHE_SECS = 10.0
 """`models.list`／`models.validate`／`settings.apply_recommendation` 重用偵測結果的時間。
@@ -30,6 +38,23 @@ DETECTION_CACHE_SECS = 10.0
 UI 開設定頁時通常連續呼叫好幾個方法，不必每次都重跑 nvidia-smi 與連線翻譯伺服器；
 但要短到使用者剛開好 Ollama、按下重新整理就看得到。`hardware.detect` 一律重新偵測。
 """
+
+
+def language_selection(
+    settings: Settings, mode: Mode | None = None
+) -> LanguageSelection:
+    """設定中的語言（與模式）→ 推薦與驗證用的 `LanguageSelection`。
+
+    Args:
+        settings: 已驗證的設定（語言碼都是正規化後的清單語言碼）。
+        mode: 要推薦的模式；省略時用設定的 `mode`（上次選的模式）。
+    """
+    return LanguageSelection(
+        mode=mode or settings.mode,
+        source_language=settings.source_language,
+        target_language=settings.target_language,
+        partner_language=settings.partner_language,
+    )
 
 
 def combination_from_settings(settings: Settings) -> dict[str, Any]:
@@ -94,14 +119,22 @@ FINGERPRINT_CHARS = 16
 """推薦指紋的長度（SHA-256 前 16 個十六進位字元，64 位元：只用來分辨推薦是否改變）。"""
 
 
-def recommendation_fingerprint(patch: dict[str, Any]) -> str:
-    """部分設定的穩定識別碼：同一份 patch（不論鍵的順序）得到同一個字串。
+def recommendation_fingerprint(
+    patch: dict[str, Any], languages: LanguageSelection | None = None
+) -> str:
+    """推薦的穩定識別碼：同一份 patch 與語言（不論鍵的順序）得到同一個字串。
 
     UI 以它記住「不要再提醒」過哪個推薦（存在設定的 `ui` 物件），推薦改變時指紋跟著
-    改變，才能再提醒一次。以 patch 而不是 `ModelCombination` 計算：原因與警告的文字
-    改變但寫入的設定相同時，不必再提醒。
+    改變，才能再提醒一次。以 patch 而不是 `ModelCombination` 計算：原因與警告的訊息
+    改變但寫入的設定相同時，不必再提醒。語言也算進去：換了語言是新的情境，即使推薦的
+    模型相同也要能再提醒（例如新語言的辨識品質較低）。沒有語言時只算 patch。
     """
-    text = json.dumps(patch, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    data: dict[str, Any] = (
+        patch
+        if languages is None
+        else {"patch": patch, "languages": languages.to_dict()}
+    )
+    text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:FINGERPRINT_CHARS]
 
 
@@ -120,7 +153,7 @@ def recommendation_preview(settings: Settings, rec: ModelCombination) -> dict[st
         "patch": patch,
         "recommendation": rec.to_dict(),
         "differs": settings.merged(patch) != settings,
-        "fingerprint": recommendation_fingerprint(patch),
+        "fingerprint": recommendation_fingerprint(patch, rec.languages),
     }
 
 
@@ -216,10 +249,12 @@ class HardwareService:
     def recommendation(
         self, settings: Settings, *, fresh: bool = False
     ) -> tuple[HardwareInfo, ModelCombination]:
-        """偵測結果與依 `translation.allow_restricted` 算出的推薦組合。"""
+        """偵測結果與依設定的語言、`translation.allow_restricted` 算出的推薦組合。"""
         info = self.info(settings, fresh=fresh)
         return info, recommend(
-            info, allow_restricted=settings.translation.allow_restricted
+            info,
+            allow_restricted=settings.translation.allow_restricted,
+            languages=language_selection(settings),
         )
 
     def report(self, settings: Settings) -> dict[str, Any]:
@@ -255,5 +290,108 @@ class HardwareService:
             info,
             downloaded_asr=downloaded,
             allow_restricted=settings.translation.allow_restricted,
+            languages=language_selection(settings),
         )
         return result.to_dict()
+
+    def preview_languages(
+        self, candidate: Settings, current: Settings
+    ) -> dict[str, Any]:
+        """`settings.preview_languages`：這組語言的推薦組合與要下載什麼，不存檔、不下載。
+
+        Args:
+            candidate: 目前設定合併了要預覽的語言（與模式）之後的設定。
+            current: 目前設定（判斷套用後是否不同）。
+
+        Returns:
+            見 `docs/specs/pipeline-engine.md` 的 `settings.preview_languages`。
+        """
+        info, rec = self.recommendation(candidate)
+        patch = recommendation_patch(rec)
+        merged = candidate.merged(patch)
+        asr = self._asr_downloads(rec)
+        needed = (
+            candidate.translation.enabled and rec.translation_status != "not_needed"
+        )
+        translation = _translation_downloads(info, rec) if needed else []
+        sizes = [entry["download_bytes"] for entry in (*asr, *translation)]
+        messages: list[Message] = []
+        if not candidate.translation.enabled:
+            messages.append(message("translation_disabled"))
+        languages = language_selection(candidate)
+        return {
+            "languages": languages.to_dict(),
+            "recommendation": rec.to_dict(),
+            "patch": patch,
+            "settings": merged.to_dict(),
+            "differs": merged != current,
+            "fingerprint": recommendation_fingerprint(patch, languages),
+            "models": {"asr": asr, "translation": translation},
+            "translation_needed": needed,
+            "download_bytes": sum(size for size in sizes if size is not None),
+            "download_size_known": all(size is not None for size in sizes),
+            "messages": [m.to_dict() for m in messages],
+        }
+
+    def _asr_downloads(self, rec: ModelCombination) -> list[dict[str, Any]]:
+        """推薦的 ASR 模型（同一個模型兩條路徑合併成一筆）與是否需要下載。"""
+        catalog = {m.id: m for m in self._catalog.asr_models()}
+        entries: dict[str, dict[str, Any]] = {}
+        for role, choice in (("fast", rec.fast_asr), ("final", rec.final_asr)):
+            entry = entries.get(choice.model)
+            if entry is None:
+                known = catalog.get(choice.model)
+                installed = known is not None and known.downloaded
+                size = None if known is None else known.size_bytes
+                entry = entries[choice.model] = {
+                    "model": choice.model,
+                    "roles": [],
+                    "installed": installed,
+                    "size_bytes": size,
+                    "download_bytes": 0 if installed else size,
+                }
+            entry["roles"].append(role)
+        return list(entries.values())
+
+
+def _translation_downloads(
+    info: HardwareInfo, rec: ModelCombination
+) -> list[dict[str, Any]]:
+    """推薦的翻譯模型與是否需要下載（伺服器連不上時 `installed` 為 null）。
+
+    大小是預設組的權重大小（約略值，`size_approximate`）；不認得的模型為 null。
+    """
+    server_models = info.translation_server.models
+    installed = (
+        None
+        if server_models is None
+        else {normalize_model_name(m) for m in server_models}
+    )
+    entries: dict[str, dict[str, Any]] = {}
+    for role, model in (
+        ("fast", rec.translation_fast),
+        ("final", rec.translation_final),
+    ):
+        if model is None:
+            continue
+        name = normalize_model_name(model)
+        entry = entries.get(name)
+        if entry is None:
+            preset = PRESETS.get(name)
+            size = (
+                None
+                if preset is None
+                else round(preset.approx_vram_gb * TRANSLATION_BYTES_PER_GB)
+            )
+            present = None if installed is None else name in installed
+            entry = entries[name] = {
+                "model": model,
+                "roles": [],
+                "installed": present,
+                "size_bytes": size,
+                "size_approximate": True,
+                # 連不上伺服器時不知道有沒有裝：當成可能要下載，大小照列
+                "download_bytes": 0 if present else size,
+            }
+        entry["roles"].append(role)
+    return list(entries.values())

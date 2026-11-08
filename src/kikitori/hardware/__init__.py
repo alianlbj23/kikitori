@@ -21,6 +21,8 @@ from kikitori.hardware.gpu_runtime import (
     install_gpu_runtime,
     installed_runtime_dir,
 )
+from kikitori.hardware.messages import CATALOG as MESSAGE_CATALOG
+from kikitori.hardware.messages import Message, message
 from kikitori.hardware.overview import models_overview
 from kikitori.hardware.recommend import (
     cpu_threads_per_model,
@@ -33,9 +35,11 @@ from kikitori.hardware.types import (
     CublasInfo,
     GpuInfo,
     HardwareInfo,
+    LanguageSelection,
     MemoryInfo,
     ModelCombination,
     TranslationServerInfo,
+    TranslationStatus,
     ValidationResult,
 )
 from kikitori.translate import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL
@@ -67,6 +71,7 @@ def hardware_report(
 __all__ = [
     "CUBLAS_VERSION",
     "GPU_RUNTIME_ID",
+    "MESSAGE_CATALOG",
     "AsrChoice",
     "CpuInfo",
     "CublasInfo",
@@ -74,9 +79,12 @@ __all__ = [
     "GpuRuntimeError",
     "GpuRuntimeStatus",
     "HardwareInfo",
+    "LanguageSelection",
     "MemoryInfo",
+    "Message",
     "ModelCombination",
     "TranslationServerInfo",
+    "TranslationStatus",
     "ValidationResult",
     "auto_cpu_threads",
     "cpu_threads_per_model",
@@ -86,6 +94,7 @@ __all__ = [
     "hardware_report",
     "install_gpu_runtime",
     "installed_runtime_dir",
+    "message",
     "models_overview",
     "recommend",
     "validate_combination",

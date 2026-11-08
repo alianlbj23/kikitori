@@ -13,6 +13,8 @@ import {
   machineSummary,
   missingModels,
   missingModelsView,
+  missingNoticeMode,
+  missingShownByStartPanel,
   offerText,
   runFirstRun,
   shouldOfferRecommendation,
@@ -48,6 +50,7 @@ function gpuRec(overrides: Partial<Recommendation> = {}): Recommendation {
     translation_fast: "qwen3.5:9b",
     translation_final: "qwen3.5:9b",
     translation_budget_gb: 8.21,
+    translation_status: "recommended",
     gpu_runtime_missing: false,
     reasons: [],
     warnings: [],
@@ -225,6 +228,7 @@ describe("missing models", () => {
   const models = (): AsrModel[] => parseModels(engine["models.list"]).asr;
   const progress = (model: string, state: DownloadProgressEvent["state"], done = 0, total = 100): DownloadProgressEvent => ({
     model,
+    kind: "asr",
     downloaded_bytes: done,
     total_bytes: total,
     state,
@@ -299,5 +303,44 @@ describe("commands and permissions", () => {
       expect(declared, command).toContain(command);
       expect(allowed, command).toContain(`allow-${command.replaceAll("_", "-")}`);
     }
+  });
+});
+
+describe("missingShownByStartPanel", () => {
+  const required = [
+    { id: "base", size_bytes: 148e6 },
+    { id: "small", size_bytes: 486e6 },
+  ];
+
+  it("hands the notice over to the start panel once a start downloads any of them", () => {
+    expect(missingShownByStartPanel(required, (id) => id === "small")).toBe(true);
+  });
+
+  it("keeps the notice while no start is downloading them", () => {
+    expect(missingShownByStartPanel(required, () => false)).toBe(false);
+    expect(missingShownByStartPanel([], () => true)).toBe(false);
+  });
+});
+
+describe("missingNoticeMode", () => {
+  it("hides the notice while the start panel shows the downloads", () => {
+    expect(missingNoticeMode("downloading", true, false)).toBe("panel");
+    expect(missingNoticeMode("downloading", true, true)).toBe("panel");
+  });
+
+  it("brings the notice back when the start is cancelled before the models arrive", () => {
+    // The panel is gone; the engine may still be downloading (cancel only stops waiting).
+    expect(missingNoticeMode("downloading", false, true)).toBe("notice");
+    expect(missingNoticeMode("offer", false, true)).toBe("notice");
+    expect(missingNoticeMode("failed", false, true)).toBe("notice");
+  });
+
+  it("forgets the models quietly once a start has downloaded them", () => {
+    expect(missingNoticeMode("done", false, true)).toBe("forget");
+  });
+
+  it("shows the notice as before when no start was involved", () => {
+    expect(missingNoticeMode("offer", false, false)).toBe("notice");
+    expect(missingNoticeMode("done", false, false)).toBe("notice");
   });
 });

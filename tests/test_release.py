@@ -457,6 +457,164 @@ class ReleaseNotesTest(unittest.TestCase):
             rel.release_notes("kikitori", VERSION, "v1.2.4")
 
 
+class VersionNotesTest(unittest.TestCase):
+    """`docs/release-notes/v<版本>.md`（這一版的更新內容）放在下載表之前。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.path = self.root / "docs" / "release-notes" / f"v{VERSION}.md"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _notes(self) -> str:
+        return rel.release_notes("kikitori", VERSION, "v1.2.3", root=self.root)
+
+    def test_absent_file_keeps_the_old_body(self) -> None:
+        text = self._notes()
+        self.assertEqual(text, rel.release_notes("kikitori", VERSION, "v1.2.3"))
+        self.assertTrue(text.startswith("kikitori v1.2.3\n\n| 平台 | 下載 |\n"))
+        self.assertNotIn("## 下載", text)
+
+    def test_included_before_the_download_table(self) -> None:
+        _write(
+            self.path,
+            "# kikitori v1.2.3\r\n\r\n本版重點：字幕更穩定。\r\n\r\n## 新功能\r\n\r\n- 術語表\r\n",
+        )
+        text = self._notes()
+        self.assertTrue(text.startswith("kikitori v1.2.3\n\n本版重點：字幕更穩定。\n"))
+        # Release 標題已是「kikitori v1.2.3」，重複的 H1 拿掉。
+        self.assertNotIn("# kikitori v1.2.3", text)
+        self.assertNotIn("\r", text)
+        self.assertLess(text.index("- 術語表"), text.index("## 下載"))
+        self.assertLess(text.index("## 下載"), text.index("| 平台 | 下載 |"))
+        self.assertIn("## 安裝提示", text)
+
+    def test_h1_without_the_version_is_kept(self) -> None:
+        _write(self.path, "﻿# 大改版\n\n內容\n")
+        text = self._notes()
+        self.assertIn("# 大改版\n\n內容\n", text)
+        self.assertNotIn("﻿", text)
+
+    def test_rejects_invalid_files(self) -> None:
+        cases: dict[str, bytes] = {
+            "UTF-8": b"# v1.2.3\n\xff\xfe broken\n",
+            "not text": b"binary\x00data\n",
+            "empty": b"  \n\n",
+            "empty after": b"# kikitori v1.2.3\n\n",
+            "too large": b"a" * (rel.VERSION_NOTES_MAX_BYTES + 1),
+        }
+        for message, data in cases.items():
+            with self.subTest(message=message):
+                _write(self.path, data)
+                with self.assertRaisesRegex(rel.ReleaseError, message):
+                    self._notes()
+
+    def test_directory_instead_of_file(self) -> None:
+        self.path.mkdir(parents=True)
+        with self.assertRaisesRegex(rel.ReleaseError, "not a regular file"):
+            self._notes()
+
+    def test_repo_release_notes_are_valid(self) -> None:
+        # repo 裡每一份已寫好的更新說明都要能通過檢查，發布時才不會在 assemble 失敗。
+        for path in sorted((ROOT / "docs" / "release-notes").glob("v*.md")):
+            version = path.stem[1:]
+            with self.subTest(file=path.name):
+                text = rel.release_notes("kikitori", version, f"v{version}")
+                self.assertNotIn(f"# kikitori v{version}\n", text)
+                self.assertIn("## 下載", text)
+
+
+class ManifestNotesTest(unittest.TestCase):
+    """`latest.json` 的 `notes`（App 內更新提示顯示的說明）取自這一版的更新說明。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.path = self.root / "docs" / "release-notes" / f"v{VERSION}.md"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _notes(self, tag: str = "v1.2.3") -> str:
+        return rel.manifest_notes(
+            self.root, "kikitori", VERSION, tag, "alianlbj23/kikitori"
+        )
+
+    def test_absent_file_falls_back_to_the_title(self) -> None:
+        self.assertEqual(self._notes(), "kikitori v1.2.3")
+
+    def test_uses_the_version_notes_without_the_h1(self) -> None:
+        # bytes：write_text 在 Windows 會把 \n 再轉成 \r\n。
+        data = "\ufeff# kikitori v1.2.3\r\n\r\n本版重點\r\n\r\n- 術語表\r\n"
+        _write(self.path, data.encode("utf-8"))
+        self.assertEqual(self._notes(), "本版重點\n\n- 術語表")
+
+    def test_short_notes_are_not_marked(self) -> None:
+        body = "a" * rel.LATEST_NOTES_MAX_CHARS
+        _write(self.path, body + "\n")
+        self.assertEqual(self._notes(), body)
+
+    def test_long_notes_are_cut_at_a_line_and_marked(self) -> None:
+        line = "- " + "字" * 98  # 100 個字元
+        _write(self.path, "\n".join([line] * 100) + "\n")  # 約 10,000 字元
+        text = self._notes()
+        url = "https://github.com/alianlbj23/kikitori/releases/tag/v1.2.3"
+        body, marker = text.split("\n\n…", 1)
+        self.assertIn(url, marker)
+        self.assertLessEqual(len(body), rel.LATEST_NOTES_MAX_CHARS)
+        # 在整行處截斷：不留半行。
+        self.assertEqual(set(body.split("\n")), {line})
+        self.assertGreater(len(body), rel.LATEST_NOTES_MAX_CHARS // 2)
+
+    def test_one_long_line_is_cut_at_the_limit(self) -> None:
+        _write(self.path, "b" * (rel.LATEST_NOTES_MAX_CHARS + 50))
+        body = self._notes().split("\n\n…", 1)[0]
+        self.assertEqual(body, "b" * rel.LATEST_NOTES_MAX_CHARS)
+
+    def test_fits_the_apps_validation_limit_in_utf16(self) -> None:
+        # app 的 validate.ts 以 UTF-16 長度檢查 notes（上限 10,000）；超過的話整個更新檢查
+        # 會失敗、使用者看不到更新。BMP 以外的字元（emoji）在 UTF-16 佔 2 個單位。
+        _write(self.path, "😀" * 20_000)
+        text = self._notes()
+        self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 10_000)
+
+    def test_invalid_file_fails(self) -> None:
+        _write(self.path, b"\xff\xfe")
+        with self.assertRaisesRegex(rel.ReleaseError, "UTF-8"):
+            self._notes()
+
+    def test_tag_must_match_the_version(self) -> None:
+        with self.assertRaisesRegex(rel.ReleaseError, "does not match version"):
+            self._notes("v9.9.9")
+
+    def test_repo_release_notes_fit(self) -> None:
+        for path in sorted((ROOT / "docs" / "release-notes").glob("v*.md")):
+            version = path.stem[1:]
+            with self.subTest(file=path.name):
+                text = rel.manifest_notes(
+                    ROOT, "kikitori", version, f"v{version}", "alianlbj23/kikitori"
+                )
+                self.assertNotEqual(text, f"kikitori v{version}")
+                self.assertNotIn(f"# kikitori v{version}", text)
+                self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 10_000)
+
+    def test_workflow_takes_the_notes_from_the_version_file(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(workflow.count("scripts/release.py manifest"), 1)
+        # 指令本身與它的續行（以 `\` 結尾的行）。
+        lines = workflow.split("scripts/release.py manifest", 1)[1].splitlines()
+        call = [lines[0]]
+        while call[-1].rstrip().endswith("\\"):
+            call.append(lines[len(call)])
+        manifest_call = "\n".join(call)
+        self.assertIn("--notes-from-version", manifest_call)
+        self.assertNotIn("--notes ", manifest_call)
+
+
 class RepoConfigTest(unittest.TestCase):
     """repo 實際的設定要能讓更新器使用這裡產生的檔案。"""
 
@@ -590,6 +748,61 @@ class CommandLineTest(unittest.TestCase):
         self.assertTrue((self.root / "stage" / "latest.json").is_file())
         self.assertIn("  darwin-aarch64: ", "\n".join(self.out))
 
+    def _manifest(self, *extra: str) -> int:
+        bundle = self.root / "bundle"
+        _fake_bundles(bundle)
+        for platform in rel.PLATFORMS:
+            rel.collect(
+                platform,
+                bundle,
+                self.root / "artifacts" / platform,
+                "kikitori",
+                VERSION,
+            )
+        return self._run(
+            "manifest",
+            "--dir",
+            str(self.root / "artifacts"),
+            "--stage",
+            str(self.root / "stage"),
+            "--repo",
+            "alianlbj23/kikitori",
+            "--tag",
+            "v1.2.3",
+            *extra,
+        )
+
+    def _latest_notes(self) -> str:
+        latest = self.root / "stage" / "latest.json"
+        return json.loads(latest.read_text(encoding="utf-8"))["notes"]
+
+    def test_manifest_notes_from_version_file(self) -> None:
+        _write(
+            self.root / "docs" / "release-notes" / "v1.2.3.md",
+            "# kikitori v1.2.3\n\n本版重點\n\n- 術語表\n",
+        )
+        self.assertEqual(self._manifest("--notes-from-version"), 0, self.err)
+        self.assertEqual(self._latest_notes(), "本版重點\n\n- 術語表")
+
+    def test_manifest_notes_from_version_without_file(self) -> None:
+        self.assertEqual(self._manifest("--notes-from-version"), 0, self.err)
+        self.assertEqual(self._latest_notes(), "kikitori v1.2.3")
+
+    def test_manifest_explicit_notes_still_work(self) -> None:
+        self.assertEqual(self._manifest("--notes", "hello"), 0, self.err)
+        self.assertEqual(self._latest_notes(), "hello")
+
+    def test_manifest_invalid_version_notes_fail(self) -> None:
+        _write(self.root / "docs" / "release-notes" / "v1.2.3.md", b"\x00\x01")
+        self.assertEqual(self._manifest("--notes-from-version"), 1)
+        self.assertIn("NUL", self.err[-1])
+        self.assertFalse((self.root / "stage" / "latest.json").exists())
+
+    def test_manifest_notes_options_are_exclusive(self) -> None:
+        with mock.patch("sys.stderr"):
+            code = self._manifest("--notes", "x", "--notes-from-version")
+        self.assertEqual(code, 2)
+
     def test_notes_writes_the_release_body(self) -> None:
         out_file = self.root / "out" / "notes.md"
         self.assertEqual(
@@ -602,6 +815,28 @@ class CommandLineTest(unittest.TestCase):
             self._run("notes", "--tag", "v9.9.9", "--out", str(out_file)), 1
         )
         self.assertIn("does not match", self.err[-1])
+
+    def test_notes_include_the_version_notes_from_root(self) -> None:
+        _write(
+            self.root / "docs" / "release-notes" / "v1.2.3.md",
+            "# kikitori v1.2.3\n\n本版重點\n",
+        )
+        out_file = self.root / "out" / "notes.md"
+        self.assertEqual(
+            self._run("notes", "--tag", "v1.2.3", "--out", str(out_file)), 0, self.err
+        )
+        text = out_file.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("kikitori v1.2.3\n\n本版重點\n"))
+        self.assertIn("## 下載", text)
+
+    def test_notes_invalid_version_notes_fail(self) -> None:
+        _write(self.root / "docs" / "release-notes" / "v1.2.3.md", b"\xff\xfe")
+        out_file = self.root / "out" / "notes.md"
+        self.assertEqual(
+            self._run("notes", "--tag", "v1.2.3", "--out", str(out_file)), 1
+        )
+        self.assertIn("UTF-8", self.err[-1])
+        self.assertFalse(out_file.exists())
 
     def test_usage_errors(self) -> None:
         with mock.patch("sys.stderr"):

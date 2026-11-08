@@ -131,6 +131,18 @@ class ProbeTest(unittest.TestCase):
             self.assertFalse(info.reachable, url)
             self.assertIn("invalid base_url", info.error or "")
 
+    def test_credentials_in_the_url_are_never_reported(self) -> None:
+        # 結果會回到 UI（hardware.detect、推薦理由）並寫進 log
+        for url in (
+            f"http://kiki:s3cret@127.0.0.1:{self.port}/v1",
+            "http://kiki:s3cret@h:99999/v1",
+            f"http://kiki:s3cret@127.0.0.1:{free_port()}/v1",
+        ):
+            with self.subTest(url=url.split("@")[1]):
+                info = probe_translation_server(url, env={}, timeout=0.5)
+                self.assertNotIn("s3cret", repr(info))
+                self.assertTrue(info.base_url.startswith("http://***@"))
+
     def test_remote_host_is_not_local(self) -> None:
         class FailingConn:
             def request(self, *a: object, **k: object) -> None:

@@ -57,6 +57,7 @@ pub enum EngineEvent {
     Status(StatusPayload),
     DownloadProgress(DownloadProgressPayload),
     Log(LogPayload),
+    Metrics(MetricsPayload),
     Unknown { name: String },
 }
 
@@ -75,7 +76,49 @@ pub struct SubtitlePayload {
     /// architecture spec is still accepted.
     #[serde(default)]
     pub session_id: Option<u64>,
+    /// Partials only (competitive-features.md F2): how many characters (code
+    /// points) at the start of `original` will not change any more. Absent from
+    /// finals and from older engines, and then left out when forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_chars: Option<u64>,
+    /// Finals only (F4): end of speech → final subtitle sent, in milliseconds;
+    /// `null` when the engine could not measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// Furigana for Japanese originals (docs/specs/furigana.md): `[start, end,
+    /// reading]` with code-point offsets into `original` and a hiragana reading.
+    /// Present only when the engine annotated the line; an invalid list is
+    /// dropped (the subtitle itself is kept) and then left out when forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<Vec<RubySpan>>,
 }
+
+/// One furigana annotation: `original[start..end]` (code points) reads `reading`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RubySpan(pub u64, pub u64, pub String);
+
+/// A reading longer than this is not a reading of one word.
+const MAX_RUBY_READING_CHARS: usize = 64;
+
+/// `metrics` event (F4), about once a second while a session runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsPayload {
+    #[serde(default)]
+    pub session_id: Option<u64>,
+    /// Input level (RMS) in dBFS, −120 (silence) to 0.
+    pub level_dbfs: f64,
+    /// Complete sentences waiting for the final pass.
+    pub backlog: u64,
+    /// Median of recent `latency_ms`; `null` before the first final.
+    #[serde(default)]
+    pub latency_ms_median: Option<u64>,
+}
+
+/// Bounds of `metrics.level_dbfs` (the engine floors silence at −120 dBFS).
+const LEVEL_DBFS_RANGE: std::ops::RangeInclusive<f64> = -120.0..=0.0;
+/// Anything above this is a broken clock or counter, not a measurement.
+const MAX_LATENCY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_BACKLOG: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -96,6 +139,11 @@ pub struct StatusPayload {
     pub session_id: Option<u64>,
     #[serde(default)]
     pub code: Option<String>,
+    /// Extra facts for some codes (Milestone 13: `translation_model_missing`
+    /// carries `{"models": [...]}`); absent otherwise, and left out when
+    /// forwarded so other payloads keep their exact shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +168,15 @@ pub struct DownloadProgressPayload {
     pub state: DownloadState,
     #[serde(default)]
     pub error: Option<String>,
+    /// What is being downloaded (Milestone 13): `asr`, `gpu_runtime`,
+    /// `translation` or `furigana` (the furigana dictionary, docs/specs/furigana.md);
+    /// ASR and translation models may share a name. Kept as a
+    /// checked string so a kind added by a newer engine is still forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
+
+const MAX_KIND_CHARS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -252,9 +308,14 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
     let ctx = |e: serde_json::Error| shape(format!("event {name:?}: {e}"));
     let event = match name.as_str() {
         "subtitle" => {
-            let p: SubtitlePayload = serde_json::from_value(data).map_err(ctx)?;
-            validate_subtitle(&p)?;
+            let mut p: SubtitlePayload = serde_json::from_value(data).map_err(ctx)?;
+            validate_subtitle(&mut p)?;
             EngineEvent::Subtitle(p)
+        }
+        "metrics" => {
+            let p: MetricsPayload = serde_json::from_value(data).map_err(ctx)?;
+            validate_metrics(&p)?;
+            EngineEvent::Metrics(p)
         }
         "status" => {
             let p: StatusPayload = serde_json::from_value(data).map_err(ctx)?;
@@ -264,6 +325,16 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             if let Some(c) = &p.code {
                 check_non_empty_len("status.code", c, MAX_CODE_CHARS)?;
             }
+            if let Some(d) = &p.data {
+                // The whole line is already bounded (MAX_LINE_BYTES); this keeps
+                // one status from carrying a large blob into every window.
+                let size = serde_json::to_vec(d).map_or(usize::MAX, |v| v.len());
+                if size > MAX_TEXT_CHARS {
+                    return Err(shape(format!(
+                        "status.data is {size} bytes, limit {MAX_TEXT_CHARS}"
+                    )));
+                }
+            }
             EngineEvent::Status(p)
         }
         "download_progress" => {
@@ -271,6 +342,15 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             check_non_empty_len("download_progress.model", &p.model, MAX_MODEL_CHARS)?;
             if let Some(e) = &p.error {
                 check_len("download_progress.error", e, MAX_TEXT_CHARS)?;
+            }
+            if let Some(k) = &p.kind
+                && (k.is_empty()
+                    || k.len() > MAX_KIND_CHARS
+                    || !k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+            {
+                return Err(shape(format!(
+                    "download_progress.kind is not an identifier: {k:?}"
+                )));
             }
             EngineEvent::DownloadProgress(p)
         }
@@ -284,13 +364,74 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
     Ok(event)
 }
 
-fn validate_subtitle(p: &SubtitlePayload) -> Result<(), ParseError> {
+/// Checks a subtitle. Out-of-range F2/F4 hints are repaired instead of
+/// rejected (dropping the whole line over a display hint would lose the text);
+/// a hint of the wrong type is a broken engine and rejected like any field.
+fn validate_subtitle(p: &mut SubtitlePayload) -> Result<(), ParseError> {
     check_len("subtitle.original", &p.original, MAX_TEXT_CHARS)?;
     check_len("subtitle.translation", &p.translation, MAX_TEXT_CHARS)?;
     check_language("subtitle.source_language", &p.source_language)?;
     check_language("subtitle.target_language", &p.target_language)?;
     if p.end_sample < p.start_sample {
         return Err(shape("subtitle.end_sample is before start_sample"));
+    }
+    if let Some(n) = p.stable_chars {
+        // A prefix longer than the text means "all of it" (the UI clamps too).
+        p.stable_chars = Some(n.min(p.original.chars().count() as u64));
+    }
+    if p.latency_ms.is_some_and(|ms| ms > MAX_LATENCY_MS) {
+        p.latency_ms = None;
+    }
+    if let Some(spans) = &p.ruby
+        && let Err(reason) = check_ruby(spans, p.original.chars().count() as u64)
+    {
+        // Furigana is a display hint: losing it is better than losing the line.
+        log::warn!("dropping invalid subtitle.ruby: {reason}");
+        p.ruby = None;
+    }
+    Ok(())
+}
+
+/// Furigana spans must be in order, inside `original`, non-overlapping and
+/// carry a short hiragana reading (the engine guarantees this; anything else is
+/// a broken engine and must not reach the webview as markup input).
+fn check_ruby(spans: &[RubySpan], text_chars: u64) -> Result<(), String> {
+    if spans.len() as u64 > text_chars {
+        return Err(format!("{} spans for {text_chars} characters", spans.len()));
+    }
+    let mut previous_end = 0;
+    for RubySpan(start, end, reading) in spans {
+        if *start < previous_end || start >= end || *end > text_chars {
+            return Err(format!("span {start}..{end} is out of order or range"));
+        }
+        let count = reading.chars().count();
+        if count == 0 || count > MAX_RUBY_READING_CHARS {
+            return Err(format!("reading of {count} characters"));
+        }
+        if !reading
+            .chars()
+            .all(|c| ('\u{3041}'..='\u{3096}').contains(&c) || c == '\u{30fc}')
+        {
+            return Err(format!("reading {reading:?} is not hiragana"));
+        }
+        previous_end = *end;
+    }
+    Ok(())
+}
+
+/// A malformed `metrics` event is dropped: the next one follows within a second.
+fn validate_metrics(p: &MetricsPayload) -> Result<(), ParseError> {
+    if !LEVEL_DBFS_RANGE.contains(&p.level_dbfs) {
+        return Err(shape(format!(
+            "metrics.level_dbfs {} is outside -120..0",
+            p.level_dbfs
+        )));
+    }
+    if p.backlog > MAX_BACKLOG {
+        return Err(shape(format!("metrics.backlog {} is too large", p.backlog)));
+    }
+    if p.latency_ms_median.is_some_and(|ms| ms > MAX_LATENCY_MS) {
+        return Err(shape("metrics.latency_ms_median is too large"));
     }
     Ok(())
 }
@@ -485,6 +626,135 @@ mod tests {
         }
     }
 
+    fn parse_subtitle(v: &Value) -> SubtitlePayload {
+        match parse(&v.to_string()) {
+            Ok(Some(Incoming::Event(EngineEvent::Subtitle(s)))) => s,
+            other => panic!("expected subtitle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtitle_stable_chars_and_latency() {
+        let mut v = subtitle_json();
+        v["data"]["stable_chars"] = json!(2);
+        let s = parse_subtitle(&v);
+        assert_eq!(s.stable_chars, Some(2));
+        assert_eq!(serde_json::to_value(&s).unwrap()["stable_chars"], json!(2));
+        // Longer than the text (5 characters, 15 UTF-8 bytes): clamped, not rejected.
+        v["data"]["stable_chars"] = json!(99);
+        assert_eq!(parse_subtitle(&v).stable_chars, Some(5));
+
+        let mut f = subtitle_json();
+        f["data"]["is_final"] = json!(true);
+        f["data"]["latency_ms"] = json!(850);
+        let s = parse_subtitle(&f);
+        assert_eq!(s.latency_ms, Some(850));
+        assert!(s.stable_chars.is_none());
+        let forwarded = serde_json::to_value(&s).unwrap();
+        assert_eq!(forwarded["latency_ms"], json!(850));
+        // Absent fields stay absent when forwarded, so older payloads keep their shape.
+        assert!(forwarded.get("stable_chars").is_none());
+        for no_latency in [json!(null), json!(MAX_LATENCY_MS + 1)] {
+            f["data"]["latency_ms"] = no_latency;
+            assert!(parse_subtitle(&f).latency_ms.is_none());
+        }
+        for bad in [json!(-1), json!("3"), json!(1.5)] {
+            let mut b = subtitle_json();
+            b["data"]["stable_chars"] = bad.clone();
+            assert!(
+                matches!(parse(&b.to_string()), Err(ParseError::Shape(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn subtitle_ruby() {
+        // "今日は" is 3 code points (9 UTF-8 bytes).
+        let mut v = subtitle_json();
+        v["data"]["original"] = json!("今日は");
+        v["data"]["ruby"] = json!([[0, 2, "きょう"]]);
+        let s = parse_subtitle(&v);
+        assert_eq!(s.ruby, Some(vec![RubySpan(0, 2, "きょう".to_owned())]));
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["ruby"],
+            json!([[0, 2, "きょう"]])
+        );
+        v["data"]["ruby"] = json!([]);
+        assert_eq!(parse_subtitle(&v).ruby, Some(vec![]));
+        // Absent stays absent when forwarded.
+        let plain = parse_subtitle(&subtitle_json());
+        assert!(plain.ruby.is_none());
+        assert!(serde_json::to_value(&plain).unwrap().get("ruby").is_none());
+        // Invalid spans drop the annotation, not the subtitle.
+        for bad in [
+            json!([[0, 4, "きょうは"]]),
+            json!([[2, 2, "き"]]),
+            json!([[1, 2, "う"], [0, 1, "き"]]),
+            json!([[0, 2, "キョウ"]]),
+            json!([[0, 2, ""]]),
+            json!([[0, 2, "<b>"]]),
+            json!([[0, 2, "あ".repeat(MAX_RUBY_READING_CHARS + 1)]]),
+            json!([[0, 1, "き"], [1, 2, "ょ"], [2, 3, "う"], [2, 3, "う"]]),
+        ] {
+            v["data"]["ruby"] = bad.clone();
+            let s = parse_subtitle(&v);
+            assert!(s.ruby.is_none(), "{bad}");
+            assert_eq!(s.original, "今日は");
+        }
+        // A wrong type is a broken engine: the line is rejected like any field.
+        for bad in [json!("x"), json!([[0, 2]]), json!([[-1, 2, "き"]])] {
+            v["data"]["ruby"] = bad.clone();
+            assert!(
+                matches!(parse(&v.to_string()), Err(ParseError::Shape(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn subtitle_with_unknown_fields_is_accepted() {
+        let mut v = subtitle_json();
+        v["data"]["future_field"] = json!({"x": 1});
+        assert_eq!(parse_subtitle(&v).utterance_id, 3);
+    }
+
+    #[test]
+    fn metrics_event() {
+        let line = r#"{"event":"metrics","data":{"session_id":4,"level_dbfs":-23.5,"backlog":2,"latency_ms_median":900,"later":true}}"#;
+        let Some(Incoming::Event(EngineEvent::Metrics(m))) = parse(line).unwrap() else {
+            panic!("expected metrics");
+        };
+        assert_eq!(m.session_id, Some(4));
+        assert_eq!(m.level_dbfs, -23.5);
+        assert_eq!(m.backlog, 2);
+        assert_eq!(m.latency_ms_median, Some(900));
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"session_id": 4, "level_dbfs": -23.5, "backlog": 2, "latency_ms_median": 900})
+        );
+        let quiet = r#"{"event":"metrics","data":{"level_dbfs":-120,"backlog":0,"latency_ms_median":null}}"#;
+        let Some(Incoming::Event(EngineEvent::Metrics(m))) = parse(quiet).unwrap() else {
+            panic!("expected metrics");
+        };
+        assert!(m.session_id.is_none() && m.latency_ms_median.is_none());
+        for bad in [
+            json!({"level_dbfs": 3.0, "backlog": 0}),
+            json!({"level_dbfs": -121.0, "backlog": 0}),
+            json!({"level_dbfs": "-3", "backlog": 0}),
+            json!({"level_dbfs": -3.0, "backlog": -1}),
+            json!({"level_dbfs": -3.0, "backlog": MAX_BACKLOG + 1}),
+            json!({"level_dbfs": -3.0, "backlog": 0, "latency_ms_median": MAX_LATENCY_MS + 1}),
+            json!({"backlog": 0}),
+        ] {
+            let line = json!({"event": "metrics", "data": bad});
+            assert!(
+                matches!(parse(&line.to_string()), Err(ParseError::Shape(_))),
+                "{line}"
+            );
+        }
+    }
+
     #[test]
     fn status_event() {
         let got = parse(r#"{"event":"status","data":{"state":"error","detail":"no mic","session_id":2,"code":"device_lost"}}"#)
@@ -499,6 +769,70 @@ mod tests {
             parse(r#"{"event":"status","data":{"state":"sleeping"}}"#),
             Err(ParseError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn status_event_keeps_data_for_translation_model_missing() {
+        let line = r#"{"event":"status","data":{"state":"error","detail":"missing","session_id":3,"code":"translation_model_missing","data":{"models":["qwen3.5:9b"]}}}"#;
+        let Some(Incoming::Event(EngineEvent::Status(s))) = parse(line).unwrap() else {
+            panic!("expected status");
+        };
+        assert_eq!(s.data.as_ref().unwrap()["models"], json!(["qwen3.5:9b"]));
+        // Forwarded to the webview unchanged.
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["data"],
+            json!({"models": ["qwen3.5:9b"]})
+        );
+        // Without data the forwarded payload has no `data` key at all.
+        let Some(Incoming::Event(EngineEvent::Status(plain))) =
+            parse(r#"{"event":"status","data":{"state":"idle"}}"#).unwrap()
+        else {
+            panic!("expected status");
+        };
+        assert!(serde_json::to_value(&plain).unwrap().get("data").is_none());
+        for bad in [
+            r#"{"event":"status","data":{"state":"error","data":[1]}}"#,
+            r#"{"event":"status","data":{"state":"error","data":"x"}}"#,
+        ] {
+            assert!(matches!(parse(bad), Err(ParseError::Shape(_))), "{bad}");
+        }
+        let huge = json!({"event": "status", "data": {"state": "error", "data": {"models": ["m".repeat(MAX_TEXT_CHARS)]}}});
+        assert!(matches!(
+            parse(&huge.to_string()),
+            Err(ParseError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn download_progress_kind() {
+        let got = parse(r#"{"event":"download_progress","data":{"model":"qwen3.5:9b","kind":"translation","downloaded_bytes":0,"total_bytes":0,"state":"downloading","error":null}}"#)
+            .unwrap()
+            .unwrap();
+        let Incoming::Event(EngineEvent::DownloadProgress(p)) = got else {
+            panic!("expected download_progress");
+        };
+        assert_eq!(p.kind.as_deref(), Some("translation"));
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["kind"],
+            json!("translation")
+        );
+        // The furigana dictionary (docs/specs/furigana.md) is forwarded the same way.
+        let got = parse(r#"{"event":"download_progress","data":{"model":"furigana-dictionary","kind":"furigana","downloaded_bytes":0,"total_bytes":72238136,"state":"downloading","error":null}}"#)
+            .unwrap()
+            .unwrap();
+        let Incoming::Event(EngineEvent::DownloadProgress(p)) = got else {
+            panic!("expected download_progress");
+        };
+        assert_eq!(p.kind.as_deref(), Some("furigana"));
+        for bad in [json!(""), json!("Translation"), json!("<b>"), json!(1)] {
+            let line = json!({"event": "download_progress", "data": {
+                "model": "m", "kind": bad, "downloaded_bytes": 0, "total_bytes": 0
+            }});
+            assert!(
+                matches!(parse(&line.to_string()), Err(ParseError::Shape(_))),
+                "{line}"
+            );
+        }
     }
 
     #[test]

@@ -10,9 +10,16 @@ import {
   parseDevices,
   parseDownloadProgress,
   parseHardware,
+  parseMetrics,
+  parseModelDeleteResult,
   parseModels,
+  parseObsStatus,
+  parseOutputInfo,
+  parseOverlaySnapshot,
   parseOverlayStyle,
   parseRecommendationPreview,
+  parseSavedPath,
+  parseShortcutAction,
   parseStatus,
   parseSubtitle,
   parseUpdateDownloadEvent,
@@ -63,8 +70,32 @@ describe("other events", () => {
       detail: null,
       session_id: null,
       code: null,
+      missing_translation_models: [],
     });
     expect(() => parseStatus({ state: "napping" })).toThrow(ValidationError);
+  });
+
+  it("reads the missing translation models of translation_model_missing (real engine capture)", () => {
+    const events = engine["status events"] as unknown[];
+    const missing = parseStatus(events[events.length - 1]);
+    expect(missing.code).toBe("translation_model_missing");
+    expect(missing.missing_translation_models).toEqual(["qwen3.5:9b"]);
+    // Names the engine could not pull are dropped; other codes never carry models.
+    expect(
+      parseStatus({ state: "error", code: "translation_model_missing", data: { models: ["ok:1b", "../x", "a b", 3, "ok:1b"] } })
+        .missing_translation_models,
+    ).toEqual(["ok:1b"]);
+    expect(parseStatus({ state: "error", code: "load_error", data: { models: ["x"] } }).missing_translation_models).toEqual([]);
+    expect(parseStatus({ state: "error", code: "translation_model_missing", data: [1] }).missing_translation_models).toEqual([]);
+  });
+
+  it("reads download_progress.kind, treating unknown kinds as none", () => {
+    const events = engine["download_progress events"] as unknown[];
+    const parsed = events.map(parseDownloadProgress);
+    expect(parsed.every((p) => p.kind === "translation")).toBe(true);
+    expect(parsed[parsed.length - 1]).toMatchObject({ model: "qwen3.5:9b", state: "done" });
+    expect(parseDownloadProgress({ model: "base", downloaded_bytes: 0, total_bytes: 0 }).kind).toBeNull();
+    expect(parseDownloadProgress({ model: "base", kind: "future", downloaded_bytes: 0, total_bytes: 0 }).kind).toBeNull();
   });
 
   it("parses download progress, defaulting state", () => {
@@ -109,11 +140,65 @@ describe("command results", () => {
   });
 
   it("validates overlay style ranges", () => {
-    const ok = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 };
+    const ok = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2, min_display_ms: 0, idle_clear_secs: 600 };
     expect(parseOverlayStyle(ok)).toEqual(ok);
     expect(() => parseOverlayStyle({ ...ok, font_size: 200 })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, background_opacity: 2 })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, position: "left" })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, min_display_ms: 10_001 })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, idle_clear_secs: 601 })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, idle_clear_secs: 1.5 })).toThrow();
+  });
+
+  it("defaults the reading rhythm when an older Rust build has no such fields", () => {
+    const old = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 };
+    expect(parseOverlayStyle(old)).toEqual({ ...old, min_display_ms: 1500, idle_clear_secs: 8 });
+  });
+
+  it("reads the shortcut list, dropping unknown actions, and the OBS and output results", () => {
+    const snap = {
+      style: { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 },
+      click_through: false,
+      visible: true,
+      shortcut: "CommandOrControl+Alt+K",
+      shortcut_registered: true,
+      shortcuts: [
+        { action: "click_through", keys: "CommandOrControl+Alt+K", registered: true },
+        { action: "toggle_translation", keys: "CommandOrControl+Alt+J", registered: false },
+        { action: "future_action", keys: "X", registered: true },
+      ],
+    };
+    expect(parseOverlaySnapshot(snap).shortcuts.map((s) => s.action)).toEqual(["click_through", "toggle_translation"]);
+    expect(parseOverlaySnapshot({ ...snap, shortcuts: undefined }).shortcuts).toEqual([]);
+    expect(() => parseOverlaySnapshot({ ...snap, shortcuts: [{ action: "clear_subtitles", keys: 1, registered: true }] })).toThrow();
+    expect(parseShortcutAction("toggle_translation")).toBe("toggle_translation");
+    expect(() => parseShortcutAction("rm -rf")).toThrow();
+    expect(parseObsStatus({ content: "both", path: "C:/Docs/kikitori/obs/subtitle.txt", error: null })).toEqual({
+      content: "both",
+      path: "C:/Docs/kikitori/obs/subtitle.txt",
+      error: null,
+    });
+    expect(() => parseObsStatus({ content: "all", path: null, error: null })).toThrow();
+    expect(parseOutputInfo({ transcripts_dir: null, obs_file: null })).toEqual({ transcripts_dir: null, obs_file: null });
+    expect(parseSavedPath("C:/Docs/kikitori/transcripts/a.srt")).toBe("C:/Docs/kikitori/transcripts/a.srt");
+    expect(() => parseSavedPath("")).toThrow();
+  });
+
+  it("reads the overlay locale, tolerating older Rust builds and malformed tags", () => {
+    const snap = {
+      style: { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 },
+      click_through: false,
+      visible: true,
+      shortcut: "CommandOrControl+Alt+K",
+      shortcut_registered: true,
+    };
+    expect(parseOverlaySnapshot({ ...snap, locale: "pt-BR" }).locale).toBe("pt-BR");
+    expect(parseOverlaySnapshot({ ...snap, locale: null }).locale).toBeNull();
+    expect(parseOverlaySnapshot(snap).locale).toBeNull();
+    // Older Rust builds have no show_translation: translations were always shown.
+    expect(parseOverlaySnapshot(snap).show_translation).toBe(true);
+    expect(parseOverlaySnapshot({ ...snap, show_translation: false }).show_translation).toBe(false);
+    expect(parseOverlaySnapshot({ ...snap, locale: "<script>" }).locale).toBeNull();
   });
 
   it("recognises serialized command errors only", () => {
@@ -183,7 +268,20 @@ describe("hardware.detect (real engine, fake NVIDIA hardware)", () => {
     expect(r.translation_budget_gb).toBe(7);
     expect(r.gpu_runtime_missing).toBe(true);
     expect(r.reasons.length).toBeGreaterThan(0);
-    expect(r.warnings[0]).toContain("cuBLAS");
+    // Coded messages since Milestone 12 (hardware.md「訊息碼」).
+    expect(r.warnings[0]).toMatchObject({ code: "gpu_runtime_missing", params: {} });
+    expect(r.translation_status).toBe("recommended");
+    expect(parseHardware({ ...detect, recommendation: { ...detect.recommendation, translation_status: "odd" } }).recommendation.translation_status).toBeNull();
+  });
+
+  it("accepts coded reasons and warnings from newer engines next to plain strings", () => {
+    const v = clone(detect);
+    const coded = { code: "gpu_runtime_missing", params: { name: "RTX" }, message: "Download the GPU runtime." };
+    (v.recommendation as Record<string, unknown>).reasons = ["plain", coded];
+    (v.recommendation as Record<string, unknown>).warnings = [coded, { code: 3 }];
+    const r = parseHardware(v).recommendation;
+    expect(r.reasons).toEqual(["plain", coded]);
+    expect(r.warnings).toEqual([coded]);
   });
 
   it("accepts a CUDA recommendation without translation (remote server)", () => {
@@ -230,11 +328,12 @@ describe("models.list (real engine, fake NVIDIA hardware)", () => {
       vram_mb: 600,
       vram_int8_mb: 450,
       recommended_for: ["fast"],
+      disk_bytes: 4194304,
     });
     const turbo = m.asr.find((a) => a.id === "large-v3-turbo");
     expect(turbo?.no_speech_reliable).toBe(false);
     const missing = m.asr.find((a) => a.id === "fake-missing");
-    expect(missing).toMatchObject({ no_speech_reliable: null, vram_mb: null, downloaded: false });
+    expect(missing).toMatchObject({ no_speech_reliable: null, vram_mb: null, downloaded: false, disk_bytes: null });
   });
 
   it("parses the GPU runtime with its license", () => {
@@ -294,6 +393,12 @@ describe("models.validate", () => {
       warnings: ["w"],
     });
     expect(parseCombinationCheck({ ok: false, errors: ["e"], warnings: [] }).ok).toBe(false);
+  });
+
+  it("keeps coded engine messages for translation in the UI", () => {
+    const coded = { code: "vram_tight", params: { gb: 4 }, message: "Video memory is tight." };
+    const check = parseCombinationCheck({ ok: true, errors: [], warnings: ["legacy", coded, 7] });
+    expect(check.warnings).toEqual(["legacy", coded]);
   });
 
   it("never reports ok next to an error", () => {
@@ -360,5 +465,127 @@ describe("update_check / update_install", () => {
     expect(() => parseUpdateDownloadEvent({ event: "Paused" })).toThrow(ValidationError);
     expect(() => parseUpdateDownloadEvent({ event: "Progress", data: { chunkLength: -1 } })).toThrow(ValidationError);
     expect(() => parseUpdateDownloadEvent({ event: "Progress" })).toThrow(ValidationError);
+  });
+});
+
+describe("furigana (docs/specs/furigana.md)", () => {
+  const japanese = { ...subtitle, original: "今日は食べる" };
+
+  it("keeps a valid ruby list and drops an invalid one without losing the subtitle", () => {
+    const ruby = [
+      [0, 2, "きょう"],
+      [3, 4, "た"],
+    ];
+    expect(parseSubtitle({ ...japanese, ruby }).ruby).toEqual(ruby);
+    expect(parseSubtitle({ ...japanese, ruby: [] }).ruby).toEqual([]);
+    expect(parseSubtitle(japanese).ruby).toBeNull();
+    for (const bad of [
+      "x",
+      [[0, 2]],
+      [[0, 2, 3]],
+      [[0, 9, "きょう"]],
+      [
+        [3, 4, "た"],
+        [0, 2, "きょう"],
+      ],
+      [[0, 2, "キョウ"]],
+      [[0, 2, "<b>"]],
+    ]) {
+      const parsed = parseSubtitle({ ...japanese, ruby: bad });
+      expect(parsed.ruby, JSON.stringify(bad)).toBeNull();
+      expect(parsed.original).toBe("今日は食べる");
+    }
+  });
+
+  it("recognises the dictionary download kind", () => {
+    const p = parseDownloadProgress({
+      model: "furigana-dictionary",
+      kind: "furigana",
+      downloaded_bytes: 0,
+      total_bytes: 72238136,
+      state: "downloading",
+      error: null,
+    });
+    expect(p.kind).toBe("furigana");
+  });
+
+  it("reads models.list.furigana and tolerates engines without it", () => {
+    const furigana = {
+      id: "furigana-dictionary",
+      installed: true,
+      edition: "core",
+      version: "20260428",
+      download_bytes: 72238136,
+      installed_bytes: 217391698,
+      disk_bytes: 217392119,
+      path: "C:/fake/furigana/system_core.dic",
+      license: "Apache-2.0",
+      license_url: "https://example.invalid/LEGAL",
+      in_use: false,
+    };
+    const list = engine["models.list"];
+    expect(parseModels({ ...list, furigana }).furigana).toEqual(furigana);
+    expect(parseModels(list).furigana).toBeNull();
+    expect(() => parseModels({ ...list, furigana: { ...furigana, installed: "yes" } })).toThrow(ValidationError);
+  });
+});
+
+describe("competitive features: subtitle hints, metrics, model deletion", () => {
+  it("keeps stable_chars on partials and latency_ms on finals only", () => {
+    const partial = { ...subtitle, is_final: false, stable_chars: 2, latency_ms: 900 };
+    expect(parseSubtitle(partial)).toMatchObject({ stable_chars: 2, latency_ms: null });
+    const final = { ...subtitle, stable_chars: 2, latency_ms: 900 };
+    expect(parseSubtitle(final)).toMatchObject({ stable_chars: null, latency_ms: 900 });
+    // Older engines send neither.
+    expect(parseSubtitle({ ...subtitle, is_final: false })).toMatchObject({ stable_chars: null, latency_ms: null });
+    expect(parseSubtitle({ ...subtitle, latency_ms: null }).latency_ms).toBeNull();
+    expect(() => parseSubtitle({ ...partial, stable_chars: -1 })).toThrow(ValidationError);
+    expect(() => parseSubtitle({ ...partial, stable_chars: "2" })).toThrow(ValidationError);
+    expect(() => parseSubtitle({ ...final, latency_ms: 1.5 })).toThrow(ValidationError);
+  });
+
+  it("parses metrics and clamps the level", () => {
+    expect(parseMetrics({ session_id: 3, level_dbfs: -20.5, backlog: 1, latency_ms_median: 800 })).toEqual({
+      session_id: 3,
+      level_dbfs: -20.5,
+      backlog: 1,
+      latency_ms_median: 800,
+    });
+    expect(parseMetrics({ level_dbfs: -200, backlog: 0 })).toEqual({
+      session_id: null,
+      level_dbfs: -120,
+      backlog: 0,
+      latency_ms_median: null,
+    });
+    expect(parseMetrics({ level_dbfs: 4, backlog: 0 }).level_dbfs).toBe(0);
+    for (const bad of [
+      { backlog: 0 },
+      { level_dbfs: "-3", backlog: 0 },
+      { level_dbfs: -3, backlog: -1 },
+      { level_dbfs: -3, backlog: 0, latency_ms_median: "9" },
+      null,
+    ]) {
+      expect(() => parseMetrics(bad), JSON.stringify(bad)).toThrow(ValidationError);
+    }
+  });
+
+  it("reads disk_bytes when present and null otherwise", () => {
+    const list = clone(engine["models.list"]) as { asr: Record<string, unknown>[] };
+    list.asr[0]!.disk_bytes = 150_000_000;
+    delete list.asr[1]!.disk_bytes;
+    const m = parseModels(list);
+    expect(m.asr[0]!.disk_bytes).toBe(150_000_000);
+    expect(m.asr[1]!.disk_bytes).toBeNull();
+    list.asr[0]!.disk_bytes = -1;
+    expect(() => parseModels(list)).toThrow(ValidationError);
+  });
+
+  it("parses the models.delete result", () => {
+    expect(parseModelDeleteResult({ model: "small", freed_bytes: 484_000_000 })).toEqual({
+      model: "small",
+      freed_bytes: 484_000_000,
+    });
+    expect(() => parseModelDeleteResult({ model: "small" })).toThrow(ValidationError);
+    expect(() => parseModelDeleteResult({ model: 1, freed_bytes: 0 })).toThrow(ValidationError);
   });
 });

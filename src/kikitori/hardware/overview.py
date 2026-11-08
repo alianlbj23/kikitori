@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from kikitori.asr.cache import default_cache_dir
-from kikitori.asr.download import is_downloaded
+from kikitori.asr.download import model_disk_bytes
 from kikitori.asr.registry import MODELS
 from kikitori.hardware.gpu_runtime import gpu_runtime_status
 from kikitori.hardware.types import HardwareInfo, ModelCombination
@@ -63,11 +63,14 @@ def models_overview(
         欄位見 `docs/specs/hardware.md`。
     """
     cache = default_cache_dir() if cache_dir is None else cache_dir
+    disk = {spec.id: model_disk_bytes(spec, cache) for spec in MODELS.values()}
     asr = [
         {
             "id": spec.id,
             "size_bytes": spec.total_bytes,
-            "downloaded": is_downloaded(spec, cache),
+            "downloaded": disk[spec.id] is not None,
+            # 實際佔用（F7 模型管理）；含續傳殘留與舊版本，所以可能與 size_bytes 不同
+            "disk_bytes": disk[spec.id],
             "license": spec.license,
             "speed_tier": spec.speed_tier,
             "no_speech_reliable": spec.no_speech_reliable,

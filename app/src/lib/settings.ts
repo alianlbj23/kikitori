@@ -6,32 +6,53 @@
  * edits, checks form input before sending it (so mistakes are pointed at the
  * right field immediately), and builds the partial objects `settings.set` and
  * `models.validate` deep-merge. Two forms exist: the settings page (translation
- * service, licence region, language, subtitle appearance) and the model
+ * service, licence region, subtitle appearance) and the model
  * combination on the models page (ASR and translation models, device,
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
- * Overlay appearance lives in the engine's opaque `subtitle` object, the UI's
- * own state (dismissed recommendation offers) in the opaque `ui` object.
+ * The language section has its own module (`languages.ts`), and so has the
+ * glossary editor (`glossary.ts`, `translation.glossary`).
+ * Overlay appearance, reading rhythm and the OBS text choice live in the
+ * engine's opaque `subtitle` object, the UI's own state (dismissed
+ * recommendation offers, interface language, transcript auto-save) in the
+ * opaque `ui` object. Validation messages come from the i18n dictionary.
  */
+
+import { DEFAULT_GLOSSARY, glossaryFromSettings } from "./glossary";
+import { isUiLocale, t, type UiLocalePreference } from "./i18n";
+import { isLanguageCode } from "./languages";
 
 import type {
   AppliedRecommendation,
   AsrDevice,
   ComputeType,
   Mode,
+  ObsContent,
   OverlayStyle,
-  PartnerLanguage,
   Settings,
   UiState,
 } from "./types";
-import { FONT_SIZE_RANGE, MAX_LINES_RANGE, ValidationError, parseRecommendation } from "./validate";
+import {
+  DEFAULT_IDLE_CLEAR_SECS,
+  DEFAULT_MIN_DISPLAY_MS,
+  FONT_SIZE_RANGE,
+  IDLE_CLEAR_SECS_RANGE,
+  MAX_LINES_RANGE,
+  MIN_DISPLAY_MS_RANGE,
+  ValidationError,
+  parseRecommendation,
+} from "./validate";
 
 export const DEFAULT_OVERLAY_STYLE: OverlayStyle = {
   font_size: 32,
   background_opacity: 0.45,
   position: "bottom",
   max_lines: 2,
+  min_display_ms: DEFAULT_MIN_DISPLAY_MS,
+  idle_clear_secs: DEFAULT_IDLE_CLEAR_SECS,
 };
+
+export const OBS_CONTENTS: readonly ObsContent[] = ["off", "original", "translation", "both"];
 
 /** CTranslate2 precisions the engine accepts (config `COMPUTE_TYPES`). */
 export const COMPUTE_TYPES: readonly ComputeType[] = [
@@ -52,6 +73,7 @@ const ASR_MODEL_ID = /^[A-Za-z0-9._-]{1,100}$/;
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: "media",
+  source_language: "ja",
   target_language: "zh-TW",
   partner_language: "ja",
   media_device_id: null,
@@ -67,14 +89,18 @@ export const DEFAULT_SETTINGS: Settings = {
     cuda_library_dirs: [],
   },
   translation: {
+    enabled: true,
     base_url: "http://localhost:11434/v1",
     fast_model: "qwen3.5:4b",
     final_model: "qwen3.5:4b",
     api_key_env: "KIKITORI_TRANSLATE_API_KEY",
     allow_restricted: false,
+    glossary: DEFAULT_GLOSSARY,
   },
+  furigana: { enabled: false },
   subtitle: DEFAULT_OVERLAY_STYLE,
-  ui: { dismissed_recommendations: [] },
+  obs_output: "off",
+  ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false },
 };
 
 /** Recommendation fingerprints are short hex strings (engine `recommendation_fingerprint`). */
@@ -93,6 +119,17 @@ function pickStr(o: Obj, key: string, fallback: string, warn: Warn, path: string
   const v = o[key];
   if (typeof v === "string" && v.length <= 2000) return v;
   if (v !== undefined) warn(`${path}${key}`);
+  return fallback;
+}
+
+/**
+ * A language code from the settings. Only the format is checked: the engine
+ * owns the language list and has validated the value already.
+ */
+function pickLanguage(o: Obj, key: string, fallback: string, allowAuto: boolean, warn: Warn): string {
+  const v = o[key];
+  if (isLanguageCode(v, allowAuto)) return v;
+  if (v !== undefined) warn(key);
   return fallback;
 }
 
@@ -153,17 +190,39 @@ function clampInt(v: unknown, [lo, hi]: readonly [number, number], fallback: num
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
 
-/** The UI's state from the opaque `settings.ui`; malformed parts fall back to empty. */
+/** The UI's state from the opaque `settings.ui`; malformed parts fall back to defaults. */
 export function uiStateFromSettings(ui: unknown, warn: Warn): UiState {
-  const v = asObj(ui).dismissed_recommendations;
-  if (v === undefined) return { dismissed_recommendations: [] };
+  const o = asObj(ui);
+  return {
+    dismissed_recommendations: dismissedFromUi(o.dismissed_recommendations, warn),
+    locale: localeFromUi(o.locale, warn),
+    auto_save_transcripts: pickBool(o, "auto_save_transcripts", false, warn, "ui."),
+  };
+}
+
+function dismissedFromUi(v: unknown, warn: Warn): string[] {
+  if (v === undefined) return [];
   // Reading is more lenient than writing (MAX_DISMISSED): a list written by a later
   // version that keeps more entries must not be reported as malformed.
   if (Array.isArray(v) && v.length <= 100 && v.every((f) => typeof f === "string" && FINGERPRINT_PATTERN.test(f))) {
-    return { dismissed_recommendations: v as string[] };
+    return v as string[];
   }
   warn("ui.dismissed_recommendations");
-  return { dismissed_recommendations: [] };
+  return [];
+}
+
+function localeFromUi(v: unknown, warn: Warn): UiLocalePreference {
+  if (v === undefined || v === "system") return "system";
+  if (isUiLocale(v)) return v;
+  // 較新版本可能存了這一版還不認得的語系：視為「跟隨系統」，不當成壞欄位提示使用者。
+  if (typeof v === "string" && v.length <= 35) return "system";
+  warn("ui.locale");
+  return "system";
+}
+
+/** Patch that stores the interface language; the engine deep-merges `ui`, so other keys stay. */
+export function uiLocalePatch(locale: UiLocalePreference): Record<string, unknown> {
+  return { ui: { locale } };
 }
 
 /** Overlay style from `settings.subtitle`, falling back field by field. */
@@ -178,6 +237,8 @@ export function overlayStyleFromSubtitle(subtitle: unknown): OverlayStyle {
         : DEFAULT_OVERLAY_STYLE.background_opacity,
     position: o.position === "top" || o.position === "bottom" ? o.position : "bottom",
     max_lines: clampInt(o.max_lines, MAX_LINES_RANGE, DEFAULT_OVERLAY_STYLE.max_lines),
+    min_display_ms: clampInt(o.min_display_ms, MIN_DISPLAY_MS_RANGE, DEFAULT_OVERLAY_STYLE.min_display_ms),
+    idle_clear_secs: clampInt(o.idle_clear_secs, IDLE_CLEAR_SECS_RANGE, DEFAULT_OVERLAY_STYLE.idle_clear_secs),
   };
 }
 
@@ -192,6 +253,8 @@ export interface SettingsResult {
    * report it (older engine): then the UI never changes settings on its own.
    */
   isNew: boolean;
+  /** The engine's settings revision (see lib/settings-revision.ts); null when not reported. */
+  revision: number | null;
 }
 
 /**
@@ -214,8 +277,9 @@ export function parseSettingsResult(result: unknown): SettingsResult {
   return {
     settings: {
       mode: pickEnum(root, "mode", ["media", "interpret"] as const, d.mode, warn, ""),
-      target_language: pickStr(root, "target_language", d.target_language, warn, ""),
-      partner_language: pickEnum(root, "partner_language", ["ja", "en"] as const, d.partner_language, warn, ""),
+      source_language: pickLanguage(root, "source_language", d.source_language, true, warn),
+      target_language: pickLanguage(root, "target_language", d.target_language, false, warn),
+      partner_language: pickLanguage(root, "partner_language", d.partner_language, false, warn),
       media_device_id: pickNullableStr(media, "device_id", warn, "media."),
       interpret_device_id: pickNullableStr(interpret, "device_id", warn, "interpret."),
       asr: {
@@ -229,18 +293,25 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         cuda_library_dirs: pickPaths(asr, "cuda_library_dirs", warn, "asr."),
       },
       translation: {
+        enabled: pickBool(tr, "enabled", d.translation.enabled, warn, "translation."),
         base_url: pickStr(tr, "base_url", d.translation.base_url, warn, "translation."),
         fast_model: pickStr(tr, "fast_model", d.translation.fast_model, warn, "translation."),
         final_model: pickStr(tr, "final_model", d.translation.final_model, warn, "translation."),
         api_key_env: pickStr(tr, "api_key_env", d.translation.api_key_env, warn, "translation."),
         allow_restricted: pickBool(tr, "allow_restricted", d.translation.allow_restricted, warn, "translation."),
+        glossary: glossaryFromSettings(tr.glossary, warn),
+      },
+      furigana: {
+        enabled: pickBool(asObj(root.furigana), "enabled", d.furigana.enabled, warn, "furigana."),
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
+      obs_output: pickEnum(asObj(root.subtitle), "obs_output", OBS_CONTENTS, d.obs_output, warn, "subtitle."),
       ui: uiStateFromSettings(root.ui, warn),
     },
     path,
     warnings,
     isNew: top.is_new === true,
+    revision: Number.isSafeInteger(top.revision) && (top.revision as number) >= 0 ? (top.revision as number) : null,
   };
 }
 
@@ -255,12 +326,13 @@ export function parseAppliedRecommendation(result: unknown): AppliedRecommendati
   if (o.applied !== null && (typeof o.applied !== "object" || Array.isArray(o.applied))) {
     throw new ValidationError(`${p}.applied`, "expected an object or null");
   }
-  const { settings, path, warnings, isNew } = parseSettingsResult(result);
+  const { settings, path, warnings, isNew, revision } = parseSettingsResult(result);
   return {
     settings,
     path,
     warnings,
     isNew,
+    revision,
     applied: o.applied as Record<string, unknown> | null,
     recommendation: parseRecommendation(o.recommendation, `${p}.recommendation`),
   };
@@ -274,21 +346,32 @@ export interface SettingsForm {
   api_key_env: string;
   /** Checkbox: "I am not in the EU, UK or South Korea and accept the licences". */
   allow_restricted: boolean;
-  partner_language: string;
   font_size: string;
   background_opacity_percent: string;
   position: string;
   max_lines: string;
+  /** Seconds, decimals allowed ("1.5"); stored as `subtitle.min_display_ms`. */
+  min_display_secs: string;
+  idle_clear_secs: string;
+  obs_output: string;
+  auto_save_transcripts: boolean;
 }
 
 export type FormErrors = Partial<Record<keyof SettingsForm, string>>;
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_NAME_MAX = 100;
 const MODEL_NAME_MAX = 200;
 
 function parseIntField(raw: string): number | null {
   if (!/^\s*\d+\s*$/.test(raw)) return null;
   return Number.parseInt(raw, 10);
+}
+
+/** Non-negative seconds with an optional fraction ("1", "1.5", "0.25"). */
+function parseSecondsField(raw: string): number | null {
+  if (!/^\s*\d{1,6}(\.\d{1,3})?\s*$/.test(raw)) return null;
+  return Number.parseFloat(raw);
 }
 
 /** Checks the settings page form; returns per-field messages (empty when valid). */
@@ -298,35 +381,44 @@ export function validateSettingsForm(form: SettingsForm): FormErrors {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      errors.base_url = "網址要以 http:// 或 https:// 開頭。";
+      errors.base_url = t("validation.urlScheme");
     }
   } catch {
     // URL() throws for anything unparsable; that is exactly the user error to report.
-    errors.base_url = url === "" ? "請填寫翻譯服務的網址。" : "這不是有效的網址。";
+    errors.base_url = url === "" ? t("validation.urlEmpty") : t("validation.urlInvalid");
   }
   const env = form.api_key_env.trim();
   if (!ENV_NAME.test(env)) {
-    errors.api_key_env = "只能用英文字母、數字和底線，且不能以數字開頭。";
-  } else if (env.length > 100) {
-    errors.api_key_env = "名稱太長（最多 100 個字元）。";
-  }
-  if (form.partner_language !== "ja" && form.partner_language !== "en") {
-    errors.partner_language = "請選擇日語或英語。";
+    errors.api_key_env = t("validation.envPattern");
+  } else if (env.length > ENV_NAME_MAX) {
+    errors.api_key_env = t("validation.envTooLong", { max: ENV_NAME_MAX });
   }
   const size = parseIntField(form.font_size);
   if (size === null || size < FONT_SIZE_RANGE[0] || size > FONT_SIZE_RANGE[1]) {
-    errors.font_size = `字級要在 ${FONT_SIZE_RANGE[0]} 到 ${FONT_SIZE_RANGE[1]} 之間。`;
+    errors.font_size = t("validation.fontSize", { min: FONT_SIZE_RANGE[0], max: FONT_SIZE_RANGE[1] });
   }
   const opacity = parseIntField(form.background_opacity_percent);
   if (opacity === null || opacity > 100) {
-    errors.background_opacity_percent = "背景不透明度要在 0% 到 100% 之間。";
+    errors.background_opacity_percent = t("validation.opacity");
   }
   if (form.position !== "top" && form.position !== "bottom") {
-    errors.position = "請選擇上方或下方。";
+    errors.position = t("validation.position");
   }
   const lines = parseIntField(form.max_lines);
   if (lines === null || lines < MAX_LINES_RANGE[0] || lines > MAX_LINES_RANGE[1]) {
-    errors.max_lines = `句數要在 ${MAX_LINES_RANGE[0]} 到 ${MAX_LINES_RANGE[1]} 之間。`;
+    errors.max_lines = t("validation.lines", { min: MAX_LINES_RANGE[0], max: MAX_LINES_RANGE[1] });
+  }
+  const minSecs = parseSecondsField(form.min_display_secs);
+  const [msLo, msHi] = MIN_DISPLAY_MS_RANGE;
+  if (minSecs === null || minSecs * 1000 < msLo || minSecs * 1000 > msHi) {
+    errors.min_display_secs = t("validation.minDisplay", { min: msLo / 1000, max: msHi / 1000 });
+  }
+  const idle = parseIntField(form.idle_clear_secs);
+  if (idle === null || idle < IDLE_CLEAR_SECS_RANGE[0] || idle > IDLE_CLEAR_SECS_RANGE[1]) {
+    errors.idle_clear_secs = t("validation.idleClear", { min: IDLE_CLEAR_SECS_RANGE[0], max: IDLE_CLEAR_SECS_RANGE[1] });
+  }
+  if (!(OBS_CONTENTS as readonly string[]).includes(form.obs_output)) {
+    errors.obs_output = t("validation.obsOutput");
   }
   return errors;
 }
@@ -337,19 +429,30 @@ export function overlayStyleFromForm(form: SettingsForm): OverlayStyle {
     background_opacity: Number.parseInt(form.background_opacity_percent, 10) / 100,
     position: form.position === "top" ? "top" : "bottom",
     max_lines: Number.parseInt(form.max_lines, 10),
+    min_display_ms: Math.round(Number.parseFloat(form.min_display_secs) * 1000),
+    idle_clear_secs: Number.parseInt(form.idle_clear_secs, 10),
   };
 }
 
-/** Partial settings for `settings.set`; call only after validation passed. */
+/** The form's OBS choice; call only after validation passed. */
+export function obsOutputFromForm(form: SettingsForm): ObsContent {
+  return (OBS_CONTENTS as readonly string[]).includes(form.obs_output) ? (form.obs_output as ObsContent) : "off";
+}
+
+/**
+ * Partial settings for `settings.set`; call only after validation passed.
+ * `obs_output` sits in `subtitle` beside the style (the engine deep-merges and
+ * never reads either), but is not part of the style Rust validates.
+ */
 export function settingsPatchFromForm(form: SettingsForm): Record<string, unknown> {
   return {
-    partner_language: form.partner_language as PartnerLanguage,
     translation: {
       base_url: form.base_url.trim(),
       api_key_env: form.api_key_env.trim(),
       allow_restricted: form.allow_restricted,
     },
-    subtitle: overlayStyleFromForm(form),
+    subtitle: { ...overlayStyleFromForm(form), obs_output: obsOutputFromForm(form) },
+    ui: { auto_save_transcripts: form.auto_save_transcripts },
   };
 }
 
@@ -358,11 +461,14 @@ export function formFromSettings(s: Settings): SettingsForm {
     base_url: s.translation.base_url,
     api_key_env: s.translation.api_key_env,
     allow_restricted: s.translation.allow_restricted,
-    partner_language: s.partner_language,
     font_size: String(s.subtitle.font_size),
     background_opacity_percent: String(Math.round(s.subtitle.background_opacity * 100)),
     position: s.subtitle.position,
     max_lines: String(s.subtitle.max_lines),
+    min_display_secs: String(s.subtitle.min_display_ms / 1000),
+    idle_clear_secs: String(s.subtitle.idle_clear_secs),
+    obs_output: s.obs_output,
+    auto_save_transcripts: s.ui.auto_save_transcripts,
   };
 }
 
@@ -421,34 +527,34 @@ function looksAbsolute(path: string): boolean {
 export function validateCombinationForm(form: CombinationForm): CombinationErrors {
   const errors: CombinationErrors = {};
   for (const key of ["fast_model", "final_model"] as const) {
-    if (!ASR_MODEL_ID.test(form[key])) errors[key] = "請選擇語音辨識模型。";
+    if (!ASR_MODEL_ID.test(form[key])) errors[key] = t("validation.asrModel");
   }
   if (!(ASR_DEVICES as readonly string[]).includes(form.device)) {
-    errors.device = "請選擇運算裝置。";
+    errors.device = t("validation.device");
   }
   for (const key of ["translation_fast", "translation_final"] as const) {
     const v = form[key].trim();
-    if (v === "") errors[key] = "請填寫翻譯模型的名稱。";
-    else if (v.length > MODEL_NAME_MAX) errors[key] = `模型名稱最多 ${MODEL_NAME_MAX} 個字元。`;
+    if (v === "") errors[key] = t("validation.translationEmpty");
+    else if (v.length > MODEL_NAME_MAX) errors[key] = t("validation.translationTooLong", { max: MODEL_NAME_MAX });
   }
   for (const key of ["fast_compute_type", "final_compute_type"] as const) {
     const v = form[key];
-    if (v !== "" && !(COMPUTE_TYPES as readonly string[]).includes(v)) errors[key] = "請選擇精度。";
+    if (v !== "" && !(COMPUTE_TYPES as readonly string[]).includes(v)) errors[key] = t("validation.computeType");
   }
   for (const key of ["fast_cpu_threads", "final_cpu_threads"] as const) {
     const raw = form[key].trim();
     if (raw === "") continue;
     const n = parseIntField(raw);
     if (n === null || n < CPU_THREADS_RANGE[0] || n > CPU_THREADS_RANGE[1]) {
-      errors[key] = `執行緒數要在 ${CPU_THREADS_RANGE[0]} 到 ${CPU_THREADS_RANGE[1]} 之間，留空代表自動。`;
+      errors[key] = t("validation.threads", { min: CPU_THREADS_RANGE[0], max: CPU_THREADS_RANGE[1] });
     }
   }
   const dirs = cudaDirs(form.cuda_library_dirs);
   if (dirs.length > MAX_CUDA_DIRS) {
-    errors.cuda_library_dirs = `最多 ${MAX_CUDA_DIRS} 個資料夾。`;
+    errors.cuda_library_dirs = t("validation.cudaDirsTooMany", { max: MAX_CUDA_DIRS });
   } else {
     const bad = dirs.find((d) => d.length > MAX_PATH_CHARS || !looksAbsolute(d));
-    if (bad !== undefined) errors.cuda_library_dirs = `「${bad.slice(0, 80)}」不是完整路徑（例如 C:\\CUDA\\bin）。`;
+    if (bad !== undefined) errors.cuda_library_dirs = t("validation.cudaDirNotAbsolute", { path: bad.slice(0, 80) });
   }
   return errors;
 }
@@ -499,11 +605,14 @@ export function formFieldForEnginePath(message: string): keyof SettingsForm | nu
     "translation.base_url": "base_url",
     "translation.api_key_env": "api_key_env",
     "translation.allow_restricted": "allow_restricted",
-    partner_language: "partner_language",
     "subtitle.font_size": "font_size",
     "subtitle.background_opacity": "background_opacity_percent",
     "subtitle.position": "position",
     "subtitle.max_lines": "max_lines",
+    "subtitle.min_display_ms": "min_display_secs",
+    "subtitle.idle_clear_secs": "idle_clear_secs",
+    "subtitle.obs_output": "obs_output",
+    "ui.auto_save_transcripts": "auto_save_transcripts",
   };
   return map[enginePath(message)] ?? null;
 }

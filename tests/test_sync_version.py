@@ -299,6 +299,35 @@ class BumpTest(SyncVersionTestCase):
         self.assertIn('[tool.something]\nversion = "9.9.9"', pyproject)
         self.assertEqual(sv.mismatches(self.repo.root), [])
 
+    def test_bump_and_sync_work_on_crlf_toml_files(self) -> None:
+        # Windows 上 git 的 core.autocrlf=true 會把 checkout 的 TOML 轉成 CRLF；
+        # `[project]` 標題行結尾的 `\r` 不能讓區段比對失敗，也要保留原本的換行。
+        self.repo.setup("1.2.3", "1.2.3")
+        self.repo.write(
+            "pyproject.toml", PYPROJECT.format(version="1.2.3"), newline="\r\n"
+        )
+        self.repo.write(
+            "app/src-tauri/Cargo.toml",
+            CARGO_TOML.format(version="1.2.3"),
+            newline="\r\n",
+        )
+        self.assertEqual(sv.bump(self.repo.root, "minor"), "1.3.0")
+        self.assertEqual(
+            self.repo.read("pyproject.toml"),
+            PYPROJECT.format(version="1.3.0").replace("\n", "\r\n"),
+        )
+        self.assertEqual(
+            self.repo.read("app/src-tauri/Cargo.toml"),
+            CARGO_TOML.format(version="1.3.0").replace("\n", "\r\n"),
+        )
+        self.assertEqual(sv.mismatches(self.repo.root), [])
+        # 標題行帶註解時也一樣（`#.*` 不能把 `\r` 留給 `$`）
+        text = '[project] # 專案\r\nname = "x"\r\nversion = "1.0.0"\r\n'
+        self.assertEqual(
+            sv.replace_toml_section_version(text, "project", "2.0.0"),
+            text.replace("1.0.0", "2.0.0"),
+        )
+
     def test_bump_command_runs_uv_lock(self) -> None:
         self.repo.setup("1.2.3", "1.2.3")
         with mock.patch.object(

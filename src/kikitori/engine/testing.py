@@ -26,10 +26,18 @@ from kikitori.capture import ArraySource, DeviceInfo, DeviceKind
 from kikitori.capture.errors import DeviceNotFoundError
 from kikitori.capture.types import AudioSource
 from kikitori.config import Settings, SettingsStore, default_settings_path
+from kikitori.engine.furigana_service import RubyAnalyzer
 from kikitori.engine.services import (
     EngineServices,
     ProgressCallback,
+    TranslationServerState,
 )
+from kikitori.furigana.dictionary import (
+    DICTIONARY_ID,
+    SUDACHIDICT_CORE,
+    DictionaryStatus,
+)
+from kikitori.furigana.ruby import RubySpan, Token, ruby_for_tokens
 from kikitori.hardware import (
     CUBLAS_VERSION,
     CpuInfo,
@@ -53,12 +61,14 @@ from kikitori.hardware.gpu_runtime import (
     RuntimeWheel,
     WheelMember,
 )
+from kikitori.languages import WHISPER_CODES, get_language
 from kikitori.pipeline import (
     Mode,
     PipelineComponents,
     default_transcript_filter,
 )
-from kikitori.pipeline.factory import AsrModelInfo, UnknownModelError
+from kikitori.pipeline.factory import AsrModelInfo, LoadProgress, UnknownModelError
+from kikitori.translate.presets import normalize_model_name
 from kikitori.translate.types import TranslationRequest
 
 SAMPLE_RATE = 16000
@@ -67,6 +77,11 @@ ENDLESS_DEVICE = "fake:microphone:endless"
 FAKE_MODEL_SIZE = 4 * 1024 * 1024
 
 FAKE_INSTALLED_TRANSLATION_MODELS = ["qwen3.5:4b"]
+FAKE_PULL_SIZE = 4 * 1024 * 1024
+FAKE_BROKEN_PULL = "fake-broken-pull:1b"
+"""假 Ollama 下載到一半失敗的模型名稱。"""
+FAKE_SLOW_PULL = "fake-slow-pull:1b"
+"""假 Ollama 下載很慢的模型名稱（測試結束引擎時的取消）。"""
 GIB = 1024**3
 
 logger = logging.getLogger(__name__)
@@ -163,7 +178,11 @@ def open_fake_source(device_id: str | None, kind: DeviceKind) -> AudioSource:
 
 
 class FakeModelCatalog:
-    """ASR 模型：`base`、`small`、`large-v3-turbo` 已下載；`fake-missing` 未下載；`fake-broken` 下載會失敗。"""
+    """ASR 模型：`base`、`small`、`large-v3-turbo` 已下載；`fake-missing` 未下載；`fake-broken` 下載會失敗。
+
+    已下載的模型 `disk_bytes` 是 `FAKE_MODEL_SIZE`；`delete()` 把模型標成未下載（不碰磁碟），
+    之後的 `models.list` 與 `session.start`（`model_not_downloaded`）都看得到。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -182,7 +201,14 @@ class FakeModelCatalog:
         """固定的模型清單。"""
         with self._lock:
             return [
-                AsrModelInfo(model, FAKE_MODEL_SIZE, "MIT", "fast", downloaded)
+                AsrModelInfo(
+                    model,
+                    FAKE_MODEL_SIZE,
+                    "MIT",
+                    "fast",
+                    downloaded,
+                    FAKE_MODEL_SIZE if downloaded else None,
+                )
                 for model, downloaded in self._downloaded.items()
             ]
 
@@ -203,6 +229,21 @@ class FakeModelCatalog:
         with self._lock:
             self._downloaded[model_id] = True
 
+    def delete(self, model_id: str) -> int:
+        """把模型標成未下載，回傳 `FAKE_MODEL_SIZE`。
+
+        Raises:
+            UnknownModelError: 不在清單中。
+            FileNotFoundError: 沒有下載。
+        """
+        with self._lock:
+            if model_id not in self._downloaded:
+                raise UnknownModelError(f"unknown ASR model {model_id!r}")
+            if not self._downloaded[model_id]:
+                raise FileNotFoundError(f"ASR model {model_id} is not downloaded")
+            self._downloaded[model_id] = False
+        return FAKE_MODEL_SIZE
+
     def check_loadable(self, model_id: str) -> None:
         """模擬 `create_transcriber()` 的錯誤：未知 → UnknownModelError，未下載 → FileNotFoundError。"""
         with self._lock:
@@ -210,6 +251,107 @@ class FakeModelCatalog:
                 raise UnknownModelError(f"unknown ASR model {model_id!r}")
             if not self._downloaded[model_id]:
                 raise FileNotFoundError(f"ASR model {model_id} is not downloaded")
+
+
+FAKE_FURIGANA_SIZE = 4 * 1024 * 1024
+FAKE_FURIGANA_LEXICON: dict[str, str] = {
+    "今日": "キョウ",
+    "天気": "テンキ",
+    "食べる": "タベル",
+    "日本語": "ニホンゴ",
+    "字幕": "ジマク",
+    "勉強": "ベンキョウ",
+    "お腹": "オナカ",
+    "取り扱い": "トリアツカイ",
+}
+"""假分析器認得的詞（最長比對）；其他字元一個字一個詞、沒有讀音。"""
+
+
+class FakeRubyAnalyzer:
+    """以 `FAKE_FURIGANA_LEXICON` 最長比對的假分析器，走真的對齊演算法。"""
+
+    def __init__(self, opened: list["FakeRubyAnalyzer"]) -> None:
+        self.closed = False
+        opened.append(self)
+
+    def ruby(self, text: str) -> list[RubySpan]:
+        """`text` 的振假名。"""
+        tokens: list[Token] = []
+        i = 0
+        while i < len(text):
+            word = next(
+                (
+                    w
+                    for w in sorted(FAKE_FURIGANA_LEXICON, key=len, reverse=True)
+                    if text.startswith(w, i)
+                ),
+                None,
+            )
+            if word is None:
+                tokens.append(Token(text[i], ""))
+                i += 1
+            else:
+                tokens.append(Token(word, FAKE_FURIGANA_LEXICON[word]))
+                i += len(word)
+        return ruby_for_tokens(text, tokens)
+
+    def close(self) -> None:
+        """標記為已關閉。"""
+        self.closed = True
+
+
+class FakeFurigana:
+    """振假名辭典：預設未安裝；`install` 分四段回報 4 MiB 後標成已安裝（不碰磁碟）。
+
+    `opened` 記下每個開啟過的分析器（測試檢查「關閉時不載入」「結束時釋放」）。
+    """
+
+    def __init__(self, installed: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._installed = installed
+        self.opened: list[FakeRubyAnalyzer] = []
+
+    def status(self) -> DictionaryStatus:
+        """固定的大小與真的授權資訊。"""
+        with self._lock:
+            installed = self._installed
+        return DictionaryStatus(
+            id=DICTIONARY_ID,
+            installed=installed,
+            edition=SUDACHIDICT_CORE.edition,
+            version=SUDACHIDICT_CORE.version,
+            download_bytes=FAKE_FURIGANA_SIZE,
+            installed_bytes=FAKE_FURIGANA_SIZE,
+            disk_bytes=FAKE_FURIGANA_SIZE if installed else None,
+            path="/fake/furigana/system_core.dic" if installed else None,
+            license=SUDACHIDICT_CORE.license,
+            license_url=SUDACHIDICT_CORE.license_url,
+        )
+
+    def install(self, progress: ProgressCallback, cancel: threading.Event) -> None:
+        """分四段回報進度後標成已安裝。"""
+        step = FAKE_FURIGANA_SIZE // 4
+        for i in range(1, 5):
+            if cancel.is_set():
+                raise RuntimeError("download cancelled")
+            progress(step * i, FAKE_FURIGANA_SIZE)
+        with self._lock:
+            self._installed = True
+
+    def delete(self) -> int:
+        """標成未安裝，回傳 `FAKE_FURIGANA_SIZE`（沒安裝時 `FileNotFoundError`）。"""
+        with self._lock:
+            if not self._installed:
+                raise FileNotFoundError("the furigana dictionary is not installed")
+            self._installed = False
+        return FAKE_FURIGANA_SIZE
+
+    def open(self) -> RubyAnalyzer:
+        """開啟假分析器（沒安裝時 `FileNotFoundError`）。"""
+        with self._lock:
+            if not self._installed:
+                raise FileNotFoundError("the furigana dictionary is not installed")
+        return FakeRubyAnalyzer(self.opened)
 
 
 class _FakeWheelResponse:
@@ -305,6 +447,108 @@ def _fake_wheel(library_bytes: int) -> tuple[RuntimeWheel, bytes]:
     return wheel, payload
 
 
+FAKE_TRANSLATION_ENV = "KIKITORI_ENGINE_FAKE_TRANSLATION"
+"""假模式的翻譯伺服器情境（只在 `KIKITORI_ENGINE_FAKE=1` 時讀取），見 `FAKE_TRANSLATION_PROFILES`。"""
+FAKE_TRANSLATION_PROFILES = ("ollama", "openai", "offline", "auth")
+"""
+- `ollama`（預設）：本機 Ollama，已安裝 qwen3.5:4b；`models.pull_translation` 會「下載」。
+- `openai`：本機的其他 OpenAI 相容伺服器（不是 Ollama）：無法替使用者下載。
+- `offline`：連不上翻譯伺服器。
+- `auth`：伺服器回 401（金鑰錯誤）：`models.pull_translation` 回
+  `translation_server_auth_failed`，`session.start` 照常開始並記 warning。
+"""
+
+
+class FakeTranslationServer:
+    """假的翻譯伺服器：已安裝的模型清單與 Ollama 的 `/api/pull`（不連網）。
+
+    `FakeHardwareProvider` 的偵測結果與 `models.pull_translation` 共用這份狀態，
+    下載完成後 `models.list` 與推薦立即看得到新模型，和真實流程一樣。
+    """
+
+    def __init__(self, profile: str = "ollama") -> None:
+        if profile not in FAKE_TRANSLATION_PROFILES:
+            raise ValueError(f"unknown fake translation profile {profile!r}")
+        self.profile = profile
+        self._lock = threading.Lock()
+        self._installed = list(FAKE_INSTALLED_TRANSLATION_MODELS)
+
+    @property
+    def installed(self) -> tuple[str, ...]:
+        """已安裝的模型名稱。"""
+        with self._lock:
+            return tuple(self._installed)
+
+    def server_info(self, base_url: str) -> TranslationServerInfo:
+        """`hardware.detect` 的 `translation_server`。"""
+        if self.profile == "offline":
+            return TranslationServerInfo(
+                base_url=base_url,
+                is_local=True,
+                reachable=False,
+                error="cannot connect to localhost: fake server is offline",
+            )
+        if self.profile == "auth":
+            # 真實的 probe 在 401 時也是「連得上、沒有模型清單」
+            return TranslationServerInfo(
+                base_url=base_url,
+                is_local=True,
+                reachable=True,
+                error="HTTP 401 from /v1/models",
+            )
+        return TranslationServerInfo(
+            base_url=base_url, is_local=True, reachable=True, models=self.installed
+        )
+
+    def server_state(self, settings: Settings) -> TranslationServerState:
+        """見 `TranslationModels.server_state()`。"""
+        if self.profile == "offline":
+            return TranslationServerState(
+                False, False, None, "fake translation server is offline"
+            )
+        if self.profile == "auth":
+            return TranslationServerState(
+                reachable=True,
+                is_ollama=False,
+                installed=None,
+                error="HTTP 401 from /api/version: the server requires a valid API key",
+                auth_failed=True,
+            )
+        return TranslationServerState(
+            reachable=True,
+            is_ollama=self.profile == "ollama",
+            installed=self.installed,
+            error=None if self.profile == "ollama" else "HTTP 404 from /api/version",
+        )
+
+    def unload(
+        self, base_url: str, api_key_env: str, model: str, timeout: float
+    ) -> None:
+        """假伺服器沒有載入任何東西：只記 debug（真實行為見 `hardware.ollama.unload_model`）。"""
+        logger.debug("fake translation server: unload %s", model)
+
+    def pull(
+        self,
+        settings: Settings,
+        model: str,
+        progress: ProgressCallback,
+        cancel: threading.Event,
+    ) -> None:
+        """分四段回報進度；`FAKE_BROKEN_PULL` 一半時失敗，`FAKE_SLOW_PULL` 每段等 0.5 秒。"""
+        step = FAKE_PULL_SIZE // 4
+        for i in range(1, 5):
+            if cancel.wait(0.5 if model == FAKE_SLOW_PULL else 0):
+                raise RuntimeError(f"pull of {model} cancelled")
+            if model == FAKE_BROKEN_PULL and i == 3:
+                raise RuntimeError("Ollama: simulated pull failure")
+            progress(step * i, FAKE_PULL_SIZE)
+        with self._lock:
+            if normalize_model_name(model) not in {
+                normalize_model_name(m) for m in self._installed
+            }:
+                self._installed.append(model)
+
+
 FAKE_HARDWARE_ENV = "KIKITORI_ENGINE_FAKE_HARDWARE"
 """假模式的硬體情境（只在 `KIKITORI_ENGINE_FAKE=1` 時讀取），見 `FAKE_HARDWARE_PROFILES`。"""
 FAKE_HARDWARE_PROFILES = ("nvidia", "apple", "slow-runtime", "broken-runtime")
@@ -323,16 +567,24 @@ class FakeHardwareProvider:
     安裝後 cuBLAS 變成可用、推薦改為 GPU 等級，和真實流程一樣。
     """
 
-    def __init__(self, catalog: FakeModelCatalog, profile: str = "nvidia") -> None:
+    def __init__(
+        self,
+        catalog: FakeModelCatalog,
+        profile: str = "nvidia",
+        server: FakeTranslationServer | None = None,
+    ) -> None:
         """
         Args:
             catalog: 假模式的 ASR 模型清單（`models.list` 的 ASR 部分以它為準）。
             profile: `FAKE_HARDWARE_PROFILES` 之一。
+            server: 假的翻譯伺服器（偵測結果的 `translation_server` 取自它）；
+                省略時是裝了 qwen3.5:4b 的本機 Ollama。
         """
         if profile not in FAKE_HARDWARE_PROFILES:
             raise ValueError(f"unknown fake hardware profile {profile!r}")
         self._catalog = catalog
         self._profile = profile
+        self._server = server or FakeTranslationServer()
         # 行程結束時刪除；背景下載可能還在寫，清理失敗不影響測試結果
         self._tmp = tempfile.TemporaryDirectory(
             prefix="kikitori-fake-gpu-", ignore_cleanup_errors=True
@@ -349,12 +601,7 @@ class FakeHardwareProvider:
 
     def detect(self, settings: Settings) -> HardwareInfo:
         """固定的硬體；cuBLAS 是否可用取決於假 GPU 執行環境是否已安裝。"""
-        server = TranslationServerInfo(
-            base_url=settings.translation.base_url,
-            is_local=True,
-            reachable=True,
-            models=tuple(FAKE_INSTALLED_TRANSLATION_MODELS),
-        )
+        server = self._server.server_info(settings.translation.base_url)
         if self._wheel is None:
             return HardwareInfo(
                 os="macos",
@@ -460,14 +707,52 @@ def _fake_hardware_profile() -> str:
     return value
 
 
-def fake_services() -> EngineServices:
-    """假模式的完整服務（硬體情境由 `KIKITORI_ENGINE_FAKE_HARDWARE` 選擇）。"""
-    catalog = FakeModelCatalog()
+def _fake_translation_profile() -> str:
+    value = os.environ.get(FAKE_TRANSLATION_ENV, "").strip() or "ollama"
+    if value not in FAKE_TRANSLATION_PROFILES:
+        logger.warning(
+            "%s must be one of %s; using ollama",
+            FAKE_TRANSLATION_ENV,
+            ", ".join(FAKE_TRANSLATION_PROFILES),
+        )
+        return "ollama"
+    return value
 
-    def build_components(settings: Settings, mode: Mode) -> PipelineComponents:
+
+def _fake_spoken_language(settings: Settings, mode: Mode) -> str:
+    """假辨識結果的語言（Whisper 語言碼），讓字幕依設定的語言組合走真的路由。
+
+    口譯模擬使用者說自己的語言（會譯成對方語言）；影片翻譯用收聽語言，"auto" 時挑
+    第一個和字幕語言不同的語言，才看得到翻譯。
+    """
+    target = get_language(settings.target_language).whisper_code
+    if mode == "interpret":
+        return target
+    if settings.source_language != "auto":
+        return get_language(settings.source_language).whisper_code
+    return next(code for code in WHISPER_CODES if code != target)
+
+
+def fake_services() -> EngineServices:
+    """假模式的完整服務（硬體情境由 `KIKITORI_ENGINE_FAKE_HARDWARE`、翻譯伺服器情境由
+    `KIKITORI_ENGINE_FAKE_TRANSLATION` 選擇）。"""
+    catalog = FakeModelCatalog()
+    server = FakeTranslationServer(_fake_translation_profile())
+
+    def build_components(
+        settings: Settings,
+        mode: Mode,
+        *,
+        progress: LoadProgress | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> PipelineComponents:
         catalog.check_loadable(settings.asr.fast_model)
         catalog.check_loadable(settings.asr.final_model)
-        language = "zh" if mode == "interpret" else "ja"
+        # 與真的載入一樣回報兩個 ASR 步驟，UI 在假模式下也看得到載入進度
+        if progress is not None:
+            progress("asr_fast", 1, 2)
+            progress("asr_final", 2, 2)
+        language = _fake_spoken_language(settings, mode)
         translator = FakeTranslator()
         return PipelineComponents(
             voice_model=AmplitudeVoiceModel(),
@@ -485,7 +770,9 @@ def fake_services() -> EngineServices:
         list_devices=lambda: list(FAKE_DEVICES),
         open_source=open_fake_source,
         build_components=build_components,
-        hardware=FakeHardwareProvider(catalog, _fake_hardware_profile()),
+        hardware=FakeHardwareProvider(catalog, _fake_hardware_profile(), server),
         models=catalog,
+        translation_models=server,
         fake=True,
+        furigana=FakeFurigana(),
     )

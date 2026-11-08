@@ -113,6 +113,12 @@ body {
   gap: calc(var(--fs) * 0.35);
 }
 
+/* Idle fade-out (reading rhythm, lib/rhythm.ts); overlay.ts FADE_MS matches. */
+.lines.is-fading {
+  opacity: 0;
+  transition: opacity 400ms ease-out;
+}
+
 .line {
   display: flex;
   flex-direction: column;
@@ -150,6 +156,17 @@ body {
   color: var(--sub-white);
 }
 
+/* Furigana: small readings over the kanji; the line grows to make room for them. */
+.orig rt {
+  font-size: 0.5em;
+  font-weight: 500;
+  user-select: none;
+}
+
+.orig:has(ruby) {
+  line-height: 1.9;
+}
+
 .tr {
   font-size: var(--fs);
   font-weight: 700;
@@ -160,14 +177,47 @@ body {
   display: none;
 }
 
+/*
+ * "顯示翻譯" off: the original is the only line, so it takes the translation's
+ * place — primary size, weight and subtitle yellow (white while still being
+ * heard, like a partial translation) — instead of staying small above nothing.
+ */
+.line.is-original-only .orig {
+  font-size: var(--fs);
+  font-weight: 700;
+  color: var(--sub-yellow);
+}
+
+.line.is-original-only.is-partial .orig {
+  color: var(--sub-white);
+}
+
+/*
+ * Languages written without spaces (ja, zh, th) still need line breaks inside a
+ * long sentence; Thai breaks at word boundaries the browser finds itself, the
+ * others anywhere. Right-to-left text (Arabic) gets its direction from
+ * dir="auto" on each span.
+ */
+.orig:lang(th),
+.tr:lang(th) {
+  overflow-wrap: break-word;
+}
+
 /* Earlier, already-finished lines step back so the newest one leads. */
 .line:not(:last-child) {
   opacity: 0.78;
 }
 
-.line.is-partial .orig,
+/*
+ * A line still being heard: its translation is lighter; of the original only
+ * the tail that may still change is (the settled prefix, lib/stable.ts, is not).
+ */
 .line.is-partial .tr {
   opacity: 0.72;
+}
+
+.line.is-partial .unstable {
+  opacity: 0.6;
 }
 
 .line.is-partial .tr {
@@ -204,7 +254,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .orig,
   .tr,
-  .handle {
+  .handle,
+  .lines.is-fading {
     transition: none;
   }
 }

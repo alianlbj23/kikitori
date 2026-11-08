@@ -14,6 +14,7 @@ import {
   parseAppliedRecommendation,
   parseSettingsResult,
   settingsPatchFromForm,
+  uiLocalePatch,
   validateCombinationForm,
   validateSettingsForm,
 } from "./settings";
@@ -34,13 +35,19 @@ describe("validateSettingsForm", () => {
     ["api_key_env", "1ABC"],
     ["api_key_env", "MY-KEY"],
     ["api_key_env", "sk-actual-secret value"],
-    ["partner_language", "ko"],
     ["font_size", "13"],
     ["font_size", "abc"],
     ["background_opacity_percent", "101"],
     ["background_opacity_percent", "-1"],
     ["position", "left"],
     ["max_lines", "4"],
+    ["min_display_secs", "10.5"],
+    ["min_display_secs", "-1"],
+    ["min_display_secs", "1,5"],
+    ["min_display_secs", ""],
+    ["idle_clear_secs", "601"],
+    ["idle_clear_secs", "1.5"],
+    ["obs_output", "everything"],
   ] as const)("flags %s = %j", (field, value) => {
     const errors = validateSettingsForm({ ...validForm(), [field]: value });
     expect(errors[field]).toBeTruthy();
@@ -48,7 +55,7 @@ describe("validateSettingsForm", () => {
 });
 
 describe("settings patch", () => {
-  it("builds a partial settings object with the licence region and overlay style", () => {
+  it("builds a partial settings object with the licence region and overlay style (languages have their own section)", () => {
     const patch = settingsPatchFromForm({
       ...validForm(),
       base_url: "  https://api.example.com/v1 ",
@@ -57,14 +64,46 @@ describe("settings patch", () => {
       position: "top",
     });
     expect(patch).toEqual({
-      partner_language: "ja",
       translation: {
         base_url: "https://api.example.com/v1",
         api_key_env: "KIKITORI_TRANSLATE_API_KEY",
         allow_restricted: true,
       },
-      subtitle: { font_size: 32, background_opacity: 0.3, position: "top", max_lines: 2 },
+      subtitle: {
+        font_size: 32,
+        background_opacity: 0.3,
+        position: "top",
+        max_lines: 2,
+        min_display_ms: 1500,
+        idle_clear_secs: 8,
+        obs_output: "off",
+      },
+      ui: { auto_save_transcripts: false },
     });
+  });
+
+  it("stores reading rhythm, the OBS choice and auto-save (seconds become milliseconds)", () => {
+    const form = {
+      ...validForm(),
+      min_display_secs: "2.25",
+      idle_clear_secs: "0",
+      obs_output: "both",
+      auto_save_transcripts: true,
+    };
+    expect(validateSettingsForm(form)).toEqual({});
+    const patch = settingsPatchFromForm(form) as { subtitle: Record<string, unknown>; ui: Record<string, unknown> };
+    expect(patch.subtitle).toMatchObject({ min_display_ms: 2250, idle_clear_secs: 0, obs_output: "both" });
+    expect(patch.ui).toEqual({ auto_save_transcripts: true });
+    // Round trip through the settings the engine stores.
+    const back = parseSettingsResult({ settings: { subtitle: patch.subtitle, ui: patch.ui } }).settings;
+    expect(formFromSettings(back)).toMatchObject({
+      min_display_secs: "2.25",
+      idle_clear_secs: "0",
+      obs_output: "both",
+      auto_save_transcripts: true,
+    });
+    // obs_output stays out of the style Rust validates (deny_unknown_fields).
+    expect(back.subtitle).not.toHaveProperty("obs_output");
   });
 
   it("never sends translation models from the settings page", () => {
@@ -84,11 +123,19 @@ describe("settings patch", () => {
 });
 
 describe("parseSettingsResult", () => {
+  it("reads the revision, and null when it is missing or not a non-negative integer", () => {
+    expect(parseSettingsResult({ settings: {}, revision: 7 }).revision).toBe(7);
+    expect(parseSettingsResult({ settings: {}, revision: 0 }).revision).toBe(0);
+    for (const bad of [undefined, null, -1, 1.5, "7", Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(parseSettingsResult({ settings: {}, revision: bad }).revision).toBeNull();
+    }
+  });
+
   it("reads the engine result and falls back on bad fields with warnings", () => {
     const { settings, warnings, path } = parseSettingsResult({
       settings: {
         mode: "interpret",
-        partner_language: "fr",
+        partner_language: "<b>",
         interpret: { device_id: "mic-1" },
         asr: { fast_model: "tiny", final_model: "small", device: "cuda" },
         translation: { base_url: "http://h/v1", fast_model: "a", final_model: "b", api_key_env: "K" },
@@ -106,7 +153,27 @@ describe("parseSettingsResult", () => {
       background_opacity: DEFAULT_OVERLAY_STYLE.background_opacity,
       position: "top",
       max_lines: DEFAULT_OVERLAY_STYLE.max_lines,
+      min_display_ms: DEFAULT_OVERLAY_STYLE.min_display_ms,
+      idle_clear_secs: DEFAULT_OVERLAY_STYLE.idle_clear_secs,
     });
+  });
+
+  it("reads reading rhythm and the OBS choice, clamping and falling back", () => {
+    const { settings, warnings } = parseSettingsResult({
+      settings: {
+        subtitle: { min_display_ms: 99_999, idle_clear_secs: -3, obs_output: "translation" },
+        ui: { auto_save_transcripts: true },
+      },
+    });
+    expect(settings.subtitle.min_display_ms).toBe(10_000);
+    expect(settings.subtitle.idle_clear_secs).toBe(0);
+    expect(settings.obs_output).toBe("translation");
+    expect(settings.ui.auto_save_transcripts).toBe(true);
+    expect(warnings).toEqual([]);
+    const bad = parseSettingsResult({ settings: { subtitle: { obs_output: "all" }, ui: { auto_save_transcripts: "yes" } } });
+    expect(bad.settings.obs_output).toBe("off");
+    expect(bad.settings.ui.auto_save_transcripts).toBe(false);
+    expect(bad.warnings).toEqual(expect.arrayContaining(["subtitle.obs_output", "ui.auto_save_transcripts"]));
   });
 
   it("reads schema 2 fields", () => {
@@ -155,14 +222,55 @@ describe("parseSettingsResult", () => {
     expect(parseSettingsResult({ settings: {}, is_new: "yes" }).isNew).toBe(false);
   });
 
+  it("reads the glossary the engine reports, and defaults it for older engines", () => {
+    const fromEngine = parseSettingsResult(engine["settings.get"]);
+    expect(fromEngine.settings.translation.glossary).toEqual({ builtin: true, entries: [] });
+    expect(fromEngine.warnings).toEqual([]);
+    const old = parseSettingsResult({ settings: { translation: {} } });
+    expect(old.settings.translation.glossary).toEqual({ builtin: true, entries: [] });
+    expect(old.warnings).toEqual([]);
+    const custom = parseSettingsResult({
+      settings: { translation: { glossary: { builtin: false, entries: [{ source: "a", target: "b", target_language: "en" }] } } },
+    });
+    expect(custom.settings.translation.glossary).toEqual({
+      builtin: false,
+      entries: [{ source: "a", target: "b", target_language: "en" }],
+    });
+  });
+
   it("reads dismissed recommendations from the opaque ui object", () => {
-    expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({ dismissed_recommendations: [] });
+    expect(parseSettingsResult(engine["settings.get"]).settings.ui).toEqual({
+      dismissed_recommendations: [],
+      locale: "system",
+      auto_save_transcripts: false,
+    });
     const ok = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["0123456789abcdef"], other: 1 } } });
     expect(ok.settings.ui.dismissed_recommendations).toEqual(["0123456789abcdef"]);
     expect(ok.warnings).toEqual([]);
     const bad = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["x", 3] } } });
     expect(bad.settings.ui.dismissed_recommendations).toEqual([]);
     expect(bad.warnings).toContain("ui.dismissed_recommendations");
+  });
+
+  it("reads the interface language from ui.locale, keeping unknown future locales quiet", () => {
+    const read = (locale: unknown) => parseSettingsResult({ settings: { ui: { locale } } });
+    expect(read(undefined).settings.ui.locale).toBe("system");
+    expect(read("system").settings.ui.locale).toBe("system");
+    expect(read("pt-BR").settings.ui.locale).toBe("pt-BR");
+    expect(read("en").warnings).toEqual([]);
+    // A locale added by a later version: follow the system, without a "bad field" notice.
+    const future = read("sw");
+    expect(future.settings.ui.locale).toBe("system");
+    expect(future.warnings).toEqual([]);
+    const bad = read(42);
+    expect(bad.settings.ui.locale).toBe("system");
+    expect(bad.warnings).toContain("ui.locale");
+  });
+
+  it("stores the interface language under ui without touching other ui keys", () => {
+    // The engine deep-merges settings.set, so sending only ui.locale keeps dismissed_recommendations.
+    expect(uiLocalePatch("ja")).toEqual({ ui: { locale: "ja" } });
+    expect(uiLocalePatch("system")).toEqual({ ui: { locale: "system" } });
   });
 
   it("uses defaults for an empty subtitle object", () => {

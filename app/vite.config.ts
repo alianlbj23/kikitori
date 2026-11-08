@@ -9,6 +9,11 @@ export default defineConfig(() => ({
   // Keep Rust compiler output visible in `tauri dev`.
   clearScreen: false,
   build: {
+    // The 13 UI dictionaries share one ~640 kB chunk (~170 kB gzip). The app
+    // loads it from local disk inside the WebView, never over the network, so
+    // the default 500 kB web warning does not apply; lazy-loading per locale
+    // would make every locale switch asynchronous for no measurable gain.
+    chunkSizeWarningLimit: 1024,
     rollupOptions: {
       // Two windows, two pages.
       input: { main: "index.html", overlay: "overlay.html" },
@@ -25,5 +30,7 @@ export default defineConfig(() => ({
   test: {
     include: ["src/**/*.test.ts"],
     environment: "node",
+    // CSS is processed only so `main.css?raw` (render-cost.test.ts) has its text.
+    css: { include: [/\/main\.css(\?|$)/] },
   },
 }));

@@ -24,6 +24,7 @@ from kikitori.config import (
     write_json_atomic,
 )
 from kikitori.config import store as store_module
+from kikitori.translate.glossary import GlossaryEntry
 
 
 def _with(path: str, value: Any) -> dict[str, Any]:
@@ -42,8 +43,10 @@ class DefaultsTest(unittest.TestCase):
         s = Settings()
         self.assertEqual(s.schema_version, SCHEMA_VERSION)
         self.assertEqual(s.mode, "media")
+        self.assertEqual(s.source_language, "ja")
         self.assertEqual(s.target_language, "zh-TW")
         self.assertEqual(s.partner_language, "ja")
+        self.assertTrue(s.translation.enabled)
         self.assertEqual((s.media.pause_secs, s.media.max_secs), (0.6, 10.0))
         self.assertEqual((s.interpret.pause_secs, s.interpret.max_secs), (0.5, 8.0))
         self.assertIsNone(s.media.device_id)
@@ -112,8 +115,8 @@ class ValidationTest(unittest.TestCase):
 
     def test_mode_choices(self) -> None:
         self.assertInvalid(_with("mode", "karaoke"), "mode")
-        self.assertInvalid(_with("partner_language", "ko"), "partner_language")
-        self.assertInvalid(_with("target_language", "ja"), "target_language")
+        self.assertInvalid(_with("partner_language", "sv"), "partner_language")
+        self.assertInvalid(_with("target_language", "zh"), "target_language")
         self.assertInvalid(_with("asr.device", "tpu"), "asr.device")
 
     def test_number_ranges_and_types(self) -> None:
@@ -237,6 +240,161 @@ class ValidationTest(unittest.TestCase):
         merged = Settings().merged({"translation": {"keep_warm_secs": 30}})
         self.assertEqual(merged.translation.keep_warm_secs, 30)
 
+    def test_glossary_defaults_and_round_trip(self) -> None:
+        s = Settings()
+        self.assertTrue(s.translation.glossary.builtin)
+        self.assertEqual(s.translation.glossary.entries, ())
+        self.assertEqual(
+            s.to_dict()["translation"]["glossary"], {"builtin": True, "entries": []}
+        )
+        entries = [
+            {"source": "ぺこら", "target": "佩克拉", "target_language": "zh-TW"},
+            {"source": "Hololive", "target": "hololive", "target_language": None},
+        ]
+        data = _with("translation.glossary", {"builtin": False, "entries": entries})
+        s = Settings.from_dict(data)
+        self.assertFalse(s.translation.glossary.builtin)
+        self.assertEqual(
+            s.translation.glossary.entries,
+            (
+                GlossaryEntry("ぺこら", "佩克拉", "zh-TW"),
+                GlossaryEntry("Hololive", "hololive", None),
+            ),
+        )
+        self.assertEqual(
+            s.to_dict()["translation"]["glossary"],
+            {"builtin": False, "entries": entries},
+        )
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
+
+    def test_glossary_missing_uses_default_without_migration(self) -> None:
+        # 新欄位有預設值：沒有 glossary 的 schema 3 設定檔照樣讀得進來，不必升 schema。
+        data = Settings().to_dict()
+        del data["translation"]["glossary"]
+        self.assertEqual(Settings.from_dict(data), Settings())
+        partial = _with("translation.glossary", {"entries": []})
+        self.assertTrue(Settings.from_dict(partial).translation.glossary.builtin)
+        merged = Settings().merged({"translation": {"glossary": {"builtin": False}}})
+        self.assertFalse(merged.translation.glossary.builtin)
+
+    def test_furigana_defaults_round_trip_and_missing(self) -> None:
+        # 振假名：預設關閉；新欄位有預設值，沒有 furigana 的 schema 3 檔案照樣讀得進來（不升 schema）
+        s = Settings()
+        self.assertFalse(s.furigana.enabled)
+        self.assertEqual(s.to_dict()["furigana"], {"enabled": False})
+        data = s.to_dict()
+        del data["furigana"]
+        self.assertEqual(Settings.from_dict(data), Settings())
+        on = Settings.from_dict(_with("furigana", {"enabled": True}))
+        self.assertTrue(on.furigana.enabled)
+        self.assertEqual(Settings.from_dict(on.to_dict()), on)
+        self.assertTrue(
+            Settings().merged({"furigana": {"enabled": True}}).furigana.enabled
+        )
+
+    def test_furigana_validation(self) -> None:
+        for value, path in (
+            ({"enabled": "yes"}, "furigana.enabled"),
+            ({"enabled": 1}, "furigana.enabled"),
+            ({"edition": "full"}, "furigana.edition"),
+            ([], "furigana"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as ctx:
+                    Settings.from_dict(_with("furigana", value))
+                self.assertIn(path, str(ctx.exception))
+
+    def test_glossary_entry_language_is_normalized(self) -> None:
+        data = _with(
+            "translation.glossary",
+            {"entries": [{"source": "a", "target": "b", "target_language": "zh-tw"}]},
+        )
+        entry = Settings.from_dict(data).translation.glossary.entries[0]
+        self.assertEqual(entry.target_language, "zh-TW")
+        # target_language 可以省略（= 所有譯文語言）
+        data = _with(
+            "translation.glossary", {"entries": [{"source": "a", "target": "b"}]}
+        )
+        entry = Settings.from_dict(data).translation.glossary.entries[0]
+        self.assertIsNone(entry.target_language)
+
+    def test_glossary_validation(self) -> None:
+        good = {"source": "a", "target": "b", "target_language": None}
+        for glossary, path in [
+            ("on", "translation.glossary"),
+            ({"builtin": "yes"}, "translation.glossary.builtin"),
+            ({"extra": 1}, "translation.glossary.extra"),
+            ({"entries": {}}, "translation.glossary.entries"),
+            ({"entries": [good] * 501}, "translation.glossary.entries"),
+            ({"entries": ["a->b"]}, "translation.glossary.entries[0]"),
+            (
+                {"entries": [{**good, "note": "x"}]},
+                "translation.glossary.entries[0].note",
+            ),
+            ({"entries": [{"target": "b"}]}, "translation.glossary.entries[0].source"),
+            (
+                {"entries": [good, {**good, "source": ""}]},
+                "translation.glossary.entries[1].source",
+            ),
+            (
+                {"entries": [{**good, "source": "a\nb"}]},
+                "translation.glossary.entries[0].source",
+            ),
+            (
+                {"entries": [{**good, "target": "x" * 201}]},
+                "translation.glossary.entries[0].target",
+            ),
+            (
+                {"entries": [{**good, "target": 5}]},
+                "translation.glossary.entries[0].target",
+            ),
+            (
+                {"entries": [{**good, "target_language": "xx"}]},
+                "translation.glossary.entries[0].target_language",
+            ),
+            (
+                {"entries": [{**good, "target_language": "zh"}]},
+                "translation.glossary.entries[0].target_language",
+            ),
+            # 同一個原文寫法（不分大小寫與全半形）＋同一個譯文語言只能有一筆
+            (
+                {"entries": [good, {**good, "source": "Ａ", "target": "c"}]},
+                "translation.glossary.entries[1].source",
+            ),
+        ]:
+            with self.subTest(glossary=glossary):
+                self.assertInvalid(_with("translation.glossary", glossary), path)
+        # 同一個寫法、不同譯文語言可以並存
+        ok = {
+            "entries": [
+                good,
+                {**good, "target_language": "en"},
+                {**good, "target_language": "ko"},
+            ]
+        }
+        self.assertEqual(
+            len(
+                Settings.from_dict(
+                    _with("translation.glossary", ok)
+                ).translation.glossary.entries
+            ),
+            3,
+        )
+        self.assertEqual(
+            len(
+                Settings.from_dict(
+                    _with(
+                        "translation.glossary",
+                        {
+                            "entries": [good] * 1
+                            + [{**good, "source": f"s{i}"} for i in range(499)]
+                        },
+                    )
+                ).translation.glossary.entries
+            ),
+            500,
+        )
+
     def test_translation_fields_use_translator_validation(self) -> None:
         self.assertInvalid(
             _with("translation.base_url", "ftp://example.com"), "translation.base_url"
@@ -293,7 +451,94 @@ class ValidationTest(unittest.TestCase):
         data = Settings().to_dict()
         del data["ui"]
         self.assertEqual(Settings.from_dict(data).ui, {})
-        self.assertEqual(Settings.from_dict(data).schema_version, 2)
+        self.assertEqual(Settings.from_dict(data).schema_version, SCHEMA_VERSION)
+
+    def test_any_catalog_language_for_source_target_and_partner(self) -> None:
+        s = Settings.from_dict(
+            {
+                **_with("source_language", "ko"),
+                "target_language": "es",
+                "partner_language": "zh-CN",
+            }
+        )
+        self.assertEqual(
+            (s.source_language, s.target_language, s.partner_language),
+            ("ko", "es", "zh-CN"),
+        )
+        self.assertEqual(s.to_dict()["source_language"], "ko")
+
+    def test_source_language_auto(self) -> None:
+        s = Settings.from_dict(_with("source_language", "auto"))
+        self.assertEqual(s.source_language, "auto")
+        # auto 只用於收聽語言；字幕語言與對方語言必須是具體語言
+        self.assertInvalid(_with("target_language", "auto"), "target_language")
+        self.assertInvalid(_with("partner_language", "auto"), "partner_language")
+
+    def test_language_codes_are_validated_and_normalized(self) -> None:
+        for path in ("source_language", "target_language", "partner_language"):
+            for bad in ("", "xx", 3, None, "zh", "x" * 100):
+                with self.subTest(path=path, value=bad):
+                    self.assertInvalid(_with(path, bad), path)
+        # 手改設定檔的常見寫法與舊別名正規化成清單語言碼
+        s = Settings.from_dict(_with("target_language", "zh_hans"))
+        self.assertEqual(s.target_language, "zh-CN")
+        self.assertEqual(
+            Settings.from_dict(_with("source_language", "EN")).source_language, "en"
+        )
+
+    def test_source_may_equal_target(self) -> None:
+        # 只做字形轉換或原樣顯示（例如學語言的人聽中文看中文）
+        s = Settings.from_dict(
+            {**_with("source_language", "zh-CN"), "target_language": "zh-TW"}
+        )
+        self.assertEqual((s.source_language, s.target_language), ("zh-CN", "zh-TW"))
+
+    def test_interpret_partner_whisper_language_must_differ_from_target(self) -> None:
+        interpret = _with("mode", "interpret")
+        self.assertInvalid(
+            {**interpret, "target_language": "ja", "partner_language": "ja"},
+            "partner_language",
+        )
+        self.assertInvalid(
+            {**interpret, "target_language": "zh-CN", "partner_language": "zh-TW"},
+            "partner_language",
+        )
+        with self.assertRaises(SettingsError):
+            Settings().merged({"mode": "interpret", "partner_language": "zh-CN"})
+        s = Settings().merged(
+            {"mode": "interpret", "target_language": "ja", "partner_language": "en"}
+        )
+        self.assertEqual((s.target_language, s.partner_language), ("ja", "en"))
+
+    def test_media_mode_accepts_partner_equal_to_target(self) -> None:
+        # 影片翻譯不用對方語言；日語使用者把字幕語言設成 ja 時，預設的對方語言 ja
+        # 不該讓設定無法儲存。
+        s = Settings.from_dict(_with("target_language", "ja"))
+        self.assertEqual(
+            (s.mode, s.target_language, s.partner_language), ("media", "ja", "ja")
+        )
+        s = Settings().merged({"target_language": "zh-CN", "partner_language": "zh-TW"})
+        self.assertEqual((s.target_language, s.partner_language), ("zh-CN", "zh-TW"))
+
+    def test_switching_to_interpret_revalidates_the_language_pair(self) -> None:
+        s = Settings().merged({"target_language": "ja"})
+        with self.assertRaises(SettingsError) as ctx:
+            s.merged({"mode": "interpret"})
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith("partner_language"), message)
+        self.assertIn("interpret", message)
+        self.assertIn("'ja'", message)
+        # 同時改對方語言就可以切換
+        s = s.merged({"mode": "interpret", "partner_language": "en"})
+        self.assertEqual((s.mode, s.partner_language), ("interpret", "en"))
+
+    def test_translation_enabled(self) -> None:
+        self.assertInvalid(_with("translation.enabled", 1), "translation.enabled")
+        self.assertInvalid(_with("translation.enabled", None), "translation.enabled")
+        s = Settings().merged({"translation": {"enabled": False}})
+        self.assertFalse(s.translation.enabled)
+        self.assertFalse(s.to_dict()["translation"]["enabled"])
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
 
     def test_error_message_shows_received_value(self) -> None:
         with self.assertRaises(SettingsError) as ctx:
@@ -386,6 +631,59 @@ class MigrationTest(unittest.TestCase):
             assert s is not None
             self.assertEqual(s.asr.fast_compute_type, "int8")
             self.assertEqual(s.to_dict()["schema_version"], SCHEMA_VERSION)
+
+    def test_v2_gets_source_language_and_translation_enabled(self) -> None:
+        v2 = {
+            "schema_version": 2,
+            "mode": "interpret",
+            "target_language": "zh-TW",
+            "partner_language": "en",
+            "translation": {"fast_model": "qwen3.5:9b", "keep_warm_secs": 0},
+            "subtitle": {"font_size": 30},
+            "ui": {"dismissed": ["x"]},
+        }
+        migrated = migrate(v2)
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated["source_language"], "ja")
+        self.assertIs(migrated["translation"]["enabled"], True)
+        # 其他欄位原樣保留，呼叫端的 dict 不被改動
+        self.assertEqual(migrated["translation"]["fast_model"], "qwen3.5:9b")
+        self.assertEqual(migrated["partner_language"], "en")
+        self.assertEqual(migrated["subtitle"], {"font_size": 30})
+        self.assertNotIn("enabled", v2["translation"])  # type: ignore[operator]
+        s = Settings.from_dict(v2)
+        self.assertEqual((s.source_language, s.translation.enabled), ("ja", True))
+        self.assertEqual(s.translation.keep_warm_secs, 0)
+
+    def test_v2_without_translation_or_with_invalid_translation(self) -> None:
+        self.assertEqual(
+            migrate({"schema_version": 2}),
+            {
+                "schema_version": 3,
+                "source_language": "ja",
+                "translation": {"enabled": True},
+            },
+        )
+        with self.assertRaises(SettingsError) as ctx:
+            Settings.from_dict({"schema_version": 2, "translation": "ollama"})
+        self.assertTrue(str(ctx.exception).startswith("translation"))
+
+    def test_v2_keeps_existing_v3_fields(self) -> None:
+        migrated = migrate(
+            {
+                "schema_version": 2,
+                "source_language": "en",
+                "translation": {"enabled": False},
+            }
+        )
+        self.assertEqual(migrated["source_language"], "en")
+        self.assertIs(migrated["translation"]["enabled"], False)
+
+    def test_v1_migrates_all_the_way(self) -> None:
+        s = Settings.from_dict({"schema_version": 1, "asr": {"compute_type": "int8"}})
+        self.assertEqual(s.schema_version, 3)
+        self.assertEqual(s.source_language, "ja")
+        self.assertTrue(s.translation.enabled)
 
     def test_missing_migration_step(self) -> None:
         with self.assertRaises(SettingsError):
@@ -524,6 +822,43 @@ class StoreTest(unittest.TestCase):
         again = SettingsStore(self.path)
         again.load()
         self.assertFalse(again.is_new)
+
+    def test_revision_increases_on_every_change(self) -> None:
+        # UI 收到的設定可能晚於更新的一份才寫回畫面；revision 讓它丟掉較舊的那份
+        store = SettingsStore(self.path)
+        before = store.snapshot().revision
+        store.load()
+        loaded = store.snapshot().revision
+        self.assertGreater(loaded, before)
+        store.update({"mode": "interpret"})
+        first = store.snapshot()
+        self.assertGreater(first.revision, loaded)
+        self.assertEqual(first.settings.mode, "interpret")
+        self.assertFalse(first.is_new)
+        store.update({"furigana": {"enabled": True}})
+        self.assertGreater(store.snapshot().revision, first.revision)
+        # 讀取不改變 revision
+        self.assertEqual(store.snapshot().revision, store.snapshot().revision)
+
+    def test_loading_an_invalid_file_also_bumps_the_revision(self) -> None:
+        self.path.write_text("{not json", encoding="utf-8")
+        store = SettingsStore(self.path)
+        before = store.snapshot().revision
+        self.assertIsNotNone(store.load())
+        snap = store.snapshot()
+        self.assertGreater(snap.revision, before)
+        self.assertEqual(snap.settings, Settings())
+        self.assertFalse(snap.is_new)
+
+    def test_failed_or_skipped_update_keeps_the_revision(self) -> None:
+        store = SettingsStore(self.path)
+        store.load()
+        store.update({"mode": "interpret"})
+        revision = store.snapshot().revision
+        with self.assertRaises(SettingsError):
+            store.update({"mode": "karaoke"})
+        self.assertIsNone(store.update_if_new({"mode": "media"}))
+        self.assertEqual(store.snapshot().revision, revision)
 
     def test_update_if_new_only_writes_a_new_file(self) -> None:
         store = SettingsStore(self.path)
