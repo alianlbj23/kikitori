@@ -7,6 +7,7 @@ from kikitori.translate.glossary import (
     BUILTIN_TARGET_LANGUAGES,
     BUILTIN_TERMS,
     MAX_TERMS_PER_REQUEST,
+    ZH_JA_FALSE_FRIENDS,
     Glossary,
     GlossaryEntry,
     Term,
@@ -52,6 +53,78 @@ class BuiltinDataTest(unittest.TestCase):
         for text in ["草原を走る", "箱を開けて", "枠組みを作る", "おつりをください"]:
             with self.subTest(text=text):
                 self.assertEqual(g.lookup(text, "ja", "zh-TW"), ())
+
+
+class ChineseToJapaneseFalseFriendsTest(unittest.TestCase):
+    """中文原文 → 日文：中日同形異義詞與斷詞陷阱（experiments/kanji_false_friends）。"""
+
+    def test_data_is_well_formed(self) -> None:
+        self.assertGreaterEqual(len(ZH_JA_FALSE_FRIENDS), 15)
+        self.assertLessEqual(len(ZH_JA_FALSE_FRIENDS), 60)
+        keys = [match_key(s) for t in ZH_JA_FALSE_FRIENDS for s in t.sources]
+        self.assertEqual(len(keys), len(set(keys)))
+        for term in ZH_JA_FALSE_FRIENDS:
+            with self.subTest(sources=term.sources):
+                self.assertEqual(set(term.targets), {"ja"})
+                # 單字太容易出現在別的詞裡（「娘」在「姑娘」「新娘」），一律不收
+                self.assertTrue(all(len(s) >= 2 for s in term.sources))
+                for value in (*term.sources, *term.targets.values()):
+                    self.assertEqual(value, value.strip())
+                    self.assertTrue(value and value.isprintable())
+
+    def test_compound_wins_over_its_parts(self) -> None:
+        # 「豬排便當」整個比對到，模型就不會切成 豬／排便／當
+        g = Glossary()
+        self.assertEqual(
+            g.lookup("我今天要吃豬排便當", "zh", "ja"),
+            (Term("豬排便當", "豚カツ弁当"),),
+        )
+        self.assertEqual(
+            g.lookup("午餐吃猪排便当好了", "zh", "ja"),
+            (Term("猪排便当", "豚カツ弁当"),),
+        )
+        self.assertEqual(
+            g.lookup("這家的豬排很好吃", "zh", "ja"), (Term("豬排", "豚カツ"),)
+        )
+
+    def test_common_false_friends(self) -> None:
+        g = Glossary()
+        for text, term in [
+            ("大家晚安", Term("大家", "みんな")),
+            ("我每天都看新聞", Term("新聞", "ニュース")),
+            ("直播結束了", Term("結束", "終わる")),
+            ("放心吧", Term("放心", "安心する")),
+        ]:
+            with self.subTest(text=text):
+                self.assertIn(term, g.lookup(text, "zh", "ja"))
+
+    def test_longer_phrases_shadow_risky_parts(self) -> None:
+        # 「老婆婆」是老太太，不能被「老婆」（妻子）吃掉
+        g = Glossary()
+        terms = g.lookup("老婆婆在公園散步", "zh", "ja")
+        self.assertIn(Term("老婆婆", "おばあさん"), terms)
+        self.assertNotIn(Term("老婆", "妻"), terms)
+
+    def test_only_for_chinese_to_japanese_and_follows_the_builtin_switch(self) -> None:
+        self.assertEqual(Glossary().lookup("我今天要吃豬排便當", "zh", "en"), ())
+        self.assertEqual(Glossary().lookup("我今天要吃豬排便當", "ja", "zh-TW"), ())
+        self.assertEqual(
+            Glossary(builtin=False).lookup("我今天要吃豬排便當", "zh", "ja"), ()
+        )
+
+    def test_user_entries_override(self) -> None:
+        g = Glossary(entries=(GlossaryEntry("大家", "皆さん", "ja"),))
+        self.assertEqual(g.lookup("大家好", "zh", "ja"), (Term("大家", "皆さん"),))
+
+    def test_ordinary_sentences_get_nothing(self) -> None:
+        g = Glossary()
+        for text in [
+            "謝謝你們今天來看直播",
+            "這個遊戲真的太難了吧",
+            "我們一起去看煙火吧",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(g.lookup(text, "zh", "ja"), ())
 
 
 class LookupTest(unittest.TestCase):

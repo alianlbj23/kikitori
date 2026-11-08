@@ -6,6 +6,7 @@ from unittest import mock
 
 from kikitori.languages import WHISPER_CODES, get_language, language_codes
 from kikitori.translate.errors import InvalidRequestError
+from kikitori.translate.glossary import Term
 from kikitori.translate.languages import (
     ALL_LANGUAGE_CODES,
     SAKURA_PAIRS,
@@ -223,12 +224,50 @@ class BuildMessagesTest(unittest.TestCase):
 
     def test_generic_japanese_target_instructions_in_japanese(self) -> None:
         msgs = build_messages(
-            "generic", TranslationRequest("你好", "zh", "ja", ("嗨",))
+            "generic", TranslationRequest("Hello", "en", "ja", ("Hi",))
         )
         self.assertIn("日本語", msgs[0]["content"])
+        self.assertIn("英語", msgs[0]["content"])
         self.assertNotIn("台灣", msgs[0]["content"])
         self.assertIn("翻訳しない", msgs[1]["content"])
-        self.assertTrue(msgs[1]["content"].endswith("日本語に翻訳してください：\n你好"))
+        self.assertTrue(
+            msgs[1]["content"].endswith("日本語に翻訳してください：\nHello")
+        )
+
+    def test_generic_chinese_to_japanese_instructions_in_chinese(self) -> None:
+        # 中文與日文共用漢字：用日文寫指示時，模型會用日文的讀法斷詞、理解同形詞
+        # （「豬排便當」→「豚の排泄物」、「我娘」→「娘」）。改用中文寫指示，
+        # qwen3.5:9b 陷阱句 16/24 → 22/24、沒有沒翻譯的句子（experiments/kanji_false_friends）。
+        msgs = build_messages(
+            "generic",
+            TranslationRequest(
+                "我娘做的菜",
+                "zh",
+                "ja",
+                ("嗨",),
+            ),
+        )
+        system, user = msgs[0]["content"], msgs[1]["content"]
+        self.assertIn("中文", system)
+        self.assertIn("日文", system)
+        self.assertNotIn("日本語", system)
+        self.assertIn("不要翻譯", user)
+        self.assertLess(user.index("嗨"), user.index("我娘做的菜"))
+        self.assertTrue(user.endswith("翻成日文：\n我娘做的菜"))
+        terms = build_messages(
+            "generic",
+            TranslationRequest("我娘做的菜", "zh", "ja"),
+            [Term("娘", "母")],
+        )[1]["content"]
+        self.assertIn("術語", terms)
+        self.assertIn("娘 → 母", terms)
+
+    def test_only_chinese_to_japanese_switches_the_instruction_language(self) -> None:
+        # 日翻中用日文指示沒有改善、還多一句沒翻（同一個實驗），維持譯文語言的指示
+        ja_zh = build_messages("generic", TranslationRequest("手紙", "ja", "zh-TW"))
+        self.assertTrue(ja_zh[1]["content"].endswith("請翻譯成繁體中文：\n手紙"))
+        ja_en = build_messages("generic", TranslationRequest("你好", "zh", "en"))
+        self.assertTrue(ja_en[1]["content"].endswith("Translate into English:\n你好"))
 
     def test_generic_english_target_instructions_in_english(self) -> None:
         msgs = build_messages(

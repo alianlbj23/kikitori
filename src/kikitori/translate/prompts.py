@@ -239,6 +239,28 @@ def _english_template(target_code: str) -> _GenericTemplate:
     )
 
 
+# 依（原文, 譯文）指定的範本，優先於上面「依譯文語言」的範本。中文與日文共用漢字：
+# 用日文寫指示時，模型會用日文的讀法斷詞、理解同形詞（「豬排便當」→「豚の排泄物」、
+# 「我娘」→「娘」）。用原文語言（中文）寫指示，qwen3.5:9b 的陷阱句（不含內建詞表）
+# 16/24 → 22/24，一般句子沒有「沒翻譯」（experiments/kanji_false_friends）。日翻中
+# 反過來用日文指示沒有改善、還多一句沒翻，所以只有這個方向。
+_PAIR_TEMPLATES: dict[tuple[str, str], _GenericTemplate] = {
+    ("zh", "ja"): _GenericTemplate(
+        system_lines=(
+            "你是字幕翻譯員。把使用者輸入的{source}句子翻成自然的日文。",
+            "規則：",
+            "- 只輸出一行日文譯文。",
+            "- 簡短自然，忠於原意與語氣。",
+            "- 不加說明、註解、引號或振假名，不保留原文。",
+            "- 前文僅供參考，不要翻譯。",
+        ),
+        source_names={"zh": "中文"},
+        context_header="前文（只供參考，不要翻譯）：",
+        instruction="翻成日文：",
+        terms_header="術語（原文出現時請用這些譯法）：",
+    ),
+}
+
 for _lang in LANGUAGES:
     if _lang.code not in _GENERIC_TEMPLATES:
         _GENERIC_TEMPLATES[_lang.code] = _english_template(_lang.code)
@@ -339,7 +361,9 @@ def _sakura(request: TranslationRequest, terms: Sequence[Term]) -> list[Message]
 
 
 def _generic(request: TranslationRequest, terms: Sequence[Term]) -> list[Message]:
-    template = _GENERIC_TEMPLATES.get(request.target_language)
+    template = _PAIR_TEMPLATES.get((request.source_language, request.target_language))
+    if template is None:
+        template = _GENERIC_TEMPLATES.get(request.target_language)
     if template is None or request.source_language not in template.source_names:
         raise InvalidRequestError(
             "unsupported language pair: "

@@ -1,0 +1,619 @@
+{
+ "model": "translategemma:12b",
+ "items": [
+  {
+   "id": "zj-01",
+   "text": "我今天要吃豬排便當",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "今日のランチは豚肉の定食にしようと思っています。",
+     "secs": 12.16,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "zj-02",
+   "text": "午餐吃豬排便當好了",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "ランチは豚肉の定食にしようかな。",
+     "secs": 2.32,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "zj-03",
+   "text": "他很愛面子，不會承認的",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "彼は非常にプライドが高いため、それを認めることはないでしょう。",
+     "secs": 2.35,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-04",
+   "text": "我老婆在家等我",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "妻が家にいて、私の帰りを待っています。",
+     "secs": 2.28,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-05",
+   "text": "她丈夫是醫生",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "彼女の夫は医師です。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-06",
+   "text": "我每天早上都看電視新聞",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "私は毎日朝にテレビのニュースを見ています。",
+     "secs": 2.28,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-07",
+   "text": "他很勉強才答應了",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "彼は非常に苦労して、やっと承諾しました。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "zj-08",
+   "text": "我們開汽車去海邊吧",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "車で行って、海辺に行きましょう。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-09",
+   "text": "我娘做的菜最好吃",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "母さんが作った料理が一番美味しい。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-10",
+   "text": "這碗湯太燙了",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "このスープはとても熱い。",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-11",
+   "text": "大家晚安，明天見",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "皆様、おやすみなさい。また明日。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-12",
+   "text": "我每天走路去學校",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "私は毎日、徒歩で学校に通っています。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-13",
+   "text": "你在找什麼東西",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "あなたは何を探していますか？",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-14",
+   "text": "我明天早上還要去公司工作",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "明日の朝も、私は会社で仕事をする予定です。",
+     "secs": 2.32,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-15",
+   "text": "貓咪在床上睡覺",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "猫がベッドで寝ています。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-16",
+   "text": "這次直播的企劃很有意思",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "今回のライブ配信の企画は、とても面白いですね。",
+     "secs": 2.33,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-17",
+   "text": "我們分手吧",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "別過吧。\nまたは\n別れてしまいましょう。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-18",
+   "text": "這部動畫的結局很感人",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "このアニメの結末は、とても感動的でした。",
+     "secs": 2.31,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-19",
+   "text": "他是個很大方的人，常常請客",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "彼はとてもおおらかな人柄で、よく食事をご馳走してくれる。",
+     "secs": 2.34,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-20",
+   "text": "我的電腦好像中毒了",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "私のパソコンが、どうやらウイルスに感染したようです。",
+     "secs": 2.29,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-21",
+   "text": "這部電影真的很無聊",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "この映画は本当に退屈だった。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-22",
+   "text": "她平常很用功，考試一定沒問題",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "彼女は普段からとても努力しているので、試験で問題ないでしょう。",
+     "secs": 2.33,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-23",
+   "text": "我先生這禮拜去日本出差了",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "私の夫は先週、日本への出張に行っていました。",
+     "secs": 2.31,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-24",
+   "text": "你不要一味地責怪他",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "彼を一方的に責めないでください。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-c1",
+   "text": "謝謝大家今天來看我的直播",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "本日、私のライブをご覧いただき、ありがとうございました。",
+     "secs": 2.28,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c2",
+   "text": "明天下午三點我們在車站見面",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "明日の午後3時に駅で会いましょう。",
+     "secs": 2.27,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c3",
+   "text": "這個遊戲真的太難了吧",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "このゲーム、本当に難しすぎる。",
+     "secs": 2.25,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c4",
+   "text": "抱歉剛剛網路斷線了",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "申し訳ありません、さきほどインターネットが切断されました。",
+     "secs": 2.32,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c5",
+   "text": "我們一起去看煙火吧",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "一緒に花火を見に行きましょう。",
+     "secs": 2.23,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c6",
+   "text": "這次的新衣裝超可愛的",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "今回の新しい服、すごく可愛いですね。",
+     "secs": 2.27,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-01",
+   "text": "昨日、友達に手紙を書いた",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "昨天，我給朋友寫了一封信。",
+     "secs": 2.41,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-02",
+   "text": "今日の配信はすごく勉強になった",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "今天的直播內容非常有啟發，讓我學到了很多東西。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-03",
+   "text": "この箱は丈夫だから大丈夫",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "這個盒子很結實，所以沒問題。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-04",
+   "text": "先月、娘が生まれました",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "上個月，我的女兒出生了。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-05",
+   "text": "大家さんに家賃を払わなきゃ",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "我得給房東交房租了。",
+     "secs": 2.29,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-06",
+   "text": "毎朝、新聞を読んでいます",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "我每天早上都閱讀報紙。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-07",
+   "text": "汽車に乗って田舎に帰った",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "我乘坐汽車回到了鄉下。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-08",
+   "text": "みんなに迷惑をかけてごめん",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "很抱歉給大家添麻煩了。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-09",
+   "text": "床に座って配信を見てた",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "我坐在地板上，正在觀看直播。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-10",
+   "text": "犬が走ってきた",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "狗跑了過來。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-11",
+   "text": "階段で転んで怪我をした",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "在樓梯上摔倒受傷了。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-12",
+   "text": "夕飯の用意はできた？",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "晚餐準備好了嗎？",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-13",
+   "text": "ちょっと留守番をお願いね",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "請你幫我照顧一下，我可能要出門一會兒。",
+     "secs": 2.38,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-14",
+   "text": "この料理は本当に油断できない",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "這道菜真的讓人措手不及。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-c1",
+   "text": "みんな、今日も来てくれてありがとう！",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "各位，非常感謝大家今天的光臨！",
+     "secs": 2.26,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-c2",
+   "text": "このボス強すぎない？",
+   "covered": false,
+   "variants": {
+    "official": {
+     "output": "這個Boss太強了嗎？",
+     "secs": 2.22,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-c3",
+   "text": "スパチャありがとうございます！",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "非常感謝您的贊助！",
+     "secs": 2.23,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-c4",
+   "text": "明日は朝から歌枠やります",
+   "covered": true,
+   "variants": {
+    "official": {
+     "output": "明天早上我會開始直播唱歌。",
+     "secs": 2.24,
+     "untranslated": false
+    }
+   }
+  }
+ ]
+}

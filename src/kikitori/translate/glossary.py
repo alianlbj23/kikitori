@@ -1,4 +1,4 @@
-"""翻譯術語表：內建的日語直播用語，加上使用者自訂詞條。
+"""翻譯術語表：內建的日語直播用語、中翻日的中日同形異義詞，加上使用者自訂詞條。
 
 位於 translate 模組的資料層：翻譯器（`client.py`）每句呼叫 `Glossary.lookup()`，只把
 「這句原文實際出現的詞」交給 `prompts.build_messages()` 放進提示詞。為什麼需要：
@@ -12,6 +12,14 @@ WMT 的術語任務與 HY-MT 官方的術語干預範本都是「出現才給」
 自己翻。容易和一般用語撞字的詞只收不會誤判的寫法（例如不收單獨的「草」「箱」「枠」，
 只收「草生え」「箱推し」「歌枠」），寧可少給也不要在一般句子裡誤導模型。
 資料寫在 Python 裡：打包（PyInstaller）會自動收進來，不必另外列資料檔。
+
+中翻日另有一張內建表（`ZH_JA_FALSE_FRIENDS`）：中文與日文共用漢字，模型會用日文的讀法
+斷詞或理解同形詞——Qwen3.5 的 tokenizer 把「豬排便當」切成 豬｜排便｜當，譯成
+「豚の排泄物」；「節目」「階段」「顏色」在日文是「轉折點」「樓梯」「臉色」。做法同上
+（出現才給，最長比對），依據是字典輔助提示的研究（chain-of-dictionary，EMNLP 2024；
+IdiomKB，AAAI 2024）與 WMT23 術語任務。複合詞條目同時告訴模型詞的邊界。只收中文意思
+穩定、而且日文同形詞意思不同的詞；不收單字（「娘」在「姑娘」「新娘」裡意思不同），
+有歧義的寫法以較長的寫法擋住（「老婆婆」不是「老婆」）。
 """
 
 import re
@@ -27,7 +35,7 @@ MAX_USER_ENTRIES = 500
 MAX_SOURCE_CHARS = 100
 MAX_TARGET_CHARS = 200
 BUILTIN_SOURCE_LANGUAGE = "ja"
-"""內建表只適用於日語原文（Whisper 語言碼）。"""
+"""直播用語表只適用於日語原文（Whisper 語言碼）。"""
 BUILTIN_TARGET_LANGUAGES: tuple[str, ...] = ("zh-TW", "zh-CN", "en", "ko")
 
 
@@ -285,6 +293,61 @@ BUILTIN_TERMS: tuple[BuiltinTerm, ...] = (
 )
 
 
+# 中文原文 → 日文：中日同形異義詞與斷詞陷阱。譯法是日文的一般說法；同一個詞的繁簡
+# 寫法都列（Whisper 可能輸出任一種）。較長的寫法放在同一張表裡，最長比對會先用它們，
+# 擋住短詞的誤判（「老婆婆」「佔便宜」「汽車站」「大丈夫」）。
+ZH_JA_FALSE_FRIENDS: tuple[BuiltinTerm, ...] = (
+    # --- 斷詞陷阱：不整個比對，模型會切成別的詞 ---------------------------------
+    _term(("豬排便當", "猪排便当"), ja="豚カツ弁当"),
+    _term(("豬排", "猪排"), ja="豚カツ"),
+    _term(("便當", "便当"), ja="弁当"),
+    # --- 家人、人物 ------------------------------------------------------------
+    _term(("老婆",), ja="妻"),
+    _term(("老婆婆",), ja="おばあさん"),
+    _term(("丈夫",), ja="夫"),
+    # 台灣網路上「大丈夫」是日語借詞（沒問題），不能被「丈夫」（先生）吃掉
+    _term(("大丈夫",), ja="大丈夫"),
+    _term(("大家",), ja="みんな"),
+    _term(("老師", "老师"), ja="先生"),
+    _term(("經理", "经理"), ja="マネージャー"),
+    # --- 日常用語 --------------------------------------------------------------
+    _term(("新聞", "新闻"), ja="ニュース"),
+    _term(("節目", "节目"), ja="番組"),
+    _term(("汽車", "汽车"), ja="車"),
+    _term(("汽車站", "汽车站"), ja="バスターミナル"),
+    _term(("汽水",), ja="炭酸飲料"),
+    _term(("手紙", "手纸"), ja="トイレットペーパー"),
+    _term(("走路",), ja="歩く"),
+    _term(("工作",), ja="仕事"),
+    _term(("便宜",), ja="安い"),
+    _term(("佔便宜", "占便宜"), ja="得をする"),
+    _term(("顏色", "颜色"), ja="色"),
+    _term(("麻雀",), ja="スズメ"),
+    _term(("看病",), ja="診察を受ける"),
+    _term(("階段", "阶段"), ja="段階"),
+    # --- 動作、感受 ------------------------------------------------------------
+    _term(("結束", "结束"), ja="終わる"),
+    _term(("告訴", "告诉"), ja="教える"),
+    _term(("放心",), ja="安心する"),
+    _term(("小心",), ja="気をつけて"),
+    _term(("迷惑",), ja="戸惑う"),
+    _term(("約束", "约束"), ja="束縛する"),
+    _term(("質問", "质问"), ja="問い詰める"),
+    _term(("分手",), ja="別れる"),
+    _term(("感人",), ja="感動的"),
+    _term(("有意思",), ja="面白い"),
+    _term(("沒意思", "没意思"), ja="つまらない"),
+    _term(("愛面子", "爱面子"), ja="メンツを気にする"),
+    _term(("面子",), ja="メンツ"),
+    _term(("心中",), ja="心の中"),
+    _term(("印象深刻",), ja="印象に残る"),
+)
+_BUILTIN_TABLES: Mapping[str, tuple[BuiltinTerm, ...]] = MappingProxyType(
+    {BUILTIN_SOURCE_LANGUAGE: BUILTIN_TERMS, "zh": ZH_JA_FALSE_FRIENDS}
+)
+"""原文語言（Whisper 語言碼）→ 內建表；譯文語言由每個詞條的 `targets` 決定。"""
+
+
 @dataclass(frozen=True)
 class GlossaryEntry:
     """使用者自訂的一個詞條（設定檔 `translation.glossary.entries` 的一筆）。
@@ -352,7 +415,7 @@ class Glossary:
 
     Attributes:
         entries: 使用者詞條。
-        builtin: 是否使用內建的日語直播用語。
+        builtin: 是否使用內建表（日語直播用語、中翻日的中日同形異義詞）。
     """
 
     entries: Sequence[GlossaryEntry] = ()
@@ -374,7 +437,7 @@ class Glossary:
 
         Args:
             text: 原文。
-            source_language: 原文的 Whisper 語言碼（內建表只用於 "ja"）。
+            source_language: 原文的 Whisper 語言碼（內建表只有 "ja" 與 "zh"）。
             target_language: 譯文的清單語言碼。
         """
         index = self._index(source_language, target_language)
@@ -394,8 +457,8 @@ class Glossary:
         if cached is not None:
             return cached
         terms: dict[str, Term] = {}
-        if self.builtin and source_language == BUILTIN_SOURCE_LANGUAGE:
-            for item in BUILTIN_TERMS:
+        if self.builtin:
+            for item in _BUILTIN_TABLES.get(source_language, ()):
                 target = item.targets.get(target_language)
                 if target is None:
                     continue

@@ -1,0 +1,1175 @@
+{
+ "model": "qwen3.5:9b",
+ "items": [
+  {
+   "id": "zj-01",
+   "text": "我今天要吃豬排便當",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "今日は豚の排泄物を主食にするんだ。",
+     "secs": 5.88,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "今日は豚のレバーを詰めた弁当を食べるよ。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr+terms": {
+     "output": "今日は豚カツ弁当を食べるよ",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-02",
+   "text": "午餐吃豬排便當好了",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "昼食の豚糞便料理が準備できました。",
+     "secs": 2.31,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "昼飯に豚のハムサンドを食べようか。",
+     "secs": 2.29,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr+terms": {
+     "output": "昼は豚カツ弁当でいいよ。",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-03",
+   "text": "他很愛面子，不會承認的",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "彼は顔を立てるのが大好きで、認めることはしません。",
+     "secs": 2.32,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "彼はプライドが高いので認めないでしょう。",
+     "secs": 2.28,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "彼はメンツを気にするので、認めないでしょう。",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-04",
+   "text": "我老婆在家等我",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "奥さんが家に待っています。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "妻が家に待っています。",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "妻が家に待っています。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-05",
+   "text": "她丈夫是醫生",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "彼女の夫は医者です。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "彼女の夫は医者です。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "彼女の夫は医者です。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-06",
+   "text": "我每天早上都看電視新聞",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "私は毎日テレビのニュースを見ます。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "私は毎朝テレビのニュースを見ます。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "私は毎朝テレビのニュースを見ます。",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-07",
+   "text": "他很勉強才答應了",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "彼はよく勉強したからこそ承諾してくれたのだ。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "彼はしぶしぶ承諾した。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "彼はしぶしぶ承諾した。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-08",
+   "text": "我們開汽車去海邊吧",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "車で海へ行きましょう。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "車で海に行きましょうか。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "車で海に行きましょう。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-09",
+   "text": "我娘做的菜最好吃",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "娘の料理が一番美味しいです。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "母さんの料理が一番美味しいです。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "母さんの料理が一番美味しいです。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-10",
+   "text": "這碗湯太燙了",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "このスープは熱すぎる。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "このスープは熱すぎるよ。",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "このスープは熱すぎるよ。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-11",
+   "text": "大家晚安，明天見",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "みなさんおやすみなさい、明日また会いましょう。",
+     "secs": 2.29,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "みなさんおやすみなさい、明日また会いましょう",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "みんな、おやすみなさい、また明日ね",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-12",
+   "text": "我每天走路去學校",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "私は毎日歩いて学校へ通っています。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "私は毎日歩いて学校に行きます。",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "私は毎日学校へ歩いていきます。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-13",
+   "text": "你在找什麼東西",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "何を探しているんですか？",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "何を探しているんですか？",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "何を探しているんですか？",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-14",
+   "text": "我明天早上還要去公司工作",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "明日朝も会社で仕事に行くんだ。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "明日朝も会社で仕事に行かなければなりません。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "明日朝、会社で仕事をしに行くんだ。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-15",
+   "text": "貓咪在床上睡覺",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "猫がベッドで寝ています。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "猫がベッドで寝ています。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "猫がベッドで寝ています。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-16",
+   "text": "這次直播的企劃很有意思",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "今回の生配信企画は面白いですね。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "今回の配信企画は面白いですね",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "今回の配信企画は面白いね",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-17",
+   "text": "我們分手吧",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "別れましょうか。",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "別れましょうか",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "もう別れましょうか",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-18",
+   "text": "這部動畫的結局很感人",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "このアニメの結末は本当に感動的でした。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "このアニメの結末は本当に感動しました。",
+     "secs": 2.28,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "このアニメの結末は感動的です。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-19",
+   "text": "他是個很大方的人，常常請客",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "彼は気前が良く、よく奢ってくれる人です。",
+     "secs": 2.31,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "彼は非常に気前の良い人で、よく奢ってくれる。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "彼は非常に気前の良い人で、よく奢ってくれる。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-20",
+   "text": "我的電腦好像中毒了",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "私のパソコンがウイルスに感染しているようです。",
+     "secs": 2.24,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "私のパソコンがウイルスに感染しているようです。",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "私のパソコンがウイルスに感染しているようです。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-21",
+   "text": "這部電影真的很無聊",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "この映画は本当につまらないね。",
+     "secs": 2.27,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "この映画は本当につまらないね",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "この映画は本当につまらないね",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-22",
+   "text": "她平常很用功，考試一定沒問題",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "普段から勉強がていねいな彼女は、試験で間違いなく合格できるはずです。",
+     "secs": 2.38,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "普段から勉強している彼女なら、試験はきっと問題ないはずだ。",
+     "secs": 2.33,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "普段から勉強している彼女なら、試験はきっと問題ないはずだ。",
+     "secs": 2.28,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-23",
+   "text": "我先生這禮拜去日本出差了",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "先週、私の先生が日本へ出張に行きました。",
+     "secs": 2.3,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "夫が今週、日本の出張に行ってきました。",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "夫が今週、日本の出張に行ってきました。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-24",
+   "text": "你不要一味地責怪他",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "彼をただ責めるだけではないで",
+     "secs": 2.26,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "彼をただ一方的に責めるな",
+     "secs": 2.25,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "彼をただ一方的に責めるな",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "zj-c1",
+   "text": "謝謝大家今天來看我的直播",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "今日は私の生配信に来てくれてありがとう。",
+     "secs": 2.24,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "今日は私の配信に来てくれてありがとう",
+     "secs": 2.23,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "みなさん、今日のライブに来てくれてありがとう。",
+     "secs": 2.23,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c2",
+   "text": "明天下午三點我們在車站見面",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "明日午後 3 時に駅で待ち合わせましょう。",
+     "secs": 2.28,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "明日午後三時に駅で待ち合わせましょう。",
+     "secs": 2.27,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "明日午後三時に駅で待ち合わせましょう。",
+     "secs": 2.2,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c3",
+   "text": "這個遊戲真的太難了吧",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "このゲーム、本当に難しいですね。",
+     "secs": 2.24,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "このゲームは本当に難しいですね",
+     "secs": 2.23,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "このゲームは本当に難しいですね",
+     "secs": 2.17,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c4",
+   "text": "抱歉剛剛網路斷線了",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "さっきネットが切れてしまい申し訳ありません",
+     "secs": 2.26,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "ごめん、さっきネットが切れたんだ。",
+     "secs": 2.27,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "ごめん、さっきネットが切れたんだ。",
+     "secs": 2.22,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c5",
+   "text": "我們一起去看煙火吧",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "一緒に花火を見に行きましょう。",
+     "secs": 2.22,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "一緒に花火を見に行きましょうか",
+     "secs": 2.24,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "一緒に花火を見に行きましょうか",
+     "secs": 2.18,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "zj-c6",
+   "text": "這次的新衣裝超可愛的",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "今回の新衣装はとっても可愛いですね。",
+     "secs": 2.27,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "今回の新衣装はすごく可愛いね",
+     "secs": 2.23,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "今回の新衣装はすごく可愛いね",
+     "secs": 2.17,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-01",
+   "text": "昨日、友達に手紙を書いた",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "昨天寫信給朋友了。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "昨天寫信給朋友了。",
+     "secs": 2.16,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "昨天寫信給朋友了。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-02",
+   "text": "今日の配信はすごく勉強になった",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "今天的直播讓我學到了很多。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "今天的直播讓我學到了很多。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "今天的直播讓我學到了很多。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-03",
+   "text": "この箱は丈夫だから大丈夫",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "這個箱子很堅固，沒問題的。",
+     "secs": 2.22,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "這個箱子很堅固，沒問題的。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "這個箱子很堅固，沒問題的。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-04",
+   "text": "先月、娘が生まれました",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "上個月，我女兒出生了。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "上個月，我女兒出生了。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "上個月，我女兒出生了。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-05",
+   "text": "大家さんに家賃を払わなきゃ",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "得付給大家房租啊。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "得付給大家房租啊。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr+terms": {
+     "output": "得付給大家房租啊。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-06",
+   "text": "毎朝、新聞を読んでいます",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "我每天早上都看報紙。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "我每天早上都看報紙。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "我每天早上都看報紙。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-07",
+   "text": "汽車に乗って田舎に帰った",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "搭車回到鄉下。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "搭車回到鄉下。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr+terms": {
+     "output": "搭車回到鄉下。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-08",
+   "text": "みんなに迷惑をかけてごめん",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "對不起讓大家受麻煩了。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "對不起讓大家受麻煩了。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "對不起讓大家受麻煩了。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-09",
+   "text": "床に座って配信を見てた",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "坐在床上看直播。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "坐在床上看直播。",
+     "secs": 2.16,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr+terms": {
+     "output": "坐在床上看直播。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-10",
+   "text": "犬が走ってきた",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "狗跑過來了。",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "狗跑過來了。",
+     "secs": 2.17,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "狗跑過來了。",
+     "secs": 2.16,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-11",
+   "text": "階段で転んで怪我をした",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "在階梯上摔倒了受傷了。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "在階梯上摔倒了受傷了。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "在階梯上摔倒了受傷了。",
+     "secs": 2.23,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-12",
+   "text": "夕飯の用意はできた？",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "晚餐準備好了嗎？",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "晚餐準備好了嗎？",
+     "secs": 2.18,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "晚餐準備好了嗎？",
+     "secs": 2.15,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-13",
+   "text": "ちょっと留守番をお願いね",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "稍微幫我照看一下吧。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr": {
+     "output": "稍微幫我照看一下吧。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": false
+    },
+    "zh-instr+terms": {
+     "output": "稍微幫我照看一下吧。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": false
+    }
+   }
+  },
+  {
+   "id": "jz-14",
+   "text": "この料理は本当に油断できない",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "這道菜真的讓人不敢大意。",
+     "secs": 2.21,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr": {
+     "output": "這道菜真的讓人不敢大意。",
+     "secs": 2.19,
+     "untranslated": false,
+     "correct": true
+    },
+    "zh-instr+terms": {
+     "output": "這道菜真的讓人不敢大意。",
+     "secs": 2.2,
+     "untranslated": false,
+     "correct": true
+    }
+   }
+  },
+  {
+   "id": "jz-c1",
+   "text": "みんな、今日も来てくれてありがとう！",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "大家今天也來參加了，謝謝！",
+     "secs": 2.24,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "大家今天也來參加了，謝謝！",
+     "secs": 2.2,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "大家今天也來參加了，謝謝！",
+     "secs": 2.21,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-c2",
+   "text": "このボス強すぎない？",
+   "covered": false,
+   "variants": {
+    "old-ja": {
+     "output": "這個 BOSS 也太強了吧？",
+     "secs": 2.22,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "這個 BOSS 也太強了吧？",
+     "secs": 2.19,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "這個 BOSS 也太強了吧？",
+     "secs": 2.2,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-c3",
+   "text": "スパチャありがとうございます！",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "感謝你的贊助！",
+     "secs": 2.18,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "感謝你的贊助！",
+     "secs": 2.15,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "感謝您的超級留言！",
+     "secs": 2.19,
+     "untranslated": false
+    }
+   }
+  },
+  {
+   "id": "jz-c4",
+   "text": "明日は朝から歌枠やります",
+   "covered": true,
+   "variants": {
+    "old-ja": {
+     "output": "明天早上開始唱歌環節。",
+     "secs": 2.2,
+     "untranslated": false
+    },
+    "zh-instr": {
+     "output": "明天早上開始唱歌環節。",
+     "secs": 2.2,
+     "untranslated": false
+    },
+    "zh-instr+terms": {
+     "output": "明天早上就要開始唱歌了。",
+     "secs": 2.23,
+     "untranslated": false
+    }
+   }
+  }
+ ]
+}
