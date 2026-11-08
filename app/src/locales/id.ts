@@ -698,7 +698,7 @@ export const id: Messages = {
   "output.obsOriginal": "Teks asli",
   "output.obsTranslation": "Terjemahan",
   "output.obsBoth": "Teks asli dan terjemahan",
-  "output.obsHelp": "Jika aktif, subtitle di jendela subtitle langsung ditulis ke file teks. Di OBS, tambahkan sumber Teks (GDI+), centang Baca dari file, lalu pilih file ini. Tidak ada port jaringan yang dibuka.",
+  "output.obsHelp": "Jika aktif, subtitle di jendela subtitle langsung ditulis ke file teks. Di OBS, tambahkan sumber Teks (GDI+), centang Baca dari berkas, lalu pilih file ini. Tidak ada port jaringan yang dibuka.",
   "output.obsPath": "File teks: {path}",
   "output.obsError": "Gagal menulis file teks untuk OBS: {error}",
   "output.openObs": "Buka folder file untuk OBS",

@@ -720,7 +720,7 @@ export const ptBR: Messages = {
   "output.obsOriginal": "Original",
   "output.obsTranslation": "Tradução",
   "output.obsBoth": "Original e tradução",
-  "output.obsHelp": "Quando ligado, as legendas da janela de legendas são gravadas em um arquivo de texto conforme aparecem. No OBS, adicione uma fonte Texto (GDI+), marque Ler do arquivo e escolha este arquivo. Nenhuma porta de rede é aberta.",
+  "output.obsHelp": "Quando ligado, as legendas da janela de legendas são gravadas em um arquivo de texto conforme aparecem. No OBS, adicione uma fonte Texto (GDI+), marque Carregar do arquivo e escolha este arquivo. Nenhuma porta de rede é aberta.",
   "output.obsPath": "Arquivo de texto: {path}",
   "output.obsError": "Não foi possível gravar o arquivo de texto para o OBS: {error}",
   "output.openObs": "Abrir pasta do arquivo para o OBS",

@@ -649,7 +649,7 @@ export const ja: Messages = {
   "output.obsOriginal": "原文",
   "output.obsTranslation": "訳文",
   "output.obsBoth": "原文と訳文",
-  "output.obsHelp": "オンにすると、字幕ウィンドウの字幕がリアルタイムでテキストファイルに書き込まれます。OBS で「テキスト (GDI+)」ソースを追加し、「ファイルから読み取り」をオンにしてこのファイルを選んでください。ネットワークポートは開きません。",
+  "output.obsHelp": "オンにすると、字幕ウィンドウの字幕がリアルタイムでテキストファイルに書き込まれます。OBS で「テキスト (GDI+)」ソースを追加し、「ファイルからの読み取り」をオンにしてこのファイルを選んでください。ネットワークポートは開きません。",
   "output.obsPath": "テキストファイル：{path}",
   "output.obsError": "OBS 用テキストファイルに書き込めませんでした：{error}",
   "output.openObs": "OBS 用テキストファイルのフォルダーを開く",

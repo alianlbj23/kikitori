@@ -652,7 +652,7 @@ export const ko: Messages = {
   "output.obsOriginal": "원문",
   "output.obsTranslation": "번역",
   "output.obsBoth": "원문과 번역",
-  "output.obsHelp": "켜면 자막 창의 자막이 실시간으로 텍스트 파일에 기록됩니다. OBS에서 '텍스트 (GDI+)' 소스를 추가하고 '파일에서 읽기'를 선택한 뒤 이 파일을 고르세요. 네트워크 포트는 열지 않습니다.",
+  "output.obsHelp": "켜면 자막 창의 자막이 실시간으로 텍스트 파일에 기록됩니다. OBS에서 '텍스트 (GDI+)' 소스를 추가하고 '파일에서 불러들이기'를 선택한 뒤 이 파일을 고르세요. 네트워크 포트는 열지 않습니다.",
   "output.obsPath": "텍스트 파일: {path}",
   "output.obsError": "OBS 텍스트 파일에 쓸 수 없습니다: {error}",
   "output.openObs": "OBS 텍스트 파일 폴더 열기",

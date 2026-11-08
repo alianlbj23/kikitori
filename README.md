@@ -1,39 +1,43 @@
 # kikitori（聞き取り）
 
-kikitori 聽你電腦正在播放的聲音（或麥克風），即時辨識成文字、翻譯成你選的語言，用浮在畫面上的雙語字幕顯示。
-語音辨識（Whisper）與翻譯（本機 Ollama）都在你自己的電腦上執行：聲音與文字不會上傳到任何雲端服務。
+[繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | **English** | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Русский](README.ru.md) | [Tiếng Việt](README.vi.md) | [ไทย](README.th.md) | [Bahasa Indonesia](README.id.md)
 
-主要情境是**看日語 VTuber 直播**（有 BGM、遊戲音效、直播用語），模型推薦與參數都依本專案的實測調整過；
-其他 20 種語言之間的任意組合也能用。
+*This is a translation of the Traditional Chinese [README.zh-TW.md](README.zh-TW.md). If the two differ, README.zh-TW.md prevails. It was translated with AI assistance; corrections are welcome via [issues](https://github.com/alianlbj23/kikitori/issues).*
 
-- 平台：Windows 10/11 x64（主要驗證平台）、Linux x64、macOS Apple Silicon
-- 授權：MIT（各模型另有授權，見「授權」）
-- 目前版本：0.2.0（[更新內容](docs/release-notes/v0.2.0.md)）
+kikitori listens to the audio your computer is playing (or your microphone), transcribes it in real time, translates it into the language you choose, and shows it as bilingual subtitles floating on your screen.
+Speech recognition (Whisper) and translation (local Ollama) both run on your own computer: audio and text are never uploaded to any cloud service.
 
-## 功能
+The main use case is **watching Japanese VTuber livestreams** (with BGM, game sound effects and livestream slang); the recommended models and parameters were tuned from this project's own measurements.
+Any other combination of the 20 supported languages works too.
 
-| 功能 | 說明 |
+- Platforms: Windows 10/11 x64 (main tested platform), Linux x64, macOS Apple Silicon
+- License: MIT (models have their own licenses, see "License")
+- Current version: 0.2.0 ([release notes](docs/release-notes/v0.2.0.md))
+
+## Features
+
+| Feature | Description |
 |---|---|
-| 影片翻譯 | 擷取系統播放的聲音（Windows WASAPI loopback／Linux PulseAudio monitor／macOS ScreenCaptureKit），把收聽語言翻成字幕語言 |
-| 即時口譯 | 擷取麥克風；你說「我的語言」時譯成對方的語言，對方說話時譯成你的語言 |
-| 先快後準的雙路徑字幕 | 句子還在說時，先用較快的模型出「即時字幕」；說完後用較準的模型重算「完整字幕」取代它 |
-| 穩定的即時字幕 | 即時字幕中已經不會再變的開頭正常顯示、還在變動的尾巴淡色顯示；譯文不再跟著尾巴一直閃 |
-| 20 種語言任意組合 | 收聽語言（可選「自動偵測」）與字幕語言從 20 種語言中任選，見「支援的語言」 |
-| 13 種介面語言 | 預設跟隨作業系統，可在設定頁切換 |
-| 只顯示原文 | 關掉「顯示翻譯」就只看原文：不需要 Ollama、不佔 GPU；執行中也能切換 |
-| 振假名 | 在日文原文的漢字上標讀音（SudachiDict，第一次打開時才下載約 69 MiB） |
-| 依硬體推薦模型 | 偵測 CPU、記憶體、NVIDIA 顯示卡與 Ollama，自動選擇模型組合；第一次按「開始」時才下載缺少的模型 |
-| 術語表 | 內建 53 個日語直播用語（赤スパ、推し、メン限…），也可以自訂詞條、匯入／匯出 CSV |
-| 匯出字幕紀錄 | SRT、VTT、TXT、CSV；可設定每次結束時自動存檔 |
-| OBS 文字檔 | 把目前字幕寫到文字檔，給 OBS「文字（GDI+）→ 從檔案讀取」使用；不開網路埠 |
-| 字幕視窗 | 透明、置頂、可滑鼠穿透；字級、背景、位置、句數、每句至少顯示多久、閒置多久淡出都可調 |
-| 狀態列 | 音量表、延遲（說完到完整字幕的中位數）；辨識跟不上或 15 秒沒有聲音時提醒 |
-| 模型管理 | 下載、查看磁碟用量、刪除辨識模型；替你在 Ollama 下載翻譯模型 |
-| 自動更新 | 啟動時檢查 GitHub Releases，下載並驗證簽章後安裝 |
+| Video translation | Captures the audio the system is playing (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit) and translates the listening language into the subtitle language |
+| Live interpreting | Captures the microphone; when you speak in "My language" it is translated into the "Other person's language", and when they speak it is translated into yours |
+| Two-pass subtitles: fast first, accurate after | While a sentence is still being spoken, a faster model produces "live subtitles"; once it ends, a more accurate model recomputes "final subtitles" that replace them |
+| Stable live subtitles | The beginning of a live subtitle that will no longer change is shown normally, and the tail that is still changing is shown faded; the translation no longer flickers along with the tail |
+| Any combination of 20 languages | Pick the listening language (or "Detect automatically") and the subtitle language from 20 languages, see "Supported languages" |
+| 13 interface languages | Follows the operating system by default; can be changed on the Settings page |
+| Show originals only | Turn off "Show translation" to see only the original: no Ollama needed, no GPU used; can be switched while running |
+| Furigana | Shows readings above the kanji of Japanese originals (SudachiDict, about 69 MiB, downloaded only the first time you turn it on) |
+| Hardware-based model recommendations | Detects CPU, memory, NVIDIA GPU and Ollama and picks a model combination automatically; missing models are downloaded only the first time you press "Start" |
+| Glossary | 53 built-in Japanese livestream terms (赤スパ, 推し, メン限…) plus easily confused Chinese–Japanese words for Chinese-to-Japanese; you can also add your own entries and import/export CSV |
+| Transcript export | SRT, VTT, TXT, CSV; can be set to save automatically each time a session ends |
+| OBS text file | Writes the current subtitles to a text file for the "Read from file" option of an OBS "Text (GDI+)" source; no network port is opened |
+| Subtitle window | Transparent, always on top, click-through; font size, background, position, number of lines, minimum display time per line and idle fade-out time are all adjustable |
+| Status bar | Volume meter, latency (median from end of speech to final subtitle); warns when recognition can't keep up or there has been no sound for 15 seconds |
+| Model management | Download speech recognition models, view their disk usage and delete them; downloads translation models into Ollama for you |
+| Auto-update | Checks GitHub Releases at startup, downloads the update, verifies its signature and installs it |
 
-## 支援的語言
+## Supported languages
 
-收聽語言與字幕語言（20 種，任意組合）：
+Listening and subtitle languages (20, any combination):
 
 | | | | | |
 |---|---|---|---|---|
@@ -42,147 +46,149 @@ kikitori 聽你電腦正在播放的聲音（或麥克風），即時辨識成�
 | Italiano | العربية | हिन्दी | Bahasa Indonesia | Tiếng Việt |
 | ไทย | Türkçe | Polski | Nederlands | Українська |
 
-- 繁體中文字幕以 OpenCC `s2twp` 轉成台灣正體與台灣用語（例如 视频 → 影片），只在譯文出現簡體字時才轉，不會把「台灣」改成「臺灣」。
-- 收聽與字幕是同一種語言時不翻譯（繁中與簡中之間只做字形轉換）。
-- 語音辨識的品質依語言而不同。模型對某個語言的錯誤率超過 20% 時（例如 large-v3-turbo 的泰語、阿拉伯語、印地語，large-v3 的越南語），推薦說明會提示「辨識品質較低」；泰語、阿拉伯語、印地語在 8 GB 以上的顯示卡上即時字幕也改用 large-v3。
+- Traditional Chinese subtitles are converted with OpenCC `s2twp` to Taiwan-standard Traditional characters and Taiwanese usage (e.g. 视频 → 影片). The conversion only runs when the translation contains Simplified characters, and it does not change 「台灣」 to 「臺灣」.
+- When the listening and subtitle languages are the same, nothing is translated (between Traditional and Simplified Chinese, only the script is converted).
+- Speech recognition quality varies by language. When a model's error rate for a language is above 20% (e.g. Thai, Arabic and Hindi with large-v3-turbo, Vietnamese with large-v3), the recommendation notes warn that it recognizes that language poorly; for Thai, Arabic and Hindi on GPUs with 8 GB or more, live subtitles also switch to large-v3.
 
-介面語言（13 種）：繁體中文（台灣）、简体中文、English、日本語、한국어、Español、Français、Deutsch、Português (Brasil)、Русский、Tiếng Việt、ไทย、Bahasa Indonesia。
-阿拉伯語可以當收聽或字幕語言，但沒有阿拉伯語介面（介面不支援由右到左的版面）。
+Interface languages (13): 繁體中文（台灣）, 简体中文, English, 日本語, 한국어, Español, Français, Deutsch, Português (Brasil), Русский, Tiếng Việt, ไทย, Bahasa Indonesia.
+Arabic can be used as a listening or subtitle language, but there is no Arabic interface (the interface does not support right-to-left layouts).
 
-## 推薦組合（依硬體）
+## Recommended combinations (by hardware)
 
-kikitori 會自動偵測並套用，下表只是讓你知道會拿到什麼。依據是本專案的評測（`experiments/vtuber_eval/`、`experiments/translate_eval/`），規則與算式見 [`docs/specs/hardware.md`](docs/specs/hardware.md)。
+kikitori detects and applies these automatically; the table only shows what you will get. They are based on this project's evaluations (`experiments/vtuber_eval/`, `experiments/translate_eval/`); the rules and formulas are in [`docs/specs/hardware.md`](docs/specs/hardware.md).
 
-| 你的電腦 | 即時字幕 | 完整字幕 | 翻譯（Ollama） |
+| Your computer | Live subtitles | Final subtitles | Translation (Ollama) |
 |---|---|---|---|
-| NVIDIA 16 GB 以上 | large-v3-turbo（float16） | large-v3（float16） | qwen3.5:9b |
-| NVIDIA 12 GB（例如 RTX 5070） | large-v3-turbo（int8_float16） | large-v3（int8_float16） | qwen3.5:9b |
-| NVIDIA 8–11 GB | large-v3-turbo（顯示記憶體剛好 8 GB 下限時改 small） | large-v3（依顯示記憶體選精度） | qwen3.5:4b |
+| NVIDIA 16 GB or more | large-v3-turbo (float16) | large-v3 (float16) | qwen3.5:9b |
+| NVIDIA 12 GB (e.g. RTX 5070) | large-v3-turbo (int8_float16) | large-v3 (int8_float16) | qwen3.5:9b |
+| NVIDIA 8–11 GB | large-v3-turbo (small when VRAM is right at the 8 GB minimum) | large-v3 (precision chosen by VRAM) | qwen3.5:4b |
 | NVIDIA 4–8 GB | base | large-v3-turbo | qwen3.5:4b |
-| NVIDIA 4 GB 以下 | base | small | qwen3.5:4b |
-| 沒有 NVIDIA GPU，RAM ≥ 16 GB、5 核以上 | base（CPU） | small（CPU） | qwen3.5:4b |
-| 沒有 NVIDIA GPU，RAM 較少或 4 核以下 | tiny（CPU） | base（CPU） | qwen3.5:4b |
-| Mac（Apple Silicon） | base（CPU） | small（CPU） | 依統一記憶體大小（16 GB 為 qwen3.5:9b） |
+| NVIDIA under 4 GB | base | small | qwen3.5:4b |
+| No NVIDIA GPU, RAM ≥ 16 GB, 5 or more cores | base (CPU) | small (CPU) | qwen3.5:4b |
+| No NVIDIA GPU, less RAM or 4 cores or fewer | tiny (CPU) | base (CPU) | qwen3.5:4b |
+| Mac (Apple Silicon) | base (CPU) | small (CPU) | Depends on unified memory size (qwen3.5:9b at 16 GB) |
 
-- 精度 int8_float16 與 float16 的辨識品質實測相同（差異不顯著），只是顯示記憶體約減半；與翻譯模型共用顯示卡時，kikitori 優先讓翻譯模型用大一級的。
-- 辨識模型下載量：large-v3-turbo 1.62 GB、large-v3 3.09 GB、small 487 MB、base 148 MB、tiny 78 MB。翻譯模型：qwen3.5:9b 約 6.6 GB、qwen3.5:4b 約 3.3 GB。
-- NVIDIA GPU 需要 cuBLAS 12（約 570 MB）。kikitori 不隨安裝檔附帶；在模型頁同意 NVIDIA EULA 後一鍵下載。沒裝時會改用 CPU。
-- 翻譯伺服器在其他電腦（遠端）時，不會自動選翻譯模型，請在模型頁自己選。
-- 翻譯一律優先推薦 Qwen3.5（Apache-2.0）：顯示記憶體夠就 9B，否則 4B。顯示卡 4 GB 以下或沒有 NVIDIA GPU 時也是 qwen3.5:4b，Ollama 會把放不下的部分放到 CPU 執行，速度較慢（這種情況的翻譯延遲還沒有實測）。
-- 騰訊 HY-MT 有地區限制，只在你於設定頁勾選「我不在歐盟、英國或南韓使用」後才可能被推薦；Sakura（非商用授權）永遠不會被推薦，只能手動選。
-- macOS 與 Linux 的辨識速度、CPU 上的翻譯速度都還沒有實測（見「已知限制」）。
+- In our measurements, int8_float16 and float16 give the same recognition quality (no significant difference), but int8_float16 uses about half the VRAM; when the GPU is shared with the translation model, kikitori prefers to let the translation model be one size larger.
+- Speech recognition model downloads: large-v3-turbo 1.62 GB, large-v3 3.09 GB, small 487 MB, base 148 MB, tiny 78 MB. Translation models: qwen3.5:9b about 6.6 GB, qwen3.5:4b about 3.3 GB.
+- NVIDIA GPUs need cuBLAS 12 (about 570 MB). kikitori does not bundle it with the installer; after you accept the NVIDIA EULA on the Models page it downloads with one click. Without it, the CPU is used.
+- When the translation server is on another computer (remote), no translation model is chosen automatically; pick one yourself on the Models page.
+- For translation, Qwen3.5 (Apache-2.0) is always recommended first: 9B if there is enough VRAM, otherwise 4B. With a GPU of 4 GB or less, or no NVIDIA GPU, it is also qwen3.5:4b; Ollama runs the part that doesn't fit on the CPU, which is slower (translation latency in this case has not been measured yet).
+- Tencent HY-MT has regional restrictions and can only be recommended after you tick the confirmation on the Settings page that you don't use it in the EU, the UK or South Korea; Sakura (non-commercial license) is never recommended and can only be chosen manually.
+- Recognition speed on macOS and Linux and translation speed on the CPU have not been measured yet (see "Known limitations").
 
-## 開始使用
+## Getting started
 
-1. 從 [GitHub Releases](https://github.com/alianlbj23/kikitori/releases) 下載安裝檔（各平台的安裝提示寫在 Release 頁面：未簽章的 SmartScreen／Gatekeeper 警告、Linux 的 fuse3 與字型）。
-2. 要翻譯的話，安裝 [Ollama](https://ollama.com/download) 並讓它在背景執行。kikitori 偵測不到時會提示「安裝 Ollama」或改用「只顯示原文」。
-3. 開啟 kikitori。第一次啟動會依硬體自動套用推薦組合。
-4. 在設定頁的「語言」選收聽語言與字幕語言。選擇後只會顯示推薦組合與下載大小，**不會立刻下載**。
-5. 選聲音來源，按「開始」。缺少的辨識模型與翻譯模型（Ollama 時）會先下載，完成後自動開始。
+1. Download the installer from [GitHub Releases](https://github.com/alianlbj23/kikitori/releases) (installation notes for each platform are on the Release page: SmartScreen/Gatekeeper warnings for unsigned builds, fuse3 and fonts on Linux).
+2. To translate, install [Ollama](https://ollama.com/download) and keep it running in the background. If kikitori can't detect it, it offers "Install Ollama" or "Show originals only".
+3. Open kikitori. On first launch it automatically applies the recommended combination for your hardware.
+4. Under "Languages" on the Settings page, choose the listening language and the subtitle language. This only shows the recommended combination and download size; **nothing is downloaded yet**.
+5. Choose the audio source and press "Start". Missing speech recognition and translation models (with Ollama) are downloaded first, and subtitles start automatically when done.
 
-### 只顯示原文
+### Show originals only
 
-字幕紀錄頁工具列與設定頁「字幕」區塊的「顯示翻譯」開關（或快速鍵 Ctrl+Alt+J）。關閉時：
+Use the "Show translation" switch in the Transcript page toolbar or in the "Subtitles" section of the Settings page (or the shortcut Ctrl+Alt+J). When it is off:
 
-- 引擎完全不連翻譯伺服器，不需要安裝 Ollama，也不佔用 GPU 給翻譯模型；
-- 字幕視窗把原文改成主要字幕的字級與顏色；
-- 執行中切換即時生效，已顯示的句子不會補翻。
+- the engine does not connect to the translation server at all, Ollama is not needed, and no GPU is used for a translation model;
+- the subtitle window shows the original in the main subtitle's font size and color;
+- switching while running applies immediately; lines already shown are not translated afterwards.
 
-### 振假名
+### Furigana
 
-設定頁「在日文原文上標振假名」：收聽語言是日語時，在原文的漢字上方標上平假名讀音（送り仮名不重複標）。第一次打開時下載 SudachiDict core（Apache-2.0，約 69 MiB），模型頁可以查看用量與刪除。只影響畫面，匯出的字幕不變。設計見 [`docs/specs/furigana.md`](docs/specs/furigana.md)。
+"Show furigana over Japanese originals" on the Settings page: when the listening language is Japanese, hiragana readings are shown above the kanji of the original (okurigana are not annotated again). The first time you turn it on, SudachiDict core (Apache-2.0, about 69 MiB) is downloaded; its disk usage can be viewed and it can be deleted on the Models page. It only affects the display; exported subtitles are unchanged. Design: [`docs/specs/furigana.md`](docs/specs/furigana.md).
 
-### 術語表
+### Glossary
 
-設定頁「術語表」：
+"Glossary" on the Settings page:
 
-- **內建直播用語表**（預設開）：原文是日語、字幕是繁中／簡中／英文／韓文時使用，例如 スパチャ → 超級留言、メン限 → 會員專屬、切り抜き → 切片。只有這句原文實際出現的詞才放進翻譯提示詞（每句最多 8 條）。
-- **自訂詞條**：原文、譯文、適用的字幕語言（或「全部語言」），最多 500 筆，適用於任何收聽語言；同一個寫法時優先於內建表。比對不分大小寫與全形／半形。
-- 可以匯入／匯出 CSV（UTF-8，逗號、分號或 Tab 分隔，Excel 存的檔案也能讀）。按「儲存術語表」後，下一次開始字幕時生效。
+- **Built-in livestream terms** (on by default): used when the original is Japanese and the subtitles are Traditional Chinese, Simplified Chinese, English or Korean; for English subtitles, for example, スパチャ → Super Chat, メン限 → members-only, 切り抜き → clip. Only terms that actually appear in the sentence's original are put into the translation prompt (at most 8 per sentence).
+- **Easily confused Chinese–Japanese words** (follow the built-in list's switch): when the original is Chinese and the subtitles are Japanese, the prompt flags words written the same or similarly in Chinese and Japanese but with different meanings, e.g. 便當 → 弁当, 節目 → 番組, 老婆 → 妻; Chinese-to-Japanese also gives the model its instructions in Chinese, so it is less likely to read Chinese with Japanese meanings.
+- **Custom entries**: original, translation and the subtitle language they apply to (or "All languages"), up to 500 entries, for any listening language; for the same spelling they take priority over the built-in list. Matching ignores case and full-width/half-width differences.
+- You can import/export CSV (UTF-8, separated by commas, semicolons or tabs; files saved by Excel can be read too). After you press "Save glossary", changes take effect the next time you start subtitles.
 
-### 匯出字幕紀錄
+### Transcript export
 
-字幕紀錄頁的「匯出」：SRT、VTT、TXT、CSV，內容可選「原文與譯文」「只有原文」「只有譯文」。只匯出完整字幕（即時字幕還在變動）。
-檔案存在 `文件/kikitori/transcripts/YYYY-MM-DD_HHMMSS_<模式>.<副檔名>`，時間碼從開始字幕時算起。
-設定頁可以開「每次結束時自動存檔（SRT 與 TXT）」；按「停止」後會等最後一句的完整字幕送到（最多 2 秒）再存。
+"Export" on the Transcript page: SRT, VTT, TXT, CSV, with the content set to "Original and translation", "Original only" or "Translation only". Only final subtitles are exported (live subtitles are still changing).
+Files are saved to `Documents/kikitori/transcripts/YYYY-MM-DD_HHMMSS_<mode>.<extension>`, with timecodes counted from when subtitles started.
+On the Settings page you can turn on "Save automatically when a session ends (SRT and TXT)"; after you press "Stop", it waits for the final subtitle of the last sentence (up to 2 seconds) before saving.
 
-### OBS 文字檔
+### OBS text file
 
-設定頁「字幕紀錄與 OBS」→「輸出字幕到文字檔（給 OBS）」：原文、譯文或兩者。
-kikitori 把字幕視窗目前的句子覆寫到 `文件/kikitori/obs/subtitle.txt`（UTF-8，原子寫入，每秒最多 10 次）；
-在 OBS 新增「文字（GDI+）」來源並勾「從檔案讀取」指到這個檔案。字幕結束、閒置淡出或清除字幕時檔案會清空。
-不開任何網路埠，所以沒有「瀏覽器來源」的做法。
+Settings page "Transcripts and OBS" → "Write subtitles to a text file (for OBS)": original, translation or both.
+kikitori overwrites `Documents/kikitori/obs/subtitle.txt` with the lines currently in the subtitle window (UTF-8, atomic writes, at most 10 times per second);
+in OBS, add a "Text (GDI+)" source, tick "Read from file" and point it at this file. The file is emptied when subtitles end, fade out when idle, or are cleared.
+No network port is opened, so there is no approach using an OBS "Browser" source.
 
-### 全域快速鍵
+### Global shortcuts
 
-| Windows／Linux | macOS | 動作 |
+| Windows / Linux | macOS | Action |
 |---|---|---|
-| Ctrl+Alt+K | ⌘+Option+K | 切換字幕視窗的滑鼠穿透 |
-| Ctrl+Alt+J | ⌘+Option+J | 切換「顯示翻譯」 |
-| Ctrl+Alt+U | ⌘+Option+U | 清除字幕視窗（與 OBS 文字檔）；字幕紀錄不受影響 |
+| Ctrl+Alt+K | ⌘+Option+K | Toggle click-through for the subtitle window |
+| Ctrl+Alt+J | ⌘+Option+J | Toggle "Show translation" |
+| Ctrl+Alt+U | ⌘+Option+U | Clear the subtitle window (and the OBS text file); the transcript is not affected |
 
-被其他程式占用的快速鍵會在字幕紀錄頁標示「無法使用」，不影響其他快速鍵。Linux Wayland 可能完全無法註冊全域快速鍵。
+A shortcut taken by another program is marked as unavailable on the Transcript page; the other shortcuts are not affected. On Linux Wayland, global shortcuts may not be registered at all.
 
-## 隱私與離線
+## Privacy and offline use
 
-- 聲音、辨識結果與譯文都只在你的電腦上處理。翻譯預設送到本機的 Ollama（`http://localhost:11434/v1`）；你若把翻譯服務改成其他網址，字幕文字會送到那裡。
-- 會連網的只有：下載模型（辨識模型來自 Hugging Face、翻譯模型經 Ollama、GPU 元件來自 PyPI，都是你按下開始或下載時才發生）、啟動時檢查更新（GitHub Releases）。模型都下載好之後，字幕本身可以完全離線使用。
-- API 金鑰只從環境變數讀（設定裡只存變數名稱，預設 `KIKITORI_TRANSLATE_API_KEY`），不寫進任何檔案。
-- 「關於」頁的「複製診斷資訊」只複製到剪貼簿，會遮蔽金鑰、網址中的帳密與使用者名稱，術語表只列筆數。
-- 引擎與桌面程式之間只用標準輸入輸出溝通，不開網路埠。
+- Audio, recognition results and translations are processed only on your computer. Translation goes to local Ollama by default (`http://localhost:11434/v1`); if you change the translation service to another URL, the subtitle text is sent there.
+- The only network access is: downloading models (speech recognition models from Hugging Face, translation models via Ollama, GPU components from PyPI, all only when you press Start or download), and checking for updates at startup (GitHub Releases). Once all models are downloaded, subtitles themselves work fully offline.
+- The API key is read only from an environment variable (the settings store only the variable name, `KIKITORI_TRANSLATE_API_KEY` by default) and is never written to any file.
+- "Copy diagnostics" on the "About" page only copies to the clipboard; it masks keys, credentials in URLs and user names, and lists only the number of glossary entries.
+- The engine and the desktop app communicate only through standard input/output; no network port is opened.
 
-## 0.2.0 新功能
+## What's new in 0.2.0
 
-摘要（完整說明與升級注意事項見 [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)）：
+Summary (for full details and upgrade notes see [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
 
-- 20 種語言任意組合、13 種介面語言、只顯示原文、日文振假名
-- 針對日語 VTuber 直播重新選模型（GPU：即時 large-v3-turbo、完整 large-v3；翻譯溫度 0）
-- 內建直播用語術語表與自訂詞條
-- 穩定的即時字幕、音量表與延遲、辨識落後提醒
-- 匯出 SRT／VTT／TXT／CSV、OBS 文字檔、閱讀節奏設定
-- 開始時才下載缺少的模型、模型磁碟用量與刪除
-- 新快速鍵 Ctrl+Alt+J／U、「複製診斷資訊」
-- 按「開始」更快（12 GB 推薦組合含翻譯：剛開啟約 11 → 6 秒、之後約 7.8 → 2.4 秒）、更新提示顯示版本說明
-- 修正：開裝置失敗時模型留在 GPU、每次開始字幕多佔約 17 MiB 顯示記憶體、長時間執行時主視窗記憶體持續成長
+- Any combination of 20 languages, 13 interface languages, "Show originals only", furigana for Japanese
+- Models re-selected for Japanese VTuber livestreams (GPU: live large-v3-turbo, final large-v3; translation temperature 0)
+- Built-in livestream glossary and custom entries
+- Stable live subtitles, volume meter and latency, warning when recognition falls behind
+- Export to SRT/VTT/TXT/CSV, OBS text file, reading pace settings
+- Missing models downloaded only at start, model disk usage and deletion
+- New shortcuts Ctrl+Alt+J/U, "Copy diagnostics"
+- More accurate Chinese-to-Japanese (instructions written in Chinese and a list of easily confused Chinese–Japanese words), translation model chosen from a drop-down list, and closing kikitori also unloads the translation model from local Ollama to free VRAM
+- Faster "Start" (12 GB recommended combination with translation: right after launch about 11 → 6 seconds, afterwards about 7.8 → 2.4 seconds), update prompts show the release notes
+- Fixes: models left on the GPU when opening the device failed, each subtitle session using about 17 MiB more VRAM, main window memory growing steadily during long runs
 
-## 已知限制
+## Known limitations
 
-- **只在 Windows（RTX 5070）上完整實測**。macOS 與 Linux 的實機擷取、Apple Silicon 與 CPU 上的翻譯速度都沒有量過；Linux 只在 Docker 容器中驗收過。
-- **新推薦組合只在 RTX 5070（12 GB）上端到端量測**：turbo＋large-v3（int8_float16）與 qwen3.5:9b 同時執行時整張卡最高 10.8 GB、即時字幕延遲約 0.31 秒、說完到完整字幕約 0.92 秒（中位數，見 [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)）。
-- **辨識準確度的評測素材不是 VTuber**：用的是 YouTube 一般口語（YODAS）、朗讀與電視語音，加上混入的 BGM；沒有歌回、尖叫、多人連動的資料。歌聲會穿過人聲偵測，可能出現奇怪的字幕。
-- 英文以外的語言只有公開基準與非語音的幻覺測試，沒有在真實語音上實測；幻覺片語表沒有經過母語者審閱。
-- 有些片尾套話（例如「チャンネル登録よろしくお願いします」）會被當成 Whisper 幻覺整句濾掉，即使直播主真的說了。
-- 需要另外安裝 Ollama 才能翻譯；Ollama 以外的 OpenAI 相容伺服器只能自己安裝模型。
-- 長時間執行的記憶體壓力測試在 Windows 上做過（引擎 20 分鐘 session 持平、主視窗 22 分鐘 +0.7 MiB／分）；macOS、Linux 沒有測。
-- 同一時間只能有一個字幕 session；裝置被拔掉後不會自動重連。
-- 不支援：點字查詞、只擷取單一 App 的聲音、歌回模式、說話者分離、OBS 瀏覽器來源（原因見 [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md)「先不做」與 [`docs/adr/`](docs/adr/)）。
-- 安裝檔沒有付費程式碼簽章（Windows SmartScreen、macOS Gatekeeper 會警告）。
+- **Fully tested only on Windows (RTX 5070)**. Real-device capture on macOS and Linux, and translation speed on Apple Silicon and the CPU, have not been measured; Linux has only been verified in a Docker container.
+- **The new recommended combination has been measured end to end only on an RTX 5070 (12 GB)**: with turbo + large-v3 (int8_float16) and qwen3.5:9b running together, the whole card peaks at 10.8 GB, live subtitle latency is about 0.31 seconds, and end of speech to final subtitle is about 0.92 seconds (medians, see [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
+- **The recognition accuracy evaluation material is not VTuber content**: it is everyday YouTube speech (YODAS), read speech and TV audio, mixed with BGM; there is no data from singing streams, screaming or multi-person collabs. Singing passes through voice activity detection and may produce odd subtitles.
+- Languages other than English have only public benchmarks and non-speech hallucination tests, with no measurements on real speech; the hallucination phrase list has not been reviewed by native speakers.
+- Some stock closing phrases (e.g. 「チャンネル登録よろしくお願いします」) are filtered out as whole-sentence Whisper hallucinations, even when the streamer really says them.
+- Translation requires installing Ollama separately; with OpenAI-compatible servers other than Ollama, you have to install the models yourself.
+- Long-running memory stress tests were done on Windows (engine flat over a 20-minute session, main window +0.7 MiB/min over 22 minutes); macOS and Linux have not been tested.
+- Only one subtitle session can run at a time; it does not reconnect automatically after a device is unplugged.
+- Not supported: click-to-look-up words, capturing audio from a single app only, singing stream mode, speaker diarization, OBS "Browser" source (for the reasons see the "Not doing for now" (先不做) section of [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) (in Chinese) and [`docs/adr/`](docs/adr/)).
+- The installers have no paid code signing (Windows SmartScreen and macOS Gatekeeper will warn).
 
-## 授權
+## License
 
-kikitori 本身以 MIT 授權發布（[LICENSE](LICENSE)）。第三方元件的授權全文在安裝目錄，可從「關於」頁開啟。
+kikitori itself is released under the MIT license ([LICENSE](LICENSE)). The full license texts of third-party components are in the installation directory and can be opened from the "About" page.
 
-模型不隨安裝檔散布，由你下載時適用各自的授權：
+Models are not distributed with the installer; their own licenses apply when you download them:
 
-| 模型 | 授權 | 注意 |
+| Model | License | Notes |
 |---|---|---|
-| Whisper（CTranslate2 轉換版） | MIT | — |
-| Silero VAD（隨程式附帶） | MIT | — |
-| Qwen3.5（預設翻譯模型） | Apache-2.0 | — |
-| 騰訊 HY-MT1.5 | Tencent HY Community License | **不適用於歐盟、英國、南韓**；kikitori 預設不推薦，需在設定頁確認所在地區 |
-| Sakura-GalTransl | CC BY-NC-SA 4.0 | **禁止商業用途**；不會被推薦，只能手動選 |
-| NVIDIA cuBLAS | NVIDIA CUDA EULA | 下載前需同意 |
+| Whisper (CTranslate2 conversion) | MIT | — |
+| Silero VAD (bundled with the app) | MIT | — |
+| Qwen3.5 (default translation model) | Apache-2.0 | — |
+| Tencent HY-MT1.5 | Tencent HY Community License | **Not applicable in the EU, the UK or South Korea**; kikitori does not recommend it by default, and your region must be confirmed on the Settings page |
+| Sakura-GalTransl | CC BY-NC-SA 4.0 | **Commercial use prohibited**; never recommended, can only be chosen manually |
+| NVIDIA cuBLAS | NVIDIA CUDA EULA | Must be accepted before download |
 
-## 給開發者
+## For developers
 
-- 架構：[docs/architecture.md](docs/architecture.md)；各模組規格：[docs/specs/](docs/specs/)；學習指南：[docs/learning/](docs/learning/README.md)
-- 評測與實驗：`experiments/*/README.md`；調查報告：`reports/`
+- Architecture: [docs/architecture.md](docs/architecture.md); module specs: [docs/specs/](docs/specs/); learning guide: [docs/learning/](docs/learning/README.md)
+- Evaluations and experiments: `experiments/*/README.md`; research reports: `reports/`
 
 ```text
-uv sync                                       安裝 Python 依賴
-uv run python -m unittest discover -s tests   Python 測試
+uv sync                                       Install Python dependencies
+uv run python -m unittest discover -s tests   Python tests
 uv run ruff check                             Lint
-uv run kikitori                               互動選單（啟動引擎、列出音訊裝置…）
-cd app && npm ci && npm run menu              桌面程式的開發選單（需要 Node 與 Rust）
-cd app && npm test && npx tsc --noEmit        前端測試與型別檢查
+uv run kikitori                               Interactive menu (start the engine, list audio devices…)
+cd app && npm ci && npm run menu              Desktop app development menu (requires Node and Rust)
+cd app && npm test && npx tsc --noEmit        Frontend tests and type checking
 ```
