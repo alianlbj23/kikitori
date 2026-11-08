@@ -161,6 +161,7 @@ import { SessionEndSave } from "../lib/session-end";
 import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
 import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
 import { isTranslationServerLog, translationGuide, type GuideView } from "../lib/translation-guide";
+import { CUSTOM_TRANSLATION_MODEL, translationPicker } from "../lib/translation-picker";
 import { setShowTranslation } from "../lib/translation-toggle";
 import type {
   AboutInfo,
@@ -436,7 +437,6 @@ const el = {
   modelsRefresh: byId<HTMLButtonElement>("models-refresh"),
   trSource: byId("tr-source"),
   trPresets: byId("tr-presets"),
-  trNames: byId<HTMLDataListElement>("tr-names"),
   comboForm: byId<HTMLFormElement>("combo-form"),
   comboCheck: byId("combo-check"),
   comboSave: byId<HTMLButtonElement>("combo-save"),
@@ -2049,6 +2049,7 @@ function renderModels(): void {
   renderFurigana();
   if (!m) {
     replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, t("common.loading"))));
+    renderTranslationPickers();
     return;
   }
   replace(
@@ -2121,7 +2122,6 @@ function renderModels(): void {
       ),
     ),
   );
-  replace(el.trNames, ...tr.models.map((x) => h("option", { value: x.name })));
   renderComboOptions();
   renderTranslationGuide();
 }
@@ -2282,6 +2282,49 @@ function renderComboOptions(): void {
   for (const key of ["fast_compute_type", "final_compute_type"] as const) {
     setOptions(namedField(el.comboForm, key) as HTMLSelectElement, precisions, current[key]);
   }
+  renderTranslationPickers();
+}
+
+const TRANSLATION_FIELDS = ["translation_fast", "translation_final"] as const;
+type TranslationField = (typeof TRANSLATION_FIELDS)[number];
+/** Fields where the user picked "other": the text field stays open while they type. */
+const translationCustomOpen: Record<TranslationField, boolean> = { translation_fast: false, translation_final: false };
+
+function translationSelect(field: TranslationField): HTMLSelectElement {
+  const select = el.comboForm.querySelector<HTMLSelectElement>(`select[data-pick-for="${field}"]`);
+  if (!select) throw new Error(`combo form has no picker for ${field}`);
+  return select;
+}
+
+/** Dropdowns from `models.list`; the hidden text field keeps the value that is validated and saved. */
+function renderTranslationPickers(): void {
+  const models = state.models?.translation.models ?? [];
+  for (const field of TRANSLATION_FIELDS) {
+    const textField = namedField(el.comboForm, field);
+    const picker = translationPicker(models, textField.value, translationCustomOpen[field]);
+    const select = translationSelect(field);
+    replace(select, ...picker.options.map((o) => h("option", { value: o.value }, o.label)));
+    select.value = picker.selected;
+    textField.hidden = !picker.showTextField;
+  }
+}
+
+/**
+ * Runs on the select's `input` event, before the form's listener re-validates, so the text
+ * field already holds the picked name. Arrow keys on a closed select fire `input` on every
+ * step, so "other" only reveals the text field; taking focus would trap keyboard users.
+ */
+function onTranslationPicked(field: TranslationField): void {
+  const select = translationSelect(field);
+  const textField = namedField(el.comboForm, field);
+  if (select.value === CUSTOM_TRANSLATION_MODEL) {
+    translationCustomOpen[field] = true;
+    textField.hidden = false;
+  } else {
+    translationCustomOpen[field] = false;
+    textField.value = select.value;
+    textField.hidden = true;
+  }
 }
 
 /** Puts saved settings into the form unless the user has unsaved edits (or `force`). */
@@ -2296,6 +2339,7 @@ function fillCombo(settings: Settings, force = false): void {
     }
   }
   for (const name of COMBO_FIELDS) namedField(el.comboForm, name).value = form[name];
+  for (const field of TRANSLATION_FIELDS) translationCustomOpen[field] = false;
   state.comboDirty = false;
   renderComboOptions();
   showComboErrors({});
@@ -2315,6 +2359,8 @@ function showFieldErrors<K extends string>(form: HTMLFormElement, fields: readon
 
 function showComboErrors(errors: CombinationErrors): void {
   showFieldErrors(el.comboForm, COMBO_FIELDS, errors);
+  // The text field is hidden unless "other" is picked; the select is what the user sees.
+  for (const field of TRANSLATION_FIELDS) translationSelect(field).setAttribute("aria-invalid", String(Boolean(errors[field])));
   // Advanced fields are hidden by default; open the section when one is wrong.
   const advanced = el.comboForm.querySelector("details");
   const advancedKeys: (keyof CombinationForm)[] = [
@@ -3514,6 +3560,9 @@ function wire(): void {
     void submitGlossary();
   });
   el.modelsRefresh.addEventListener("click", () => void loadModels().then(checkRecommendation));
+  for (const field of TRANSLATION_FIELDS) {
+    translationSelect(field).addEventListener("input", () => onTranslationPicked(field));
+  }
   el.comboForm.addEventListener("input", () => {
     state.comboDirty = true;
     el.comboStatus.textContent = "";

@@ -77,7 +77,7 @@
   - 已安裝：顯示套件、版本、位置；`cublas_available=false` 時提示重啟引擎後重新偵測。
 - **語音辨識模型**：`models.list.asr` 表格——模型（使用中、`recommended_for` 的「建議：即時／完整」、`no_speech_reliable=false` 時「不判斷非人聲」並以 title 說明）、大小、速度等級、記憶體（CPU `cpu_ram_mb`／GPU `vram_mb`，未知時「未知」）、授權、狀態（下載按鈕、進度、失敗原因與「重新下載」；已下載的模型顯示磁碟用量 `disk_bytes` 與「刪除」，見「刪除模型」）。
 - **翻譯模型**：伺服器狀態（`translation.server`；連不上時提示啟動 Ollama），`translation.models` 每個模型：名稱、建議用途、**「不可商用」**（`commercial_use=false`）與**「授權不適用於歐盟、英國、南韓」**（`excluded_regions`）兩種警示標籤、授權名稱（`known=false` 時「不在 kikitori 的清單中，授權請自行確認」）、約需記憶體、安裝狀態、授權網址（可選取的文字，不開啟）。第一版的 `translation.base_url／installed／error／presets` 不再讀取。
-- **自訂組合**（表單）：即時／完整辨識模型（下拉，未下載的註明）、運算裝置（自動／CPU／CUDA，兩條路徑共用，`asr.device`）、即時／完整翻譯模型（輸入框，附 `translation.models` 自動完成）；收合的「**進階**」：兩條路徑各自的精度（自動＝`null`，或 CTranslate2 精度名稱）、CPU 執行緒（留空＝自動，1–256）、自行安裝的 cuBLAS 12 資料夾（每行一個絕對路徑，最多 16 個）。
+- **自訂組合**（表單）：即時／完整辨識模型（下拉，未下載的註明）、運算裝置（自動／CPU／CUDA，兩條路徑共用，`asr.device`）、即時／完整翻譯模型（下拉選單：`translation.models` 每個模型一項，標示安裝狀態、「不可商用」與地區限制，最後一項「其他（自行輸入模型名稱）…」才顯示文字框；存檔的名稱不在清單裡時直接選「其他」並顯示該名稱。原本的輸入框＋datalist 會被 WebView2 依目前文字過濾，已填 `qwen3.5:9b` 時看不到其他模型，所以改掉。表單送出、驗證仍以文字框的值為準，`app/src/lib/translation-picker.ts`）；收合的「**進階**」：兩條路徑各自的精度（自動＝`null`，或 CTranslate2 精度名稱）、CPU 執行緒（留空＝自動，1–256）、自行安裝的 cuBLAS 12 資料夾（每行一個絕對路徑，最多 16 個）。
   - **即時檢查**：每次輸入先做本地格式檢查（`validateCombinationForm`）；通過後等 350 ms 沒有新輸入才送 `models.validate {"settings": 表單的部分設定}`（不存檔）。結果顯示在表單下方：`errors` 紅字、`warnings` 一般文字。
   - **儲存**：`ok=false`、檢查中、本地格式錯誤、或引擎回 `invalid_settings`（訊息依欄位路徑標到對應欄位，例如 `asr.cuda_library_dirs[2]` → 資料夾欄）時「儲存組合」停用。檢查本身無法執行（逾時、引擎重啟中）時仍可儲存並說明原因——`settings.set` 一樣會驗證欄位，卡住的檢查不應鎖住使用者。規則在 `canSave()`。
   - 送出的部分設定一律包含組合的全部欄位，「自動」明確送 `null`；未儲存的修改在重新讀取清單時保留，「還原成目前設定」放棄修改。

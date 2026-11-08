@@ -190,17 +190,18 @@
               </div>
               <div class="field-row">
                 <div class="field">
-                  <label for="c-tr-fast" data-i18n="combo.translationFast"></label>
-                  <input id="c-tr-fast" name="translation_fast" list="tr-names" autocomplete="off" spellcheck="false" />
+                  <label for="c-tr-fast-pick" data-i18n="combo.translationFast"></label>
+                  <select id="c-tr-fast-pick" data-pick-for="translation_fast"></select>
+                  <input id="c-tr-fast" name="translation_fast" data-i18n-aria-label="combo.customModelName" data-i18n-placeholder="combo.customModelName" autocomplete="off" spellcheck="false" hidden />
                   <p class="field-error" data-error-for="translation_fast"></p>
                 </div>
                 <div class="field">
-                  <label for="c-tr-final" data-i18n="combo.translationFinal"></label>
-                  <input id="c-tr-final" name="translation_final" list="tr-names" autocomplete="off" spellcheck="false" />
+                  <label for="c-tr-final-pick" data-i18n="combo.translationFinal"></label>
+                  <select id="c-tr-final-pick" data-pick-for="translation_final"></select>
+                  <input id="c-tr-final" name="translation_final" data-i18n-aria-label="combo.customModelName" data-i18n-placeholder="combo.customModelName" autocomplete="off" spellcheck="false" hidden />
                   <p class="field-error" data-error-for="translation_final"></p>
                 </div>
               </div>
-              <datalist id="tr-names"></datalist>
 
               <details class="advanced">
                 <summary data-i18n="combo.advanced"></summary>
