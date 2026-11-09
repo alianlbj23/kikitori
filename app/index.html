@@ -36,6 +36,15 @@
           <p class="rail-hint" id="device-hint"></p>
         </section>
 
+        <!-- Speaker labels (docs/specs/speaker-labels.md): media mode only, chosen before 開始 (read when a session
+             starts). Saved at once with settings.set; the first time it downloads the speaker model (lib/speaker-model.ts). -->
+        <section class="rail-block" id="speakers-block">
+          <label class="rail-heading" for="f-speakers" data-i18n="settings.speakers"></label>
+          <select id="f-speakers" class="rail-select"></select>
+          <p class="rail-hint" id="speakers-help"></p>
+          <p class="rail-hint furigana-status progress" id="speakers-status" role="status" aria-live="polite" hidden></p>
+        </section>
+
         <!-- v0.3 G5: names and topics of this stream, given to the translator as reference only. -->
         <details class="rail-block session-info" id="session-info-block">
           <summary class="rail-heading" data-i18n="rail.sessionInfo"></summary>
@@ -394,13 +403,6 @@
                   <input id="f-furigana-first" name="furigana_first_only" type="checkbox" />
                   <span data-i18n="settings.furiganaFirstOnly"></span>
                 </label>
-              </div>
-              <!-- No name: saved at once with settings.set; the first time it downloads the speaker model (lib/speaker-model.ts). -->
-              <div class="field">
-                <label for="f-speakers" data-i18n="settings.speakers"></label>
-                <select id="f-speakers"></select>
-                <p class="field-help" id="speakers-help"></p>
-                <p class="field-help furigana-status progress" id="speakers-status" role="status" aria-live="polite" hidden></p>
               </div>
               <div class="preview" id="style-preview" aria-hidden="true">
                 <div class="preview-line">

@@ -286,6 +286,17 @@ async function main() {
     await page.eval(CLICK('.nav-item[data-page="settings"]'));
     const off = await waitFor("select back to off", async () => (await page.eval(`document.getElementById('f-speakers').value`)) === "off", 10_000);
     check("deleting turns speaker labels off", off);
+
+    // --- the choice sits in the rail under the audio source, and only in media mode
+    const inRail = await page.eval(`(() => { const b = document.getElementById('speakers-block');
+      return !!b && !!b.closest('.rail') && !b.hidden; })()`);
+    check("speaker labels are in the rail in media mode", inRail);
+    await page.eval(CLICK('.mode[data-mode="interpret"]'));
+    const hiddenInInterpret = await waitFor("hidden in interpret mode", async () => page.eval(`document.getElementById('speakers-block').hidden`), 5_000);
+    check("speaker labels are hidden in interpret mode", hiddenInInterpret);
+    await page.eval(CLICK('.mode[data-mode="media"]'));
+    await waitFor("shown again", async () => page.eval(`!document.getElementById('speakers-block').hidden`), 5_000);
+    await page.screenshot(join(shots, "55-speakers-rail.png"));
   } catch (e) {
     console.error("run aborted:", e);
     results.aborted = String(e);

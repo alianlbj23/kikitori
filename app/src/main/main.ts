@@ -435,6 +435,7 @@ const el = {
   furiganaStatus: byId("furigana-status"),
   furiganaHelp: byId("furigana-help"),
   furiganaBlock: byId("furigana-dictionary"),
+  speakersBlock: byId("speakers-block"),
   speakersSelect: byId<HTMLSelectElement>("f-speakers"),
   speakersHelp: byId("speakers-help"),
   speakersStatus: byId("speakers-status"),
@@ -821,6 +822,7 @@ async function setMode(mode: Mode): Promise<void> {
   state.mode = mode;
   renderStatus();
   renderDevices();
+  renderSpeakerSelect();
   // The language section shows the languages of the selected mode.
   if (state.langForm) state.langForm = { ...state.langForm, mode };
   renderLanguages();
@@ -1651,8 +1653,10 @@ function commitVoiceRename(): void {
   void setSpeakerNames(names);
 }
 
-/** The settings-page select and its status line (download progress, errors). */
+/** The rail select (under the audio source) and its status line (download progress, errors). */
 function renderSpeakerSelect(): void {
+  // Interpret mode already says who spoke ("You" / "Them"); the labels are for media mode only.
+  el.speakersBlock.hidden = state.mode !== "media";
   if (el.speakersSelect.options.length === 0) {
     replace(
       el.speakersSelect,
