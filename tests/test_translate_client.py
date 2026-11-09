@@ -267,6 +267,22 @@ class TranslateTest(ClientTestCase):
         self.assertEqual(body["model"], "my-qwen")
         self.assertEqual(body["reasoning_effort"], "none")
 
+    def test_background_reaches_only_generic_prompts(self) -> None:
+        # v0.3 G5：本場資訊只給 generic 格式；HY-MT、Sakura 照官方範本（不收前文也不收它）
+        info = "配信者：兎田ぺこら"
+        for model, expected in (("qwen3.5:4b", True), ("hy-mt1.5-7b", False)):
+            with self.subTest(model=model):
+                self.server.requests.clear()
+                self.server.script.append(completion("早安"))
+                translator = OpenAICompatibleTranslator(
+                    TranslatorConfig(model=model, base_url=self.server.base_url)
+                )
+                translator.translate(
+                    TranslationRequest("おはよう", "ja", background=info)
+                )
+                text = json.dumps(self.server.requests[0].body, ensure_ascii=False)
+                self.assertEqual(info in text, expected)
+
     def test_glossary_terms_present_in_source_go_into_the_prompt(self) -> None:
         self.server.script.extend([completion("謝謝超級留言"), completion("早安")])
         translator = OpenAICompatibleTranslator(

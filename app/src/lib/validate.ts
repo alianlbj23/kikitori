@@ -30,10 +30,12 @@ import type {
   ModelRole,
   ModelsList,
   ObsStatus,
+  OverlayNotice,
   OutputInfo,
   OverlaySnapshot,
   OverlayStyle,
   ShortcutInfo,
+  SpeakerModel,
   Recommendation,
   RecommendationPreview,
   StatusEvent,
@@ -150,7 +152,15 @@ export function parseSubtitle(v: unknown): SubtitleEvent {
     // Partial-only and final-only hints; dropped where they do not belong so
     // the renderers never have to second-guess them.
     stable_chars: o.is_final === false ? optUint(o, "stable_chars", p) : null,
+    translation_stable_chars: o.is_final === false ? optUint(o, "translation_stable_chars", p) : null,
     latency_ms: o.is_final === true ? optUint(o, "latency_ms", p) : null,
+    // Interpret mode only (G3); anything else is a hint gone wrong, not a broken line.
+    speaker: o.speaker === "self" || o.speaker === "partner" ? o.speaker : null,
+    // Finals only, 1–64 like Rust; a bad label loses the label, not the line.
+    voice:
+      o.is_final === true && Number.isInteger(o.voice) && (o.voice as number) >= 1 && (o.voice as number) <= MAX_VOICE
+        ? (o.voice as number)
+        : null,
     ruby: null,
   };
   ev.ruby = parseRuby(o.ruby, ev.original);
@@ -198,7 +208,7 @@ export function parseStatus(v: unknown): StatusEvent {
   };
 }
 
-const DOWNLOAD_KINDS: readonly DownloadKind[] = ["asr", "gpu_runtime", "translation", "furigana"];
+const DOWNLOAD_KINDS: readonly DownloadKind[] = ["asr", "gpu_runtime", "translation", "furigana", "speaker"];
 
 export function parseDownloadProgress(v: unknown): DownloadProgressEvent {
   const p = "download_progress";
@@ -230,7 +240,15 @@ export function parseMetrics(v: unknown): MetricsEvent {
     level_dbfs: Math.min(0, Math.max(-120, level)),
     backlog: uint(o, "backlog", p),
     latency_ms_median: optUint(o, "latency_ms_median", p),
+    // G8 hints: anything but a level in range is "unknown", not a broken event.
+    speech_level_dbfs: optLevel(o.speech_level_dbfs),
+    background_level_dbfs: optLevel(o.background_level_dbfs),
   };
+}
+
+/** A dBFS level in [-120, 0], or null. */
+function optLevel(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= -120 && v <= 0 ? v : null;
 }
 
 export function parseLog(v: unknown): LogEvent {
@@ -277,6 +295,17 @@ export const MIN_DISPLAY_MS_RANGE = [0, 10_000] as const;
 export const IDLE_CLEAR_SECS_RANGE = [0, 600] as const;
 export const DEFAULT_MIN_DISPLAY_MS = 1500;
 export const DEFAULT_IDLE_CLEAR_SECS = 8;
+/** Same bounds as Rust `MAX_LINE_EM_RANGE` (0 = no limit is allowed too). */
+export const MAX_LINE_EM_RANGE = [10, 60] as const;
+/** Same bounds as Rust `ORIGINAL_SCALE_PERCENT_RANGE`. */
+export const ORIGINAL_SCALE_PERCENT_RANGE = [50, 150] as const;
+export const DEFAULT_ORIGINAL_SCALE_PERCENT = 62;
+
+/** An optional boolean; `fallback` when absent (older Rust builds). */
+function boolOr(o: Obj, key: string, path: string, fallback: boolean): boolean {
+  if (o[key] === undefined) return fallback;
+  return bool(o, key, path);
+}
 
 /** An optional integer in `range`; `fallback` when absent (older Rust builds). */
 function rangedOr(o: Obj, key: string, path: string, range: readonly [number, number], fallback: number): number {
@@ -308,10 +337,28 @@ export function parseOverlayStyle(v: unknown): OverlayStyle {
     max_lines: maxLines,
     min_display_ms: rangedOr(o, "min_display_ms", p, MIN_DISPLAY_MS_RANGE, DEFAULT_MIN_DISPLAY_MS),
     idle_clear_secs: rangedOr(o, "idle_clear_secs", p, IDLE_CLEAR_SECS_RANGE, DEFAULT_IDLE_CLEAR_SECS),
+    pace_by_length: boolOr(o, "pace_by_length", p, false),
+    max_line_em: o.max_line_em === 0 ? 0 : rangedOr(o, "max_line_em", p, MAX_LINE_EM_RANGE, 0),
+    original_scale_percent: rangedOr(
+      o,
+      "original_scale_percent",
+      p,
+      ORIGINAL_SCALE_PERCENT_RANGE,
+      DEFAULT_ORIGINAL_SCALE_PERCENT,
+    ),
+    original_position: o.original_position === undefined ? "above" : oneOf(o, "original_position", p, ["above", "below"] as const),
+    furigana_first_only: boolOr(o, "furigana_first_only", p, false),
   };
 }
 
-const SHORTCUT_ACTIONS = ["click_through", "toggle_translation", "clear_subtitles"] as const;
+const SHORTCUT_ACTIONS = [
+  "click_through",
+  "toggle_translation",
+  "clear_subtitles",
+  "say_again",
+  "pause_subtitles",
+  "show_history",
+] as const;
 
 /** `OverlaySnapshot.shortcuts`; unknown actions (a newer Rust build) are dropped. */
 function parseShortcuts(v: unknown, path: string): ShortcutInfo[] {
@@ -337,6 +384,20 @@ export function parseShortcutAction(v: unknown): ShortcutInfo["action"] {
     throw new ValidationError("shortcut", `expected one of ${SHORTCUT_ACTIONS.join(", ")}`);
   }
   return v as ShortcutInfo["action"];
+}
+
+/** Longest notice the overlay accepts (Rust `MAX_NOTICE_CHARS`). */
+const MAX_NOTICE_CHARS = 200;
+
+/** `overlay://notice` (G3): a short sentence and its language tag. */
+export function parseOverlayNotice(v: unknown): OverlayNotice {
+  const p = "overlay_notice";
+  const o = obj(v, p);
+  const text = str(o, "text", p);
+  if (text.trim() === "" || Array.from(text).length > MAX_NOTICE_CHARS) {
+    throw new ValidationError(`${p}.text`, `expected 1-${MAX_NOTICE_CHARS} characters`);
+  }
+  return { text, lang: lang(o, "lang", p) };
 }
 
 export function parseObsStatus(v: unknown): ObsStatus {
@@ -377,7 +438,22 @@ export function parseOverlaySnapshot(v: unknown): OverlaySnapshot {
     // Older Rust builds have no flag: translations were always shown then.
     show_translation: o.show_translation !== false,
     shortcuts: parseShortcuts(o.shortcuts, `${p}.shortcuts`),
+    speaker_names: parseSpeakerNames(o.speaker_names),
   };
+}
+
+/** Longest list and name Rust accepts (`overlay::MAX_SPEAKER_NAMES` / `MAX_SPEAKER_NAME_CHARS`). */
+export const MAX_SPEAKER_NAMES = 16;
+export const MAX_SPEAKER_NAME_CHARS = 40;
+/** Highest `subtitle.voice` kept (Rust `protocol::MAX_VOICE`). */
+export const MAX_VOICE = 64;
+
+/** `overlay.speaker_names`: older Rust builds have none; anything malformed falls back to the defaults. */
+function parseSpeakerNames(v: unknown): string[] {
+  if (!Array.isArray(v) || v.length > MAX_SPEAKER_NAMES) return [];
+  return v.map((name) =>
+    typeof name === "string" && Array.from(name).length <= MAX_SPEAKER_NAME_CHARS ? name : "",
+  );
 }
 
 export function parseDevices(v: unknown): DeviceInfo[] {
@@ -608,6 +684,24 @@ function parseFuriganaDictionary(v: unknown, p: string): FuriganaDictionary | nu
   };
 }
 
+/** `models.list.speaker_model` (docs/specs/speaker-labels.md). */
+function parseSpeakerModel(v: unknown, p: string): SpeakerModel | null {
+  // Engines without speaker labels send nothing; the UI then hides the option.
+  if (v === undefined || v === null) return null;
+  const o = obj(v, p);
+  return {
+    id: str(o, "id", p, 100),
+    name: str(o, "name", p, 200),
+    installed: bool(o, "installed", p),
+    download_bytes: uint(o, "download_bytes", p),
+    installed_bytes: uint(o, "installed_bytes", p),
+    disk_bytes: optUint(o, "disk_bytes", p),
+    path: optStr(o, "path", p),
+    license: str(o, "license", p, 500),
+    license_url: str(o, "license_url", p, 500),
+  };
+}
+
 /**
  * `models.list` (hardware.md `models_overview()`). The first-version fields the
  * engine still sends (`translation.base_url/installed/error/presets`) are
@@ -624,6 +718,7 @@ export function parseModels(v: unknown): ModelsList {
     asr: arr(o, "asr", p).map((m, i) => parseAsrModel(m, `${p}.asr[${i}]`)),
     gpu_runtime: parseGpuRuntime(o.gpu_runtime, `${p}.gpu_runtime`),
     furigana: parseFuriganaDictionary(o.furigana, `${p}.furigana`),
+    speaker_model: parseSpeakerModel(o.speaker_model, `${p}.speaker_model`),
     translation: {
       server: {
         base_url: str(server, "base_url", sp, 2000),

@@ -34,9 +34,11 @@ import {
   EXPORT_MAX_LINES,
   exportTranscript,
   hasExportableLines,
+  interpretNamer,
   transcriptFileName,
   type ExportContent,
   type ExportFormat,
+  type LineNamer,
 } from "../lib/export";
 import {
   computeTypeLabel,
@@ -91,6 +93,7 @@ import {
 } from "../lib/languages";
 import {
   GLOSSARY_MAX_CSV_BYTES,
+  GLOSSARY_MAX_SOURCE_CHARS,
   glossaryErrorForEnginePath,
   glossaryFileName,
   glossaryPatch,
@@ -159,6 +162,21 @@ import {
 } from "../lib/settings";
 import { SessionEndSave } from "../lib/session-end";
 import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
+import { correctionsToText, parseCorrectionsText } from "../lib/corrections";
+import { sayAgainPhrase, voiceColor, voiceName } from "../lib/speaker";
+import {
+  SPEAKER_CHOICES,
+  SPEAKER_MODEL_ID,
+  afterSpeakerDownload,
+  isSpeakerDownload,
+  parseChoice,
+  speakerBlockView,
+  speakerChoiceAction,
+  speakerSelectView,
+  speakersPatch,
+  type SpeakerChoice,
+} from "../lib/speaker-model";
+import { MAX_SPEAKER_NAME_CHARS } from "../lib/validate";
 import { applySubtitle, emptySubtitles, lineDisplay, type SubtitleLine, type SubtitleState } from "../lib/subtitles";
 import { isTranslationServerLog, translationGuide, type GuideView } from "../lib/translation-guide";
 import { CUSTOM_TRANSLATION_MODEL, translationPicker } from "../lib/translation-picker";
@@ -280,6 +298,16 @@ interface State {
   furiganaDownload: DownloadProgressEvent | null;
   furiganaDeleting: boolean;
   furiganaConfirmDelete: boolean;
+  /** Speaker labels (lib/speaker-model.ts): a `settings.set` of `speakers` is in flight. */
+  speakersBusy: boolean;
+  /** The choice waiting for the speaker model to finish downloading. */
+  speakersPending: SpeakerChoice | null;
+  /** Last `download_progress` of the speaker model (cleared when it is done). */
+  speakerDownload: DownloadProgressEvent | null;
+  speakerDeleting: boolean;
+  speakerConfirmDelete: boolean;
+  /** Names the user gave the speaker labels this session; index i names voice i + 1. */
+  speakerNames: string[];
 }
 
 /** One table row; `id` keeps the row's elements when others are added or removed. */
@@ -299,6 +327,8 @@ interface GlossaryEditor {
   saving: boolean;
   /** Counts edits, so a save does not overwrite rows changed while it was in flight. */
   revision: number;
+  /** The ASR correction rules as typed in their text box (G4; lib/corrections.ts). */
+  corrections: string;
 }
 
 /** State of the recommended-combination preview under the language menus. */
@@ -350,7 +380,7 @@ const state: State = {
   guideShown: false,
   appVersion: null,
   metrics: emptyMetrics(),
-  glossary: { builtin: true, rows: [], dirty: false, engineError: null, saving: false, revision: 0 },
+  glossary: { builtin: true, rows: [], dirty: false, engineError: null, saving: false, revision: 0, corrections: "" },
   deleting: new Set(),
   confirmDelete: null,
   furiganaBusy: false,
@@ -358,6 +388,12 @@ const state: State = {
   furiganaDownload: null,
   furiganaDeleting: false,
   furiganaConfirmDelete: false,
+  speakersBusy: false,
+  speakersPending: null,
+  speakerDownload: null,
+  speakerDeleting: false,
+  speakerConfirmDelete: false,
+  speakerNames: [],
 };
 
 /** Last engine messages for "複製診斷資訊". */
@@ -399,6 +435,12 @@ const el = {
   furiganaStatus: byId("furigana-status"),
   furiganaHelp: byId("furigana-help"),
   furiganaBlock: byId("furigana-dictionary"),
+  speakersSelect: byId<HTMLSelectElement>("f-speakers"),
+  speakersHelp: byId("speakers-help"),
+  speakersStatus: byId("speakers-status"),
+  speakerBlock: byId("speaker-model"),
+  voiceRename: byId<HTMLFormElement>("voice-rename"),
+  voiceRenameInput: byId<HTMLInputElement>("voice-rename-input"),
   startDownloads: byId("start-downloads"),
   startDownloadsItems: byId("startdl-items"),
   startDownloadsMessage: byId("startdl-message"),
@@ -428,6 +470,11 @@ const el = {
   languagesSave: byId<HTMLButtonElement>("languages-save"),
   languagesStatus: byId("languages-status"),
   shortcutNote: byId("shortcut-note"),
+  resetOverlay: byId<HTMLButtonElement>("reset-overlay"),
+  oOrigScale: byId("o-orig-scale"),
+  sessionInfo: byId<HTMLTextAreaElement>("session-info"),
+  sessionInfoBlock: byId<HTMLDetailsElement>("session-info-block"),
+  sessionInfoStatus: byId("session-info-status"),
   clear: byId<HTMLButtonElement>("clear-transcript"),
   hardware: byId("hardware"),
   hardwareErrors: byId("hardware-errors"),
@@ -489,6 +536,9 @@ const el = {
   glossarySave: byId<HTMLButtonElement>("glossary-save"),
   glossaryReset: byId<HTMLButtonElement>("glossary-reset"),
   glossaryStatus: byId("glossary-status"),
+  correctionsInput: byId<HTMLTextAreaElement>("f-corrections"),
+  correctionsError: byId("corrections-error"),
+  addToGlossary: byId<HTMLButtonElement>("add-to-glossary"),
 };
 
 // ---------------------------------------------------------------- settings answers
@@ -652,7 +702,16 @@ function renderStatus(): void {
 
 // ---------------------------------------------------------------- status bar metrics
 
-const METRICS_NOTICES: Readonly<Record<MetricsWarning, string>> = { backlog: "metrics-backlog", no_audio: "metrics-no-audio" };
+const METRICS_NOTICES: Readonly<Record<MetricsWarning, string>> = {
+  backlog: "metrics-backlog",
+  no_audio: "metrics-no-audio",
+  bgm: "metrics-bgm",
+};
+const METRICS_TEXT: Readonly<Record<MetricsWarning, StringKey>> = {
+  backlog: "metrics.backlog",
+  no_audio: "metrics.noAudio",
+  bgm: "metrics.bgm",
+};
 /**
  * Warnings whose notice was shown for the current occurrence. A notice pushed
  * out by newer ones (the list keeps three) is not re-added every second.
@@ -691,7 +750,7 @@ function renderMetrics(): void {
   );
   setIfChanged(el.latency, "title", t("metrics.latencyHelp"));
 
-  for (const warning of ["backlog", "no_audio"] as const) {
+  for (const warning of ["backlog", "no_audio", "bgm"] as const) {
     const key = METRICS_NOTICES[warning];
     const show = view.warnings.includes(warning);
     if (!show) {
@@ -703,7 +762,7 @@ function renderMetrics(): void {
     shownMetricsWarnings.add(warning);
     const actions: NoticeAction[] =
       warning === "backlog" ? [{ label: t("metrics.openModels"), run: () => showPage("models") }] : [];
-    notify(warning === "backlog" ? t("metrics.backlog") : t("metrics.noAudio"), "info", actions, {
+    notify(t(METRICS_TEXT[warning]), "info", actions, {
       key,
       onClose: () => {
         state.metrics = dismissMetricsWarning(state.metrics, warning);
@@ -814,8 +873,48 @@ async function toggleSession(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- stream info (G5)
+
+/** Saves the stream info this long after the last keystroke. */
+const SESSION_INFO_SAVE_MS = 800;
+let sessionInfoTimer: number | undefined;
+/** The text box differs from the saved settings. */
+let sessionInfoDirty = false;
+
+/** Shows the saved stream info, unless the user is typing in the box. */
+function fillSessionInfo(settings: Settings): void {
+  if (sessionInfoDirty) return;
+  el.sessionInfo.value = settings.translation.session_info;
+  // Open the block when there is something in it, so it is not forgotten between streams.
+  if (settings.translation.session_info !== "") el.sessionInfoBlock.open = true;
+}
+
+function onSessionInfoInput(): void {
+  sessionInfoDirty = true;
+  el.sessionInfoStatus.textContent = "";
+  window.clearTimeout(sessionInfoTimer);
+  sessionInfoTimer = window.setTimeout(() => void saveSessionInfo(), SESSION_INFO_SAVE_MS);
+}
+
+/** Saves the box now if it has unsaved text (also before a session starts, so it takes effect). */
+async function saveSessionInfo(): Promise<void> {
+  window.clearTimeout(sessionInfoTimer);
+  if (!sessionInfoDirty || !engineReady()) return;
+  const value = el.sessionInfo.value;
+  try {
+    const { settings, revision } = await api.settingsSet({ translation: { session_info: value } });
+    adoptSettings(settings, revision);
+    // Typed more while saving: keep the newer text and save again later.
+    if (el.sessionInfo.value === value) sessionInfoDirty = false;
+    el.sessionInfoStatus.textContent = sessionActive() ? t("rail.sessionInfoSavedNext") : t("rail.sessionInfoSaved");
+  } catch (e) {
+    reportError("error.saveSessionInfo", e);
+  }
+}
+
 /** `session.start` with the current mode and device; resets the transcript. */
 async function startSession(): Promise<void> {
+  await saveSessionInfo();
   const deviceId = el.device.value === "" ? null : el.device.value;
   // A previous session still waiting for its last final is saved before its log is reset.
   sessionEnd.flush();
@@ -825,6 +924,8 @@ async function startSession(): Promise<void> {
   state.exportLog = emptySubtitles(sessionId);
   state.sessionStartedAt = new Date();
   state.sessionMode = state.mode;
+  // Speaker labels are numbered afresh each session, so last session's names would be wrong.
+  if (state.speakerNames.length) void setSpeakerNames([]);
   setSessionState("loading", false);
   renderTranscript();
   if (state.overlay && !state.overlay.visible) {
@@ -921,7 +1022,16 @@ function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
       target: languageName(line.targetLanguage),
     }),
   );
-  const [orig, tr] = text.children as unknown as [HTMLElement, HTMLElement];
+  const [voice, orig, tr] = text.children as unknown as [HTMLButtonElement, HTMLElement, HTMLElement];
+  // Media mode speaker labels (speaker-labels.md): on every row, like the interpret chip; click to rename.
+  const voiceText = line.voice === null ? "" : speakerName(line.voice);
+  voice.hidden = line.voice === null;
+  setIfChanged(voice, "textContent", voiceText);
+  const voiceKey = line.voice === null ? "" : String(line.voice);
+  if ((voice.dataset.voice ?? "") !== voiceKey) voice.dataset.voice = voiceKey;
+  const voiceClass = line.voice === null ? "utt-voice" : `utt-voice c${voiceColor(voiceText)}`;
+  setIfChanged(voice, "className", voiceClass);
+  setIfChanged(voice, "title", t("speaker.rename"));
   // Settled prefix at normal emphasis, the tail that may still change faded (F2).
   const [stable, unstable] = orig.children as unknown as [HTMLElement, HTMLElement];
   if (shown.originalRuby) {
@@ -943,7 +1053,19 @@ function updateLineElement(li: HTMLLIElement, line: SubtitleLine): void {
     setIfChanged(unstable, "textContent", shown.originalParts.unstable);
   }
   setIfChanged(orig, "lang", htmlLang(line.sourceLanguage));
-  setIfChanged(tr, "textContent", shown.translation);
+  // Interpret mode: who said it (G3). Every row is labelled: the log is scanned, not read in one go.
+  const who = line.speaker ? t(line.speaker === "self" ? "speaker.self" : "speaker.partner") : "";
+  if ((orig.dataset.who ?? "") !== who) {
+    if (who) orig.dataset.who = who;
+    else delete orig.dataset.who;
+  }
+  li.classList.toggle("is-self", line.speaker === "self");
+  li.classList.toggle("is-partner", line.speaker === "partner");
+  // Settled prefix of the translation and its tail that may still change (G1).
+  const [trStable, trUnstable] = tr.children as unknown as [HTMLElement, HTMLElement];
+  setIfChanged(trStable, "textContent", shown.translationParts.stable);
+  setIfChanged(trUnstable, "textContent", shown.translationParts.unstable);
+  tr.classList.toggle("is-empty", shown.translation === "");
   setIfChanged(tr, "lang", htmlLang(line.targetLanguage));
   // Shown by CSS when the translation is empty (not translated yet, or failed).
   const empty = line.isFinal ? t("transcript.noTranslation") : t("transcript.translating");
@@ -961,8 +1083,9 @@ function newLineElement(): HTMLLIElement {
     h(
       "div",
       { class: "utt-text" },
+      h("button", { type: "button", class: "utt-voice", hidden: true }),
       h("p", { class: "utt-orig", dir: "auto" }, h("span", { class: "utt-stable" }), h("span", { class: "utt-unstable" })),
-      h("p", { class: "utt-tr", dir: "auto" }),
+      h("p", { class: "utt-tr", dir: "auto" }, h("span", { class: "utt-stable" }), h("span", { class: "utt-unstable" })),
     ),
   );
 }
@@ -977,6 +1100,8 @@ function renderTranscript(): void {
     let li = lineElements.get(line.utteranceId);
     if (!li) {
       li = newLineElement();
+      // Lets a selection find its line again (G4 "add to glossary").
+      li.dataset.id = String(line.utteranceId);
       lineElements.set(line.utteranceId, li);
     }
     updateLineElement(li, line);
@@ -986,6 +1111,8 @@ function renderTranscript(): void {
   }
   for (const [id, li] of lineElements) {
     if (!keep.has(id)) {
+      // An open rename box goes with the row it sits in: keep what was typed and park the box.
+      if (li.contains(el.voiceRename)) parkVoiceRename();
       li.remove();
       lineElements.delete(id);
     }
@@ -1028,16 +1155,27 @@ interface TranscriptSnapshot {
   lines: readonly SubtitleLine[];
   startedAt: Date;
   mode: Mode;
+  speakerNames: readonly string[];
 }
 
 function transcriptSnapshot(): TranscriptSnapshot {
-  return { lines: state.exportLog.lines, startedAt: state.sessionStartedAt ?? new Date(), mode: state.sessionMode };
+  return {
+    lines: state.exportLog.lines,
+    startedAt: state.sessionStartedAt ?? new Date(),
+    mode: state.sessionMode,
+    speakerNames: [...state.speakerNames],
+  };
 }
 
 /** Writes one format through Rust; resolves to the saved path. */
 async function saveTranscript(snap: TranscriptSnapshot, format: ExportFormat, content: ExportContent): Promise<string> {
   const name = transcriptFileName(snap.startedAt, snap.mode, format);
-  return api.transcriptSave(name, exportTranscript(snap.lines, format, content));
+  // Who said each line: "You"/"Them" in interpret sessions (G3), the speaker labels in media sessions.
+  const nameOf: LineNamer =
+    snap.mode === "interpret"
+      ? interpretNamer({ self: t("speaker.self"), partner: t("speaker.partner") })
+      : (line) => (line.voice === null ? null : voiceName(line.voice, snap.speakerNames, speakerFallback));
+  return api.transcriptSave(name, exportTranscript(snap.lines, format, content, nameOf));
 }
 
 function notifySaved(text: string): void {
@@ -1131,24 +1269,63 @@ function renderOverlay(): void {
   const lines = [o.shortcut_registered ? t("transcript.shortcutOn", { keys }) : t("transcript.shortcutTaken", { keys })];
   for (const s of o.shortcuts) {
     if (s.action === "click_through") continue;
-    const action = s.action === "toggle_translation" ? t("shortcut.toggleTranslation") : t("shortcut.clearSubtitles");
+    const text = SHORTCUT_TEXT[s.action];
+    const actionKeys = label(s.keys);
     lines.push(
-      !s.registered
-        ? t("transcript.shortcutActionTaken", { keys: label(s.keys), action })
-        : s.action === "toggle_translation"
-          ? t("transcript.shortcutTranslation", { keys: label(s.keys) })
-          : t("transcript.shortcutClear", { keys: label(s.keys) }),
+      s.registered
+        ? t(text.on, { keys: actionKeys })
+        : t("transcript.shortcutActionTaken", { keys: actionKeys, action: t(text.action) }),
     );
   }
   replace(el.shortcutNote, ...lines.flatMap((line, i) => (i === 0 ? [line] : [h("br"), line])));
 }
 
+/** How each shortcut (except click-through) is described under the transcript. */
+const SHORTCUT_TEXT: Readonly<Record<Exclude<ShortcutAction, "click_through">, { on: StringKey; action: StringKey }>> = {
+  toggle_translation: { on: "transcript.shortcutTranslation", action: "shortcut.toggleTranslation" },
+  clear_subtitles: { on: "transcript.shortcutClear", action: "shortcut.clearSubtitles" },
+  say_again: { on: "transcript.shortcutSayAgain", action: "shortcut.sayAgain" },
+  pause_subtitles: { on: "transcript.shortcutPause", action: "shortcut.pauseSubtitles" },
+  show_history: { on: "transcript.shortcutHistory", action: "shortcut.showHistory" },
+};
+
 /** A global shortcut handled here (Rust forwards it; see lib.rs `run_shortcut`). */
 function onShortcut(action: ShortcutAction): void {
+  if (action === "say_again") {
+    void sayAgain();
+    return;
+  }
   if (action !== "toggle_translation") return;
   // Same rules as the switches: not while the engine is down or a switch is in flight.
   if (!engineReady() || state.translationBusy || !state.settings) return;
   void changeShowTranslation(!showsTranslation());
+}
+
+/**
+ * Interpret mode (G3): shows "could you say that again?" in the partner's
+ * language on the overlay. Does nothing outside a running interpret session.
+ */
+async function sayAgain(): Promise<void> {
+  const settings = state.settings;
+  if (!settings || settings.mode !== "interpret" || state.sessionState !== "running") return;
+  const phrase = sayAgainPhrase(settings.partner_language);
+  try {
+    // The other person has to see it: bring a hidden subtitle window back first.
+    if (state.overlay && !state.overlay.visible) await setOverlayVisible(true);
+    await api.overlayNotice(phrase.text, phrase.lang);
+  } catch (e) {
+    reportError("error.sayAgain", e);
+  }
+}
+
+/** Moves the subtitle window back onto the main screen (G6). */
+async function resetOverlayPosition(): Promise<void> {
+  try {
+    state.overlay = await api.overlayResetPosition();
+  } catch (e) {
+    reportError("error.resetOverlay", e);
+  }
+  renderOverlay();
 }
 
 async function setOverlayVisible(visible: boolean): Promise<void> {
@@ -1313,8 +1490,8 @@ function renderFurigana(): void {
   renderFuriganaBlock();
 }
 
-/** Re-reads `models.list` (the dictionary's state lives there). */
-async function refreshFuriganaState(): Promise<void> {
+/** Re-reads `models.list` (the furigana dictionary and the speaker model live there too). */
+async function refreshModels(): Promise<void> {
   try {
     state.models = await api.modelsList();
   } catch (e) {
@@ -1332,7 +1509,7 @@ async function setFurigana(enabled: boolean): Promise<void> {
     adoptSettings(result.settings, result.revision);
   } catch (e) {
     reportError("error.setFurigana", e);
-    if (engineCode(e) === "model_not_downloaded") void refreshFuriganaState();
+    if (engineCode(e) === "model_not_downloaded") void refreshModels();
   } finally {
     state.furiganaBusy = false;
     renderFuriganaSwitch();
@@ -1385,7 +1562,7 @@ function onFuriganaDownload(p: DownloadProgressEvent): void {
     notify(t("furigana.downloadFailed", { error: p.error ?? t("common.unknownReason") }), "bad");
   }
   if (p.state === "done") {
-    void refreshFuriganaState().then(async () => {
+    void refreshModels().then(async () => {
       if (next !== "enable") return;
       await setFurigana(true);
       if (state.settings?.furigana.enabled) notify(t("furigana.ready"), "info", [], { autoDismiss: true });
@@ -1407,7 +1584,261 @@ async function deleteFuriganaDictionary(): Promise<void> {
   } finally {
     state.furiganaDeleting = false;
   }
-  await refreshFuriganaState();
+  await refreshModels();
+}
+
+// ---------------------------------------------------------------- speaker labels (settings + models page + transcript)
+
+function speakerFallback(voice: number): string {
+  return t("speaker.voice", { n: voice });
+}
+
+/** The shown name of `voice` (from 1) this session. */
+function speakerName(voice: number): string {
+  return voiceName(voice, state.speakerNames, speakerFallback);
+}
+
+/** Saves this session's names and hands them to the overlay; redraws the transcript. */
+async function setSpeakerNames(names: string[]): Promise<void> {
+  state.speakerNames = names;
+  renderTranscript();
+  try {
+    state.overlay = await api.overlaySetSpeakerNames(names);
+  } catch (e) {
+    reportError("error.setSpeakers", e);
+  }
+}
+
+/** Commits an open rename and moves the box back out of the transcript rows. */
+function parkVoiceRename(): void {
+  commitVoiceRename();
+  el.transcript.after(el.voiceRename);
+}
+
+/** Opens the inline rename box in the row of the clicked chip. */
+function openVoiceRename(chip: HTMLButtonElement, voice: number): void {
+  const row = chip.closest("li");
+  if (!row) return;
+  // A box still open for another speaker keeps its text for that speaker.
+  commitVoiceRename();
+  el.voiceRename.dataset.voice = String(voice);
+  // Appended after the row's three parts, which updateLineElement reads by position.
+  row.append(el.voiceRename);
+  el.voiceRename.hidden = false;
+  el.voiceRenameInput.value = (state.speakerNames[voice - 1] ?? "").trim() || speakerName(voice);
+  el.voiceRenameInput.focus();
+  el.voiceRenameInput.select();
+}
+
+function closeVoiceRename(): void {
+  delete el.voiceRename.dataset.voice;
+  el.voiceRename.hidden = true;
+}
+
+/** Enter or leaving the box: the typed name (blank = back to "Speaker N"). */
+function commitVoiceRename(): void {
+  const voice = Number(el.voiceRename.dataset.voice);
+  if (el.voiceRename.hidden || !Number.isInteger(voice) || voice < 1) return;
+  closeVoiceRename();
+  // Same limits as Rust (`overlay::validate_speaker_names`): one line, at most 40 characters.
+  const typed = Array.from(el.voiceRenameInput.value.replace(/\p{Cc}+/gu, " ").trim())
+    .slice(0, MAX_SPEAKER_NAME_CHARS)
+    .join("");
+  const names = [...state.speakerNames];
+  while (names.length < voice) names.push("");
+  names[voice - 1] = typed === speakerFallback(voice) ? "" : typed;
+  while (names.length && names[names.length - 1] === "") names.pop();
+  void setSpeakerNames(names);
+}
+
+/** The settings-page select and its status line (download progress, errors). */
+function renderSpeakerSelect(): void {
+  if (el.speakersSelect.options.length === 0) {
+    replace(
+      el.speakersSelect,
+      ...SPEAKER_CHOICES.map((choice) =>
+        h(
+          "option",
+          { value: choice },
+          choice === "off"
+            ? t("settings.speakersOff")
+            : choice === "auto"
+              ? t("settings.speakersAuto")
+              : t("settings.speakersCount", { n: Number(choice) }),
+        ),
+      ),
+    );
+  }
+  const view = speakerSelectView({
+    speakers: state.settings?.speakers ?? DEFAULT_SETTINGS.speakers,
+    model: state.models?.speaker_model ?? null,
+    modelsLoaded: state.models !== null,
+    download: state.speakerDownload,
+    pending: state.speakersPending,
+    busy: state.speakersBusy,
+    engineReady: engineReady(),
+  });
+  el.speakersSelect.value = view.value;
+  el.speakersSelect.disabled = view.disabled;
+  const size = state.models?.speaker_model?.download_bytes ?? null;
+  setIfChanged(el.speakersHelp, "textContent", t("settings.speakersHelp", { size: formatBytes(size) }));
+  if (!view.status) {
+    replace(el.speakersStatus);
+    el.speakersStatus.hidden = true;
+    return;
+  }
+  el.speakersStatus.hidden = false;
+  el.speakersStatus.classList.toggle("field-error", view.status.error);
+  replace(
+    el.speakersStatus,
+    view.percent === null
+      ? null
+      : h("progress", { max: 100, value: view.percent, "aria-label": t("speakers.progressLabel") }),
+    h("span", {}, statusText(view.status)),
+  );
+}
+
+/** Models page: model name, disk use, license and Delete with an in-page confirmation. */
+function renderSpeakerBlock(): void {
+  const model = state.models?.speaker_model ?? null;
+  const section = el.speakerBlock.closest("section");
+  if (section) section.hidden = state.models !== null && model === null;
+  if (!model) {
+    replace(el.speakerBlock, h("p", { class: "rail-hint" }, t("common.loading")));
+    return;
+  }
+  const view = speakerBlockView(model, {
+    downloading: state.speakerDownload?.state === "downloading",
+    deleting: state.speakerDeleting,
+    engineReady: engineReady(),
+  });
+  const lines = view.lines.map((line) => h("p", { class: "gpu-state" }, statusText(line)));
+  const deletable = view.deletable;
+  if (!deletable) {
+    replace(el.speakerBlock, ...lines);
+    return;
+  }
+  if (state.speakerConfirmDelete && !deletable.enabled) state.speakerConfirmDelete = false;
+  if (state.speakerConfirmDelete) {
+    const yes = h("button", { type: "button", class: "danger" }, t("asr.deleteYes"));
+    yes.addEventListener("click", () => void deleteSpeakerModel());
+    const no = h("button", { type: "button", class: "ghost" }, t("asr.deleteNo"));
+    no.addEventListener("click", () => {
+      state.speakerConfirmDelete = false;
+      renderSpeakerBlock();
+    });
+    const size = formatBytes(model.disk_bytes ?? model.installed_bytes);
+    replace(
+      el.speakerBlock,
+      ...lines,
+      h(
+        "div",
+        { class: "delete-confirm", role: "group" },
+        h("p", {}, t("speakers.deleteConfirm", { size })),
+        h("div", { class: "gpu-actions" }, yes, no),
+      ),
+    );
+    return;
+  }
+  const del = h("button", { type: "button", class: "ghost" }, state.speakerDeleting ? t("asr.deleting") : t("speakers.delete"));
+  del.disabled = !deletable.enabled;
+  del.addEventListener("click", () => {
+    state.speakerConfirmDelete = true;
+    renderSpeakerBlock();
+    el.speakerBlock.querySelector<HTMLButtonElement>(".delete-confirm .ghost")?.focus();
+  });
+  replace(el.speakerBlock, ...lines, h("div", { class: "gpu-actions" }, del));
+}
+
+function renderSpeakers(): void {
+  renderSpeakerSelect();
+  renderSpeakerBlock();
+}
+
+/** `settings.set` of `speakers`; read by the next session. */
+async function saveSpeakers(choice: SpeakerChoice): Promise<void> {
+  state.speakersBusy = true;
+  renderSpeakerSelect();
+  try {
+    const result = await api.settingsSet(speakersPatch(choice));
+    adoptSettings(result.settings, result.revision);
+  } catch (e) {
+    reportError("error.setSpeakers", e);
+  } finally {
+    state.speakersBusy = false;
+    renderSpeakerSelect();
+  }
+}
+
+/** The settings select: choosing labels downloads the model first when it is missing. */
+async function changeSpeakers(choice: SpeakerChoice): Promise<void> {
+  const action = speakerChoiceAction(choice, state.models?.speaker_model ?? null);
+  if (action === "save") {
+    state.speakersPending = null;
+    await saveSpeakers(choice);
+    return;
+  }
+  if (action === "unsupported") {
+    renderSpeakerSelect();
+    return;
+  }
+  state.speakersPending = choice;
+  state.speakerDownload = {
+    model: SPEAKER_MODEL_ID,
+    kind: "speaker",
+    downloaded_bytes: 0,
+    total_bytes: state.models?.speaker_model?.download_bytes ?? 0,
+    state: "downloading",
+    error: null,
+  };
+  renderSpeakers();
+  try {
+    await api.modelsDownload(SPEAKER_MODEL_ID);
+  } catch (e) {
+    if (engineCode(e) === "download_in_progress") return; // progress events follow
+    state.speakersPending = null;
+    state.speakerDownload = null;
+    reportError("error.setSpeakers", e);
+    renderSpeakers();
+  }
+}
+
+/** `download_progress` of the speaker model: progress, then the waiting choice saved, or the error. */
+function onSpeakerDownload(p: DownloadProgressEvent): void {
+  state.speakerDownload = p.state === "done" ? null : p;
+  const pending = state.speakersPending;
+  const next = afterSpeakerDownload(p, pending);
+  if (p.state !== "downloading") state.speakersPending = null;
+  if (next === "failed") {
+    notify(t("speakers.downloadFailed", { error: p.error ?? t("common.unknownReason") }), "bad");
+  }
+  if (p.state === "done") {
+    void refreshModels().then(async () => {
+      if (next !== "save" || pending === null) return;
+      await saveSpeakers(pending);
+      if (state.settings?.speakers.enabled) notify(t("speakers.ready"), "info", [], { autoDismiss: true });
+    });
+  }
+  renderSpeakers();
+}
+
+/** `models.delete` of the speaker model after the user confirmed. */
+async function deleteSpeakerModel(): Promise<void> {
+  state.speakerConfirmDelete = false;
+  state.speakerDeleting = true;
+  renderSpeakerBlock();
+  try {
+    const result = await api.modelsDelete(SPEAKER_MODEL_ID);
+    notify(t("speakers.deleted", { size: formatBytes(result.freed_bytes) }), "info", [], { autoDismiss: true });
+    // The engine turned speaker labels off with the model; read the saved settings back.
+    const current = await api.settingsGet();
+    adoptSettings(current.settings, current.revision);
+  } catch (e) {
+    reportError("error.deleteSpeakers", e);
+  } finally {
+    state.speakerDeleting = false;
+  }
+  await refreshModels();
 }
 
 // ---------------------------------------------------------------- models page: hardware
@@ -2047,6 +2478,7 @@ function renderModels(): void {
   const s = state.settings;
   renderGpuRuntime();
   renderFurigana();
+  renderSpeakers();
   if (!m) {
     replace(el.asrModels, h("tr", {}, h("td", { colspan: 6 }, t("common.loading"))));
     renderTranslationPickers();
@@ -2498,6 +2930,11 @@ const FORM_FIELDS: (keyof SettingsForm)[] = [
   "max_lines",
   "min_display_secs",
   "idle_clear_secs",
+  "pace_by_length",
+  "max_line_em",
+  "original_scale_percent",
+  "original_position",
+  "furigana_first_only",
   "obs_output",
   "auto_save_transcripts",
 ];
@@ -2514,6 +2951,11 @@ function readForm(): SettingsForm {
     max_lines: field("max_lines").value,
     min_display_secs: field("min_display_secs").value,
     idle_clear_secs: field("idle_clear_secs").value,
+    pace_by_length: (field("pace_by_length") as HTMLInputElement).checked,
+    max_line_em: field("max_line_em").value,
+    original_scale_percent: field("original_scale_percent").value,
+    original_position: field("original_position").value,
+    furigana_first_only: (field("furigana_first_only") as HTMLInputElement).checked,
     obs_output: field("obs_output").value,
     auto_save_transcripts: (field("auto_save_transcripts") as HTMLInputElement).checked,
   };
@@ -2544,6 +2986,11 @@ function renderPreview(): void {
   if (Number.isFinite(size)) el.preview.style.setProperty("--fs", `${size}px`);
   if (Number.isFinite(opacity)) el.preview.style.setProperty("--plate", String(opacity / 100));
   el.preview.dataset.position = form.position;
+  // G7: original size and place, as the overlay will draw them.
+  const scale = Number.parseInt(form.original_scale_percent, 10);
+  el.oOrigScale.textContent = Number.isFinite(scale) ? `${scale}%` : "";
+  if (Number.isFinite(scale)) el.preview.style.setProperty("--orig-scale", String(scale / 100));
+  el.preview.dataset.original = form.original_position;
 }
 
 function renderSettingsPath(): void {
@@ -2617,7 +3064,9 @@ function fillGlossary(settings: Settings, force = false): void {
     engineError: null,
     saving: false,
     revision: state.glossary.revision,
+    corrections: correctionsToText(g.corrections),
   };
+  el.correctionsInput.value = state.glossary.corrections;
   freshGlossaryRows.clear();
   el.glossaryStatus.textContent = "";
   renderGlossary();
@@ -2702,6 +3151,12 @@ function renderGlossaryErrors(): void {
     }
   });
   el.glossaryListError.textContent = errors.list ?? "";
+  // Correction rules: every problem with its line number, one per line.
+  const fixes = parseCorrectionsText(state.glossary.corrections).errors;
+  el.correctionsError.textContent = fixes
+    .map((e) => (e.line > 0 ? t("glossary.correctionLine", { line: e.line, message: e.message }) : e.message))
+    .join("\n");
+  el.correctionsInput.setAttribute("aria-invalid", String(fixes.length > 0));
   el.glossarySave.disabled = !engineReady() || !state.settings || !state.glossary.dirty || state.glossary.saving;
   el.glossaryReset.disabled = !state.glossary.dirty;
   el.glossaryExport.disabled = state.glossary.rows.length === 0;
@@ -2723,6 +3178,53 @@ function addGlossaryRow(): void {
   markGlossaryEdited();
   renderGlossary();
   el.glossaryRows.querySelector<HTMLInputElement>(`tr[data-row="${row.id}"] [data-field="source"]`)?.focus();
+}
+
+/** Text selected inside one original of the transcript (G4), or null. */
+let transcriptSelection: { text: string; targetLanguage: string } | null = null;
+
+/** The selection lies within a single original (not across rows, not in a translation). */
+function selectedOriginal(): { text: string; targetLanguage: string } | null {
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  // Furigana: the selection may include <rt> readings; the glossary wants the original only.
+  const copy = range.cloneContents();
+  for (const rt of copy.querySelectorAll("rt")) rt.remove();
+  const text = (copy.textContent ?? "").trim();
+  if (text === "") return null;
+  const start = range.startContainer.parentElement?.closest(".utt-orig");
+  const end = range.endContainer.parentElement?.closest(".utt-orig");
+  if (!start || start !== end || !el.transcript.contains(start)) return null;
+  const id = Number(start.closest<HTMLElement>("li.utt")?.dataset.id);
+  const line = state.subtitles.lines.find((l) => l.utteranceId === id);
+  return { text, targetLanguage: line?.targetLanguage ?? state.settings?.target_language ?? "" };
+}
+
+function onTranscriptSelection(): void {
+  // Clicking the button must not lose the selection it acts on: only a new selection replaces it.
+  const current = selectedOriginal();
+  if (current) transcriptSelection = current;
+  else if (document.activeElement !== el.addToGlossary) transcriptSelection = null;
+  el.addToGlossary.disabled = transcriptSelection === null;
+}
+
+/** Opens the glossary with a new row for the selected words (G4); the user fills in the translation. */
+function addSelectionToGlossary(): void {
+  const picked = transcriptSelection;
+  if (!picked) return;
+  const source = Array.from(picked.text).slice(0, GLOSSARY_MAX_SOURCE_CHARS).join("");
+  const language = state.languages?.some((l) => l.code === picked.targetLanguage) ? picked.targetLanguage : null;
+  const [row] = toGlossaryRows([{ source, target: "", target_language: language }]);
+  if (!row) return;
+  state.glossary.rows.push(row);
+  state.glossary.engineError = null;
+  markGlossaryEdited();
+  showPage("settings");
+  renderGlossary();
+  const target = el.glossaryRows.querySelector<HTMLInputElement>(`tr[data-row="${row.id}"] [data-field="target"]`);
+  target?.scrollIntoView({ block: "center" });
+  target?.focus();
 }
 
 function removeGlossaryRow(id: number): void {
@@ -2765,9 +3267,11 @@ async function submitGlossary(): Promise<void> {
   const entries = glossaryEntries();
   const local = validateGlossary(entries, state.languages?.map((l) => l.code) ?? null);
   renderGlossaryErrors();
-  if (hasGlossaryErrors(local)) {
+  const corrections = parseCorrectionsText(state.glossary.corrections);
+  if (hasGlossaryErrors(local) || corrections.errors.length > 0) {
     el.glossaryStatus.textContent = t("form.fixFields");
-    el.glossaryRows.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    const invalidRow = el.glossaryRows.querySelector<HTMLElement>('[aria-invalid="true"]');
+    (invalidRow ?? el.correctionsInput).focus();
     return;
   }
   const revision = state.glossary.revision;
@@ -2775,7 +3279,7 @@ async function submitGlossary(): Promise<void> {
   renderGlossaryErrors();
   el.glossaryStatus.textContent = t("common.saving");
   try {
-    const { settings: saved, revision: settingsRev } = await api.settingsSet(glossaryPatch({ builtin: state.glossary.builtin, entries }));
+    const { settings: saved, revision: settingsRev } = await api.settingsSet(glossaryPatch({ builtin: state.glossary.builtin, entries, corrections: corrections.entries }));
     const settings = adoptSettings(saved, settingsRev);
     state.glossary.saving = false;
     // Rows edited (or imported) while saving stay as they are, still unsaved.
@@ -2787,6 +3291,10 @@ async function submitGlossary(): Promise<void> {
     const target = ce?.kind === "engine" && ce.code === "invalid_settings" ? glossaryErrorForEnginePath(ce.message) : null;
     if (target && ce?.kind === "engine") {
       state.glossary.engineError = { target, message: ce.message };
+      el.glossaryStatus.textContent = t("form.fixFields");
+    } else if (ce?.kind === "engine" && ce.message.startsWith("translation.glossary.corrections")) {
+      // A correction rule the engine still rejects: show it under the box it came from.
+      el.correctionsError.textContent = ce.message;
       el.glossaryStatus.textContent = t("form.fixFields");
     } else {
       el.glossaryStatus.textContent = describeError(e);
@@ -3240,6 +3748,7 @@ function onLocaleChanged(): void {
   renderOverlay();
   renderTranslationSwitches();
   renderFurigana();
+  renderSpeakers();
   renderLanguages();
   renderStartDownloads();
   renderHardware();
@@ -3315,9 +3824,11 @@ async function loadEngineData(): Promise<void> {
     fillCombo(settings);
     fillLanguageForm(settings);
     fillGlossary(settings);
+    fillSessionInfo(settings);
     renderSettingsPath();
     renderTranslationSwitches();
     renderFuriganaSwitch();
+    renderSpeakerSelect();
     await pushOverlayStyle();
     await pushOverlayShowTranslation();
     await pushObsOutput();
@@ -3349,11 +3860,14 @@ function onBridge(status: BridgeStatus): void {
     for (const [id, d] of state.downloads) if (d.state === "downloading") state.downloads.delete(id);
     if (state.furiganaDownload?.state === "downloading") state.furiganaDownload = null;
     state.furiganaPendingEnable = false;
+    if (state.speakerDownload?.state === "downloading") state.speakerDownload = null;
+    state.speakersPending = null;
   }
   renderStatus();
   renderCheck();
   renderTranslationSwitches();
   renderFurigana();
+  renderSpeakers();
   renderGlossaryErrors();
   if (status.phase !== "ready") {
     // A restarted engine has no downloads for the start in flight any more.
@@ -3484,6 +3998,7 @@ function wire(): void {
     item.addEventListener("click", () => showPage(item.dataset.page as Page));
   }
   el.overlayVisible.addEventListener("change", () => void setOverlayVisible(el.overlayVisible.checked));
+  el.resetOverlay.addEventListener("click", () => void resetOverlayPosition());
   el.overlayClick.addEventListener("change", async () => {
     try {
       state.overlay = await api.overlaySetClickThrough(el.overlayClick.checked);
@@ -3496,6 +4011,24 @@ function wire(): void {
     input.addEventListener("change", () => void changeShowTranslation(input.checked));
   }
   el.furiganaSwitch.addEventListener("change", () => void changeFurigana(el.furiganaSwitch.checked));
+  el.speakersSelect.addEventListener("change", () => {
+    const choice = parseChoice(el.speakersSelect.value);
+    if (choice) void changeSpeakers(choice);
+  });
+  // Rows are reused across redraws, so the chip clicks are handled on the list.
+  el.transcript.addEventListener("click", (e) => {
+    const chip = (e.target as HTMLElement).closest<HTMLButtonElement>("button.utt-voice");
+    const voice = Number(chip?.dataset.voice);
+    if (chip && Number.isInteger(voice) && voice >= 1) openVoiceRename(chip, voice);
+  });
+  el.voiceRename.addEventListener("submit", (e) => {
+    e.preventDefault();
+    commitVoiceRename();
+  });
+  el.voiceRenameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeVoiceRename();
+  });
+  el.voiceRenameInput.addEventListener("blur", () => commitVoiceRename());
   el.startDownloadsRetry.addEventListener("click", () => startFlow.retry());
   el.startDownloadsCancel.addEventListener("click", () => startFlow.cancel());
   for (const f of LANGUAGE_FIELDS) {
@@ -3537,6 +4070,17 @@ function wire(): void {
   el.guideRecheck.addEventListener("click", () => void recheckTranslationServer());
   el.copyDiagnostics.addEventListener("click", () => void copyDiagnostics());
   el.glossaryRows.addEventListener("input", onGlossaryInput);
+  el.correctionsInput.addEventListener("input", () => {
+    state.glossary.corrections = el.correctionsInput.value;
+    markGlossaryEdited();
+    renderGlossaryErrors();
+  });
+  el.addToGlossary.addEventListener("click", addSelectionToGlossary);
+  // Pressing the button must not clear the selection it acts on (some WebViews do on mousedown).
+  el.addToGlossary.addEventListener("mousedown", (e) => e.preventDefault());
+  el.sessionInfo.addEventListener("input", onSessionInfoInput);
+  el.sessionInfo.addEventListener("blur", () => void saveSessionInfo());
+  document.addEventListener("selectionchange", onTranscriptSelection);
   el.glossaryBuiltin.addEventListener("change", () => {
     state.glossary.builtin = el.glossaryBuiltin.checked;
     if (state.glossary.engineError?.target.kind === "builtin") state.glossary.engineError = null;
@@ -3626,6 +4170,11 @@ async function subscribe(): Promise<void> {
       // The furigana dictionary has its own switch and block; it is not an ASR model.
       if (isFuriganaDownload(p)) {
         onFuriganaDownload(p);
+        return;
+      }
+      // So does the speaker model (speaker-labels.md).
+      if (isSpeakerDownload(p)) {
+        onSpeakerDownload(p);
         return;
       }
       startFlow.onProgress(p);

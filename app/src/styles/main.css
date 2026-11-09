@@ -768,12 +768,11 @@ input[type="range"] {
 }
 
 /*
- * The utterance still being heard: yellow edge, lighter translation. Of the
- * original only the tail that may still change is faded; the settled prefix
- * (`stable_chars`, lib/stable.ts) is already final-looking.
+ * The utterance still being heard: yellow edge. Of the original and of the
+ * translation only the tail that may still change is faded; the settled prefixes
+ * (`stable_chars`, `translation_stable_chars`, lib/stable.ts) look final.
  */
-.utt.is-partial .utt-unstable,
-.utt.is-partial .utt-tr {
+.utt.is-partial .utt-unstable {
   opacity: 0.5;
 }
 
@@ -806,7 +805,7 @@ input[type="range"] {
 }
 
 /* Placeholder words come from the dictionary (data-empty, set in main.ts). */
-.utt-tr:empty::before {
+.utt-tr.is-empty::before {
   content: attr(data-empty);
   color: var(--nezumi);
 }
@@ -1074,7 +1073,12 @@ output {
 
 .preview-orig {
   color: #f3f5fa;
-  font-size: calc(var(--fs) * 0.62);
+  font-size: calc(var(--fs) * var(--orig-scale, 0.62));
+}
+
+/* G7: original below the translation. */
+.preview[data-original="below"] .preview-orig {
+  order: 1;
 }
 
 .preview-tr {
@@ -1346,4 +1350,88 @@ textarea {
 .glossary-actions {
   width: 1%;
   white-space: nowrap;
+}
+
+/*
+ * v0.3 G3: interpret mode labels each transcript row with who said it
+ * (data-who set in main.ts). The word is the cue; colour only helps.
+ */
+.utt-orig[data-who]::before {
+  content: attr(data-who);
+  display: inline-block;
+  margin-inline-end: 0.5em;
+  padding: 0 0.45em;
+  border-radius: 4px;
+  font-size: 0.8em;
+  font-weight: 700;
+  /* Fixed colours: readable in both themes (the chip is its own light plate). */
+  color: #10162c;
+  background: #8fd3ff;
+}
+
+.utt.is-partner .utt-orig[data-who]::before {
+  background: #f2c230;
+}
+
+/*
+ * Media-mode speaker labels (docs/specs/speaker-labels.md): a chip button on
+ * each labelled row; clicking it opens the rename box. Same light plates as
+ * the overlay (`.who.voice.cN`), picked from the name so merged labels match.
+ */
+.utt-voice {
+  display: inline-block;
+  margin: 0 0 2px;
+  padding: 0 0.45em;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.8em;
+  font-weight: 700;
+  line-height: 1.6;
+  color: #10162c;
+  background: #8fd3ff;
+  cursor: pointer;
+}
+
+.utt-voice[hidden] {
+  display: none;
+}
+
+.utt-voice:focus-visible {
+  outline: 2px solid var(--ai);
+  outline-offset: 2px;
+}
+
+.utt-voice.c1 { background: #ffd36b; }
+.utt-voice.c2 { background: #a8e6a1; }
+.utt-voice.c3 { background: #f5a8c8; }
+.utt-voice.c4 { background: #c9b6ff; }
+.utt-voice.c5 { background: #ffb38a; }
+
+.voice-rename {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+
+.voice-rename input {
+  width: min(100%, 18em);
+}
+
+/* v0.3 G5: stream info for the translator, in the rail under the audio source. */
+.session-info summary {
+  cursor: pointer;
+}
+
+.rail-textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  border: 1px solid rgb(255 255 255 / 0.18);
+  background: var(--ai-deep);
+  color: var(--on-ai);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+  color-scheme: dark;
 }

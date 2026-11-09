@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { rubyKey, rubyParts, segmentNodes, validRuby, type RubySpan } from "./ruby";
+import { firstReadingsOnly, rubyKey, rubyParts, segmentNodes, validRuby, type RubySpan } from "./ruby";
 
 const TEXT = "今日は食べる";
 const RUBY: RubySpan[] = [
@@ -172,5 +172,30 @@ describe("segmentNodes", () => {
     expect(ruby.tagName).toBe("ruby");
     expect(ruby.childNodes[0]).toBeInstanceOf(FakeText);
     expect((ruby.childNodes[1] as FakeElement).childNodes[0]).toBeInstanceOf(FakeText);
+  });
+});
+
+describe("firstReadingsOnly (G7)", () => {
+  const word = (text: string, reading: string | null) => ({ text, reading });
+
+  it("keeps a reading only in the utterance that first showed the word", () => {
+    const owners = new Map<string, number>();
+    const first = { stable: [word("今日", "きょう"), word("は", null)], unstable: [] };
+    expect(firstReadingsOnly(first, 1, owners)).toEqual(first);
+    // The same utterance redrawn (a partial growing, then its final) keeps it.
+    expect(firstReadingsOnly(first, 1, owners)).toEqual(first);
+    // A later utterance shows the word plain; a new word still gets its reading.
+    const later = { stable: [word("今日", "きょう")], unstable: [word("天気", "てんき")] };
+    expect(firstReadingsOnly(later, 2, owners)).toEqual({
+      stable: [word("今日", null)],
+      unstable: [word("天気", "てんき")],
+    });
+  });
+
+  it("treats a different reading of the same kanji as a different word", () => {
+    const owners = new Map<string, number>();
+    firstReadingsOnly({ stable: [word("今日", "きょう")], unstable: [] }, 1, owners);
+    const other = { stable: [word("今日", "こんにち")], unstable: [] };
+    expect(firstReadingsOnly(other, 2, owners)).toEqual(other);
   });
 });

@@ -68,6 +68,11 @@ from kikitori.pipeline import (
     default_transcript_filter,
 )
 from kikitori.pipeline.factory import AsrModelInfo, LoadProgress, UnknownModelError
+from kikitori.speakers.model import (
+    CAMPPLUS_ZH_EN,
+    SPEAKER_MODEL_ID,
+    SpeakerModelStatus,
+)
 from kikitori.translate.presets import normalize_model_name
 from kikitori.translate.types import TranslationRequest
 
@@ -352,6 +357,69 @@ class FakeFurigana:
             if not self._installed:
                 raise FileNotFoundError("the furigana dictionary is not installed")
         return FakeRubyAnalyzer(self.opened)
+
+
+FAKE_SPEAKER_MODEL_SIZE = 2 * 1024 * 1024
+
+
+class FakeSpeakerModel:
+    """說話者向量模型：預設未安裝；`install` 分兩段回報後標成已安裝（不碰磁碟）。"""
+
+    def __init__(self, installed: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._installed = installed
+
+    @property
+    def installed(self) -> bool:
+        """是否已安裝（假的 `build_components` 依它決定要不要標說話者）。"""
+        with self._lock:
+            return self._installed
+
+    def status(self) -> SpeakerModelStatus:
+        """固定的大小與真的名稱、授權資訊。"""
+        installed = self.installed
+        return SpeakerModelStatus(
+            id=SPEAKER_MODEL_ID,
+            name=CAMPPLUS_ZH_EN.name,
+            installed=installed,
+            download_bytes=FAKE_SPEAKER_MODEL_SIZE,
+            installed_bytes=FAKE_SPEAKER_MODEL_SIZE,
+            disk_bytes=FAKE_SPEAKER_MODEL_SIZE if installed else None,
+            path="/fake/speakers/model.onnx" if installed else None,
+            license=CAMPPLUS_ZH_EN.license,
+            license_url=CAMPPLUS_ZH_EN.license_url,
+        )
+
+    def install(self, progress: ProgressCallback, cancel: threading.Event) -> None:
+        """分兩段回報進度後標成已安裝。"""
+        half = FAKE_SPEAKER_MODEL_SIZE // 2
+        for done in (half, FAKE_SPEAKER_MODEL_SIZE):
+            if cancel.is_set():
+                raise RuntimeError("download cancelled")
+            progress(done, FAKE_SPEAKER_MODEL_SIZE)
+        with self._lock:
+            self._installed = True
+
+    def delete(self) -> int:
+        """標成未安裝，回傳 `FAKE_SPEAKER_MODEL_SIZE`（沒安裝時 `FileNotFoundError`）。"""
+        with self._lock:
+            if not self._installed:
+                raise FileNotFoundError("the speaker embedding model is not installed")
+            self._installed = False
+        return FAKE_SPEAKER_MODEL_SIZE
+
+
+class FakeVoiceLabeler:
+    """依序輪流標 1、2、…、`count`（自動判斷時當作 2 人）：假音訊沒有真的聲音可分。"""
+
+    def __init__(self, count: int | None) -> None:
+        self._count = 2 if count is None else count
+        self._next = 0
+
+    def label(self, audio: npt.NDArray[np.int16]) -> int | None:
+        """下一個說話者編號（1 起算）。"""
+        self._next = self._next % self._count + 1
+        return self._next
 
 
 class _FakeWheelResponse:
@@ -738,6 +806,7 @@ def fake_services() -> EngineServices:
     `KIKITORI_ENGINE_FAKE_TRANSLATION` 選擇）。"""
     catalog = FakeModelCatalog()
     server = FakeTranslationServer(_fake_translation_profile())
+    speaker_model = FakeSpeakerModel()
 
     def build_components(
         settings: Settings,
@@ -754,7 +823,14 @@ def fake_services() -> EngineServices:
             progress("asr_final", 2, 2)
         language = _fake_spoken_language(settings, mode)
         translator = FakeTranslator()
+        # 與 factory.attach_voice_labeler 相同：影片翻譯、設定開啟、模型已下載才標
+        labeler = (
+            FakeVoiceLabeler(settings.speakers.count)
+            if mode == "media" and settings.speakers.enabled and speaker_model.installed
+            else None
+        )
         return PipelineComponents(
+            voice_labeler=labeler,
             voice_model=AmplitudeVoiceModel(),
             fast_transcriber=FakeTranscriber("partial", language),
             final_transcriber=FakeTranscriber("final", language),
@@ -775,4 +851,5 @@ def fake_services() -> EngineServices:
         translation_models=server,
         fake=True,
         furigana=FakeFurigana(),
+        speaker_model=speaker_model,
     )

@@ -157,15 +157,26 @@ describe("glossary in the report", () => {
       ...DEFAULT_SETTINGS,
       translation: {
         ...DEFAULT_SETTINGS.translation,
-        glossary: { builtin: false, entries: [{ source: "secret-term", target: "x", target_language: null }] },
+        glossary: {
+          builtin: false,
+          entries: [{ source: "secret-term", target: "x", target_language: null }],
+          corrections: [{ wrong: "secret-wrong", right: "secret-right" }],
+        },
+        session_info: "secret-streamer",
       },
     };
     expect((settingsForReport(settings) as typeof settings).translation.glossary).toEqual({
       builtin: false,
       entries: "1 entries (not included)",
+      corrections: "1 corrections (not included)",
     });
     const text = buildDiagnostics(input({ settings }));
     expect(text).not.toContain("secret-term");
+    expect(text).not.toContain("secret-wrong");
+    expect(text).not.toContain("secret-streamer");
+    expect((settingsForReport(settings) as typeof settings).translation.session_info).toBe(
+      "15 characters (not included)",
+    );
     expect(text).toContain("1 entries (not included)");
   });
 });

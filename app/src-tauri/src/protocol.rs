@@ -81,6 +81,22 @@ pub struct SubtitlePayload {
     /// finals and from older engines, and then left out when forwarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable_chars: Option<u64>,
+    /// Partials only (docs/specs/v0.3-features.md G1): how many code points at
+    /// the start of `translation` match the previous complete partial
+    /// translation of this utterance. Absent from finals and older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_stable_chars: Option<u64>,
+    /// Interpret mode only (G3): `"self"` or `"partner"`. Any other value is a
+    /// display hint gone wrong and dropped; absent in media mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    /// Media-mode finals with speaker labels on (docs/specs/speaker-labels.md):
+    /// which speaker said the line, counting from 1 per session. Out of range
+    /// or on a partial it is dropped (the line is kept); a value that is not a
+    /// non-negative integer is a broken engine and rejects the event, like any
+    /// field of the wrong type. Absent when unlabelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<u32>,
     /// Finals only (F4): end of speech → final subtitle sent, in milliseconds;
     /// `null` when the engine could not measure it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +113,9 @@ pub struct SubtitlePayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RubySpan(pub u64, pub u64, pub String);
 
+/// More speakers than this is not a speaker label (the engine caps at 6).
+pub const MAX_VOICE: u32 = 64;
+
 /// A reading longer than this is not a reading of one word.
 const MAX_RUBY_READING_CHARS: usize = 64;
 
@@ -112,6 +131,13 @@ pub struct MetricsPayload {
     /// Median of recent `latency_ms`; `null` before the first final.
     #[serde(default)]
     pub latency_ms_median: Option<u64>,
+    /// v0.3 G8: level of the audio inside sentences over ~10 s; absent or
+    /// `null` when there was none. Out-of-range values are dropped (a hint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_level_dbfs: Option<f64>,
+    /// v0.3 G8: level of the audio between sentences (music, game sounds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_level_dbfs: Option<f64>,
 }
 
 /// Bounds of `metrics.level_dbfs` (the engine floors silence at −120 dBFS).
@@ -313,8 +339,8 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             EngineEvent::Subtitle(p)
         }
         "metrics" => {
-            let p: MetricsPayload = serde_json::from_value(data).map_err(ctx)?;
-            validate_metrics(&p)?;
+            let mut p: MetricsPayload = serde_json::from_value(data).map_err(ctx)?;
+            validate_metrics(&mut p)?;
             EngineEvent::Metrics(p)
         }
         "status" => {
@@ -379,6 +405,25 @@ fn validate_subtitle(p: &mut SubtitlePayload) -> Result<(), ParseError> {
         // A prefix longer than the text means "all of it" (the UI clamps too).
         p.stable_chars = Some(n.min(p.original.chars().count() as u64));
     }
+    if p.is_final {
+        // Partials only: a final's translation is settled as a whole.
+        p.translation_stable_chars = None;
+    } else if let Some(n) = p.translation_stable_chars {
+        p.translation_stable_chars = Some(n.min(p.translation.chars().count() as u64));
+    }
+    if let Some(who) = &p.speaker
+        && who != "self"
+        && who != "partner"
+    {
+        log::warn!("dropping unknown subtitle.speaker {who:?}");
+        p.speaker = None;
+    }
+    if let Some(n) = p.voice
+        && (n == 0 || n > MAX_VOICE || !p.is_final)
+    {
+        log::warn!("dropping subtitle.voice {n} (final: {})", p.is_final);
+        p.voice = None;
+    }
     if p.latency_ms.is_some_and(|ms| ms > MAX_LATENCY_MS) {
         p.latency_ms = None;
     }
@@ -420,7 +465,13 @@ fn check_ruby(spans: &[RubySpan], text_chars: u64) -> Result<(), String> {
 }
 
 /// A malformed `metrics` event is dropped: the next one follows within a second.
-fn validate_metrics(p: &MetricsPayload) -> Result<(), ParseError> {
+fn validate_metrics(p: &mut MetricsPayload) -> Result<(), ParseError> {
+    // The G8 split levels only drive a hint: a bad value loses the hint, not the event.
+    for level in [&mut p.speech_level_dbfs, &mut p.background_level_dbfs] {
+        if level.is_some_and(|db| !LEVEL_DBFS_RANGE.contains(&db)) {
+            *level = None;
+        }
+    }
     if !LEVEL_DBFS_RANGE.contains(&p.level_dbfs) {
         return Err(shape(format!(
             "metrics.level_dbfs {} is outside -120..0",
@@ -669,6 +720,96 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_translation_stable_chars() {
+        let mut v = subtitle_json();
+        let translation_chars = v["data"]["translation"].as_str().unwrap().chars().count() as u64;
+        v["data"]["translation_stable_chars"] = json!(1);
+        let s = parse_subtitle(&v);
+        assert_eq!(s.translation_stable_chars, Some(1));
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["translation_stable_chars"],
+            json!(1)
+        );
+        // Longer than the translation: clamped to it, not rejected.
+        v["data"]["translation_stable_chars"] = json!(999);
+        assert_eq!(
+            parse_subtitle(&v).translation_stable_chars,
+            Some(translation_chars)
+        );
+        // A final never carries it, even if an engine sent one.
+        let mut f = subtitle_json();
+        f["data"]["is_final"] = json!(true);
+        f["data"]["translation_stable_chars"] = json!(1);
+        assert!(parse_subtitle(&f).translation_stable_chars.is_none());
+        // Absent (finals, older engines): stays absent when forwarded.
+        let s = parse_subtitle(&subtitle_json());
+        assert!(s.translation_stable_chars.is_none());
+        assert!(
+            serde_json::to_value(&s)
+                .unwrap()
+                .get("translation_stable_chars")
+                .is_none()
+        );
+        for bad in [json!(-1), json!("3"), json!(1.5)] {
+            let mut b = subtitle_json();
+            b["data"]["translation_stable_chars"] = bad.clone();
+            assert!(
+                matches!(parse(&b.to_string()), Err(ParseError::Shape(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn subtitle_speaker() {
+        for who in ["self", "partner"] {
+            let mut v = subtitle_json();
+            v["data"]["speaker"] = json!(who);
+            let s = parse_subtitle(&v);
+            assert_eq!(s.speaker.as_deref(), Some(who));
+            assert_eq!(serde_json::to_value(&s).unwrap()["speaker"], json!(who));
+        }
+        // Unknown values are dropped (the line is kept); absent stays absent.
+        let mut v = subtitle_json();
+        v["data"]["speaker"] = json!("narrator");
+        assert!(parse_subtitle(&v).speaker.is_none());
+        let s = parse_subtitle(&subtitle_json());
+        assert!(serde_json::to_value(&s).unwrap().get("speaker").is_none());
+        // A non-string is a broken engine: rejected like any field of the wrong type.
+        let mut b = subtitle_json();
+        b["data"]["speaker"] = json!(1);
+        assert!(matches!(parse(&b.to_string()), Err(ParseError::Shape(_))));
+    }
+
+    #[test]
+    fn subtitle_voice() {
+        let mut v = subtitle_json();
+        v["data"]["is_final"] = json!(true);
+        v["data"]["voice"] = json!(3);
+        let s = parse_subtitle(&v);
+        assert_eq!(s.voice, Some(3));
+        assert_eq!(serde_json::to_value(&s).unwrap()["voice"], json!(3));
+        // Out of range, or on a partial: dropped, the line is kept.
+        for (bad, is_final) in [(json!(0), true), (json!(65), true), (json!(2), false)] {
+            let mut v = subtitle_json();
+            v["data"]["is_final"] = json!(is_final);
+            v["data"]["voice"] = bad.clone();
+            assert!(parse_subtitle(&v).voice.is_none(), "{bad} final={is_final}");
+        }
+        let s = parse_subtitle(&subtitle_json());
+        assert!(serde_json::to_value(&s).unwrap().get("voice").is_none());
+        // Wrong type: a broken engine, rejected like any field.
+        for bad in [json!("2"), json!(-1), json!(1.5)] {
+            let mut b = subtitle_json();
+            b["data"]["voice"] = bad.clone();
+            assert!(
+                matches!(parse(&b.to_string()), Err(ParseError::Shape(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn subtitle_ruby() {
         // "今日は" is 3 code points (9 UTF-8 bytes).
         let mut v = subtitle_json();
@@ -733,6 +874,16 @@ mod tests {
             serde_json::to_value(&m).unwrap(),
             json!({"session_id": 4, "level_dbfs": -23.5, "backlog": 2, "latency_ms_median": 900})
         );
+        // G8 split levels: forwarded when valid, dropped when out of range.
+        let split = r#"{"event":"metrics","data":{"level_dbfs":-20,"backlog":0,"speech_level_dbfs":-18.5,"background_level_dbfs":5}}"#;
+        let Some(Incoming::Event(EngineEvent::Metrics(m))) = parse(split).unwrap() else {
+            panic!("expected metrics");
+        };
+        assert_eq!(m.speech_level_dbfs, Some(-18.5));
+        assert!(m.background_level_dbfs.is_none());
+        let forwarded = serde_json::to_value(&m).unwrap();
+        assert_eq!(forwarded["speech_level_dbfs"], json!(-18.5));
+        assert!(forwarded.get("background_level_dbfs").is_none());
         let quiet = r#"{"event":"metrics","data":{"level_dbfs":-120,"backlog":0,"latency_ms_median":null}}"#;
         let Some(Incoming::Event(EngineEvent::Metrics(m))) = parse(quiet).unwrap() else {
             panic!("expected metrics");

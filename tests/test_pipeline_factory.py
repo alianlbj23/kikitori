@@ -3,6 +3,7 @@
 `load_transcriber` 以 mock 取代，只檢查傳給 asr 的參數。
 """
 
+import dataclasses
 import tempfile
 import threading
 import time
@@ -1232,6 +1233,65 @@ class KeepWarmTest(unittest.TestCase):
         self.assertTrue(pinged.wait(5.0))
         task.stop(1.0)
         self.assertEqual(log[0][1].target_language, "zh-TW")
+
+
+class AttachVoiceLabelerTest(unittest.TestCase):
+    """說話者標籤（docs/specs/speaker-labels.md）：只有影片翻譯模式、設定開啟時才載入。"""
+
+    ON = Settings().merged({"speakers": {"enabled": True, "count": 3}})
+
+    def test_loads_with_the_configured_count(self) -> None:
+        labeler = object()
+        load = mock.Mock(return_value=labeler)
+        result = factory.attach_voice_labeler(
+            _components(), self.ON, "media", load=load
+        )
+        load.assert_called_once_with(3)
+        self.assertIs(result.voice_labeler, labeler)
+        auto = self.ON.merged({"speakers": {"count": None}})
+        factory.attach_voice_labeler(_components(), auto, "media", load=load)
+        self.assertEqual(load.call_args, mock.call(None))
+
+    def test_off_or_interpret_mode_does_not_load(self) -> None:
+        load = mock.Mock()
+        for settings, mode in ((Settings(), "media"), (self.ON, "interpret")):
+            with self.subTest(mode=mode):
+                components = _components()
+                result = factory.attach_voice_labeler(
+                    components, settings, mode, load=load
+                )
+                self.assertIs(result, components)
+        load.assert_not_called()
+
+    def test_missing_or_broken_model_only_warns(self) -> None:
+        for error in (FileNotFoundError("not installed"), ValueError("bad model")):
+            with self.subTest(error=type(error).__name__):
+                components = _components()
+                with self.assertLogs("kikitori.pipeline.factory", "WARNING") as logs:
+                    result = factory.attach_voice_labeler(
+                        components, self.ON, "media", load=mock.Mock(side_effect=error)
+                    )
+                self.assertIs(result, components)
+                self.assertIsNone(result.voice_labeler)
+                self.assertIn(str(error), " ".join(logs.output))
+
+    def test_session_builder_attaches_the_labeler(self) -> None:
+        components = _components()
+        with (
+            mock.patch.object(
+                factory, "build_components", side_effect=lambda *a, **k: components
+            ),
+            mock.patch.object(factory, "warm_up_translation"),
+            mock.patch.object(
+                factory,
+                "attach_voice_labeler",
+                side_effect=lambda c, *a: dataclasses.replace(c, voice_labeler="L"),
+            ) as attach,
+            mock.patch.object(factory, "attach_keep_warm", side_effect=lambda c, *a: c),
+        ):
+            result = factory.build_session_components(self.ON, "media")
+        attach.assert_called_once_with(components, self.ON, "media")
+        self.assertEqual(result.voice_labeler, "L")
 
 
 if __name__ == "__main__":

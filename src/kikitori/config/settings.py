@@ -10,12 +10,14 @@ import copy
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePath
 from typing import Any, Literal, cast
 
 from kikitori.languages import UnknownLanguageError, get_language, normalize_language
+from kikitori.pipeline.corrections import MAX_CORRECTIONS, Correction
 from kikitori.pipeline.types import MODES, Mode
 from kikitori.translate import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TranslatorConfig
 from kikitori.translate.glossary import MAX_USER_ENTRIES, GlossaryEntry, match_key
@@ -158,10 +160,13 @@ class GlossarySettings:
     Attributes:
         builtin: 是否使用內建的日語直播用語（原文是日語、譯文是 zh-TW／zh-CN／en／ko 時）。
         entries: 使用者詞條（最多 `MAX_USER_ENTRIES` 筆）；同一個原文寫法優先於內建表。
+        corrections: 原文校正（v0.3 G4，最多 `MAX_CORRECTIONS` 筆）：辨識結果裡錯的寫法 →
+            正確寫法；錯的寫法在比對規則下不重複。
     """
 
     builtin: bool = True
     entries: tuple[GlossaryEntry, ...] = ()
+    corrections: tuple[Correction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +183,8 @@ class TranslationSettings:
             無法指定 keep_alive）。0 關閉；遠端服務一律不送。
         enabled: False 時只顯示原文：pipeline 不呼叫翻譯伺服器，也不預熱、不保溫。
         glossary: 術語表設定；每句只把原文出現的詞放進提示詞。
+        session_info: 本場資訊（v0.3 G5）：主播名、遊戲名、直播說明…，翻譯時只供參考；
+            去頭尾空白、只留換行以外不含控制字元、最多 `MAX_SESSION_INFO_CHARS` 字。
     """
 
     enabled: bool = True
@@ -188,6 +195,7 @@ class TranslationSettings:
     allow_restricted: bool = False
     keep_warm_secs: int = 240
     glossary: GlossarySettings = field(default_factory=GlossarySettings)
+    session_info: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,6 +225,23 @@ class FuriganaSettings:
     """
 
     enabled: bool = False
+
+
+SPEAKER_COUNT_RANGE = (2, 6)
+
+
+@dataclass(frozen=True)
+class SpeakerSettings:
+    """影片翻譯模式的說話者標籤（`docs/specs/speaker-labels.md`）。
+
+    Attributes:
+        enabled: 是否替每句完整字幕標出「說話者 N」。需要先下載模型（`models.download
+            {"model": "speaker-embedding"}`）；在 session 開始時讀取。
+        count: 指定人數（2–6）；None 為自動判斷人數。關閉時也保留，下次打開沿用。
+    """
+
+    enabled: bool = False
+    count: int | None = None
 
 
 def _default_media() -> ModeSettings:
@@ -250,6 +275,7 @@ class Settings:
     translation: TranslationSettings = field(default_factory=TranslationSettings)
     pipeline: PipelineSettings = field(default_factory=PipelineSettings)
     furigana: FuriganaSettings = field(default_factory=FuriganaSettings)
+    speakers: SpeakerSettings = field(default_factory=SpeakerSettings)
     subtitle: dict[str, Any] = field(default_factory=dict)
     ui: dict[str, Any] = field(default_factory=dict)
 
@@ -289,6 +315,7 @@ class Settings:
                 "api_key_env": self.translation.api_key_env,
                 "allow_restricted": self.translation.allow_restricted,
                 "keep_warm_secs": self.translation.keep_warm_secs,
+                "session_info": self.translation.session_info,
                 "glossary": {
                     "builtin": self.translation.glossary.builtin,
                     "entries": [
@@ -299,6 +326,10 @@ class Settings:
                         }
                         for e in self.translation.glossary.entries
                     ],
+                    "corrections": [
+                        {"wrong": c.wrong, "right": c.right}
+                        for c in self.translation.glossary.corrections
+                    ],
                 },
             },
             "pipeline": {
@@ -308,6 +339,10 @@ class Settings:
                 "asr_prompt_context": self.pipeline.asr_prompt_context,
             },
             "furigana": {"enabled": self.furigana.enabled},
+            "speakers": {
+                "enabled": self.speakers.enabled,
+                "count": self.speakers.count,
+            },
             "subtitle": copy.deepcopy(self.subtitle),
             "ui": copy.deepcopy(self.ui),
         }
@@ -587,6 +622,7 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
             "allow_restricted",
             "keep_warm_secs",
             "glossary",
+            "session_info",
         ),
     )
     values: dict[str, str] = {}
@@ -629,7 +665,35 @@ def _parse_translation(data: Mapping[str, Any]) -> TranslationSettings:
         allow_restricted=allow_restricted,
         keep_warm_secs=keep_warm_secs,
         glossary=_parse_glossary(section),
+        session_info=_session_info(section.get("session_info", "")),
     )
+
+
+MAX_SESSION_INFO_CHARS = 500
+"""本場資訊最多幾個字（v0.3 G5；太長會稀釋提示詞、增加每句的延遲）。"""
+
+
+def _session_info(value: object) -> str:
+    """`translation.session_info`：使用者隨手貼上的說明欄，整理成可以放進提示詞的樣子。
+
+    不拒絕內容（貼上的文字常有 tab 等控制字元），只清掉換行以外的控制字元、去頭尾空白、
+    截到上限；型別不對才是錯誤。
+    """
+    if not isinstance(value, str):
+        raise SettingsError(
+            f"translation.session_info: expected a string, got {type(value).__name__}"
+        )
+    # 只清掉控制字元（Cc）：全形空白、NBSP、表情符號的 ZWJ 都是使用者要的字
+    lines = (
+        "".join(
+            " " if ch == "\t" else ch
+            for ch in line
+            if ch == "\t" or unicodedata.category(ch) != "Cc"
+        )
+        for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    )
+    text = "\n".join(line.rstrip() for line in lines).strip()
+    return text[:MAX_SESSION_INFO_CHARS].rstrip()
 
 
 _GLOSSARY_ENTRY_KEYS = ("source", "target", "target_language")
@@ -639,7 +703,7 @@ def _parse_glossary(section: Mapping[str, Any]) -> GlossarySettings:
     """`translation.glossary`：內建表開關與使用者詞條（UI 的術語表編輯器直接寫入）。"""
     default = GlossarySettings()
     path = "translation.glossary"
-    data = _section(section, "glossary", ("builtin", "entries"), path)
+    data = _section(section, "glossary", ("builtin", "entries", "corrections"), path)
     builtin = _boolean(data.get("builtin", default.builtin), f"{path}.builtin")
     raw = data.get("entries", [])
     if not isinstance(raw, list) or len(raw) > MAX_USER_ENTRIES:
@@ -678,7 +742,50 @@ def _parse_glossary(section: Mapping[str, Any]) -> GlossarySettings:
             )
         seen.add(key)
         entries.append(entry)
-    return GlossarySettings(builtin=builtin, entries=tuple(entries))
+    return GlossarySettings(
+        builtin=builtin,
+        entries=tuple(entries),
+        corrections=_parse_corrections(data.get("corrections", []), path),
+    )
+
+
+_CORRECTION_KEYS = ("wrong", "right")
+
+
+def _parse_corrections(raw: object, path: str) -> tuple[Correction, ...]:
+    """`translation.glossary.corrections`：原文校正（v0.3 G4）。缺少時為空，不升 schema。"""
+    path = f"{path}.corrections"
+    if not isinstance(raw, list) or len(raw) > MAX_CORRECTIONS:
+        raise SettingsError(
+            f"{path}: expected a list of at most {MAX_CORRECTIONS} entries, got "
+            f"{type(raw).__name__} of length {len(raw) if isinstance(raw, list) else '-'}"
+        )
+    corrections: list[Correction] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        item_path = f"{path}[{i}]"
+        if not isinstance(item, Mapping):
+            raise SettingsError(
+                f"{item_path}: expected an object, got {type(item).__name__}"
+            )
+        _reject_unknown(item, _CORRECTION_KEYS, prefix=f"{item_path}.")
+        for name in _CORRECTION_KEYS:
+            if name not in item:
+                raise SettingsError(f"{item_path}.{name}: missing")
+        try:
+            correction = Correction(item["wrong"], item["right"])
+        except (TypeError, ValueError) as exc:
+            name = str(exc).split(" ", 1)[0]
+            field_path = name if name in _CORRECTION_KEYS else "wrong"
+            raise SettingsError(f"{item_path}.{field_path}: {exc}") from exc
+        key = match_key(correction.wrong)
+        if key in seen:
+            raise SettingsError(
+                f"{item_path}.wrong: duplicate of an earlier correction ({correction.wrong!r})"
+            )
+        seen.add(key)
+        corrections.append(correction)
+    return tuple(corrections)
 
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSettings:
@@ -723,6 +830,19 @@ def _parse_furigana(data: Mapping[str, Any]) -> FuriganaSettings:
     section = _section(data, "furigana", ("enabled",))
     return FuriganaSettings(
         enabled=_boolean(section.get("enabled", default.enabled), "furigana.enabled")
+    )
+
+
+def _parse_speakers(data: Mapping[str, Any]) -> SpeakerSettings:
+    """`speakers`：缺少時用預設值（關閉、自動判斷人數）。新段落有預設值，不升 schema。"""
+    default = SpeakerSettings()
+    section = _section(data, "speakers", ("enabled", "count"))
+    count = section.get("count", default.count)
+    return SpeakerSettings(
+        enabled=_boolean(section.get("enabled", default.enabled), "speakers.enabled"),
+        count=None
+        if count is None
+        else _integer(count, "speakers.count", *SPEAKER_COUNT_RANGE),
     )
 
 
@@ -835,6 +955,7 @@ _TOP_LEVEL = (
     "translation",
     "pipeline",
     "furigana",
+    "speakers",
     "subtitle",
     "ui",
 )
@@ -855,6 +976,7 @@ def _parse(data: Mapping[str, Any]) -> Settings:
         translation=_parse_translation(data),
         pipeline=_parse_pipeline(data),
         furigana=_parse_furigana(data),
+        speakers=_parse_speakers(data),
         subtitle=_parse_opaque(data, "subtitle"),
         ui=_parse_opaque(data, "ui"),
     )

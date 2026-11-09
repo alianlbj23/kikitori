@@ -43,7 +43,10 @@
     "allow-overlay-set-click-through",
     "allow-overlay-set-visible",
     "allow-overlay-set-locale",
+    "allow-overlay-set-speaker-names",
     "allow-overlay-set-show-translation",
+    "allow-overlay-notice",
+    "allow-overlay-reset-position",
     "allow-update-check",
     "allow-update-install"
   ]

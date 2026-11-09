@@ -46,6 +46,7 @@ from kikitori.engine.services import (
     ProgressCallback,
     platform_name,
 )
+from kikitori.engine.speaker_model_service import DefaultSpeakerModelProvider
 from kikitori.furigana.dictionary import DICTIONARY_ID
 from kikitori.hardware import GPU_RUNTIME_ID
 from kikitori.hardware.ollama import (
@@ -62,6 +63,7 @@ from kikitori.pipeline.factory import (
     translation_needed,
 )
 from kikitori.pipeline.types import PipelineComponents, release_components
+from kikitori.speakers.model import SPEAKER_MODEL_ID
 from kikitori.translate import redact_url
 from kikitori.translate.presets import normalize_model_name
 
@@ -99,7 +101,7 @@ PREVIEW_LANGUAGE_PARAMS = (
     "mode",
 )
 
-DownloadKind = Literal["asr", "gpu_runtime", "translation", "furigana"]
+DownloadKind = Literal["asr", "gpu_runtime", "translation", "furigana", "speaker"]
 """`download_progress` 的 `kind`。"""
 
 logger = logging.getLogger(__name__)
@@ -150,16 +152,23 @@ def _clear_tracebacks(exc: BaseException) -> None:
 def subtitle_event(update: SubtitleUpdate, session_id: int) -> dict[str, Any]:
     """`subtitle` 事件的 data：`SubtitleUpdate` 的欄位 + `session_id`。
 
-    即時字幕帶 `stable_chars`（沒有 `latency_ms`）；完整字幕帶 `latency_ms`（可能是 null，
-    沒有 `stable_chars`）。只放有意義的那一個，UI 不必猜 null 是「沒有」還是「0」。
+    即時字幕帶 `stable_chars` 與 `translation_stable_chars`（沒有 `latency_ms`）；完整字幕帶
+    `latency_ms`（可能是 null，沒有兩個穩定前綴）。只放有意義的那些，UI 不必猜 null 是「沒有」
+    還是「0」。
     """
     data = dataclasses.asdict(update)
+    if update.speaker is None:
+        data.pop("speaker")  # 影片翻譯：沒有「誰說的」
+    if update.voice is None:
+        data.pop("voice")  # 沒開說話者標籤、即時字幕或判斷不出來
     if update.is_final:
         data.pop("stable_chars")
+        data.pop("translation_stable_chars")
     else:
         data.pop("latency_ms")
-        if data["stable_chars"] is None:
-            data["stable_chars"] = 0
+        for key in ("stable_chars", "translation_stable_chars"):
+            if data[key] is None:
+                data[key] = 0
     data["session_id"] = session_id
     return data
 
@@ -232,6 +241,9 @@ class _MetricsReporter:
                             "level_dbfs": metrics.level_dbfs,
                             "backlog": metrics.backlog,
                             "latency_ms_median": metrics.latency_ms_median,
+                            # v0.3 G8：句子進行中／之外的音量（沒有那一類時為 null）
+                            "speech_level_dbfs": metrics.speech_level_dbfs,
+                            "background_level_dbfs": metrics.background_level_dbfs,
                         },
                     )
                 except ChannelClosedError:
@@ -328,6 +340,11 @@ class EngineServer:
             services.furigana
             if services.furigana is not None
             else DefaultFuriganaProvider()
+        )
+        self._speaker_model = (
+            services.speaker_model
+            if services.speaker_model is not None
+            else DefaultSpeakerModelProvider()
         )
         # 回應寫出後才執行的動作：讓 UI 先拿到 session_id，再收到該 session 的事件。
         self._after_response: list[Callable[[], None]] = []
@@ -715,6 +732,7 @@ class EngineServer:
             return {
                 **self._hardware.models_list(settings),
                 "furigana": self._furigana_status(),
+                "speaker_model": self._speaker_model.status().to_dict(),
             }
 
         return Deferred(job)
@@ -758,9 +776,13 @@ class EngineServer:
             )
         if model == DICTIONARY_ID:
             return self._download_furigana()
+        if model == SPEAKER_MODEL_ID:
+            return self._download_speaker_model()
         known = {m.id: m for m in self._services.models.asr_models()}
         if model not in known:
-            available = ", ".join([*known, GPU_RUNTIME_ID, DICTIONARY_ID])
+            available = ", ".join(
+                [*known, GPU_RUNTIME_ID, DICTIONARY_ID, SPEAKER_MODEL_ID]
+            )
             raise p.ProtocolError(
                 p.UNKNOWN_MODEL,
                 f"unknown model {model[:100]!r}; available: {available}",
@@ -836,6 +858,46 @@ class EngineServer:
             lambda: self._unregister_download("furigana", DICTIONARY_ID)
         )
         return {"model": DICTIONARY_ID, "started": True}
+
+    def _download_speaker_model(self) -> Mapping[str, Any]:
+        """說話者向量模型（約 27 MiB）：使用者打開說話者標籤時才下載；下一個 session 開始使用。"""
+        provider = self._speaker_model
+
+        def install(progress: ProgressCallback, cancel: threading.Event) -> None:
+            provider.install(progress, cancel)
+
+        thread = self._register_download(
+            "speaker", SPEAKER_MODEL_ID, provider.status().download_bytes, install
+        )
+        self._after_response.append(thread.start)
+        self._unsent_response.append(
+            lambda: self._unregister_download("speaker", SPEAKER_MODEL_ID)
+        )
+        return {"model": SPEAKER_MODEL_ID, "started": True}
+
+    def _delete_speaker_model(self) -> Mapping[str, Any]:
+        """刪除說話者向量模型；下載中回 `model_in_use`。
+
+        執行中的 session 已把模型讀進記憶體，不受影響（見 `speaker_model_service`）。
+        """
+        with self._downloads_lock:
+            downloading = ("speaker", SPEAKER_MODEL_ID) in self._downloads
+        if downloading:
+            raise p.ProtocolError(
+                p.MODEL_IN_USE, "the speaker embedding model is in use by a download"
+            )
+        try:
+            freed = self._speaker_model.delete()
+        except FileNotFoundError as exc:
+            raise p.ProtocolError(p.MODEL_NOT_DOWNLOADED, str(exc)) from exc
+        logger.info("deleted the speaker embedding model (%d bytes)", freed)
+        # 與振假名相同：沒有模型時一併關閉，設定與畫面才一致。存檔失敗只記錄。
+        if self._services.settings_store.get().speakers.enabled:
+            try:
+                self._services.settings_store.update({"speakers": {"enabled": False}})
+            except (SettingsError, OSError) as exc:
+                logger.error("cannot turn speaker labels off after deleting: %s", exc)
+        return {"model": SPEAKER_MODEL_ID, "freed_bytes": freed}
 
     def _delete_furigana(self) -> Mapping[str, Any]:
         """刪除振假名辭典；開啟中（session 執行中且振假名開啟）或下載中回 `model_in_use`。"""
@@ -937,6 +999,8 @@ class EngineServer:
             )
         if model == DICTIONARY_ID:
             return self._delete_furigana()
+        if model == SPEAKER_MODEL_ID:
+            return self._delete_speaker_model()
         catalog = self._services.models
         known = {m.id: m for m in catalog.asr_models()}
         if model not in known:

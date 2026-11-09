@@ -14,9 +14,13 @@
  * - Right-to-left text (Arabic, Hebrew…) is wrapped in RLM marks in the
  *   subtitle and text formats, so players that lay lines out left to right
  *   still put trailing punctuation on the correct side.
+ * - Who said it: with a namer given, each cue's first line starts with
+ *   "<name>: " and CSV gets a `speaker` column, so the file still says who said
+ *   what — "You"/"Them" in interpret mode (docs/specs/v0.3-features.md G3), the
+ *   speaker labels in media mode (docs/specs/speaker-labels.md).
  */
 
-import type { Mode } from "./types";
+import type { Mode, Speaker } from "./types";
 import type { SubtitleLine } from "./subtitles";
 
 export type ExportFormat = "srt" | "vtt" | "txt" | "csv";
@@ -49,6 +53,16 @@ export interface Cue {
   translation: string;
   sourceLanguage: string;
   targetLanguage: string;
+  /** Who said it, as named by the export's `LineNamer`; null = unnamed. */
+  who: string | null;
+}
+
+/** The name to put in front of a line in an export, or null to leave it unnamed. */
+export type LineNamer = (line: SubtitleLine) => string | null;
+
+/** Interpret sessions: the localised "You" / "Them" (G3). */
+export function interpretNamer(names: Readonly<Record<Speaker, string>>): LineNamer {
+  return (line) => (line.speaker ? names[line.speaker] : null);
 }
 
 /** Collapses line breaks, tabs and other control characters into single spaces. */
@@ -77,8 +91,15 @@ function samplesToMs(samples: number): number {
   return Math.round((samples * 1000) / SAMPLE_RATE);
 }
 
-/** Final lines as cues for `content`, in utterance order; empty ones are left out. */
-export function cuesFromLines(lines: readonly SubtitleLine[], content: ExportContent): Cue[] {
+/**
+ * Final lines as cues for `content`, in utterance order; empty ones are left
+ * out. With `nameOf`, a line it names starts with "<name>: ".
+ */
+export function cuesFromLines(
+  lines: readonly SubtitleLine[],
+  content: ExportContent,
+  nameOf: LineNamer | null = null,
+): Cue[] {
   const cues: Cue[] = [];
   for (const line of lines) {
     if (!line.isFinal) continue;
@@ -92,6 +113,8 @@ export function cuesFromLines(lines: readonly SubtitleLine[], content: ExportCon
           : [original, translation];
     const shown = text.filter((s) => s !== "");
     if (shown.length === 0) continue;
+    const who = nameOf ? nameOf(line) : null;
+    if (who) shown[0] = `${oneLine(who)}: ${shown[0]}`;
     const startMs = samplesToMs(line.startSample);
     const endMs = samplesToMs(line.endSample);
     cues.push({
@@ -102,6 +125,7 @@ export function cuesFromLines(lines: readonly SubtitleLine[], content: ExportCon
       translation,
       sourceLanguage: line.sourceLanguage,
       targetLanguage: line.targetLanguage,
+      who: who ? oneLine(who) : null,
     });
   }
   return cues;
@@ -177,6 +201,9 @@ export function csvField(value: string): string {
 /** CSV for spreadsheets: UTF-8 BOM (Excel otherwise guesses the code page), CRLF rows. */
 export function toCsv(cues: readonly Cue[], content: ExportContent): string {
   const header = ["index", "start", "end", "source_language", "target_language"];
+  // Who said each line, as its own column (the text stays unprefixed).
+  const withSpeaker = cues.some((cue) => cue.who !== null);
+  if (withSpeaker) header.push("speaker");
   if (content !== "translation") header.push("original");
   if (content !== "original") header.push("translation");
   const rows = cues.map((cue, i) => {
@@ -187,6 +214,7 @@ export function toCsv(cues: readonly Cue[], content: ExportContent): string {
       cue.sourceLanguage,
       cue.targetLanguage,
     ];
+    if (withSpeaker) row.push(cue.who ?? "");
     if (content !== "translation") row.push(cue.original);
     if (content !== "original") row.push(content === "translation" ? cue.translation || cue.original : cue.translation);
     return row.map(csvField).join(",");
@@ -194,18 +222,29 @@ export function toCsv(cues: readonly Cue[], content: ExportContent): string {
   return BOM + [header.join(","), ...rows].join(CRLF) + CRLF;
 }
 
-/** File contents of `lines` in `format`. */
-export function exportTranscript(lines: readonly SubtitleLine[], format: ExportFormat, content: ExportContent): string {
-  const cues = cuesFromLines(lines, content);
+/** File contents of `lines` in `format`; `nameOf` says who said each line. */
+export function exportTranscript(
+  lines: readonly SubtitleLine[],
+  format: ExportFormat,
+  content: ExportContent,
+  nameOf: LineNamer | null = null,
+): string {
   switch (format) {
     case "srt":
-      return toSrt(cues);
+      return toSrt(cuesFromLines(lines, content, nameOf));
     case "vtt":
-      return toVtt(cues);
+      return toVtt(cuesFromLines(lines, content, nameOf));
     case "txt":
-      return toTxt(cues);
-    case "csv":
-      return toCsv(cues, content);
+      return toTxt(cuesFromLines(lines, content, nameOf));
+    case "csv": {
+      // CSV keeps the text unprefixed and puts the speaker in its own column.
+      const named = cuesFromLines(lines, content, nameOf);
+      const plain = cuesFromLines(lines, content);
+      return toCsv(
+        plain.map((cue, i) => ({ ...cue, who: named[i]?.who ?? null })),
+        content,
+      );
+    }
   }
 }
 

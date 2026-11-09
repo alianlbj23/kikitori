@@ -31,7 +31,14 @@ describe("glossaryFromSettings", () => {
   });
 
   it("reads the engine's shape", () => {
-    const raw = { builtin: false, entries: [{ source: "スパチャ", target: "超級留言", target_language: "zh-TW" }, { source: "草", target: "lol", target_language: null }] };
+    const raw = {
+      builtin: false,
+      entries: [
+        { source: "スパチャ", target: "超級留言", target_language: "zh-TW" },
+        { source: "草", target: "lol", target_language: null },
+      ],
+      corrections: [{ wrong: "ぺこら", right: "ぺこーら" }],
+    };
     expect(glossaryFromSettings(raw, () => undefined)).toEqual(raw);
   });
 
@@ -41,7 +48,7 @@ describe("glossaryFromSettings", () => {
       { builtin: "yes", entries: [{ source: "a", target: "b" }, { source: 1, target: "x" }, "junk"] },
       (f) => warn.push(f),
     );
-    expect(g).toEqual({ builtin: true, entries: [entry("a", "b")] });
+    expect(g).toEqual({ builtin: true, entries: [entry("a", "b")], corrections: [] });
     expect(warn).toEqual(["translation.glossary.builtin", "translation.glossary.entries"]);
     const warn2: string[] = [];
     expect(glossaryFromSettings([1], (f) => warn2.push(f))).toEqual(DEFAULT_GLOSSARY);
@@ -120,8 +127,11 @@ describe("validateGlossary", () => {
 
 describe("glossaryPatch", () => {
   it("sends the whole list (settings.set replaces lists)", () => {
-    expect(glossaryPatch({ builtin: false, entries: [entry("a", "b", "en")] })).toEqual({
-      translation: { glossary: { builtin: false, entries: [{ source: "a", target: "b", target_language: "en" }] } },
+    const corrections = [{ wrong: "apex", right: "Apex" }];
+    expect(glossaryPatch({ builtin: false, entries: [entry("a", "b", "en")], corrections })).toEqual({
+      translation: {
+        glossary: { builtin: false, entries: [{ source: "a", target: "b", target_language: "en" }], corrections },
+      },
     });
   });
 });

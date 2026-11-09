@@ -33,6 +33,8 @@ class SubtitleUpdate:          # 照抄架構規格
     end_sample: int
     stable_chars: int | None = None   # F2：只有即時字幕有（見「穩定前綴」）
     latency_ms: int | None = None     # F4：只有完整字幕有（見「量測」）
+    translation_stable_chars: int | None = None  # v0.3 G1：只有即時字幕有（見「穩定前綴」）
+    speaker: str | None = None        # v0.3 G3：只有口譯模式有，"self"（原文是「我的語言」）或 "partner"
 
 @dataclass(frozen=True)
 class PipelineConfig:
@@ -118,6 +120,26 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   （`stream`、同樣的前文）。不送時這則即時字幕的 `translation` 沿用這句最後一次的即時譯文（不清空、不閃爍），原文與 `stable_chars` 照常更新。
   翻譯失敗也算送過（不會每則都重試）；失敗而沒有任何譯文時 `translation` 為空字串（與以前相同）。請求數因此**不會多於以前**。
 - 不翻譯的路由（`copy`／`off`／`unsupported`）照樣有 `stable_chars`；完整路徑完全不變（一定翻譯，沒有 `stable_chars`）。
+- **譯文的穩定前綴**（v0.3 G1，`docs/specs/v0.3-features.md`）：即時字幕另有 `translation_stable_chars`，是這則譯文與這句**上一則完整的即時譯文**
+  （上一個正常結束的串流的最後一段）的最長共同前綴；第一次翻譯為 0，永遠 ≤ `len(translation)`。重翻的串流還是上一則譯文的前綴（而且比較短）時，
+  畫面維持上一則、不另外送出事件（譯文不會先縮短再長回來）；超出或分歧才顯示新串流。串流正常結束時，最後一段成為之後比較的對象；它比畫面上的短時
+  才送出縮短後的一則。中斷的串流（錯誤、句子已結束）不成為比較對象。不重送翻譯時沿用譯文與它的穩定前綴；`copy`／`off`／`unsupported` 等於
+  `min(stable_chars, len(translation))`。不多送任何翻譯請求。完整字幕沒有這個欄位。閃爍程度以 `kikitori.evaluation.stability.normalized_erasure`
+  量測（Arivazhagan et al., 2020），e2e 驗收報告的 `stability` 欄位列出原文與譯文的中位數。
+
+- **語音／背景音量**（v0.3 G8）：`SplitLevelMeter`（10 秒、以 100 ms 為單位）把每段擷取音訊依「處理完這段之後切句器是否在句子中」
+  （`Pipeline._current is not None`）記成語音或背景；兩類共用同一個以樣本計的窗，所以一直在說話時背景的讀數會被擠出窗外（回報 None），
+  不會留下過時的值。分類以擷取區塊為單位，句子起點與句長上限切開的那一小段可能歸錯類，對 10 秒的平均影響可以忽略。`metrics` 事件帶
+  `speech_level_dbfs`、`background_level_dbfs`（null＝這段時間沒有那一類的音訊）。
+
+### 原文校正（v0.3 G4）
+
+- `PipelineConfig.corrections`（`(錯的寫法, 正確寫法)`，來自設定 `translation.glossary.corrections`）在建構 `Pipeline` 時驗證並編譯
+  （`pipeline/corrections.py`）；不合法就在 session 開始時失敗。
+- 套用在 `_original()`：字形轉換（`display_original`）**之後**，所以使用者寫的正確寫法就是畫面上的字形；即時與完整路徑相同，之後的穩定前綴、
+  翻譯請求、前文、ASR prompt 都用校正後的文字。
+- 比對：在 NFKC＋casefold 的副本上找，最長的錯誤寫法優先、一次掃描、不連鎖；只接受落在字（含結合符號、半形濁點）邊界上的結果，再換掉原文
+  對應的那一段，其餘部分保持原樣（不把整句轉成 NFKC）。
 
 ### 量測（F4）
 
@@ -125,7 +147,7 @@ capture 執行緒            ── read(0.1 s) → Segmenter.process → 事件
   送出完整字幕前再讀一次，差值取整數毫秒（≥ 0）。包含排隊、完整辨識與翻譯；**不含**判定句尾所需的靜音（`pause_secs`）與擷取緩衝——
   使用者實際感受的「說完到看到」約再加 `pause_secs`。被過濾的「清除」完整結果（原文空字串）也帶 `latency_ms`，但不計入中位數。
   注入的時鐘只用來排程即時辨識與量測延遲，音訊位置仍是樣本計數。
-- **`Pipeline.metrics()`** → `PipelineMetrics(level_dbfs, backlog, latency_ms_median)`（`pipeline/metrics.py`，執行緒安全）：
+- **`Pipeline.metrics()`** → `PipelineMetrics(level_dbfs, backlog, latency_ms_median, speech_level_dbfs, background_level_dbfs)`（`pipeline/metrics.py`，執行緒安全）：
   - `level_dbfs`：最近約 1 秒（16000 樣本，以 100 ms 為單位）**擷取到**的音訊（`source.read()` 的結果，逐步模式為 `feed()` 的音訊）的 RMS，
     `20·log10(rms / 32768)`，限制在 [−120.0, 0.0]、取到小數一位；沒有音訊或全靜音為 −120.0。以樣本數為窗，不讀時鐘（擷取停住時保持最後的值）。
   - `backlog`：句子已結束、還在完整路徑佇列中**等待**的句數（`FinalQueue.size()`；不含正在辨識的那一句）。

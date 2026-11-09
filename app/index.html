@@ -36,6 +36,14 @@
           <p class="rail-hint" id="device-hint"></p>
         </section>
 
+        <!-- v0.3 G5: names and topics of this stream, given to the translator as reference only. -->
+        <details class="rail-block session-info" id="session-info-block">
+          <summary class="rail-heading" data-i18n="rail.sessionInfo"></summary>
+          <textarea id="session-info" class="rail-textarea" rows="4" maxlength="500" spellcheck="false" data-i18n-aria-label="rail.sessionInfo" data-i18n-placeholder="rail.sessionInfoPlaceholder"></textarea>
+          <p class="rail-hint" data-i18n="rail.sessionInfoHelp"></p>
+          <p class="rail-hint" id="session-info-status" role="status"></p>
+        </details>
+
         <button type="button" id="start" class="start" data-state="idle"></button>
 
         <nav class="nav" data-i18n-aria-label="nav.label">
@@ -81,6 +89,8 @@
               <label class="switch"><input type="checkbox" id="overlay-click-through" /><span data-i18n="transcript.clickThrough"></span></label>
               <label class="switch"><input type="checkbox" id="show-translation" checked /><span data-i18n="transcript.showTranslation"></span></label>
               <button type="button" class="ghost" id="clear-transcript" data-i18n="transcript.clear"></button>
+              <!-- v0.3 G4: enabled while part of an original is selected; opens the glossary with it. -->
+              <button type="button" class="ghost" id="add-to-glossary" data-i18n="transcript.addToGlossary" data-i18n-title="transcript.addToGlossaryHelp" disabled></button>
               <!-- Export (lib/export.ts builds the file, Rust transcript_save writes it). -->
               <details class="export-menu" id="export-menu">
                 <summary data-i18n="export.button"></summary>
@@ -99,6 +109,10 @@
           </header>
           <p class="shortcut-note" id="shortcut-note"></p>
           <ol class="transcript" id="transcript" aria-live="off"></ol>
+          <!-- Speaker labels (docs/specs/speaker-labels.md): moved into the row whose chip was clicked. -->
+          <form class="voice-rename" id="voice-rename" hidden>
+            <input id="voice-rename-input" maxlength="40" autocomplete="off" spellcheck="false" data-i18n-aria-label="speaker.renameLabel" />
+          </form>
           <div class="empty" id="transcript-empty">
             <p class="empty-title" data-i18n="transcript.emptyTitle"></p>
             <p data-i18n="transcript.emptyBody"></p>
@@ -154,6 +168,11 @@
           <section class="block" aria-labelledby="furigana-heading">
             <h2 id="furigana-heading" data-i18n="furigana.title"></h2>
             <div id="furigana-dictionary"></div>
+          </section>
+
+          <section class="block" aria-labelledby="speakers-heading">
+            <h2 id="speakers-heading" data-i18n="speakers.title"></h2>
+            <div id="speaker-model"></div>
           </section>
 
           <section class="block" aria-labelledby="tr-heading">
@@ -370,6 +389,18 @@
                 </label>
                 <p class="field-help" id="furigana-help"></p>
                 <p class="field-help furigana-status progress" id="furigana-status" role="status" aria-live="polite" hidden></p>
+                <!-- v0.3 G7: overlay only; saved with the other style fields. -->
+                <label class="consent" for="f-furigana-first">
+                  <input id="f-furigana-first" name="furigana_first_only" type="checkbox" />
+                  <span data-i18n="settings.furiganaFirstOnly"></span>
+                </label>
+              </div>
+              <!-- No name: saved at once with settings.set; the first time it downloads the speaker model (lib/speaker-model.ts). -->
+              <div class="field">
+                <label for="f-speakers" data-i18n="settings.speakers"></label>
+                <select id="f-speakers"></select>
+                <p class="field-help" id="speakers-help"></p>
+                <p class="field-help furigana-status progress" id="speakers-status" role="status" aria-live="polite" hidden></p>
               </div>
               <div class="preview" id="style-preview" aria-hidden="true">
                 <div class="preview-line">
@@ -422,6 +453,45 @@
                   <p class="field-help" data-i18n="settings.idleClearHelp"></p>
                   <p class="field-error" data-error-for="idle_clear_secs"></p>
                 </div>
+              </div>
+              <!-- v0.3 G7: reading layout (Netflix timed-text guide, XAG 104). -->
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-orig-scale"><span data-i18n="settings.originalScale"></span> <output id="o-orig-scale"></output></label>
+                  <input id="f-orig-scale" name="original_scale_percent" type="range" min="50" max="150" step="2" />
+                  <p class="field-error" data-error-for="original_scale_percent"></p>
+                </div>
+                <div class="field">
+                  <label for="f-orig-position" data-i18n="settings.originalPosition"></label>
+                  <select id="f-orig-position" name="original_position">
+                    <option value="above" data-i18n="settings.originalAbove"></option>
+                    <option value="below" data-i18n="settings.originalBelow"></option>
+                  </select>
+                  <p class="field-error" data-error-for="original_position"></p>
+                </div>
+              </div>
+              <p class="field-help" data-i18n="settings.originalHelp"></p>
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-max-line" data-i18n="settings.maxLineEm"></label>
+                  <input id="f-max-line" name="max_line_em" type="number" min="0" max="60" step="1" inputmode="numeric" />
+                  <p class="field-help" data-i18n="settings.maxLineEmHelp"></p>
+                  <p class="field-error" data-error-for="max_line_em"></p>
+                </div>
+                <div class="field">
+                  <label class="consent" for="f-pace">
+                    <input id="f-pace" name="pace_by_length" type="checkbox" />
+                    <span data-i18n="settings.paceByLength"></span>
+                  </label>
+                  <p class="field-help" data-i18n="settings.paceByLengthHelp"></p>
+                </div>
+              </div>
+              <!-- v0.3 G6: brings a lost subtitle window back (overlay_reset_position). -->
+              <div class="field">
+                <div class="form-actions">
+                  <button type="button" class="ghost" id="reset-overlay" data-i18n="settings.resetOverlay"></button>
+                </div>
+                <p class="field-help" data-i18n="settings.resetOverlayHelp"></p>
               </div>
             </fieldset>
 
@@ -496,6 +566,13 @@
                 <input type="file" id="glossary-file" accept=".csv,text/csv,text/plain" hidden />
               </div>
               <p class="field-help" data-i18n="glossary.csvHelp"></p>
+              <!-- v0.3 G4: ASR correction rules, one "wrong => right" per line (lib/corrections.ts). -->
+              <div class="field">
+                <label for="f-corrections" data-i18n="glossary.correctionsLegend"></label>
+                <textarea id="f-corrections" rows="4" spellcheck="false" autocomplete="off" data-i18n-aria-label="glossary.correctionsLabel"></textarea>
+                <p class="field-help" data-i18n="glossary.correctionsHelp"></p>
+                <p class="field-error" id="corrections-error" role="alert"></p>
+              </div>
               <div class="form-actions">
                 <button type="submit" class="primary" id="glossary-save" data-i18n="glossary.save"></button>
                 <button type="button" class="ghost" id="glossary-reset" data-i18n="glossary.reset"></button>

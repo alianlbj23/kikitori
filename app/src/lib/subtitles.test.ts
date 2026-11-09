@@ -127,6 +127,27 @@ describe("stable prefix of live lines (F2)", () => {
   });
 });
 
+describe("stable prefix of live translations (G1)", () => {
+  it("splits a partial translation at translation_stable_chars", () => {
+    const p = { ...ev(1, "今日は寒い", false), translation: "今天很冷", translation_stable_chars: 2 };
+    const s = run([p]);
+    expect(s.lines[0]!.translationStableChars).toBe(2);
+    expect(lineDisplay(s.lines[0]!, true).translationParts).toEqual({ stable: "今天", unstable: "很冷" });
+  });
+
+  it("fades the whole partial translation when the engine sends no count", () => {
+    const s = run([{ ...ev(1, "abc", false), translation: "ABC" }]);
+    expect(s.lines[0]!.translationStableChars).toBeNull();
+    expect(lineDisplay(s.lines[0]!, true).translationParts).toEqual({ stable: "", unstable: "ABC" });
+  });
+
+  it("shows a final translation as settled, and nothing when translations are hidden", () => {
+    const s = run([{ ...ev(1, "abc", true), translation: "ABC", translation_stable_chars: 1 }]);
+    expect(lineDisplay(s.lines[0]!, true).translationParts).toEqual({ stable: "ABC", unstable: "" });
+    expect(lineDisplay(s.lines[0]!, false).translationParts).toEqual({ stable: "", unstable: "" });
+  });
+});
+
 describe("furigana on live and final lines", () => {
   it("keeps the newest ruby with the stable prefix, and none without it", () => {
     const ruby = [

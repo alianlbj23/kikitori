@@ -409,5 +409,32 @@ class WavTest(unittest.TestCase):
                 wav.read_wav(path)
 
 
+class NormalizedErasureTest(unittest.TestCase):
+    """v0.3 G1：即時字幕穩定度指標（Arivazhagan et al., 2020）。"""
+
+    def test_append_only_updates_erase_nothing(self) -> None:
+        from kikitori.evaluation.stability import normalized_erasure
+
+        self.assertEqual(normalized_erasure(["今", "今天", "今天很冷"]), 0.0)
+
+    def test_rewrites_count_the_characters_that_disappear(self) -> None:
+        from kikitori.evaluation.stability import erased_characters, normalized_erasure
+
+        updates = ["今天下", "今天很冷", "今天很冷"]
+        # 「下」被刪掉（1 字）；之後沒有改字
+        self.assertEqual(erased_characters(updates), 1)
+        self.assertAlmostEqual(normalized_erasure(updates), 1 / 4)
+        # 整句重寫兩次：每次刪掉 4 字，最終 4 字 → 2.0
+        self.assertAlmostEqual(normalized_erasure(["abcd", "wxyz", "abcd"]), 2.0)
+
+    def test_empty_input_and_empty_final(self) -> None:
+        from kikitori.evaluation.stability import normalized_erasure
+
+        self.assertEqual(normalized_erasure([]), 0.0)
+        self.assertEqual(normalized_erasure(["x"]), 0.0)
+        # 最後清空（判定不是語音）：以 1 為分母
+        self.assertEqual(normalized_erasure(["abc", ""]), 3.0)
+
+
 if __name__ == "__main__":
     unittest.main()

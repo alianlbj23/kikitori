@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   NO_AUDIO_MS,
+  backgroundTooLoud,
   applyMetrics,
   dismissMetricsWarning,
   emptyMetrics,
@@ -139,5 +140,36 @@ describe("meterTransform", () => {
     expect(meterTransform(1.7)).toBe("scaleX(1)");
     expect(meterTransform(-0.2)).toBe("scaleX(0)");
     expect(meterTransform(Number.NaN)).toBe("scaleX(0)");
+  });
+});
+
+describe("background music warning (G8)", () => {
+  const loud = (speech: number | null, background: number | null): MetricsEvent => ({
+    ...m(-20),
+    speech_level_dbfs: speech,
+    background_level_dbfs: background,
+  });
+
+  it("needs loud background close to the speech, for 15 seconds", () => {
+    expect(backgroundTooLoud(loud(-20, -24))).toBe(true);
+    expect(backgroundTooLoud(loud(-20, -32))).toBe(false); // background quiet enough
+    expect(backgroundTooLoud(loud(-10, -24))).toBe(false); // speech clearly on top
+    expect(backgroundTooLoud(loud(null, -10))).toBe(false); // nothing to compare with
+    expect(backgroundTooLoud(m(-20))).toBe(false); // older engine
+    // Readings at 0, 1, …, 15 s: the warning is due at the 15th second, not before.
+    const readings = Array.from({ length: 16 }, () => loud(-20, -24));
+    const { state, now } = feed(running(), readings);
+    expect(metricsView(state, now - 1000).warnings).not.toContain("bgm");
+    expect(metricsView(state, now).warnings).toContain("bgm");
+  });
+
+  it("clears when the condition goes away, and a closed warning stays closed until then", () => {
+    let { state, now } = feed(running(), Array.from({ length: 16 }, () => loud(-20, -24)));
+    state = dismissMetricsWarning(state, "bgm");
+    expect(metricsView(state, now).warnings).not.toContain("bgm");
+    state = applyMetrics(state, loud(-20, -40), now);
+    expect(state.loudBackgroundSince).toBeNull();
+    ({ state, now } = feed(state, Array.from({ length: 16 }, () => loud(-20, -24)), now + 1000));
+    expect(metricsView(state, now).warnings).toContain("bgm");
   });
 });

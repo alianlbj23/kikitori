@@ -19,12 +19,15 @@ class TranslationRequest:
         source_language: 原文語言碼，ISO 639-1（例如 "ja"）；中文為 "zh"。
         target_language: 譯文語言碼，預設 "zh-TW"。
         context: 前幾句原文（由舊到新），只供參考、不翻譯，提升連貫性。
+        background: 本場資訊（v0.3 G5）：使用者填的主播名、遊戲名、直播說明等，只供參考、
+            不翻譯；空字串表示沒有。只有 generic 格式放進提示詞（HY-MT、Sakura 照官方範本）。
     """
 
     text: str
     source_language: str
     target_language: str = "zh-TW"
     context: tuple[str, ...] = ()
+    background: str = ""
 
 
 class Translator(Protocol):

@@ -16,6 +16,8 @@
  * slips through is reported by the engine on the same row.
  */
 
+import { correctionsFromSettings } from "./corrections";
+import { matchKey } from "./match-key";
 import { csvField } from "./export";
 import { t } from "./i18n";
 import { isLanguageCode } from "./languages";
@@ -28,7 +30,7 @@ export const GLOSSARY_MAX_TARGET_CHARS = 200;
 /** A glossary CSV is a few dozen KB at most; anything far larger is the wrong file. */
 export const GLOSSARY_MAX_CSV_BYTES = 1024 * 1024;
 
-export const DEFAULT_GLOSSARY: GlossarySettings = { builtin: true, entries: [] };
+export const DEFAULT_GLOSSARY: GlossarySettings = { builtin: true, entries: [], corrections: [] };
 
 export type GlossaryField = keyof GlossaryEntry;
 export type GlossaryRowErrors = Partial<Record<GlossaryField, string>>;
@@ -83,19 +85,12 @@ export function glossaryFromSettings(raw: unknown, warn: (field: string) => void
   } else if (o.entries !== undefined) {
     warn("translation.glossary.entries");
   }
-  return { builtin, entries };
+  return { builtin, entries, corrections: correctionsFromSettings(o.corrections, warn) };
 }
 
 // ---------------------------------------------------------------- checking
 
-/**
- * The engine's matching key: NFKC, case folded, trimmed (`glossary.match_key`).
- * `toUpperCase().toLowerCase()` folds like Python's `casefold()` for the cases
- * that matter here (ß → ss), and the final sigma is folded to σ as casefold does.
- */
-export function matchKey(text: string): string {
-  return text.normalize("NFKC").toUpperCase().toLowerCase().replaceAll("ς", "σ").trim();
-}
+export { matchKey };
 
 /** Characters Python's `str.isprintable()` rejects: controls, format, separators other than the ASCII space. */
 const NOT_PRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]|(?! )\p{Zs}/u;
@@ -167,6 +162,7 @@ export function glossaryPatch(glossary: GlossarySettings): Record<string, unknow
       glossary: {
         builtin: glossary.builtin,
         entries: glossary.entries.map((e) => ({ source: e.source, target: e.target, target_language: e.target_language })),
+        corrections: glossary.corrections.map((c) => ({ wrong: c.wrong, right: c.right })),
       },
     },
   };

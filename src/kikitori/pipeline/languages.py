@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from kikitori.languages import WHISPER_CODES, UnknownLanguageError, get_language
-from kikitori.pipeline.types import Mode
+from kikitori.pipeline.types import Mode, Speaker
 from kikitori.translate.postprocess import to_script
 
 RouteAction = Literal["translate", "copy", "unsupported", "off"]
@@ -27,11 +27,14 @@ class Route:
         action: "translate" 要翻譯；"copy" 原文與譯文是同一個 Whisper 語言（譯文 =
             原文轉成譯文語言的字形）；"unsupported" 原文語言不在語言清單內（譯文留空）；
             "off" 使用者關閉了翻譯（譯文留空）。
+        speaker: 口譯模式下這句是誰說的（v0.3 G3）：原文是「我的語言」為 "self"，
+            其他為 "partner"；影片翻譯為 None。
     """
 
     source: str
     target: str
     action: RouteAction
+    speaker: Speaker | None = None
 
 
 def base_language(code: str) -> str:
@@ -59,17 +62,18 @@ def route(
         UnknownLanguageError: `target_language` 不在語言清單內。
     """
     source = base_language(detected)
-    if mode == "interpret" and source == get_language(target_language).whisper_code:
-        target = partner_language
-    else:
-        target = target_language
+    mine = source == get_language(target_language).whisper_code
+    speaker: Speaker | None = None
+    if mode == "interpret":
+        speaker = "self" if mine else "partner"
+    target = partner_language if mode == "interpret" and mine else target_language
     if not translation_enabled:
-        return Route(source, target, "off")
+        return Route(source, target, "off", speaker)
     if source not in WHISPER_CODES:
-        return Route(source, target, "unsupported")
+        return Route(source, target, "unsupported", speaker)
     if source == get_language(target).whisper_code:
-        return Route(source, target, "copy")
-    return Route(source, target, "translate")
+        return Route(source, target, "copy", speaker)
+    return Route(source, target, "translate", speaker)
 
 
 def display_original(text: str, detected: str, languages: str | Sequence[str]) -> str:

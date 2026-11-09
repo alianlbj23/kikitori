@@ -153,5 +153,7 @@ def validate_request(
         raise InvalidRequestError("context must contain only str")
     context = tuple(line.strip() for line in request.context if line.strip())
     context = context[-max_context_lines:] if max_context_lines > 0 else ()
+    if not isinstance(request.background, str):
+        raise InvalidRequestError("background must be str")
 
-    return TranslationRequest(text, source, target, context)
+    return TranslationRequest(text, source, target, context, request.background.strip())

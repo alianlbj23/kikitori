@@ -77,6 +77,41 @@ class DetectionTest(unittest.TestCase):
         self.assertFalse(looks_like_context_leak(LONG, request))
 
 
+class BackgroundLeakTest(unittest.TestCase):
+    """v0.3 G5：本場資訊與前文一樣可能被翻出來。"""
+
+    def test_copied_background_is_suspicious(self) -> None:
+        req = TranslationRequest(
+            "行くよ", "ja", "zh-TW", background="今日はマイクラ建築配信"
+        )
+        self.assertTrue(looks_like_context_leak("今日はマイクラ建築配信 走吧", req))
+        self.assertFalse(looks_like_context_leak("走吧", req))
+
+    def test_background_alone_only_checks_for_copies(self) -> None:
+        # 沒有前文時，長譯文本身不算外洩（長度規則只為前文設計）
+        req = TranslationRequest("行くよ", "ja", "zh-TW", background="今日の配信")
+        self.assertFalse(looks_like_context_leak(LONG, req))
+        guard = ContextFallbackTranslator(FakeTranslator(lambda r: LONG))
+        self.assertEqual("".join(list(guard.stream(req))[-1:]), LONG)
+
+    def test_stream_retries_without_background_when_it_is_copied(self) -> None:
+        bg = "今日はマイクラ建築配信"
+        inner = FakeTranslator(lambda r: f"{bg} 走吧" if r.background else "走吧")
+        req = TranslationRequest("行くよ", "ja", "zh-TW", background=bg)
+        self.assertEqual(list(ContextFallbackTranslator(inner).stream(req))[-1], "走吧")
+        self.assertEqual([r.background for r in inner.requests], [bg, ""])
+
+    def test_retry_drops_both_context_and_background(self) -> None:
+        inner = FakeTranslator(leaky)
+        guard = ContextFallbackTranslator(inner)
+        req = TranslationRequest("怖くないもん！", "ja", "zh-TW", CONTEXT, "背景")
+        self.assertEqual(guard.translate(req), "我才不怕呢！")
+        self.assertEqual(
+            [(r.context, r.background) for r in inner.requests],
+            [(CONTEXT, "背景"), ((), "")],
+        )
+
+
 class TranslateFallbackTest(unittest.TestCase):
     def test_retranslates_once_without_context(self) -> None:
         inner = FakeTranslator(leaky)
