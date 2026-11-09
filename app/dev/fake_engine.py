@@ -47,6 +47,12 @@ Furigana (docs/specs/furigana.md) is imitated too: `models.list` has a
 session, `session.set_furigana` refuses `model_not_downloaded` until then, and
 Japanese subtitles carry `ruby` from the small reading table below while it is on.
 
+Speaker labels (docs/specs/speaker-labels.md) likewise: `models.list` has a
+`speaker_model` (not downloaded at start), `models.download {"model":
+"speaker-embedding"}` reports `kind: "speaker"`, `models.delete` frees it (and
+turns `speakers.enabled` off), and with `speakers.enabled` on and the model
+downloaded, media-mode finals carry `voice` taking turns 1, 2, … (`count`, or 2).
+
 Point the app at it with
     KIKITORI_ENGINE_CMD='["uv","run","--no-project","python","app/dev/fake_engine.py"]'
 or use `npm run menu` in app/.
@@ -125,6 +131,8 @@ FURIGANA_WORDS: dict[str, list[tuple[int, int, str]]] = {
     "思": [(0, 1, "おも")],
 }
 FURIGANA_ID = "furigana-dictionary"
+SPEAKER_MODEL_ID = "speaker-embedding"
+SPEAKER_MODEL_BYTES = 28_281_164
 FURIGANA_DOWNLOAD_BYTES = 72_238_136
 FURIGANA_INSTALLED_BYTES = 217_391_698
 
@@ -231,7 +239,7 @@ BROKEN_PULL = "fake-broken-pull:1b"
 PULL_BYTES = 4 * 1024 * 1024
 TRANSLATION_SERVER_PROFILES = ("ollama", "openai", "offline", "auth")
 # `--metrics`: what the fake input level and backlog look like.
-METRICS_PROFILES = ("normal", "silent", "backlog")
+METRICS_PROFILES = ("normal", "silent", "backlog", "bgm")
 METRICS_INTERVAL_SECS = 1.0
 # `--partial-steps` / `--partial-interval`: how often partials arrive. The
 # defaults (4 partials, 0.55 s apart) suit UI work. The real engine sent 4299
@@ -398,6 +406,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "asr_prompt_context": True,
     },
     "furigana": {"enabled": False},
+    "speakers": {"enabled": False, "count": None},
     "subtitle": {},
     "ui": {},
 }
@@ -643,6 +652,23 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise ProtocolError(
             "invalid_settings", "furigana.enabled: expected true or false"
         )
+    speakers = settings.get("speakers", {})
+    if not isinstance(speakers, dict) or set(speakers) - {"enabled", "count"}:
+        raise ProtocolError(
+            "invalid_settings", "speakers: only 'enabled' and 'count' are allowed"
+        )
+    if not isinstance(speakers.get("enabled", False), bool):
+        raise ProtocolError(
+            "invalid_settings", "speakers.enabled: expected true or false"
+        )
+    count = speakers.get("count")
+    if count is not None and (
+        isinstance(count, bool) or not isinstance(count, int) or not 2 <= count <= 6
+    ):
+        raise ProtocolError(
+            "invalid_settings",
+            f"speakers.count: expected an integer in [2, 6], got {count!r}",
+        )
     for key in ("subtitle", "ui"):
         if not isinstance(settings[key], dict):
             raise ProtocolError("invalid_settings", f"{key}: expected an object")
@@ -686,6 +712,12 @@ class Session(threading.Thread):
         # `session.set_furigana` flips it; ruby needs the dictionary too.
         self.furigana_enabled: bool = settings.get("furigana", {}).get("enabled", False)
         self.furigana_installed = False
+        # Speaker labels are read when the session starts (no switch while it runs).
+        speakers = settings.get("speakers", {})
+        self.speakers_enabled: bool = speakers.get("enabled", False)
+        self.speaker_count: int = speakers.get("count") or 2
+        self.speaker_model_installed = False
+        self.next_voice = 0
         self.stop_event = threading.Event()
         # Checked before "loading" ends, like the real engine's translation-model
         # and ASR checks: (code, detail, data) of a start that must fail.
@@ -789,6 +821,7 @@ class Session(threading.Thread):
         """
         steps = self.partial_steps
         stable = 0
+        stable_t = 0
         self.speaking = True
         try:
             for i in range(1, steps + 1):
@@ -806,8 +839,10 @@ class Session(threading.Thread):
                     start,
                     i,
                     stable_chars=stable,
+                    translation_stable_chars=min(stable_t, cut_t),
                 )
                 stable = cut_o
+                stable_t = cut_t
         finally:
             self.speaking = False
         if self.stop_event.wait(0.6):
@@ -843,6 +878,12 @@ class Session(threading.Thread):
             else:
                 backlog = 1 if self.speaking and tick % 4 == 0 else 0
             latencies = self.latencies
+            # v0.3 G8: levels inside / between sentences; "bgm" keeps the music
+            # nearly as loud as the voice, past the status-bar warning threshold.
+            speech_level = -20.0 if self.metrics_profile != "silent" else None
+            background_level = (
+                -23.0 if self.metrics_profile == "bgm" else -47.0 + (tick % 3)
+            )
             self.writer.event(
                 "metrics",
                 {
@@ -852,6 +893,8 @@ class Session(threading.Thread):
                     "latency_ms_median": int(statistics.median(latencies))
                     if latencies
                     else None,
+                    "speech_level_dbfs": speech_level,
+                    "background_level_dbfs": background_level,
                 },
             )
 
@@ -866,6 +909,7 @@ class Session(threading.Thread):
         step: int,
         stable_chars: int = 0,
         latency_ms: int | None = None,
+        translation_stable_chars: int = 0,
     ) -> None:
         data: dict[str, Any] = {
             "utterance_id": utterance_id,
@@ -878,13 +922,27 @@ class Session(threading.Thread):
             "end_sample": start + int(SAMPLE_RATE * 0.5 * step),
             "session_id": self.session_id,
         }
-        # Like the engine: partials carry only stable_chars, finals only latency_ms.
+        # Like the engine: partials carry the two stable prefixes, finals only latency_ms.
         if is_final:
             data["latency_ms"] = latency_ms
         else:
             data["stable_chars"] = stable_chars
+            data["translation_stable_chars"] = translation_stable_chars
+        if self.mode == "interpret":
+            # v0.3 G3: the user's own language is "self", anything else the partner.
+            mine = source == LANGUAGE_WHISPER[self.target]
+            data["speaker"] = "self" if mine else "partner"
         if self.furigana_enabled and self.furigana_installed and source == "ja":
             data["ruby"] = furigana(original)
+        if (
+            is_final
+            and self.mode == "media"
+            and self.speakers_enabled
+            and self.speaker_model_installed
+        ):
+            # Like engine/testing.py FakeVoiceLabeler: turns, since fake audio has no voices.
+            self.next_voice = self.next_voice % self.speaker_count + 1
+            data["voice"] = self.next_voice
         self.writer.event("subtitle", data)
 
 
@@ -919,6 +977,7 @@ class FakeEngine:
         self._reported = (copy.deepcopy(self.settings), self.is_new)
         self.downloaded = {"tiny", "base", "small"}
         self.furigana_installed = False
+        self.speaker_model_installed = False
         self.downloading: set[str] = set()
         self.session: Session | None = None
         self.next_session_id = 1
@@ -1221,6 +1280,7 @@ class FakeEngine:
                 "cublas_source": "runtime" if runtime else None,
             },
             "furigana": self._furigana_status(),
+            "speaker_model": self._speaker_model_status(),
             "translation": {
                 "server": {
                     "base_url": self.settings["translation"]["base_url"],
@@ -1590,6 +1650,20 @@ class FakeEngine:
             "in_use": self._furigana_in_use(),
         }
 
+    def _speaker_model_status(self) -> dict[str, Any]:
+        installed = self.speaker_model_installed
+        return {
+            "id": SPEAKER_MODEL_ID,
+            "name": "3D-Speaker CAM++ (zh-en, 16 kHz)",
+            "installed": installed,
+            "download_bytes": SPEAKER_MODEL_BYTES,
+            "installed_bytes": SPEAKER_MODEL_BYTES,
+            "disk_bytes": SPEAKER_MODEL_BYTES if installed else None,
+            "path": "C:/fake/speakers/model.onnx" if installed else None,
+            "license": "Apache-2.0 (3D-Speaker CAM++)",
+            "license_url": "https://www.modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced/summary",
+        }
+
     def session_set_furigana(self, params: dict[str, Any]) -> dict[str, Any]:
         """Furigana switch: saved and applied at once; needs the dictionary to turn on."""
         enabled = params.get("enabled")
@@ -1619,6 +1693,22 @@ class FakeEngine:
         model = params.get("model")
         if not isinstance(model, str) or not model:
             raise ProtocolError("invalid_params", "model must be a non-empty string")
+        if model == SPEAKER_MODEL_ID:
+            with self.lock:
+                if SPEAKER_MODEL_ID in self.downloading:
+                    raise ProtocolError(
+                        "model_in_use",
+                        "the speaker embedding model is in use by a download",
+                    )
+                if not self.speaker_model_installed:
+                    raise ProtocolError(
+                        "model_not_downloaded",
+                        "the speaker embedding model is not installed",
+                    )
+                self.speaker_model_installed = False
+            if self.settings.get("speakers", {}).get("enabled"):
+                self.settings_set({"speakers": {"enabled": False}})
+            return {"model": SPEAKER_MODEL_ID, "freed_bytes": SPEAKER_MODEL_BYTES}
         if model == FURIGANA_ID:
             with self.lock:
                 if FURIGANA_ID in self.downloading or self._furigana_in_use():
@@ -1665,6 +1755,7 @@ class FakeEngine:
         sizes = {m["id"]: int(m["size_bytes"]) for m in ASR_MODELS}
         sizes[GPU_RUNTIME_ID] = GPU_RUNTIME_BYTES
         sizes[FURIGANA_ID] = FURIGANA_DOWNLOAD_BYTES
+        sizes[SPEAKER_MODEL_ID] = SPEAKER_MODEL_BYTES
         if not isinstance(model, str) or model not in sizes:
             raise ProtocolError("unknown_model", f"unknown model {model!r}")
         accept = params.get("accept_license")
@@ -1702,6 +1793,8 @@ class FakeEngine:
             if model == GPU_RUNTIME_ID
             else "furigana"
             if model == FURIGANA_ID
+            else "speaker"
+            if model == SPEAKER_MODEL_ID
             else "asr"
         )
         for i in range(steps + 1):
@@ -1723,6 +1816,9 @@ class FakeEngine:
                 self.furigana_installed = True
                 if self.session is not None:
                     self.session.furigana_installed = True
+            elif model == SPEAKER_MODEL_ID:
+                # Read by the next session, like the real engine.
+                self.speaker_model_installed = True
             else:
                 self.downloaded.add(model)
         self.writer.event(
@@ -1783,6 +1879,7 @@ class FakeEngine:
             )
             session.start_error = self._start_error({**settings, "mode": mode})
             session.furigana_installed = self.furigana_installed
+            session.speaker_model_installed = self.speaker_model_installed
             self.next_session_id += 1
             self.session = session
         self.after_response.append(session.start)

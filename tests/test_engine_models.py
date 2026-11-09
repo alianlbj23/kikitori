@@ -250,6 +250,8 @@ class MetricsEventTest(EngineCase):
         self.sink.wait(lambda m: m.get("event") == "metrics", count=3)
         metrics = [m["data"] for m in self.sink.messages if m.get("event") == "metrics"]
         for data in metrics:
+            # v0.3 G8：背景音量是靜音（-120）或還沒有音訊（null）
+            self.assertIn(data.pop("background_level_dbfs"), (None, -120.0))
             self.assertEqual(
                 data,
                 {
@@ -257,6 +259,7 @@ class MetricsEventTest(EngineCase):
                     "level_dbfs": -120.0,
                     "backlog": 0,
                     "latency_ms_median": None,
+                    "speech_level_dbfs": None,
                 },
             )
 

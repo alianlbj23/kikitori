@@ -23,10 +23,27 @@ pub const CLICK_THROUGH_SHORTCUT: &str = "CommandOrControl+Alt+K";
 pub const TOGGLE_TRANSLATION_SHORTCUT: &str = "CommandOrControl+Alt+J";
 /// Global shortcut that clears the subtitles on screen (overlay and OBS text).
 pub const CLEAR_SUBTITLES_SHORTCUT: &str = "CommandOrControl+Alt+U";
+/// Interpret mode: show "could you say that again?" in the partner's language
+/// (docs/specs/v0.3-features.md G3; handled by the main window, which knows
+/// the partner language and whether an interpret session runs).
+///
+/// R／P／H avoid the AltGr letters of Polish (A C E L N O S X Z), German
+/// (Q E M) and French AZERTY (E) layouts, like J／U above.
+pub const SAY_AGAIN_SHORTCUT: &str = "CommandOrControl+Alt+R";
+/// Freezes / unfreezes what the overlay shows (G6; the engine keeps running).
+pub const PAUSE_SUBTITLES_SHORTCUT: &str = "CommandOrControl+Alt+P";
+/// Briefly shows the last few final lines on the overlay (G6).
+pub const SHOW_HISTORY_SHORTCUT: &str = "CommandOrControl+Alt+H";
 
 pub const FONT_SIZE_RANGE: (u32, u32) = (14, 96);
 /// Longest UI locale tag accepted for the overlay (e.g. `zh-TW`, `pt-BR`).
 pub const MAX_LOCALE_LEN: usize = 16;
+
+/// Speaker names the main window may hand the overlay (docs/specs/speaker-labels.md):
+/// index `i` names `voice` `i + 1`. The engine labels at most 6 speakers.
+pub const MAX_SPEAKER_NAMES: usize = 16;
+/// Longest speaker name, in characters (code points).
+pub const MAX_SPEAKER_NAME_CHARS: usize = 40;
 pub const MAX_LINES_RANGE: (u32, u32) = (1, 3);
 /// How long a line stays before a newer one may push it out (reading rhythm).
 pub const MIN_DISPLAY_MS_RANGE: (u32, u32) = (0, 10_000);
@@ -34,6 +51,16 @@ pub const MIN_DISPLAY_MS_RANGE: (u32, u32) = (0, 10_000);
 pub const IDLE_CLEAR_SECS_RANGE: (u32, u32) = (0, 600);
 pub const DEFAULT_MIN_DISPLAY_MS: u32 = 1500;
 pub const DEFAULT_IDLE_CLEAR_SECS: u32 = 8;
+/// Widest line in em (G7 reading layout); 0 = as wide as the window.
+pub const MAX_LINE_EM_RANGE: (u32, u32) = (10, 60);
+/// Original line size relative to the translation, in percent (G7).
+pub const ORIGINAL_SCALE_PERCENT_RANGE: (u32, u32) = (50, 150);
+/// The size the overlay always used before G7 (0.62 × the translation).
+pub const DEFAULT_ORIGINAL_SCALE_PERCENT: u32 = 62;
+
+fn default_original_scale_percent() -> u32 {
+    DEFAULT_ORIGINAL_SCALE_PERCENT
+}
 
 fn default_min_display_ms() -> u32 {
     DEFAULT_MIN_DISPLAY_MS
@@ -48,6 +75,15 @@ fn default_idle_clear_secs() -> u32 {
 pub enum OverlayPosition {
     Top,
     Bottom,
+}
+
+/// Where the original sits relative to the translation (G7 reading layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OriginalPosition {
+    #[default]
+    Above,
+    Below,
 }
 
 /// Appearance of the overlay; field names match `settings.subtitle` in the engine.
@@ -71,6 +107,21 @@ pub struct OverlayStyle {
     /// text file is emptied; 0 keeps the last lines on screen.
     #[serde(default = "default_idle_clear_secs")]
     pub idle_clear_secs: u32,
+    /// G7: long lines stay longer (characters ÷ reading speed), never building a backlog.
+    #[serde(default)]
+    pub pace_by_length: bool,
+    /// G7: widest line in em, so a long sentence wraps into two short lines; 0 = no limit.
+    #[serde(default)]
+    pub max_line_em: u32,
+    /// G7: original line size as a percentage of the translation's (learning layout).
+    #[serde(default = "default_original_scale_percent")]
+    pub original_scale_percent: u32,
+    /// G7: the original above (default) or below the translation.
+    #[serde(default)]
+    pub original_position: OriginalPosition,
+    /// G7: furigana only on a word's first appearance in the session (overlay only).
+    #[serde(default)]
+    pub furigana_first_only: bool,
 }
 
 impl Default for OverlayStyle {
@@ -82,6 +133,11 @@ impl Default for OverlayStyle {
             max_lines: 2,
             min_display_ms: DEFAULT_MIN_DISPLAY_MS,
             idle_clear_secs: DEFAULT_IDLE_CLEAR_SECS,
+            pace_by_length: false,
+            max_line_em: 0,
+            original_scale_percent: DEFAULT_ORIGINAL_SCALE_PERCENT,
+            original_position: OriginalPosition::Above,
+            furigana_first_only: false,
         }
     }
 }
@@ -122,6 +178,20 @@ impl OverlayStyle {
                 self.idle_clear_secs
             ));
         }
+        let (lo, hi) = MAX_LINE_EM_RANGE;
+        if self.max_line_em != 0 && !(lo..=hi).contains(&self.max_line_em) {
+            return Err(format!(
+                "max_line_em must be 0 or in [{lo}, {hi}], got {}",
+                self.max_line_em
+            ));
+        }
+        let (lo, hi) = ORIGINAL_SCALE_PERCENT_RANGE;
+        if !(lo..=hi).contains(&self.original_scale_percent) {
+            return Err(format!(
+                "original_scale_percent must be in [{lo}, {hi}], got {}",
+                self.original_scale_percent
+            ));
+        }
         Ok(())
     }
 }
@@ -133,13 +203,19 @@ pub enum ShortcutAction {
     ClickThrough,
     ToggleTranslation,
     ClearSubtitles,
+    SayAgain,
+    PauseSubtitles,
+    ShowHistory,
 }
 
 impl ShortcutAction {
-    pub const ALL: [ShortcutAction; 3] = [
+    pub const ALL: [ShortcutAction; 6] = [
         ShortcutAction::ClickThrough,
         ShortcutAction::ToggleTranslation,
         ShortcutAction::ClearSubtitles,
+        ShortcutAction::SayAgain,
+        ShortcutAction::PauseSubtitles,
+        ShortcutAction::ShowHistory,
     ];
 
     pub fn keys(self) -> &'static str {
@@ -147,6 +223,9 @@ impl ShortcutAction {
             ShortcutAction::ClickThrough => CLICK_THROUGH_SHORTCUT,
             ShortcutAction::ToggleTranslation => TOGGLE_TRANSLATION_SHORTCUT,
             ShortcutAction::ClearSubtitles => CLEAR_SUBTITLES_SHORTCUT,
+            ShortcutAction::SayAgain => SAY_AGAIN_SHORTCUT,
+            ShortcutAction::PauseSubtitles => PAUSE_SUBTITLES_SHORTCUT,
+            ShortcutAction::ShowHistory => SHOW_HISTORY_SHORTCUT,
         }
     }
 
@@ -155,6 +234,9 @@ impl ShortcutAction {
             ShortcutAction::ClickThrough => 0,
             ShortcutAction::ToggleTranslation => 1,
             ShortcutAction::ClearSubtitles => 2,
+            ShortcutAction::SayAgain => 3,
+            ShortcutAction::PauseSubtitles => 4,
+            ShortcutAction::ShowHistory => 5,
         }
     }
 }
@@ -190,6 +272,10 @@ pub struct OverlaySnapshot {
     /// Every global shortcut (click-through included) and whether it could be
     /// registered. `shortcut`/`shortcut_registered` stay for older front ends.
     pub shortcuts: Vec<ShortcutInfo>,
+    /// Names the user gave the speaker labels this session; index `i` is
+    /// `voice` `i + 1`, and an empty string (or a missing entry) means the
+    /// default "Speaker N".
+    pub speaker_names: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -198,9 +284,33 @@ struct Inner {
     click_through: bool,
     visible: bool,
     /// Indexed by [`ShortcutAction::index`].
-    shortcuts_registered: [bool; 3],
+    shortcuts_registered: [bool; ShortcutAction::ALL.len()],
     locale: Option<String>,
     show_translation: bool,
+    speaker_names: Vec<String>,
+}
+
+/// Checks speaker names: at most [`MAX_SPEAKER_NAMES`] of at most
+/// [`MAX_SPEAKER_NAME_CHARS`] characters, no control characters (they are
+/// shown as text, so markup is harmless, but line breaks would break the chip).
+pub fn validate_speaker_names(names: &[String]) -> Result<(), String> {
+    if names.len() > MAX_SPEAKER_NAMES {
+        return Err(format!(
+            "at most {MAX_SPEAKER_NAMES} speaker names, got {}",
+            names.len()
+        ));
+    }
+    for name in names {
+        if name.chars().count() > MAX_SPEAKER_NAME_CHARS {
+            return Err(format!(
+                "a speaker name is longer than {MAX_SPEAKER_NAME_CHARS} characters"
+            ));
+        }
+        if name.chars().any(char::is_control) {
+            return Err("a speaker name contains a control character".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// Checks a UI locale tag: a 2–3 letter language subtag, optionally followed
@@ -241,11 +351,12 @@ impl Default for OverlayState {
             // shortcut makes it click-through once it is in place.
             click_through: false,
             visible: false,
-            shortcuts_registered: [false; 3],
+            shortcuts_registered: [false; ShortcutAction::ALL.len()],
             locale: None,
             // The engine's default (`translation.enabled: true`) until the main
             // window sends the saved value.
             show_translation: true,
+            speaker_names: Vec::new(),
         }))
     }
 }
@@ -273,7 +384,14 @@ impl OverlayState {
                     registered: s.shortcuts_registered[action.index()],
                 })
                 .collect(),
+            speaker_names: s.speaker_names.clone(),
         })
+    }
+
+    pub fn set_speaker_names(&self, names: Vec<String>) -> Result<(), String> {
+        validate_speaker_names(&names)?;
+        self.with(|s| s.speaker_names = names);
+        Ok(())
     }
 
     pub fn set_show_translation(&self, enabled: bool) {
@@ -398,11 +516,62 @@ mod tests {
                 {"action": "click_through", "keys": CLICK_THROUGH_SHORTCUT, "registered": true},
                 {"action": "toggle_translation", "keys": TOGGLE_TRANSLATION_SHORTCUT, "registered": false},
                 {"action": "clear_subtitles", "keys": CLEAR_SUBTITLES_SHORTCUT, "registered": true},
+                {"action": "say_again", "keys": SAY_AGAIN_SHORTCUT, "registered": false},
+                {"action": "pause_subtitles", "keys": PAUSE_SUBTITLES_SHORTCUT, "registered": false},
+                {"action": "show_history", "keys": SHOW_HISTORY_SHORTCUT, "registered": false},
             ])
         );
         let keys: std::collections::HashSet<_> =
             ShortcutAction::ALL.iter().map(|a| a.keys()).collect();
-        assert_eq!(keys.len(), 3, "each action needs its own key combination");
+        assert_eq!(
+            keys.len(),
+            ShortcutAction::ALL.len(),
+            "each action needs its own key combination"
+        );
+        for (i, action) in ShortcutAction::ALL.iter().enumerate() {
+            assert_eq!(action.index(), i, "index() must follow ALL");
+        }
+    }
+
+    #[test]
+    fn reading_layout_fields_default_and_are_checked() {
+        // A main window from before G7 sends none of the new fields: the old look.
+        let old: OverlayStyle = serde_json::from_str(
+            r#"{"font_size":40,"background_opacity":0.2,"position":"top","max_lines":1}"#,
+        )
+        .unwrap();
+        assert!(!old.pace_by_length && !old.furigana_first_only);
+        assert_eq!(old.max_line_em, 0);
+        assert_eq!(old.original_scale_percent, DEFAULT_ORIGINAL_SCALE_PERCENT);
+        assert_eq!(old.original_position, OriginalPosition::Above);
+        assert!(old.validate().is_ok());
+        let new: OverlayStyle = serde_json::from_str(
+            r#"{"font_size":40,"background_opacity":0.2,"position":"top","max_lines":1,
+                "pace_by_length":true,"max_line_em":13,"original_scale_percent":120,
+                "original_position":"below","furigana_first_only":true}"#,
+        )
+        .unwrap();
+        assert!(new.validate().is_ok());
+        assert_eq!(new.original_position, OriginalPosition::Below);
+        for (field, value) in [
+            ("max_line_em", 5),
+            ("max_line_em", 61),
+            ("original_scale_percent", 49),
+            ("original_scale_percent", 151),
+        ] {
+            let mut bad = new.clone();
+            match field {
+                "max_line_em" => bad.max_line_em = value,
+                _ => bad.original_scale_percent = value,
+            }
+            assert!(bad.validate().is_err(), "{field}={value}");
+        }
+        assert!(
+            serde_json::from_str::<OverlayStyle>(
+                r#"{"font_size":40,"background_opacity":0.2,"position":"top","max_lines":1,"original_position":"left"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -458,6 +627,33 @@ mod tests {
         assert_eq!(json["show_translation"], serde_json::json!(false));
         state.set_show_translation(true);
         assert!(state.snapshot().show_translation);
+    }
+
+    #[test]
+    fn speaker_names_start_empty_and_are_validated() {
+        let state = OverlayState::default();
+        assert!(state.snapshot().speaker_names.is_empty());
+        let names = vec!["ぺこら".to_owned(), String::new(), "<b>x</b>".to_owned()];
+        state.set_speaker_names(names.clone()).unwrap();
+        assert_eq!(state.snapshot().speaker_names, names);
+        let json = serde_json::to_value(state.snapshot()).unwrap();
+        assert_eq!(json["speaker_names"][0], serde_json::json!("ぺこら"));
+        let long = "あ".repeat(MAX_SPEAKER_NAME_CHARS + 1);
+        for bad in [
+            vec![String::new(); MAX_SPEAKER_NAMES + 1],
+            vec![long],
+            vec!["a\nb".to_owned()],
+            vec!["tab\there".to_owned()],
+        ] {
+            assert!(state.set_speaker_names(bad.clone()).is_err(), "{bad:?}");
+        }
+        // A rejected list keeps the old names.
+        assert_eq!(state.snapshot().speaker_names, names);
+        assert!(
+            state
+                .set_speaker_names(vec!["あ".repeat(MAX_SPEAKER_NAME_CHARS)])
+                .is_ok()
+        );
     }
 
     #[test]

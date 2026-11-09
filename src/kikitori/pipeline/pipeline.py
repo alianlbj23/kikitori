@@ -24,6 +24,7 @@ import numpy.typing as npt
 
 from kikitori.asr.types import Transcript
 from kikitori.capture.types import AudioSource
+from kikitori.pipeline.corrections import Correction, Corrections
 from kikitori.pipeline.languages import (
     Route,
     base_language,
@@ -31,7 +32,13 @@ from kikitori.pipeline.languages import (
     display_original,
     route,
 )
-from kikitori.pipeline.metrics import LatencyWindow, LevelMeter, PipelineMetrics
+from kikitori.pipeline.metrics import (
+    BACKGROUND_WINDOW,
+    LatencyWindow,
+    LevelMeter,
+    PipelineMetrics,
+    SplitLevelMeter,
+)
 from kikitori.pipeline.scheduler import FinalQueue, Job, LatestSlot
 from kikitori.pipeline.stability import PartialStability
 from kikitori.pipeline.types import (
@@ -114,6 +121,10 @@ class Pipeline:
         """
         self._components = components
         self._config = config
+        # 原文校正（G4）：建構時驗證並編譯一次；不合法的設定在 session 開始時就失敗
+        self._corrections = Corrections(
+            Correction(wrong, right) for wrong, right in config.corrections
+        )
         self._on_subtitle = on_subtitle
         self._on_status = on_status
         self._on_log = on_log
@@ -140,6 +151,8 @@ class Pipeline:
         self._stability = PartialStability()
         # metrics：擷取音訊的音量（capture 執行緒寫）與完整字幕延遲（完整 worker 寫）
         self._level = LevelMeter(SAMPLE_RATE)
+        # G8：句子進行中與句子之外的音量，給「背景音太大聲」提示
+        self._split_level = SplitLevelMeter(BACKGROUND_WINDOW)
         self._latencies = LatencyWindow()
 
         # 送出字幕與前文都在這把鎖下，保證同一句的即時結果不會晚於完整結果。
@@ -171,6 +184,8 @@ class Pipeline:
         # 所以之後的句子依新狀態處理、已送出的句子不受影響。bool 的讀寫是原子的，worker
         # 讀到舊值或新值都是合法的狀態，不需要鎖。
         self._translation_enabled = config.translation_enabled
+        # 說話者標籤失敗過（只有完整 worker 讀寫）：之後這個 session 不再呼叫 labeler
+        self._voice_failed = False
 
     # --- 公開狀態 -------------------------------------------------------------
 
@@ -222,10 +237,13 @@ class Pipeline:
 
     def metrics(self) -> PipelineMetrics:
         """目前的音量、待處理的完整句數與延遲中位數（執行緒安全，任何時候都可呼叫）。"""
+        speech, background = self._split_level.levels()
         return PipelineMetrics(
             level_dbfs=self._level.dbfs(),
             backlog=self._finals.size(),
             latency_ms_median=self._latencies.median(),
+            speech_level_dbfs=speech,
+            background_level_dbfs=background,
         )
 
     @property
@@ -317,6 +335,7 @@ class Pipeline:
                 if len(chunk):
                     self._level.add(chunk)
                     self._handle(self._segmenter.process(chunk))
+                    self._split_level.add(chunk, speech=self._current is not None)
                 elif getattr(source, "exhausted", False) is True:
                     self._handle(self._segmenter.flush())
                     break
@@ -359,7 +378,12 @@ class Pipeline:
         """逐步模式：同步把音訊送進切句器並排入工作（不執行辨識）。"""
         self._claim("stepped")
         self._level.add(audio)
-        self._guarded(lambda: self._handle(self._segmenter.process(audio)))
+
+        def step() -> None:
+            self._handle(self._segmenter.process(audio))
+            self._split_level.add(audio, speech=self._current is not None)
+
+        self._guarded(step)
 
     def end_of_stream(self) -> None:
         """逐步模式：串流結束，收尾進行中的句子。"""
@@ -496,42 +520,40 @@ class Pipeline:
                 decision,
                 final=False,
                 stable_chars=stable,
+                # 譯文就是（字形轉換後的）原文或空字串：穩定的部分與原文相同
+                translation_stable_chars=min(stable, len(text)),
             )
             return
         if not self._stability.should_translate(original, stable):
             # 穩定部分沒有變長：只是尾巴在閃爍，重新翻譯只會讓譯文跟著閃、佔用翻譯伺服器。
-            # 沿用這句上一次的即時譯文，原文與 stable_chars 照常更新。
-            self._emit(
-                job,
-                original,
-                self._stability.translation,
-                transcript.language,
-                decision,
-                final=False,
-                stable_chars=stable,
+            # 沿用這句上一次的即時譯文與它的穩定前綴，原文與 stable_chars 照常更新。
+            self._emit_partial_translation(
+                job, original, transcript.language, decision, stable
             )
             return
         self._stability.mark_requested(original, stable)
         request = TranslationRequest(
-            original, decision.source, decision.target, self._context(decision.source)
+            original,
+            decision.source,
+            decision.target,
+            self._context(decision.source),
+            self._config.session_info,
         )
         emitted = False
         try:
             stream: Iterator[str] = self._components.fast_translator.stream(request)
+            shown: tuple[str, int] | None = None
             try:
-                for translation in stream:
+                for chunk in stream:
                     if self._partial_obsolete(job):
                         return
-                    self._stability.record_translation(translation)
+                    current = self._stability.show_translation(chunk)
+                    if current == shown:
+                        continue  # 重翻的前半段還是舊譯文的前綴：畫面不變，不必再送
+                    shown = current
                     emitted = (
-                        self._emit(
-                            job,
-                            original,
-                            translation,
-                            transcript.language,
-                            decision,
-                            final=False,
-                            stable_chars=stable,
+                        self._emit_partial_translation(
+                            job, original, transcript.language, decision, stable
                         )
                         or emitted
                     )
@@ -539,19 +561,41 @@ class Pipeline:
                 close = getattr(stream, "close", None)
                 if callable(close):
                     close()
+            if shown is not None and self._stability.finish_translation() != shown:
+                # 新的完整譯文比畫面上的短，或穩定前綴變了：送出最後的樣子
+                emitted = (
+                    self._emit_partial_translation(
+                        job, original, transcript.language, decision, stable
+                    )
+                    or emitted
+                )
             self._clear_warning("translate")
         except TranslationError as exc:
             self._warn("translate", f"translation failed: {type(exc).__name__}: {exc}")
             if not emitted:
-                self._emit(
-                    job,
-                    original,
-                    self._stability.translation,
-                    transcript.language,
-                    decision,
-                    final=False,
-                    stable_chars=stable,
+                self._emit_partial_translation(
+                    job, original, transcript.language, decision, stable
                 )
+
+    def _emit_partial_translation(
+        self,
+        job: Job,
+        original: str,
+        source_language: str,
+        decision: Route,
+        stable: int,
+    ) -> bool:
+        """送出這句目前顯示的即時譯文（`PartialStability` 決定的文字與穩定前綴）。"""
+        return self._emit(
+            job,
+            original,
+            self._stability.translation,
+            source_language,
+            decision,
+            final=False,
+            stable_chars=stable,
+            translation_stable_chars=self._stability.translation_stable,
+        )
 
     def _partial_obsolete(self, job: Job) -> bool:
         # 句子已結束：完整結果馬上就到，算力留給下一句。
@@ -572,6 +616,7 @@ class Pipeline:
             self._emit_cleared(job)
             return
         original = self._original(transcript)
+        voice = self._voice(job)
         decision = self._route(transcript.language)
         translation = self._copied(transcript, decision)
         if decision.action == "translate":
@@ -580,6 +625,7 @@ class Pipeline:
                 decision.source,
                 decision.target,
                 self._context(decision.source),
+                self._config.session_info,
             )
             try:
                 translation = self._components.final_translator.translate(request)
@@ -589,8 +635,40 @@ class Pipeline:
                     "translate", f"translation failed: {type(exc).__name__}: {exc}"
                 )
         self._emit(
-            job, original, translation, transcript.language, decision, final=True
+            job,
+            original,
+            translation,
+            transcript.language,
+            decision,
+            final=True,
+            voice=voice,
         )
+
+    def _voice(self, job: Job) -> int | None:
+        """影片翻譯模式的說話者標籤；關閉、口譯模式或這個 session 已經失敗過時 None。
+
+        只在完整路徑 worker 上呼叫，句子依序進來，線上分群看到的順序就是字幕的順序。
+        被過濾掉的非語音不會走到這裡，所以雜音不會開出新的說話者。
+        """
+        labeler = self._components.voice_labeler
+        if labeler is None or self._config.mode != "media" or self._voice_failed:
+            return None
+        try:
+            return labeler.label(job.audio)
+        except ValueError as exc:
+            # 這一句的音訊或模型輸出不合法（例如極短的句子）：只有這句不標
+            logger.debug("utterance %d has no speaker label: %s", job.utterance_id, exc)
+            return None
+        except Exception as exc:
+            # 推論本身壞了（onnxruntime 錯誤等），之後每句都會一樣：這個 session 不再標，
+            # 字幕照常送出——說話者標籤是輔助資訊
+            self._voice_failed = True
+            logger.warning("voice labeler failed", exc_info=exc)
+            self._warn(
+                "speakers",
+                f"speaker labels are off for this session: {type(exc).__name__}: {exc}",
+            )
+            return None
 
     def _for_filter(self, job: Job, transcript: Transcript) -> Transcript:
         """完整模型的 no_speech 不可靠時，換成即時模型對同一句的 no_speech 再過濾。"""
@@ -631,7 +709,11 @@ class Pipeline:
             languages = (config.source_language, config.target_language)
         else:
             languages = (config.target_language,)
-        return display_original(transcript.text.strip(), transcript.language, languages)
+        shown = display_original(
+            transcript.text.strip(), transcript.language, languages
+        )
+        # 校正在字形轉換之後：使用者寫的「正確寫法」就是畫面上的字形
+        return self._corrections.apply(shown)
 
     @staticmethod
     def _copied(transcript: Transcript, decision: Route) -> str:
@@ -668,6 +750,8 @@ class Pipeline:
         *,
         final: bool,
         stable_chars: int | None = None,
+        translation_stable_chars: int | None = None,
+        voice: int | None = None,
     ) -> bool:
         latency = self._latency_ms(job) if final else None
         update = SubtitleUpdate(
@@ -681,6 +765,9 @@ class Pipeline:
             end_sample=job.end_sample,
             stable_chars=None if final else stable_chars,
             latency_ms=latency,
+            translation_stable_chars=None if final else translation_stable_chars,
+            speaker=decision.speaker,
+            voice=voice if final else None,
         )
         with self._emit_lock:
             if final:

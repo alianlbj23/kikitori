@@ -26,6 +26,7 @@ from kikitori.pipeline.types import (
     PipelineComponents,
     PipelineConfig,
     TranscriptFilter,
+    VoiceLabeler,
     release_components,
 )
 from kikitori.translate import (
@@ -160,6 +161,10 @@ def pipeline_config(settings: Settings, mode: Mode) -> PipelineConfig:
         partial_interval_ms=settings.pipeline.partial_interval_ms,
         context_lines=settings.pipeline.context_lines,
         asr_prompt_context=settings.pipeline.asr_prompt_context,
+        corrections=tuple(
+            (c.wrong, c.right) for c in settings.translation.glossary.corrections
+        ),
+        session_info=settings.translation.session_info,
     )
 
 
@@ -839,6 +844,53 @@ def attach_keep_warm(
     )
 
 
+def attach_voice_labeler(
+    components: PipelineComponents,
+    settings: Settings,
+    mode: Mode,
+    *,
+    load: Callable[[int | None], VoiceLabeler] | None = None,
+) -> PipelineComponents:
+    """影片翻譯模式且開啟說話者標籤時，加上這個 session 的 labeler（`docs/specs/speaker-labels.md`）。
+
+    說話者標籤是輔助資訊：模型沒下載或載入失敗時記 warning、不標，session 照常開始。
+
+    Args:
+        components: 已建立的元件。
+        settings: 使用者設定。
+        mode: session 模式（口譯模式已有「我／對方」，不標）。
+        load: `count` → labeler；省略時用 `kikitori.speakers.load_labeler`（讀取並驗證模型）。
+    """
+    if mode != "media" or not settings.speakers.enabled:
+        return components
+    if load is None:
+        from kikitori.speakers.labeler import load_labeler
+
+        load = load_labeler
+    try:
+        labeler = load(settings.speakers.count)
+    except FileNotFoundError as exc:
+        logger.warning(
+            "speaker labels are on but the model is not downloaded (%s); "
+            "download it with models.download %r",
+            exc,
+            "speaker-embedding",
+        )
+        return components
+    except Exception:
+        logger.exception(
+            "cannot load the speaker model; showing subtitles without labels"
+        )
+        return components
+    logger.info(
+        "speaker labels on (%s)",
+        "auto"
+        if settings.speakers.count is None
+        else f"{settings.speakers.count} speakers",
+    )
+    return replace(components, voice_labeler=labeler)
+
+
 def build_session_components(
     settings: Settings,
     mode: Mode,
@@ -885,6 +937,7 @@ def build_session_components(
         elif warm:
             warm_up_translation(settings, mode)
             report("translation")
+        components = attach_voice_labeler(components, settings, mode)
         return attach_keep_warm(components, settings, mode)
     except BaseException:
         release_components(components)

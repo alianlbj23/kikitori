@@ -151,7 +151,8 @@ body {
 }
 
 .orig {
-  font-size: calc(var(--fs) * 0.62);
+  /* G7: the original's size relative to the translation (settings, default 0.62). */
+  font-size: calc(var(--fs) * var(--orig-scale, 0.62));
   font-weight: 500;
   color: var(--sub-white);
 }
@@ -209,13 +210,10 @@ body {
 }
 
 /*
- * A line still being heard: its translation is lighter; of the original only
- * the tail that may still change is (the settled prefix, lib/stable.ts, is not).
+ * A line still being heard: of the original and of the translation only the
+ * tail that may still change is faded; the settled prefixes (lib/stable.ts,
+ * `stable_chars` and `translation_stable_chars`) already look final.
  */
-.line.is-partial .tr {
-  opacity: 0.72;
-}
-
 .line.is-partial .unstable {
   opacity: 0.6;
 }
@@ -258,4 +256,168 @@ body {
   .lines.is-fading {
     transition: none;
   }
+}
+
+/*
+ * v0.3 G2: characters that just appeared at the end of a live line fade in
+ * (Google CHI EA 2023: stabilised text + smooth fade-in reads best). Nothing
+ * moves; with reduced motion they simply appear.
+ */
+@keyframes fresh-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.fresh {
+  animation: fresh-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fresh {
+    animation: none;
+  }
+}
+
+/*
+ * v0.3 G3: interpret mode names the speaker when it changes. The chip carries
+ * the word ("You" / "Them"), so colour is never the only cue (XAG 104).
+ */
+.who {
+  display: inline-block;
+  margin-inline-end: 0.4em;
+  padding: 0 0.4em;
+  border-radius: 0.3em;
+  font-size: 0.85em;
+  font-weight: 700;
+  color: #10162c;
+  vertical-align: 0.05em;
+  /* The line's outline (for text over video) would blur dark text on a light plate. */
+  text-shadow: none;
+}
+
+.who.is-self {
+  background: #8fd3ff;
+}
+
+.who.is-partner {
+  background: var(--sub-yellow);
+}
+
+/*
+ * Media-mode speaker labels (docs/specs/speaker-labels.md): six light plates
+ * picked from the name (lib/speaker.ts voiceColor), dark text on all of them.
+ */
+.who.voice.c0 { background: #8fd3ff; }
+.who.voice.c1 { background: #ffd36b; }
+.who.voice.c2 { background: #a8e6a1; }
+.who.voice.c3 { background: #f5a8c8; }
+.who.voice.c4 { background: #c9b6ff; }
+.who.voice.c5 { background: #ffb38a; }
+
+/*
+ * G3: "could you say that again?" in the partner's language, big and plated.
+ * It floats over the lines (for its 5 seconds) so a full window never pushes it out of view.
+ */
+.notice {
+  position: absolute;
+  top: 28px;
+  left: 50%;
+  z-index: 2;
+  transform: translateX(-50%);
+  margin: 0;
+  width: max-content;
+  max-width: 90%;
+  padding: 0.2em 0.6em;
+  border-radius: 0.3em;
+  font-size: var(--fs);
+  font-weight: 700;
+  text-align: center;
+  color: #10162c;
+  background: #8fd3ff;
+}
+
+/* G6: the pause shortcut froze the screen. */
+.badge {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  margin: 0;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: #fff;
+  background: rgb(16 22 44 / 0.8);
+}
+
+/* G6: recent final lines, shown instead of the live lines for a few seconds. */
+.history {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100%;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgb(16 22 44 / max(var(--plate), 0.7));
+}
+
+.history-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: #fff;
+  opacity: 0.8;
+}
+
+.history-lines {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* .orig and .tr carry their own sizes; the panel shows both smaller than live lines. */
+.history-line .orig {
+  font-size: calc(var(--fs) * 0.4);
+}
+
+.history-line .tr {
+  font-size: calc(var(--fs) * 0.55);
+}
+
+.history-line {
+  display: flex;
+  flex-direction: column;
+}
+
+.history-line .orig {
+  color: var(--sub-white);
+  opacity: 0.8;
+}
+
+.history-line .tr {
+  color: var(--sub-yellow);
+}
+
+.frame.is-history .lines {
+  display: none;
+}
+
+.badge[hidden],
+.notice[hidden],
+.history[hidden] {
+  display: none;
+}
+
+/* G7: the original below the translation (learning layout). */
+.frame[data-original="below"] .line {
+  flex-direction: column-reverse;
+}
+
+/* G7: a maximum line width, so a long sentence wraps into two short lines. */
+.frame.has-max-line .orig,
+.frame.has-max-line .tr {
+  max-width: min(100%, var(--max-line));
 }

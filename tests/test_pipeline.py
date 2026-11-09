@@ -149,6 +149,7 @@ class Harness:
         clock: Callable[[], float] | None = None,
         final_no_speech_reliable: bool = True,
         keep_warm: "RecordingKeepWarm | None" = None,
+        voice_labeler: "FakeVoiceLabeler | None" = None,
         **config: object,
     ) -> None:
         self.fast = FakeTranscriber("fast")
@@ -178,6 +179,7 @@ class Harness:
                 transcript_filter=default_transcript_filter(0.6),
                 final_no_speech_reliable=final_no_speech_reliable,
                 keep_warm=keep_warm,
+                voice_labeler=voice_labeler,
             ),
             self.config,
             clock=clock or (lambda: 0.0),
@@ -227,6 +229,18 @@ class RouteTest(unittest.TestCase):
     def test_interpret_other_goes_to_zh_tw(self) -> None:
         r = route("interpret", "en", "zh-TW", "ja")
         self.assertEqual((r.target, r.action), ("zh-TW", "translate"))
+
+    def test_speaker_is_known_only_in_interpret_mode(self) -> None:
+        # v0.3 G3：口譯時「我的語言」是自己說的，其他語言是對方
+        self.assertEqual(route("interpret", "zh", "zh-TW", "ja").speaker, "self")
+        self.assertEqual(route("interpret", "ja", "zh-TW", "ja").speaker, "partner")
+        self.assertEqual(route("interpret", "en", "zh-TW", "ja").speaker, "partner")
+        # 關閉翻譯或語言不支援時仍知道是誰說的
+        self.assertEqual(route("interpret", "zh", "zh-TW", "ja", False).speaker, "self")
+        self.assertEqual(route("interpret", "no", "zh-TW", "ja").speaker, "partner")
+        # 影片翻譯沒有「誰」
+        self.assertIsNone(route("media", "ja", "zh-TW", "ja").speaker)
+        self.assertIsNone(route("media", "zh", "zh-TW", "ja").speaker)
 
     def test_unsupported_language(self) -> None:
         # 不在語言清單內的 Whisper 語言（例如挪威語的幻覺）不送翻譯
@@ -420,6 +434,13 @@ class LanguageRoutingTest(unittest.TestCase):
         h = self.run_final("interpret", "ja")
         self.assertEqual(h.final_tr.requests[0].target_language, "zh-TW")
 
+    def test_subtitles_carry_the_speaker_in_interpret_mode(self) -> None:
+        self.assertEqual(self.run_final("interpret", "zh").finals()[0].speaker, "self")
+        h = self.run_final("interpret", "ja")
+        self.assertEqual(h.finals()[0].speaker, "partner")
+        self.assertTrue(all(u.speaker == "partner" for u in h.partials()))
+        self.assertIsNone(self.run_final("media", "ja").finals()[0].speaker)
+
     def test_chinese_original_is_shown_in_taiwan_traditional(self) -> None:
         # Whisper 的中文辨識結果通常是簡體（端到端驗收：口譯時使用者說的「請問附近有
         # 便利商店嗎」顯示成「请问附近有便利商店吗」）；使用者的語言是台灣正體。
@@ -593,7 +614,7 @@ class TranslationToggleTest(unittest.TestCase):
 
 
 class PartialStabilityTest(unittest.TestCase):
-    """`PartialStability` 的即時譯文：只能經 `record_translation()` 改變，換句子時清空。"""
+    """`PartialStability` 的即時譯文：只能經 `show_translation()`／`finish_translation()` 改變，換句子時清空。"""
 
     def test_translation_is_recorded_and_reset_per_utterance(self) -> None:
         from kikitori.pipeline.stability import PartialStability
@@ -601,13 +622,76 @@ class PartialStabilityTest(unittest.TestCase):
         stability = PartialStability()
         stability.observe(1, "こんに")
         self.assertEqual(stability.translation, "")
-        stability.record_translation("你好")
+        self.assertEqual(stability.translation_stable, 0)
+        stability.show_translation("你好")
+        stability.finish_translation()
         stability.observe(1, "こんにちは")
         self.assertEqual(stability.translation, "你好")  # 同一句：沿用，不閃爍
         stability.observe(2, "さようなら")
         self.assertEqual(stability.translation, "")
+        self.assertEqual(stability.translation_stable, 0)
         with self.assertRaises(AttributeError):
             stability.translation = "x"  # type: ignore[misc]
+
+
+class TranslationStabilityTest(unittest.TestCase):
+    """G1：即時譯文的穩定前綴（與上一則完整即時譯文的最長共同前綴）。"""
+
+    def setUp(self) -> None:
+        from kikitori.pipeline.stability import PartialStability
+
+        self.s = PartialStability()
+        self.s.observe(1, "あ")
+
+    def complete(self, *chunks: str) -> list[tuple[str, int]]:
+        shown = [self.s.show_translation(c) for c in chunks]
+        shown.append(self.s.finish_translation())
+        return shown
+
+    def test_first_translation_has_nothing_stable(self) -> None:
+        self.assertEqual(
+            self.complete("今天", "今天天氣"),
+            [("今天", 0), ("今天天氣", 0), ("今天天氣", 0)],
+        )
+
+    def test_retranslation_keeps_the_previous_text_while_it_is_a_prefix(self) -> None:
+        self.complete("今天天氣很好")
+        # 新串流還是舊譯文的前綴：畫面維持舊譯文（不縮短），已確認的部分算穩定
+        self.assertEqual(self.s.show_translation("今天"), ("今天天氣很好", 2))
+        self.assertEqual(self.s.show_translation("今天天氣很"), ("今天天氣很好", 5))
+        # 超出舊譯文：顯示新譯文，穩定前綴是共同前綴
+        self.assertEqual(
+            self.s.show_translation("今天天氣很好呢"), ("今天天氣很好呢", 6)
+        )
+        self.assertEqual(self.s.finish_translation(), ("今天天氣很好呢", 6))
+
+    def test_diverging_retranslation_is_shown_with_the_common_prefix(self) -> None:
+        self.complete("今天天氣很好")
+        self.assertEqual(self.s.show_translation("今天下雨"), ("今天下雨", 2))
+        self.assertEqual(self.s.finish_translation(), ("今天下雨", 2))
+        # 下一次比較的對象是剛完成的這一則
+        self.assertEqual(self.s.show_translation("今天下雨了"), ("今天下雨了", 4))
+
+    def test_shorter_complete_translation_replaces_the_longer_one(self) -> None:
+        self.complete("今天天氣很好")
+        self.assertEqual(self.s.show_translation("今天"), ("今天天氣很好", 2))
+        # 串流結束時新譯文就是較短的那個：只能縮短，穩定前綴是它的全長
+        self.assertEqual(self.s.finish_translation(), ("今天", 2))
+        self.assertEqual(self.s.translation, "今天")
+
+    def test_interrupted_stream_does_not_become_the_reference(self) -> None:
+        self.complete("今天天氣很好")
+        self.s.show_translation("今天下")  # 串流中斷（錯誤或句子結束），沒有 finish
+        self.assertEqual(
+            self.s.show_translation("今天天氣很好喔"), ("今天天氣很好喔", 6)
+        )
+
+    def test_stable_never_exceeds_the_shown_text(self) -> None:
+        self.complete("abc")
+        for chunk in ("", "a", "ab", "abc", "abcd", "x"):
+            text, stable = self.s.show_translation(chunk)
+            self.assertLessEqual(stable, len(text))
+            self.assertGreaterEqual(stable, 0)
 
 
 class StablePartialTest(unittest.TestCase):
@@ -722,8 +806,40 @@ class StablePartialTest(unittest.TestCase):
     def test_not_translating_partials_still_get_stable_chars(self) -> None:
         h = Harness(translation_enabled=False)
         self.run_partials(h, ["あいう", "あいえ"])
-        self.assertEqual([u.stable_chars for u in self.last_per_call(h)], [0, 2])
+        updates = self.last_per_call(h)
+        self.assertEqual([u.stable_chars for u in updates], [0, 2])
+        # 沒有譯文：譯文穩定前綴為 0（不超過譯文長度）
+        self.assertEqual([u.translation_stable_chars for u in updates], [0, 0])
         self.assertEqual(h.fast_tr.requests, [])
+
+    def test_translation_stable_chars_follow_the_previous_partial_translation(
+        self,
+    ) -> None:
+        h = Harness()
+        self.run_partials(h, ["あいう", "あいえ", "あいお", "あいかき"])
+        partials = h.partials()
+        for update in partials:
+            assert update.translation_stable_chars is not None
+            self.assertLessEqual(
+                update.translation_stable_chars, len(update.translation)
+            )
+        # 第一次翻譯：沒有可比較的前一則
+        self.assertEqual(partials[0].translation_stable_chars, 0)
+        # 第二次翻譯 "<zh-TW>あいえ" 與第一次 "<zh-TW>あいう" 共同前綴 9 個字元
+        second = [u for u in partials if u.translation == "<zh-TW>あいえ"]
+        self.assertEqual(second[-1].translation_stable_chars, len("<zh-TW>あい"))
+        # 重翻的串流前半段（"<zh-T"）還是上一則的前綴：畫面維持上一則，不縮短
+        first_full = next(
+            i for i, u in enumerate(partials) if u.translation == "<zh-TW>あいう"
+        )
+        self.assertNotIn("<zh-T", [u.translation for u in partials[first_full:]])
+        # 不重送翻譯的那一則沿用譯文與它的穩定前綴
+        reused = self.last_per_call(h)[2]
+        self.assertEqual(reused.translation, "<zh-TW>あいえ")
+        self.assertEqual(reused.translation_stable_chars, len("<zh-TW>あい"))
+        h.pipeline.feed(self.LONG[self.offset :])
+        h.pipeline.run_pending()
+        self.assertIsNone(h.finals()[-1].translation_stable_chars)
 
 
 class LatencyMetricsTest(unittest.TestCase):
@@ -797,6 +913,42 @@ class LatencyMetricsTest(unittest.TestCase):
         # 半秒人聲、半秒靜音：功率減半（−3 dB）
         h.pipeline.feed(speech(0.5))
         self.assertAlmostEqual(h.pipeline.metrics().level_dbfs, -19.3, places=1)
+
+    def test_speech_and_background_levels_are_split(self) -> None:
+        # v0.3 G8：最近約 10 秒內，句子進行中與句子之外的音量分開量
+        h = Harness()
+        m = h.pipeline.metrics()
+        self.assertIsNone(m.speech_level_dbfs)
+        self.assertIsNone(m.background_level_dbfs)
+        # 振幅 500 的 BGM（AmplitudeVoiceModel 不算人聲）：20·log10(500/32768) ≈ −36.3
+        h.pipeline.feed(np.full(SR, 500, dtype=np.int16))
+        m = h.pipeline.metrics()
+        self.assertIsNone(m.speech_level_dbfs)
+        self.assertAlmostEqual(m.background_level_dbfs, -36.3, places=1)
+        h.pipeline.feed(speech(2.0))
+        m = h.pipeline.metrics()
+        self.assertAlmostEqual(m.speech_level_dbfs, -16.3, places=1)
+        self.assertAlmostEqual(m.background_level_dbfs, -36.3, places=1)
+        # 窗外的舊讀數會被擠掉：見 test_split_level_meter_window_and_validation
+        # （這裡連續說超過 10 秒會碰到句長上限、被切成兩句，不適合測窗）
+
+    def test_split_level_meter_window_and_validation(self) -> None:
+        from kikitori.pipeline.metrics import SplitLevelMeter
+
+        meter = SplitLevelMeter(SR)
+        self.assertEqual(meter.levels(), (None, None))
+        meter.add(np.full(SR // 2, 5000, dtype=np.int16), speech=True)
+        meter.add(np.zeros(SR // 2, dtype=np.int16), speech=False)
+        speech_db, background_db = meter.levels()
+        self.assertAlmostEqual(speech_db, -16.3, places=1)
+        self.assertEqual(background_db, -120.0)  # 有樣本、但是全靜音
+        meter.add(np.zeros(SR, dtype=np.int16), speech=False)  # 整個窗都被新的蓋掉
+        self.assertEqual(meter.levels(), (None, -120.0))
+        meter.add(np.array([], dtype=np.int16), speech=True)
+        self.assertEqual(meter.levels(), (None, -120.0))
+        for bad in (0, -1, 1.5, True):
+            with self.subTest(window=bad), self.assertRaises(ValueError):
+                SplitLevelMeter(bad)  # type: ignore[arg-type]
 
     def test_level_is_capped_at_full_scale(self) -> None:
         h = Harness()
@@ -1298,6 +1450,146 @@ class _Chain:
     def stop(self) -> None:
         self.first.stop()
         self.second.stop()
+
+
+class CorrectionsInPipelineTest(unittest.TestCase):
+    """v0.3 G4：原文校正套用在畫面原文、翻譯輸入與前文上。"""
+
+    def test_partial_and_final_originals_and_requests_are_corrected(self) -> None:
+        h = Harness(corrections=(("fast", "FAST!"), ("final", "Final!")))
+        h.pipeline.feed(ONE_UTTERANCE[: 2 * SR])  # 句子還在說：先有即時字幕
+        h.pipeline.run_pending()
+        h.pipeline.feed(ONE_UTTERANCE[2 * SR :])
+        h.pipeline.run_pending()
+        self.assertTrue(h.partials())
+        self.assertTrue(h.fast_tr.requests)
+        self.assertTrue(all(u.original.startswith("FAST!") for u in h.partials()))
+        self.assertEqual(h.finals()[0].original, "Final!1")
+        self.assertTrue(all(r.text.startswith("FAST!") for r in h.fast_tr.requests))
+        self.assertEqual(h.final_tr.requests[0].text, "Final!1")
+
+    def test_invalid_corrections_fail_when_the_pipeline_is_built(self) -> None:
+        with self.assertRaises(ValueError):
+            Harness(corrections=(("", "x"),))
+
+
+class SessionInfoTest(unittest.TestCase):
+    """v0.3 G5：本場資訊放進即時與完整路徑的每個翻譯請求。"""
+
+    def test_every_request_carries_the_session_info(self) -> None:
+        h = Harness(session_info="主播：兎田ぺこら")
+        h.pipeline.feed(ONE_UTTERANCE[: 2 * SR])
+        h.pipeline.run_pending()
+        h.pipeline.feed(ONE_UTTERANCE[2 * SR :])
+        h.pipeline.run_pending()
+        requests = h.fast_tr.requests + h.final_tr.requests
+        self.assertTrue(h.fast_tr.requests)
+        self.assertTrue(h.final_tr.requests)
+        self.assertTrue(all(r.background == "主播：兎田ぺこら" for r in requests))
+
+    def test_no_session_info_by_default(self) -> None:
+        h = Harness()
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertTrue(all(r.background == "" for r in h.final_tr.requests))
+
+
+class FakeVoiceLabeler:
+    """依序回傳 `labels`；記下每次收到的樣本數。`error` 設定時丟出它。"""
+
+    def __init__(self, *labels: int | None) -> None:
+        self.labels = list(labels)
+        self.calls: list[int] = []
+        self.error: Exception | None = None
+
+    def label(self, audio: npt.NDArray[np.int16]) -> int | None:
+        self.calls.append(len(audio))
+        if self.error is not None:
+            raise self.error
+        return self.labels.pop(0)
+
+
+TWO_UTTERANCES = track(
+    silence(1.0), speech(2.0), silence(1.5), speech(2.0), silence(1.5)
+)
+
+
+class VoiceLabelTest(unittest.TestCase):
+    """說話者標籤（docs/specs/speaker-labels.md）：只在影片翻譯模式的完整字幕上。"""
+
+    def test_finals_carry_the_voice_and_partials_do_not(self) -> None:
+        labeler = FakeVoiceLabeler(2, None)
+        h = Harness(voice_labeler=labeler)
+        h.pipeline.feed(TWO_UTTERANCES[: 2 * SR])
+        h.pipeline.run_pending()
+        h.pipeline.feed(TWO_UTTERANCES[2 * SR :])
+        h.pipeline.end_of_stream()
+        h.pipeline.run_pending()
+        self.assertTrue(h.partials())
+        self.assertTrue(all(u.voice is None for u in h.partials()))
+        self.assertEqual([u.voice for u in h.finals()], [2, None])
+        # labeler 收到的是完整路徑的音訊（裁過句尾靜音的那份）
+        self.assertEqual(len(labeler.calls), 2)
+        self.assertEqual(labeler.calls[0], h.final.calls[0].samples)
+
+    def test_interpret_mode_never_labels(self) -> None:
+        labeler = FakeVoiceLabeler(1)
+        h = Harness("interpret", voice_labeler=labeler)
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(labeler.calls, [])
+        self.assertTrue(all(u.voice is None for u in h.finals()))
+
+    def test_filtered_non_speech_is_not_labelled(self) -> None:
+        labeler = FakeVoiceLabeler(1)
+        h = Harness(voice_labeler=labeler)
+        h.final.script = lambda n: transcript(
+            "noise", no_speech=0.99 if n == 1 else 0.01
+        )
+        h.pipeline.feed(TWO_UTTERANCES)
+        h.pipeline.end_of_stream()
+        h.pipeline.run_pending()
+        self.assertEqual(len(labeler.calls), 1)  # 只有第二句
+        self.assertEqual([u.voice for u in h.finals() if u.original], [1])
+
+    def test_a_failure_warns_once_and_turns_labels_off_for_the_session(self) -> None:
+        labeler = FakeVoiceLabeler(1, 1)
+        labeler.error = RuntimeError("onnx exploded")
+        h = Harness(voice_labeler=labeler)
+        h.pipeline.feed(TWO_UTTERANCES)
+        h.pipeline.end_of_stream()
+        h.pipeline.run_pending()
+        self.assertEqual(len(labeler.calls), 1)
+        self.assertEqual([u.voice for u in h.finals()], [None, None])
+        self.assertTrue(all(u.original for u in h.finals()))  # 字幕照常送出
+        warnings = [m for level, m in h.logs if "speaker labels" in m]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("onnx exploded", warnings[0])
+
+    def test_a_bad_utterance_only_loses_its_own_label(self) -> None:
+        # ValueError：這一句的音訊或模型輸出不合法；下一句照常標
+        labeler = FakeVoiceLabeler(1, 2)
+
+        def label(audio: npt.NDArray[np.int16]) -> int | None:
+            labeler.calls.append(len(audio))
+            if len(labeler.calls) == 1:
+                raise ValueError("model returned an invalid embedding")
+            return 2
+
+        labeler.label = label  # type: ignore[method-assign]
+        h = Harness(voice_labeler=labeler)
+        h.pipeline.feed(TWO_UTTERANCES)
+        h.pipeline.end_of_stream()
+        h.pipeline.run_pending()
+        self.assertEqual(len(labeler.calls), 2)
+        self.assertEqual([u.voice for u in h.finals()], [None, 2])
+        self.assertFalse([m for _, m in h.logs if "speaker labels" in m])
+
+    def test_no_labeler_means_no_voice(self) -> None:
+        h = Harness()
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual([u.voice for u in h.finals()], [None])
 
 
 if __name__ == "__main__":

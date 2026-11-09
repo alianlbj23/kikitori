@@ -16,6 +16,13 @@
         <button type="button" class="handle-button" id="hide" data-i18n="overlay.hide"></button>
       </div>
       <div class="stage" id="stage">
+        <!-- v0.3 G6: frozen by the pause shortcut / recent final lines on demand; G3: "say that again". -->
+        <p class="badge" id="paused" data-i18n="overlay.paused" hidden></p>
+        <div class="history" id="history" hidden>
+          <p class="history-title" data-i18n="overlay.history"></p>
+          <div class="history-lines" id="history-lines"></div>
+        </div>
+        <p class="notice" id="notice" role="status" hidden></p>
         <div class="lines" id="lines" aria-live="polite"></div>
         <p class="hint" id="hint" data-i18n="overlay.hint"></p>
       </div>

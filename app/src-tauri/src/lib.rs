@@ -27,7 +27,7 @@ use tauri_plugin_window_state::StateFlags;
 use crate::connection::EventSink;
 use crate::engine::{BridgePhase, BridgeSink, BridgeStatus, EngineBridge, ResolveInput};
 use crate::obs::ObsOutput;
-use crate::overlay::{MAIN_LABEL, OverlayState, ShortcutAction};
+use crate::overlay::{MAIN_LABEL, OVERLAY_LABEL, OverlayState, ShortcutAction};
 use crate::protocol::{EngineEvent, EngineState};
 
 const EVENT_SUBTITLE: &str = "engine://subtitle";
@@ -42,6 +42,9 @@ const EVENT_BRIDGE: &str = "bridge://state";
 const EVENT_SHORTCUT: &str = "shortcut://action";
 /// Sent to every window by the "clear subtitles" shortcut (the overlay listens).
 const EVENT_OVERLAY_CLEAR: &str = "overlay://clear";
+/// Sent to the overlay by the "pause" and "recent lines" shortcuts (G6): both
+/// only change what the overlay shows.
+const EVENT_OVERLAY_ACTION: &str = "overlay://action";
 
 /// Forwards engine events to every window as Tauri events.
 struct TauriSink {
@@ -135,9 +138,14 @@ fn run_shortcut(app: &AppHandle, action: ShortcutAction) {
                 log::error!("shortcut could not toggle click-through: {e}");
             }
         }
-        ShortcutAction::ToggleTranslation => {
+        ShortcutAction::ToggleTranslation | ShortcutAction::SayAgain => {
             if let Err(e) = app.emit_to(MAIN_LABEL, EVENT_SHORTCUT, action) {
                 log::error!("cannot emit {EVENT_SHORTCUT}: {e}");
+            }
+        }
+        ShortcutAction::PauseSubtitles | ShortcutAction::ShowHistory => {
+            if let Err(e) = app.emit_to(OVERLAY_LABEL, EVENT_OVERLAY_ACTION, action) {
+                log::error!("cannot emit {EVENT_OVERLAY_ACTION}: {e}");
             }
         }
         ShortcutAction::ClearSubtitles => {
@@ -252,7 +260,10 @@ pub fn run() {
             commands::overlay_set_click_through,
             commands::overlay_set_visible,
             commands::overlay_set_locale,
+            commands::overlay_set_speaker_names,
             commands::overlay_set_show_translation,
+            commands::overlay_notice,
+            commands::overlay_reset_position,
             updater::update_check,
             updater::update_install,
         ])

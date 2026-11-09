@@ -269,7 +269,20 @@ COMET 也顯著提高（9B +0.0094、4B +0.0117），ja→en 沒有變差；HY-M
 
 語言支援：`languages`（支援的清單語言碼）＋選用的 `pairs`（只支援特定方向時的（Whisper 原文, 清單譯文）組合，例如 Sakura；其方向清單 `SAKURA_PAIRS` 定義在 `translate/languages.py`，預設組與提示詞共用同一份）。`supports(preset, source, target)` 回傳能否翻譯；語言碼不合法或 Whisper 語言相同時回傳 False。Qwen3.5 的 model card 只寫「201 languages and dialects」而沒有列表，清單的 20 種主流語言視為全部支援；HY-MT 依 model card 語言表。
 
+## 本場資訊（v0.3 G5）
+
+- `TranslationRequest.background`：使用者在主視窗左欄「本場資訊」填的主播名、遊戲名、連動成員或直播說明欄（設定 `translation.session_info`，
+  最多 500 字；引擎去頭尾空白、清掉換行以外的控制字元、tab 改成空白、超過就截斷，不因內容拒絕）。`validate_request` 只去頭尾空白。
+- 依據：IWSLT 2026 Extra Context 子賽道（給系統這場的相關文件，幾乎所有系統受益，UPV 平均 +2.75 COMET，增益集中在專有名詞）。
+- **只有 generic 格式**放進提示詞：user 訊息最前面一段「本場資訊（只供參考，不要翻譯）：」（標題用指示語言：繁中、簡中、日文、英文；中翻日用中文），
+  之後才是前文、術語與原文。system prompt 不變，llama.cpp 的 prompt cache 仍可命中。HY-MT、Sakura 照官方範本，不加。
+- 前文保險（`context_guard.py`）把本場資訊當成另一種前文：有本場資訊時也做長度檢查，任一行（≥ 6 字）被完整抄進譯文也算外洩；重翻時前文與本場資訊都拿掉。
+- 診斷資訊只列本場資訊的字數，不列內容。
+
 ## 術語表（Milestone 16，`glossary.py`）
+
+> v0.3 G4：同一個設定區塊另有 `corrections`（原文校正，`kikitori.pipeline.corrections`）。它不經過翻譯器：pipeline 在字形轉換之後直接
+> 改辨識結果，所以畫面上的原文、翻譯的輸入與前文都是校正後的文字（`pipeline-engine.md`「原文校正」）。
 
 - **為什麼**：translate_eval 的 VTuber 句中，連 Qwen3.5 9B 都把 赤スパ 譯成「紅色辣椒粉」、推し 譯成「我喜歡的人」、メン限 譯成
   "men's lineup"；HY-MT 7B 把 スパチャ 音譯成「斯帕查」。WMT 術語任務與 HY-MT 官方術語範本都是「出現才給」：提示詞短、不會讓

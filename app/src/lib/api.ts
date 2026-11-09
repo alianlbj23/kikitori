@@ -34,6 +34,7 @@ import type {
   ObsStatus,
   OutputFolder,
   OutputInfo,
+  OverlayNotice,
   OverlaySnapshot,
   OverlayStyle,
   RecommendationPreview,
@@ -62,6 +63,7 @@ import {
   parseOverlaySnapshot,
   parseRecommendationPreview,
   parseSavedPath,
+  parseOverlayNotice,
   parseShortcutAction,
   parseStatus,
   parseSubtitle,
@@ -82,6 +84,10 @@ export const EVENTS = {
   shortcut: "shortcut://action",
   /** The "clear subtitles" shortcut: the overlay empties its lines. */
   overlayClear: "overlay://clear",
+  /** The "pause" and "recent lines" shortcuts (G6), sent to the overlay only. */
+  overlayAction: "overlay://action",
+  /** A short message the overlay shows for a few seconds (G3 "say that again"). */
+  overlayNotice: "overlay://notice",
 } as const;
 
 export const api = {
@@ -257,6 +263,18 @@ export const api = {
   async overlaySetShowTranslation(enabled: boolean): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_set_show_translation", { enabled }));
   },
+  /** Hands the overlay this session's speaker names (index i names voice i + 1; speaker-labels.md). */
+  async overlaySetSpeakerNames(names: string[]): Promise<OverlaySnapshot> {
+    return parseOverlaySnapshot(await invoke("overlay_set_speaker_names", { names }));
+  },
+  /** Shows `text` (in language `lang`) on the overlay for a few seconds (G3). */
+  async overlayNotice(text: string, lang: string): Promise<void> {
+    await invoke("overlay_notice", { text, lang });
+  },
+  /** Moves the overlay back to the primary monitor at its default size and shows it (G6). */
+  async overlayResetPosition(): Promise<OverlaySnapshot> {
+    return parseOverlaySnapshot(await invoke("overlay_reset_position"));
+  },
 };
 
 /**
@@ -286,6 +304,8 @@ export const events = {
   overlay: (h: (v: OverlaySnapshot) => void) => on(EVENTS.overlay, parseOverlaySnapshot, h),
   shortcut: (h: (v: ShortcutAction) => void) => on(EVENTS.shortcut, parseShortcutAction, h),
   overlayClear: (h: () => void) => on(EVENTS.overlayClear, () => undefined, () => h()),
+  overlayAction: (h: (v: ShortcutAction) => void) => on(EVENTS.overlayAction, parseShortcutAction, h),
+  overlayNotice: (h: (v: OverlayNotice) => void) => on(EVENTS.overlayNotice, parseOverlayNotice, h),
 };
 
 const ENGINE_CODES: Readonly<Record<string, StringKey>> = {

@@ -42,9 +42,20 @@ def looks_like_context_leak(translation: str, request: TranslationRequest) -> bo
     - 長度：譯文字數 > 原文字數 × 3（中日韓原文翻成拼音文字時 × 8），而且 > 40 字。
     - 抄出前文：任一句至少 6 字的前文原句完整出現在譯文裡（NFKC 正規化後比對）。
 
-    沒有前文的請求一律回傳 False（重翻也不會不同）。
+    本場資訊（v0.3 G5）與前文一樣：每一行都可能被抄出來，也會讓模型把它翻出來。
+    沒有前文也沒有本場資訊的請求一律回傳 False（重翻也不會不同）。
     """
+    if not request.context and not request.background:
+        return False
+    normalized = _normalize(translation)
+    references = (*request.context, *request.background.splitlines())
+    if any(
+        len(line) >= MIN_ECHO_CHARS and line in normalized
+        for line in (_normalize(c) for c in references)
+    ):
+        return True
     if not request.context:
+        # 只有本場資訊：長度規則是為「把前文也翻出來」設計的，這裡只看有沒有抄出來
         return False
     source = request.text.strip()
     ratio = (
@@ -54,13 +65,7 @@ def looks_like_context_leak(translation: str, request: TranslationRequest) -> bo
         else LENGTH_RATIO
     )
     length = len(translation.strip())
-    if length > MIN_SUSPICIOUS_CHARS and length > ratio * len(source):
-        return True
-    normalized = _normalize(translation)
-    return any(
-        len(line) >= MIN_ECHO_CHARS and line in normalized
-        for line in (_normalize(c) for c in request.context)
-    )
+    return length > MIN_SUSPICIOUS_CHARS and length > ratio * len(source)
 
 
 class ContextFallbackTranslator:
@@ -81,14 +86,14 @@ class ContextFallbackTranslator:
         text = self.inner.translate(request)
         if looks_like_context_leak(text, request):
             _log_retry(request, text)
-            return self.inner.translate(replace(request, context=()))
+            return self.inner.translate(_without_references(request))
         return text
 
     def stream(self, request: TranslationRequest) -> Iterator[str]:
         """同 `Translator.stream()`：每次產出「到目前為止的完整譯文」。"""
         # 先呼叫內層的 stream()：與被包住的翻譯器一樣，請求驗證在呼叫時就進行。
         parts = self.inner.stream(request)
-        if not request.context:
+        if not request.context and not request.background:
             return parts
         return self._stream(request, parts)
 
@@ -107,7 +112,12 @@ class ContextFallbackTranslator:
             if close is not None:
                 close()
         _log_retry(request, text)
-        yield from self.inner.stream(replace(request, context=()))
+        yield from self.inner.stream(_without_references(request))
+
+
+def _without_references(request: TranslationRequest) -> TranslationRequest:
+    """重翻用的請求：不帶前文與本場資訊。"""
+    return replace(request, context=(), background="")
 
 
 def _log_retry(request: TranslationRequest, translation: str) -> None:

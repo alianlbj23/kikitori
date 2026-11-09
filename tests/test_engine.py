@@ -982,10 +982,19 @@ class SessionProtocolTest(EngineTestCase):
             "end_sample",
             "session_id",
         }
-        # F2／F4：即時字幕多 stable_chars、完整字幕多 latency_ms（另一個不出現）
+        # F2／F4／v0.3 G1：即時字幕多 stable_chars 與 translation_stable_chars、
+        # 完整字幕多 latency_ms（另一邊的不出現）
         for s in subtitles:
-            extra = {"latency_ms"} if s["is_final"] else {"stable_chars"}
+            extra = (
+                {"latency_ms"}
+                if s["is_final"]
+                else {"stable_chars", "translation_stable_chars"}
+            )
             self.assertEqual(set(s), expected_keys | extra)
+            if not s["is_final"]:
+                self.assertLessEqual(
+                    s["translation_stable_chars"], len(s["translation"])
+                )
         for s in finals:
             self.assertIsInstance(s["latency_ms"], int)
             self.assertGreaterEqual(s["latency_ms"], 0)
@@ -1007,6 +1016,9 @@ class SessionProtocolTest(EngineTestCase):
             "metrics", lambda d: d["session_id"] == session_id
         )
         # 沒有聲音的假麥克風：音量是下限、沒有排隊、還沒有完整字幕
+        # v0.3 G8：背景音量是靜音（-120）或還沒有音訊（null），看假麥克風送了多少
+        background = metrics.pop("background_level_dbfs")
+        self.assertIn(background, (None, -120.0))
         self.assertEqual(
             metrics,
             {
@@ -1014,6 +1026,7 @@ class SessionProtocolTest(EngineTestCase):
                 "level_dbfs": -120.0,
                 "backlog": 0,
                 "latency_ms_median": None,
+                "speech_level_dbfs": None,
             },
         )
         self.engine.request("session.stop")

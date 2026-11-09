@@ -75,7 +75,13 @@ export function settingsForReport(s: Settings): unknown {
     ...s,
     translation: {
       ...s.translation,
-      glossary: { builtin: glossary.builtin, entries: `${glossary.entries.length} entries (not included)` },
+      // The stream info, entries and correction rules may hold names the user typed: sizes only.
+      session_info: `${Array.from(s.translation.session_info).length} characters (not included)`,
+      glossary: {
+        builtin: glossary.builtin,
+        entries: `${glossary.entries.length} entries (not included)`,
+        corrections: `${glossary.corrections.length} corrections (not included)`,
+      },
     },
   };
 }

@@ -17,6 +17,11 @@
  * In-place updates (a partial growing, partial → final) are shown immediately;
  * they replace nothing. The caller re-runs `stepRhythm` on every event and at
  * `wakeAt`.
+ *
+ * With `minDisplayFor` (v0.3 G7 "pace by length") a long line may wait longer
+ * than `minDisplayMs`: `readingTimeMs` gives characters ÷ a reading speed per
+ * script (Netflix's Japanese timed-text guide: 4 characters a second). The
+ * no-backlog rule above still wins.
  */
 
 import type { SubtitleLine } from "./subtitles";
@@ -25,6 +30,8 @@ export interface RhythmOptions {
   /** Lines on screen at once (1–3). */
   maxLines: number;
   minDisplayMs: number;
+  /** Extra minimum for one line (G7); the larger of the two applies. */
+  minDisplayFor?: (line: SubtitleLine) => number;
   /** 0 = never fade. */
   idleClearMs: number;
 }
@@ -127,7 +134,9 @@ export function stepRhythm(
   for (const id of pending) {
     if (visible.length >= maxLines) {
       const oldest = visible[0];
-      const due = (stamps.get(oldest) ?? now) + opts.minDisplayMs;
+      const oldestLine = byId.get(oldest);
+      const wait = Math.max(opts.minDisplayMs, oldestLine && opts.minDisplayFor ? opts.minDisplayFor(oldestLine) : 0);
+      const due = (stamps.get(oldest) ?? now) + wait;
       if (!force && now < due) {
         wakeAt = due;
         break;
@@ -164,6 +173,26 @@ export function stepRhythm(
     wakeAt,
     fadedNow,
   };
+}
+
+/** Characters a second people read in CJK subtitles (Netflix Japanese timed-text guide). */
+export const CJK_READING_CPS = 4;
+/** Characters a second for other scripts (a common subtitling ceiling). */
+export const OTHER_READING_CPS = 15;
+const CJK_TARGETS = new Set(["ja", "zh-TW", "zh-CN", "ko"]);
+
+/**
+ * How long reading `line` takes (G7): the text people read — the translation,
+ * or the original when translations are hidden or missing — at the reading
+ * speed of its language.
+ */
+export function readingTimeMs(line: SubtitleLine, showTranslation: boolean): number {
+  const useTranslation = showTranslation && line.translation.trim() !== "";
+  const text = useTranslation ? line.translation : line.original;
+  const language = useTranslation ? line.targetLanguage : line.sourceLanguage;
+  const cjk = CJK_TARGETS.has(language) || ["zh", "ja", "ko"].includes(language);
+  const chars = Array.from(text.replace(/\s+/gu, "")).length;
+  return Math.round((chars / (cjk ? CJK_READING_CPS : OTHER_READING_CPS)) * 1000);
 }
 
 /** Subtitle lines the overlay keeps beyond the visible ones (waiting or faded). */

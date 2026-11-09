@@ -245,7 +245,8 @@ class ValidationTest(unittest.TestCase):
         self.assertTrue(s.translation.glossary.builtin)
         self.assertEqual(s.translation.glossary.entries, ())
         self.assertEqual(
-            s.to_dict()["translation"]["glossary"], {"builtin": True, "entries": []}
+            s.to_dict()["translation"]["glossary"],
+            {"builtin": True, "entries": [], "corrections": []},
         )
         entries = [
             {"source": "ぺこら", "target": "佩克拉", "target_language": "zh-TW"},
@@ -263,9 +264,68 @@ class ValidationTest(unittest.TestCase):
         )
         self.assertEqual(
             s.to_dict()["translation"]["glossary"],
-            {"builtin": False, "entries": entries},
+            {"builtin": False, "entries": entries, "corrections": []},
         )
         self.assertEqual(Settings.from_dict(s.to_dict()), s)
+
+    def test_corrections_round_trip_and_validation(self) -> None:
+        # v0.3 G4：原文校正；缺少時為空（不升 schema）
+        fixes = [
+            {"wrong": "ぺこら", "right": "ぺこーら"},
+            {"wrong": "apex", "right": "Apex"},
+        ]
+        s = Settings.from_dict(_with("translation.glossary", {"corrections": fixes}))
+        self.assertEqual(
+            [(c.wrong, c.right) for c in s.translation.glossary.corrections],
+            [("ぺこら", "ぺこーら"), ("apex", "Apex")],
+        )
+        self.assertEqual(s.to_dict()["translation"]["glossary"]["corrections"], fixes)
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
+        for value, path in (
+            ("x", "translation.glossary.corrections"),
+            ([{"wrong": "a"}], "translation.glossary.corrections[0].right"),
+            (
+                [{"wrong": "a", "right": "b", "x": 1}],
+                "translation.glossary.corrections[0].x",
+            ),
+            (
+                [{"wrong": "", "right": "b"}],
+                "translation.glossary.corrections[0].wrong",
+            ),
+            ([{"wrong": "a", "right": 2}], "translation.glossary.corrections[0].right"),
+            (
+                [{"wrong": "Apex", "right": "b"}, {"wrong": "APEX", "right": "c"}],
+                "translation.glossary.corrections[1].wrong",
+            ),
+            (
+                [{"wrong": f"w{i}", "right": "r"} for i in range(201)],
+                "translation.glossary.corrections",
+            ),
+        ):
+            with self.subTest(path=path), self.assertRaises(SettingsError) as ctx:
+                Settings.from_dict(
+                    _with("translation.glossary", {"corrections": value})
+                )
+            self.assertIn(path, str(ctx.exception))
+
+    def test_session_info_is_tidied_and_capped(self) -> None:
+        # v0.3 G5：貼上的說明欄照收，只清掉控制字元、截到上限；缺少時為空
+        self.assertEqual(Settings().translation.session_info, "")
+        raw = "  主播：兎田ぺこら\r\n遊戲：\tMinecraft\x07  \n\n"
+        s = Settings.from_dict(_with("translation.session_info", raw))
+        self.assertEqual(
+            s.translation.session_info, "主播：兎田ぺこら\n遊戲： Minecraft"
+        )
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
+        # 全形空白、NBSP、ZWJ（👨‍🎤）不是控制字元：保留
+        kept = "配信者：\u3000兎田ぺこら\u00a0👨\u200d🎤"
+        s = Settings.from_dict(_with("translation.session_info", kept))
+        self.assertEqual(s.translation.session_info, kept)
+        long = Settings.from_dict(_with("translation.session_info", "あ" * 600))
+        self.assertEqual(len(long.translation.session_info), 500)
+        with self.assertRaises(SettingsError) as ctx:
+            Settings.from_dict(_with("translation.session_info", 5))
+        self.assertIn("translation.session_info", str(ctx.exception))
 
     def test_glossary_missing_uses_default_without_migration(self) -> None:
         # 新欄位有預設值：沒有 glossary 的 schema 3 設定檔照樣讀得進來，不必升 schema。
@@ -302,6 +362,42 @@ class ValidationTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(SettingsError) as ctx:
                     Settings.from_dict(_with("furigana", value))
+                self.assertIn(path, str(ctx.exception))
+
+    def test_speakers_defaults_round_trip_and_missing(self) -> None:
+        # 說話者標籤：預設關閉、自動判斷人數；沒有 speakers 的檔案照樣讀得進來（不升 schema）
+        s = Settings()
+        self.assertEqual(s.to_dict()["speakers"], {"enabled": False, "count": None})
+        data = s.to_dict()
+        del data["speakers"]
+        self.assertEqual(Settings.from_dict(data), Settings())
+        for count in (None, 2, 6):
+            with self.subTest(count=count):
+                on = Settings.from_dict(
+                    _with("speakers", {"enabled": True, "count": count})
+                )
+                self.assertTrue(on.speakers.enabled)
+                self.assertEqual(on.speakers.count, count)
+                self.assertEqual(Settings.from_dict(on.to_dict()), on)
+        # 關閉時保留人數，下次打開沿用
+        kept = Settings().merged({"speakers": {"count": 3}})
+        self.assertFalse(kept.speakers.enabled)
+        self.assertEqual(kept.merged({"speakers": {"enabled": True}}).speakers.count, 3)
+
+    def test_speakers_validation(self) -> None:
+        for value, path in (
+            ({"enabled": "yes"}, "speakers.enabled"),
+            ({"count": 1}, "speakers.count"),
+            ({"count": 7}, "speakers.count"),
+            ({"count": 2.0}, "speakers.count"),
+            ({"count": True}, "speakers.count"),
+            ({"count": "auto"}, "speakers.count"),
+            ({"threshold": 0.4}, "speakers.threshold"),
+            ([], "speakers"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as ctx:
+                    Settings.from_dict(_with("speakers", value))
                 self.assertIn(path, str(ctx.exception))
 
     def test_glossary_entry_language_is_normalized(self) -> None:

@@ -18,7 +18,7 @@ use crate::connection::RequestError;
 use crate::engine::{BridgeStatus, EngineBridge, third_party_licenses_dir};
 use crate::obs::{ObsContent, ObsOutput, ObsStatus};
 use crate::output::{self, OutputFolder};
-use crate::overlay::{OVERLAY_LABEL, OverlaySnapshot, OverlayState, OverlayStyle};
+use crate::overlay::{MAX_LOCALE_LEN, OVERLAY_LABEL, OverlaySnapshot, OverlayState, OverlayStyle};
 
 type CmdResult<T> = Result<T, RequestError>;
 
@@ -643,6 +643,19 @@ pub fn overlay_set_locale(
     Ok(overlay.snapshot())
 }
 
+/// Hands the overlay the names the user gave the speaker labels this session
+/// (docs/specs/speaker-labels.md); index `i` names `voice` `i + 1`.
+#[tauri::command]
+pub fn overlay_set_speaker_names(
+    app: AppHandle,
+    overlay: State<'_, OverlayState>,
+    names: Vec<String>,
+) -> CmdResult<OverlaySnapshot> {
+    overlay.set_speaker_names(names).map_err(invalid)?;
+    broadcast_overlay(&app, &overlay);
+    Ok(overlay.snapshot())
+}
+
 /// Tells the overlay whether translations are shown; without them it promotes
 /// the original to the primary subtitle style (settings `translation.enabled`).
 #[tauri::command]
@@ -715,9 +728,156 @@ pub fn overlay_set_visible(
     Ok(overlay.snapshot())
 }
 
+/// Sent to the overlay by [`overlay_notice`].
+pub const EVENT_OVERLAY_NOTICE: &str = "overlay://notice";
+/// Longest notice text accepted (one short sentence in any language).
+pub const MAX_NOTICE_CHARS: usize = 200;
+/// Default overlay size from tauri.conf.json, used by [`overlay_reset_position`].
+const OVERLAY_DEFAULT_SIZE: (f64, f64) = (960.0, 200.0);
+
+/// A short message the overlay shows for a few seconds (G3: "say that again").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OverlayNotice {
+    pub text: String,
+    /// BCP 47-ish tag of `text` (`lang` attribute, picks the right CJK glyphs).
+    pub lang: String,
+}
+
+/// Checks a notice from the main window before it reaches the overlay.
+pub fn validate_notice(text: &str, lang: &str) -> Result<OverlayNotice, RequestError> {
+    let text = text.trim();
+    if text.is_empty()
+        || text.chars().count() > MAX_NOTICE_CHARS
+        || text.chars().any(char::is_control)
+    {
+        return Err(invalid(format!(
+            "notice must be 1-{MAX_NOTICE_CHARS} characters without control characters"
+        )));
+    }
+    let lang_ok = !lang.is_empty()
+        && lang.len() <= MAX_LOCALE_LEN
+        && lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !lang_ok {
+        return Err(invalid("notice language must be a short language tag"));
+    }
+    Ok(OverlayNotice {
+        text: text.to_owned(),
+        lang: lang.to_owned(),
+    })
+}
+
+/// Shows a short notice on the overlay (interpret mode "say that again").
+#[tauri::command]
+pub fn overlay_notice(app: AppHandle, text: String, lang: String) -> CmdResult<()> {
+    let notice = validate_notice(&text, &lang)?;
+    app.emit_to(OVERLAY_LABEL, EVENT_OVERLAY_NOTICE, notice)
+        .map_err(|e| {
+            log::error!("cannot emit {EVENT_OVERLAY_NOTICE}: {e}");
+            invalid(format!("cannot show the notice: {e}"))
+        })
+}
+
+/// Where the overlay goes when reset: default size, centred near the bottom of
+/// the monitor (all values in physical pixels).
+pub fn default_overlay_frame(monitor: (i32, i32, u32, u32), scale: f64) -> (i32, i32, u32, u32) {
+    let (mx, my, mw, mh) = monitor;
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let w = ((OVERLAY_DEFAULT_SIZE.0 * scale).round() as u32).min(mw.max(1));
+    let h = ((OVERLAY_DEFAULT_SIZE.1 * scale).round() as u32).min(mh.max(1));
+    // Saturating: a monitor that reports 0×0 while it is being unplugged must not wrap around.
+    let x = mx + (mw.saturating_sub(w) / 2) as i32;
+    // Leave a tenth of the screen below it (taskbar, video controls).
+    let room = mh.saturating_sub(h);
+    let y = my + room as i32 - (mh / 10).min(room) as i32;
+    (x, y, w, h)
+}
+
+/// Moves the overlay back onto the primary monitor at its default size and
+/// shows it (G6: a window left on an unplugged monitor is otherwise lost).
+#[tauri::command]
+pub fn overlay_reset_position(
+    app: AppHandle,
+    overlay: State<'_, OverlayState>,
+) -> CmdResult<OverlaySnapshot> {
+    let window = app
+        .get_webview_window(OVERLAY_LABEL)
+        .ok_or_else(|| invalid("overlay window does not exist"))?;
+    let monitor = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten())
+        .ok_or_else(|| invalid("no monitor found"))?;
+    let pos = monitor.position();
+    let size = monitor.size();
+    let (x, y, w, h) = default_overlay_frame(
+        (pos.x, pos.y, size.width, size.height),
+        monitor.scale_factor(),
+    );
+    let moved = window
+        .set_size(tauri::PhysicalSize::new(w, h))
+        .and_then(|()| window.set_position(tauri::PhysicalPosition::new(x, y)))
+        .and_then(|()| window.show());
+    moved.map_err(|e| {
+        log::error!("overlay reset failed: {e}");
+        invalid(format!("cannot move the subtitle window: {e}"))
+    })?;
+    if let Err(e) = window.set_always_on_top(true) {
+        log::warn!("cannot re-apply always-on-top: {e}");
+    }
+    overlay.set_visible(true);
+    broadcast_overlay(&app, &overlay);
+    Ok(overlay.snapshot())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_are_validated() {
+        let ok = validate_notice("  すみません、もう一度お願いします。 ", "ja").unwrap();
+        assert_eq!(ok.text, "すみません、もう一度お願いします。");
+        assert_eq!(ok.lang, "ja");
+        assert!(validate_notice("x", "zh-TW").is_ok());
+        assert!(validate_notice("", "ja").is_err());
+        assert!(validate_notice("   ", "ja").is_err());
+        assert!(validate_notice(&"あ".repeat(MAX_NOTICE_CHARS + 1), "ja").is_err());
+        assert!(validate_notice(&"あ".repeat(MAX_NOTICE_CHARS), "ja").is_ok());
+        assert!(validate_notice("a\nb", "ja").is_err());
+        assert!(validate_notice("hi", "").is_err());
+        assert!(validate_notice("hi", "en US").is_err());
+        assert!(validate_notice("hi", &"a".repeat(MAX_LOCALE_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn default_overlay_frame_is_centred_near_the_bottom() {
+        // 1920x1080 at 100 %: 960x200, centred, 108 px above the bottom edge.
+        assert_eq!(
+            default_overlay_frame((0, 0, 1920, 1080), 1.0),
+            (480, 772, 960, 200)
+        );
+        // A secondary primary monitor to the left, at 150 %.
+        assert_eq!(
+            default_overlay_frame((-2560, 0, 2560, 1440), 1.5),
+            (-2560 + 560, 1440 - 300 - 144, 1440, 300)
+        );
+        // Tiny screens: never larger than the monitor, never off it.
+        let (x, y, w, h) = default_overlay_frame((0, 0, 800, 150), 1.0);
+        assert_eq!((w, h), (800, 150));
+        assert_eq!((x, y), (0, 0));
+        // A bad scale factor falls back to 1.
+        assert_eq!(
+            default_overlay_frame((0, 0, 1920, 1080), f64::NAN),
+            (480, 772, 960, 200)
+        );
+        // A 0×0 monitor (mid-unplug): a 1×1 window at its origin, no overflow.
+        assert_eq!(default_overlay_frame((10, 20, 0, 0), 1.0), (10, 20, 1, 1));
+    }
 
     #[test]
     fn model_ids() {

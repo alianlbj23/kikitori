@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { emptyRhythm, stepRhythm, type RhythmOptions, type RhythmState } from "./rhythm";
+import { emptyRhythm, readingTimeMs, stepRhythm, type RhythmOptions, type RhythmState } from "./rhythm";
 import type { SubtitleLine } from "./subtitles";
 
 function line(id: number, original: string, translation = "", isFinal = true): SubtitleLine {
@@ -14,6 +14,9 @@ function line(id: number, original: string, translation = "", isFinal = true): S
     startSample: id * 16_000,
     endSample: id * 16_000 + 8000,
     stableChars: null,
+    translationStableChars: null,
+    speaker: null,
+    voice: null,
     ruby: null,
   };
 }
@@ -152,5 +155,33 @@ describe("skipping", () => {
       [10, [line(3, "c"), line(5, "e")]],
     ]);
     expect(ids).toEqual([[5], [5]]);
+  });
+});
+
+describe("pace by length (G7)", () => {
+  it("measures the text people read at the speed of its script", () => {
+    // 8 CJK characters at 4 a second
+    expect(readingTimeMs(line(1, "こんにちは", "今天天氣很好呢"), true)).toBe(1750);
+    // translations hidden: the original (5 kana) is what is read
+    expect(readingTimeMs(line(1, "こんにちは", "今天天氣很好呢"), false)).toBe(1250);
+    // a missing translation falls back to the original
+    expect(readingTimeMs(line(1, "こんにちは", ""), true)).toBe(1250);
+    // Latin script at 15 a second, spaces not counted
+    const en = { ...line(1, "x", "Thank you for coming"), targetLanguage: "en" };
+    expect(readingTimeMs(en, true)).toBe(Math.round((17 / 15) * 1000));
+  });
+
+  it("keeps a long line up longer, but never builds a backlog", () => {
+    const long = line(1, "長い", "這是一句非常非常長的字幕需要多一點時間才能讀完"); // 23 chars → 5750 ms
+    const opts = { ...OPTS, maxLines: 1, minDisplayFor: (l: SubtitleLine) => readingTimeMs(l, true) };
+    let state = emptyRhythm();
+    state = stepRhythm(state, [long], 0, opts).state;
+    const waiting = stepRhythm(state, [long, line(2, "次")], 2000, opts);
+    expect(waiting.lines.map((l) => l.utteranceId)).toEqual([1]);
+    expect(waiting.wakeAt).toBe(5750);
+    expect(stepRhythm(waiting.state, [long, line(2, "次")], 5750, opts).lines.map((l) => l.utteranceId)).toEqual([2]);
+    // More waiting than fits: shown at once, as before.
+    const burst = stepRhythm(state, [long, line(2, "a"), line(3, "b")], 1000, opts);
+    expect(burst.lines.map((l) => l.utteranceId)).toEqual([3]);
   });
 });

@@ -462,6 +462,9 @@ mod tests {
             end_sample: 16_000,
             session_id: Some(1),
             stable_chars: None,
+            translation_stable_chars: None,
+            speaker: None,
+            voice: None,
             latency_ms: None,
             ruby: None,
         }

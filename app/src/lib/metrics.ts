@@ -12,7 +12,11 @@
  *   to `BACKLOG_CLEAR_AT` or less, so a backlog hovering around the threshold
  *   does not make the warning blink;
  * - "no audio" after `NO_AUDIO_MS` of input below `NO_AUDIO_DBFS` while the
- *   session runs; any louder reading resets the clock.
+ *   session runs; any louder reading resets the clock;
+ * - "background music is loud" (v0.3 G8) after `BGM_WARN_MS` of readings where
+ *   the audio between sentences is louder than `BGM_LOUD_DBFS` and within
+ *   `BGM_MARGIN_DB` of the speech. The thresholds are a first guess, to be
+ *   tuned with experiments/vtuber_eval (docs/specs/ui.md).
  *
  * The caller passes the current time (`now`, ms) to every step and re-checks
  * at `noAudioDueAt` (metrics may stop arriving, the hint must still appear on
@@ -27,8 +31,14 @@ export const NO_AUDIO_DBFS = -60;
 export const NO_AUDIO_MS = 15_000;
 export const BACKLOG_WARN_ABOVE = 3;
 export const BACKLOG_CLEAR_AT = 1;
+/** G8: background (between sentences) louder than this… */
+export const BGM_LOUD_DBFS = -30;
+/** …and less than this many dB below the speech… */
+export const BGM_MARGIN_DB = 6;
+/** …for this long. */
+export const BGM_WARN_MS = 15_000;
 
-export type MetricsWarning = "backlog" | "no_audio";
+export type MetricsWarning = "backlog" | "no_audio" | "bgm";
 
 export interface MetricsState {
   readonly sessionId: number | null;
@@ -40,6 +50,8 @@ export interface MetricsState {
   /** When the input went (and stayed) below `NO_AUDIO_DBFS`; null while there is sound. */
   readonly quietSince: number | null;
   readonly backlogHigh: boolean;
+  /** G8: when the background became (and stayed) too loud next to the speech; null otherwise. */
+  readonly loudBackgroundSince: number | null;
   /** Warnings closed by the user (until their condition clears). */
   readonly dismissed: ReadonlySet<MetricsWarning>;
 }
@@ -53,8 +65,17 @@ export function emptyMetrics(): MetricsState {
     backlog: 0,
     quietSince: null,
     backlogHigh: false,
+    loudBackgroundSince: null,
     dismissed: new Set(),
   };
+}
+
+/** G8: the background is loud and close to the speech (both levels must be known). */
+export function backgroundTooLoud(ev: MetricsEvent): boolean {
+  const speech = ev.speech_level_dbfs ?? null;
+  const background = ev.background_level_dbfs ?? null;
+  if (speech === null || background === null) return false;
+  return background > BGM_LOUD_DBFS && speech - background < BGM_MARGIN_DB;
 }
 
 /**
@@ -76,9 +97,11 @@ export function applyMetrics(state: MetricsState, ev: MetricsEvent, now: number)
   if (ev.session_id !== null && state.sessionId !== null && ev.session_id < state.sessionId) return state;
   const quiet = ev.level_dbfs < NO_AUDIO_DBFS;
   const backlogHigh = ev.backlog > BACKLOG_WARN_ABOVE ? true : ev.backlog <= BACKLOG_CLEAR_AT ? false : state.backlogHigh;
+  const loud = backgroundTooLoud(ev);
   const dismissed = new Set(state.dismissed);
   if (!backlogHigh) dismissed.delete("backlog");
   if (!quiet) dismissed.delete("no_audio");
+  if (!loud) dismissed.delete("bgm");
   return {
     ...state,
     sessionId: ev.session_id ?? state.sessionId,
@@ -87,6 +110,7 @@ export function applyMetrics(state: MetricsState, ev: MetricsEvent, now: number)
     backlog: ev.backlog,
     quietSince: quiet ? (state.quietSince ?? now) : null,
     backlogHigh,
+    loudBackgroundSince: loud ? (state.loudBackgroundSince ?? now) : null,
     dismissed,
   };
 }
@@ -136,6 +160,9 @@ export function metricsView(state: MetricsState, now: number): MetricsView {
   if (state.running && state.backlogHigh && !state.dismissed.has("backlog")) warnings.push("backlog");
   const silent = state.running && state.quietSince !== null && now - state.quietSince >= NO_AUDIO_MS;
   if (silent && !state.dismissed.has("no_audio")) warnings.push("no_audio");
+  const loud =
+    state.running && state.loudBackgroundSince !== null && now - state.loudBackgroundSince >= BGM_WARN_MS;
+  if (loud && !state.dismissed.has("bgm")) warnings.push("bgm");
   return {
     visible: state.running,
     level: state.levelDbfs === null ? null : levelFraction(state.levelDbfs),

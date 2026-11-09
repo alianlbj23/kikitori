@@ -122,6 +122,11 @@ describe("t and tp", () => {
       max_lines: "2",
       min_display_secs: "1.5",
       idle_clear_secs: "8",
+      pace_by_length: false,
+      max_line_em: "0",
+      original_scale_percent: "62",
+      original_position: "above",
+      furigana_first_only: false,
       obs_output: "off",
       auto_save_transcripts: false,
     }).base_url).toBe("The URL must start with http:// or https://.");

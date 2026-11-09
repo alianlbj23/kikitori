@@ -80,6 +80,8 @@ class _GenericTemplate:
     context_header: str
     instruction: str
     terms_header: str
+    # v0.3 G5：本場資訊（主播名、遊戲名…）的標題，放在前文之前
+    background_header: str
 
 
 # 原文語言（Whisper 語言碼）在各指示語言中的名稱。
@@ -149,6 +151,7 @@ _SOURCE_NAMES_JA = {
 _SOURCE_NAMES_EN = {code: whisper_language_name(code) for code in WHISPER_CODES}
 
 _ENGLISH_TERMS_HEADER = "Terminology (use these translations when the terms appear):"
+_ENGLISH_BACKGROUND_HEADER = "About this stream (reference only, do not translate):"
 
 # zh-TW、zh-CN、ja、en 的指示用「譯文語言」寫：實測英文指示下 qwen3.5:9b 翻日文時有
 # 11/18 次直接輸出日文，改用繁體中文指示後為 0/18（experiments/translate_benchmark/README.md）。
@@ -165,6 +168,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         ),
         source_names=_SOURCE_NAMES_ZH_TW,
         context_header="前文（只供參考，不要翻譯）：",
+        background_header="本場資訊（只供參考，不要翻譯）：",
         instruction="請翻譯成繁體中文：",
         terms_header="術語（原文出現時請用這些譯法）：",
     ),
@@ -180,6 +184,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         ),
         source_names=_SOURCE_NAMES_ZH_CN,
         context_header="前文（只供参考，不要翻译）：",
+        background_header="本场信息（只供参考，不要翻译）：",
         instruction="请翻译成简体中文：",
         terms_header="术语（原文出现时请用这些译法）：",
     ),
@@ -194,6 +199,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         ),
         source_names=_SOURCE_NAMES_JA,
         context_header="前の文（参考用、翻訳しない）：",
+        background_header="この配信の情報（参考用、翻訳しない）：",
         instruction="日本語に翻訳してください：",
         terms_header="用語（原文に出てきたらこの訳を使う）：",
     ),
@@ -208,6 +214,7 @@ _GENERIC_TEMPLATES: dict[str, _GenericTemplate] = {
         ),
         source_names=_SOURCE_NAMES_EN,
         context_header="Earlier lines (reference only, do not translate):",
+        background_header=_ENGLISH_BACKGROUND_HEADER,
         instruction="Translate into English:",
         terms_header=_ENGLISH_TERMS_HEADER,
     ),
@@ -234,6 +241,7 @@ def _english_template(target_code: str) -> _GenericTemplate:
         ),
         source_names=_SOURCE_NAMES_EN,
         context_header="Earlier lines (reference only, do not translate):",
+        background_header=_ENGLISH_BACKGROUND_HEADER,
         instruction=f"Translate into {name}:",
         terms_header=_ENGLISH_TERMS_HEADER,
     )
@@ -256,6 +264,7 @@ _PAIR_TEMPLATES: dict[tuple[str, str], _GenericTemplate] = {
         ),
         source_names={"zh": "中文"},
         context_header="前文（只供參考，不要翻譯）：",
+        background_header="本場資訊（只供參考，不要翻譯）：",
         instruction="翻成日文：",
         terms_header="術語（原文出現時請用這些譯法）：",
     ),
@@ -372,8 +381,12 @@ def _generic(request: TranslationRequest, terms: Sequence[Term]) -> list[Message
     source = template.source_names[request.source_language]
     system = "\n".join(template.system_lines).format(source=source)
     user = ""
+    if request.background:
+        # IWSLT 2026 Extra Context：給系統這場的相關資訊，增益集中在專有名詞。放在 user
+        # 訊息最前面而不是 system：system 每句都一樣，prompt cache 才能命中。
+        user = template.background_header + "\n" + request.background + "\n\n"
     if request.context:
-        user = template.context_header + "\n" + "\n".join(request.context) + "\n\n"
+        user += template.context_header + "\n" + "\n".join(request.context) + "\n\n"
     if terms:
         # WMT 術語任務的做法：「原文 → 譯法」逐行列出，標題用與指示相同的語言。
         lines = "\n".join(f"{t.source} → {t.target}" for t in terms)

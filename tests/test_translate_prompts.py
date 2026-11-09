@@ -144,6 +144,14 @@ class ValidateRequestTest(unittest.TestCase):
         with self.assertRaises(InvalidRequestError):
             validate_request("おはよう")  # type: ignore[arg-type]
 
+    def test_background_is_trimmed_and_checked(self) -> None:
+        # v0.3 G5：本場資訊（直播主、遊戲名…）；空白時視為沒有
+        req = validate_request(TranslationRequest("x", "ja", background="  ぺこら\n "))
+        self.assertEqual(req.background, "ぺこら")
+        self.assertEqual(validate_request(TranslationRequest("x", "ja")).background, "")
+        with self.assertRaises(InvalidRequestError):
+            validate_request(TranslationRequest("x", "ja", background=3))  # type: ignore[arg-type]
+
     def test_keeps_only_last_context_lines(self) -> None:
         req = validate_request(
             TranslationRequest("x", "ja", context=("a", "b", "c", "d")),
@@ -221,6 +229,44 @@ class BuildMessagesTest(unittest.TestCase):
         self.assertIn("不要翻譯", user)
         self.assertLess(user.index("準備できた？"), user.index("行くよ"))
         self.assertTrue(user.endswith("請翻譯成繁體中文：\n行くよ"))
+
+    def test_generic_includes_background_before_the_context(self) -> None:
+        # v0.3 G5（IWSLT 2026 Extra Context）：本場資訊在前文之前，標「不要翻譯」
+        msgs = build_messages(
+            "generic",
+            TranslationRequest(
+                "行くよ", "ja", context=("準備できた？",), background="主播：兎田ぺこら"
+            ),
+        )
+        user = msgs[1]["content"]
+        self.assertTrue(
+            user.startswith("本場資訊（只供參考，不要翻譯）：\n主播：兎田ぺこら\n\n")
+        )
+        self.assertLess(user.index("兎田ぺこら"), user.index("準備できた？"))
+        self.assertTrue(user.endswith("請翻譯成繁體中文：\n行くよ"))
+        # system prompt 不變（prompt cache 仍可命中）
+        plain = build_messages("generic", TranslationRequest("行くよ", "ja"))
+        self.assertEqual(msgs[0], plain[0])
+        for target, header in (
+            ("zh-CN", "本场信息"),
+            ("ja", "この配信の情報"),
+            ("en", "About this stream"),
+            ("ko", "About this stream"),
+        ):
+            source = "en" if target == "ja" else "ja"
+            req = TranslationRequest("x", source, target, background="info")
+            with self.subTest(target=target):
+                self.assertIn(header, build_messages("generic", req)[1]["content"])
+        zh_ja = TranslationRequest("便當", "zh", "ja", background="info")
+        self.assertIn("本場資訊", build_messages("generic", zh_ja)[1]["content"])
+
+    def test_official_templates_do_not_take_the_background(self) -> None:
+        # HY-MT、Sakura 照官方範本，不加本場資訊
+        req = TranslationRequest("行くよ", "ja", background="主播：兎田ぺこら")
+        for style in ("hunyuan_mt", "sakura"):
+            with self.subTest(style=style):
+                text = "".join(m["content"] for m in build_messages(style, req))
+                self.assertNotIn("兎田ぺこら", text)
 
     def test_generic_japanese_target_instructions_in_japanese(self) -> None:
         msgs = build_messages(

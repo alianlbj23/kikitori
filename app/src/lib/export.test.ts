@@ -10,6 +10,7 @@ import {
   exportTranscript,
   formatTimestamp,
   hasExportableLines,
+  interpretNamer,
   oneLine,
   startsRtl,
   transcriptFileName,
@@ -27,6 +28,9 @@ function line(id: number, original: string, translation: string, startS: number,
     startSample: Math.round(startS * 16_000),
     endSample: Math.round(endS * 16_000),
     stableChars: null,
+    translationStableChars: null,
+    speaker: null,
+    voice: null,
     ruby: null,
   };
 }
@@ -192,5 +196,65 @@ describe("file names", () => {
       expect(name).toMatch(rust);
       expect(name.length).toBeLessThanOrEqual(100);
     }
+  });
+});
+
+describe("speaker labels in interpret exports (G3)", () => {
+  const names = interpretNamer({ self: "你", partner: "對方" });
+  const lines: SubtitleLine[] = [
+    { ...line(1, "請問車站在哪裡", "Where is the station?", 0, 2), speaker: "self" },
+    { ...line(2, "Over there.", "在那裡。", 3, 4), speaker: "partner" },
+  ];
+
+  it("prefixes the first text line with the speaker's name", () => {
+    const cues = cuesFromLines(lines, "both", names);
+    expect(cues[0]!.text).toEqual(["你: 請問車站在哪裡", "Where is the station?"]);
+    expect(cues[1]!.text).toEqual(["對方: Over there.", "在那裡。"]);
+    expect(cues.map((c) => c.who)).toEqual(["你", "對方"]);
+    // The plain fields stay unprefixed.
+    expect(cues[0]!.original).toBe("請問車站在哪裡");
+    expect(exportTranscript(lines, "txt", "translation", names)).toContain("你: Where is the station?");
+  });
+
+  it("adds a speaker column to CSV instead of prefixing the text", () => {
+    const csv = exportTranscript(lines, "csv", "both", names);
+    const [header, first] = csv.replace("﻿", "").split("\r\n");
+    expect(header).toBe("index,start,end,source_language,target_language,speaker,original,translation");
+    expect(first).toContain(",你,請問車站在哪裡,");
+  });
+
+  it("labels nothing without names or in media mode", () => {
+    expect(cuesFromLines(lines, "both")[0]!.text[0]).toBe("請問車站在哪裡");
+    const media = lines.map((l) => ({ ...l, speaker: null }));
+    expect(cuesFromLines(media, "both", names)[0]!.text[0]).toBe("請問車站在哪裡");
+    expect(exportTranscript(media, "csv", "both", names)).not.toContain("speaker");
+  });
+});
+
+describe("speaker labels in media exports (speaker-labels.md)", () => {
+  const given = ["ぺこら"];
+  const nameOf = (l: SubtitleLine) => (l.voice === null ? null : (given[l.voice - 1] ?? `說話者 ${l.voice}`));
+  const lines: SubtitleLine[] = [
+    { ...line(1, "こんぺこ", "大家好", 0, 2), voice: 1 },
+    { ...line(2, "やっほー", "嗨", 3, 4), voice: 2 },
+    { ...line(3, "えー", "欸", 5, 6), voice: null },
+  ];
+
+  it("prefixes named lines and leaves unlabelled ones as they are", () => {
+    const cues = cuesFromLines(lines, "both", nameOf);
+    expect(cues.map((c) => c.text[0])).toEqual(["ぺこら: こんぺこ", "說話者 2: やっほー", "えー"]);
+    expect(cues.map((c) => c.who)).toEqual(["ぺこら", "說話者 2", null]);
+  });
+
+  it("puts the names in the CSV speaker column, blank when unlabelled", () => {
+    const rows = exportTranscript(lines, "csv", "original", nameOf).replace("\uFEFF", "").split("\r\n");
+    expect(rows[0]).toBe("index,start,end,source_language,target_language,speaker,original");
+    expect(rows[1]).toContain(",ぺこら,こんぺこ");
+    expect(rows[3]).toMatch(/,,えー$/);
+  });
+
+  it("keeps a renamed line on one line in the file", () => {
+    const odd = (l: SubtitleLine) => (l.voice === 1 ? "A\nB" : null);
+    expect(cuesFromLines(lines, "original", odd)[0]!.text[0]).toBe("A B: こんぺこ");
   });
 });

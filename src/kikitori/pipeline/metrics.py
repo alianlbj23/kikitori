@@ -33,11 +33,17 @@ class PipelineMetrics:
         backlog: 句子已結束、還在完整路徑佇列中等待的句數（不含正在處理的那一句）。
         latency_ms_median: 最近 20 句完整字幕 `latency_ms` 的中位數（四捨五入成整數）；
             還沒有完整字幕時為 None。被濾掉的「清除」結果不算。
+        speech_level_dbfs: 最近約 10 秒內「句子進行中」的音訊 RMS（v0.3 G8）；這段時間
+            沒有句子時為 None。
+        background_level_dbfs: 同一個窗內「句子之外」的音訊 RMS（BGM、遊戲音效、靜音）；
+            一直在說話時為 None。
     """
 
     level_dbfs: float
     backlog: int
     latency_ms_median: int | None
+    speech_level_dbfs: float | None = None
+    background_level_dbfs: float | None = None
 
 
 def rms_dbfs(sum_squares: float, count: int) -> float:
@@ -101,6 +107,66 @@ class LevelMeter:
         """目前窗內的 RMS dBFS。"""
         with self._lock:
             return rms_dbfs(self._sum, self._count)
+
+
+BACKGROUND_WINDOW = 10 * 16_000
+"""語音／背景音量的窗（16 kHz 時 10 秒）：BGM 太大聲要持續一陣子才值得提醒。"""
+
+
+class SplitLevelMeter:
+    """最近 `window` 個樣本內，語音與非語音兩部分各自的 RMS（v0.3 G8）。
+
+    兩部分共用同一個以「擷取到的樣本」計的窗，所以一直在說話時背景的讀數會被擠出窗外
+    （回報 None），不會留下過時的值。分類由呼叫端決定（pipeline：切句器是否在句子中）。
+    capture 執行緒寫、engine 的回報執行緒讀，所以用鎖保護。
+    """
+
+    def __init__(self, window: int) -> None:
+        """
+        Args:
+            window: 窗的樣本數。
+
+        Raises:
+            ValueError: `window` 不是正整數。
+        """
+        if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+            raise ValueError(f"window must be a positive integer, got {window!r}")
+        self._window = window
+        self._lock = threading.Lock()
+        # (是否語音, 平方和, 樣本數)，以 LEVEL_BLOCK 為單位
+        self._blocks: deque[tuple[bool, float, int]] = deque()
+        self._count = 0
+
+    def add(self, audio: npt.NDArray[np.int16], *, speech: bool) -> None:
+        """加入一段擷取音訊並標示它是不是句子進行中的音訊（空陣列不影響）。"""
+        if len(audio) == 0:
+            return
+        squares = np.square(audio[-self._window :], dtype=np.float64)
+        blocks = [
+            (
+                speech,
+                float(squares[i : i + LEVEL_BLOCK].sum()),
+                len(squares[i : i + LEVEL_BLOCK]),
+            )
+            for i in range(0, len(squares), LEVEL_BLOCK)
+        ]
+        with self._lock:
+            for block in blocks:
+                self._blocks.append(block)
+                self._count += block[2]
+            while self._blocks and self._count - self._blocks[0][2] >= self._window:
+                self._count -= self._blocks.popleft()[2]
+
+    def levels(self) -> tuple[float | None, float | None]:
+        """(語音 dBFS, 背景 dBFS)；窗內沒有那一類的樣本時為 None。"""
+        with self._lock:
+            blocks = list(self._blocks)
+        result: list[float | None] = []
+        for kind in (True, False):
+            mine = [(s, n) for k, s, n in blocks if k is kind]
+            count = sum(n for _, n in mine)
+            result.append(rms_dbfs(sum(s for s, _ in mine), count) if count else None)
+        return result[0], result[1]
 
 
 class LatencyWindow:

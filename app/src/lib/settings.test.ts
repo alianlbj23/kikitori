@@ -41,6 +41,12 @@ describe("validateSettingsForm", () => {
     ["background_opacity_percent", "-1"],
     ["position", "left"],
     ["max_lines", "4"],
+    ["max_line_em", "5"],
+    ["max_line_em", "61"],
+    ["max_line_em", "x"],
+    ["original_scale_percent", "49"],
+    ["original_scale_percent", "151"],
+    ["original_position", "left"],
     ["min_display_secs", "10.5"],
     ["min_display_secs", "-1"],
     ["min_display_secs", "1,5"],
@@ -76,6 +82,7 @@ describe("settings patch", () => {
         max_lines: 2,
         min_display_ms: 1500,
         idle_clear_secs: 8,
+        pace_by_length: false, max_line_em: 0, original_scale_percent: 62, original_position: "above", furigana_first_only: false,
         obs_output: "off",
       },
       ui: { auto_save_transcripts: false },
@@ -104,6 +111,38 @@ describe("settings patch", () => {
     });
     // obs_output stays out of the style Rust validates (deny_unknown_fields).
     expect(back.subtitle).not.toHaveProperty("obs_output");
+  });
+
+  it("stores the reading layout (G7) and reads older settings without it", () => {
+    const form = {
+      ...validForm(),
+      pace_by_length: true,
+      max_line_em: "13",
+      original_scale_percent: "120",
+      original_position: "below",
+      furigana_first_only: true,
+    };
+    expect(validateSettingsForm(form)).toEqual({});
+    const patch = settingsPatchFromForm(form) as { subtitle: Record<string, unknown> };
+    expect(patch.subtitle).toMatchObject({
+      pace_by_length: true,
+      max_line_em: 13,
+      original_scale_percent: 120,
+      original_position: "below",
+      furigana_first_only: true,
+    });
+    const back = parseSettingsResult({ settings: { subtitle: patch.subtitle } }).settings;
+    expect(formFromSettings(back)).toMatchObject({ max_line_em: "13", original_position: "below" });
+    // An engine file from 0.2.0 has none of these: the old look.
+    const old = parseSettingsResult({ settings: { subtitle: { font_size: 32 } } }).settings.subtitle;
+    expect(old).toMatchObject({
+      pace_by_length: false,
+      max_line_em: 0,
+      original_scale_percent: 62,
+      original_position: "above",
+      furigana_first_only: false,
+    });
+    expect(validateSettingsForm({ ...validForm(), max_line_em: "0" })).toEqual({});
   });
 
   it("never sends translation models from the settings page", () => {
@@ -155,6 +194,7 @@ describe("parseSettingsResult", () => {
       max_lines: DEFAULT_OVERLAY_STYLE.max_lines,
       min_display_ms: DEFAULT_OVERLAY_STYLE.min_display_ms,
       idle_clear_secs: DEFAULT_OVERLAY_STYLE.idle_clear_secs,
+      pace_by_length: false, max_line_em: 0, original_scale_percent: 62, original_position: "above", furigana_first_only: false,
     });
   });
 
@@ -224,10 +264,10 @@ describe("parseSettingsResult", () => {
 
   it("reads the glossary the engine reports, and defaults it for older engines", () => {
     const fromEngine = parseSettingsResult(engine["settings.get"]);
-    expect(fromEngine.settings.translation.glossary).toEqual({ builtin: true, entries: [] });
+    expect(fromEngine.settings.translation.glossary).toEqual({ builtin: true, entries: [], corrections: [] });
     expect(fromEngine.warnings).toEqual([]);
     const old = parseSettingsResult({ settings: { translation: {} } });
-    expect(old.settings.translation.glossary).toEqual({ builtin: true, entries: [] });
+    expect(old.settings.translation.glossary).toEqual({ builtin: true, entries: [], corrections: [] });
     expect(old.warnings).toEqual([]);
     const custom = parseSettingsResult({
       settings: { translation: { glossary: { builtin: false, entries: [{ source: "a", target: "b", target_language: "en" }] } } },
@@ -235,7 +275,21 @@ describe("parseSettingsResult", () => {
     expect(custom.settings.translation.glossary).toEqual({
       builtin: false,
       entries: [{ source: "a", target: "b", target_language: "en" }],
+      corrections: [],
     });
+  });
+
+  it("reads speaker labels, defaulting them for older engines (speaker-labels.md)", () => {
+    expect(parseSettingsResult({ settings: {} }).settings.speakers).toEqual({ enabled: false, count: null });
+    expect(DEFAULT_SETTINGS.speakers).toEqual({ enabled: false, count: null });
+    const on = parseSettingsResult({ settings: { speakers: { enabled: true, count: 4 } } });
+    expect(on.settings.speakers).toEqual({ enabled: true, count: 4 });
+    expect(on.warnings).toEqual([]);
+    for (const count of [1, 7, 2.5, "3"]) {
+      const bad = parseSettingsResult({ settings: { speakers: { enabled: true, count } } });
+      expect(bad.settings.speakers).toEqual({ enabled: true, count: null });
+      expect(bad.warnings.length).toBeGreaterThan(0);
+    }
   });
 
   it("reads dismissed recommendations from the opaque ui object", () => {

@@ -35,10 +35,13 @@ import type {
 import {
   DEFAULT_IDLE_CLEAR_SECS,
   DEFAULT_MIN_DISPLAY_MS,
+  DEFAULT_ORIGINAL_SCALE_PERCENT,
   FONT_SIZE_RANGE,
   IDLE_CLEAR_SECS_RANGE,
+  MAX_LINE_EM_RANGE,
   MAX_LINES_RANGE,
   MIN_DISPLAY_MS_RANGE,
+  ORIGINAL_SCALE_PERCENT_RANGE,
   ValidationError,
   parseRecommendation,
 } from "./validate";
@@ -50,6 +53,11 @@ export const DEFAULT_OVERLAY_STYLE: OverlayStyle = {
   max_lines: 2,
   min_display_ms: DEFAULT_MIN_DISPLAY_MS,
   idle_clear_secs: DEFAULT_IDLE_CLEAR_SECS,
+  pace_by_length: false,
+  max_line_em: 0,
+  original_scale_percent: DEFAULT_ORIGINAL_SCALE_PERCENT,
+  original_position: "above",
+  furigana_first_only: false,
 };
 
 export const OBS_CONTENTS: readonly ObsContent[] = ["off", "original", "translation", "both"];
@@ -95,9 +103,11 @@ export const DEFAULT_SETTINGS: Settings = {
     final_model: "qwen3.5:4b",
     api_key_env: "KIKITORI_TRANSLATE_API_KEY",
     allow_restricted: false,
+    session_info: "",
     glossary: DEFAULT_GLOSSARY,
   },
   furigana: { enabled: false },
+  speakers: { enabled: false, count: null },
   subtitle: DEFAULT_OVERLAY_STYLE,
   obs_output: "off",
   ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false },
@@ -161,6 +171,19 @@ function pickThreads(o: Obj, key: string, warn: Warn, path: string): number | nu
     return v;
   }
   warn(`${path}${key}`);
+  return null;
+}
+
+/** `speakers.count`: null (guess) or 2–6, like the engine's `SPEAKER_COUNT_RANGE`. */
+export const SPEAKER_COUNT_RANGE: readonly [number, number] = [2, 6];
+
+function pickSpeakerCount(o: Obj, warn: Warn): number | null {
+  const v = o.count;
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isInteger(v) && v >= SPEAKER_COUNT_RANGE[0] && v <= SPEAKER_COUNT_RANGE[1]) {
+    return v;
+  }
+  warn("speakers.count");
   return null;
 }
 
@@ -239,6 +262,15 @@ export function overlayStyleFromSubtitle(subtitle: unknown): OverlayStyle {
     max_lines: clampInt(o.max_lines, MAX_LINES_RANGE, DEFAULT_OVERLAY_STYLE.max_lines),
     min_display_ms: clampInt(o.min_display_ms, MIN_DISPLAY_MS_RANGE, DEFAULT_OVERLAY_STYLE.min_display_ms),
     idle_clear_secs: clampInt(o.idle_clear_secs, IDLE_CLEAR_SECS_RANGE, DEFAULT_OVERLAY_STYLE.idle_clear_secs),
+    pace_by_length: o.pace_by_length === true,
+    max_line_em: o.max_line_em === 0 ? 0 : clampInt(o.max_line_em, MAX_LINE_EM_RANGE, 0),
+    original_scale_percent: clampInt(
+      o.original_scale_percent,
+      ORIGINAL_SCALE_PERCENT_RANGE,
+      DEFAULT_OVERLAY_STYLE.original_scale_percent,
+    ),
+    original_position: o.original_position === "below" ? "below" : "above",
+    furigana_first_only: o.furigana_first_only === true,
   };
 }
 
@@ -300,9 +332,14 @@ export function parseSettingsResult(result: unknown): SettingsResult {
         api_key_env: pickStr(tr, "api_key_env", d.translation.api_key_env, warn, "translation."),
         allow_restricted: pickBool(tr, "allow_restricted", d.translation.allow_restricted, warn, "translation."),
         glossary: glossaryFromSettings(tr.glossary, warn),
+        session_info: pickStr(tr, "session_info", d.translation.session_info, warn, "translation."),
       },
       furigana: {
         enabled: pickBool(asObj(root.furigana), "enabled", d.furigana.enabled, warn, "furigana."),
+      },
+      speakers: {
+        enabled: pickBool(asObj(root.speakers), "enabled", d.speakers.enabled, warn, "speakers."),
+        count: pickSpeakerCount(asObj(root.speakers), warn),
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
       obs_output: pickEnum(asObj(root.subtitle), "obs_output", OBS_CONTENTS, d.obs_output, warn, "subtitle."),
@@ -353,6 +390,12 @@ export interface SettingsForm {
   /** Seconds, decimals allowed ("1.5"); stored as `subtitle.min_display_ms`. */
   min_display_secs: string;
   idle_clear_secs: string;
+  /** G7 reading layout. */
+  pace_by_length: boolean;
+  max_line_em: string;
+  original_scale_percent: string;
+  original_position: string;
+  furigana_first_only: boolean;
   obs_output: string;
   auto_save_transcripts: boolean;
 }
@@ -417,6 +460,20 @@ export function validateSettingsForm(form: SettingsForm): FormErrors {
   if (idle === null || idle < IDLE_CLEAR_SECS_RANGE[0] || idle > IDLE_CLEAR_SECS_RANGE[1]) {
     errors.idle_clear_secs = t("validation.idleClear", { min: IDLE_CLEAR_SECS_RANGE[0], max: IDLE_CLEAR_SECS_RANGE[1] });
   }
+  const width = parseIntField(form.max_line_em);
+  if (width === null || (width !== 0 && (width < MAX_LINE_EM_RANGE[0] || width > MAX_LINE_EM_RANGE[1]))) {
+    errors.max_line_em = t("validation.maxLineEm", { min: MAX_LINE_EM_RANGE[0], max: MAX_LINE_EM_RANGE[1] });
+  }
+  const scale = parseIntField(form.original_scale_percent);
+  if (scale === null || scale < ORIGINAL_SCALE_PERCENT_RANGE[0] || scale > ORIGINAL_SCALE_PERCENT_RANGE[1]) {
+    errors.original_scale_percent = t("validation.originalScale", {
+      min: ORIGINAL_SCALE_PERCENT_RANGE[0],
+      max: ORIGINAL_SCALE_PERCENT_RANGE[1],
+    });
+  }
+  if (form.original_position !== "above" && form.original_position !== "below") {
+    errors.original_position = t("validation.originalPosition");
+  }
   if (!(OBS_CONTENTS as readonly string[]).includes(form.obs_output)) {
     errors.obs_output = t("validation.obsOutput");
   }
@@ -431,6 +488,11 @@ export function overlayStyleFromForm(form: SettingsForm): OverlayStyle {
     max_lines: Number.parseInt(form.max_lines, 10),
     min_display_ms: Math.round(Number.parseFloat(form.min_display_secs) * 1000),
     idle_clear_secs: Number.parseInt(form.idle_clear_secs, 10),
+    pace_by_length: form.pace_by_length,
+    max_line_em: Number.parseInt(form.max_line_em, 10),
+    original_scale_percent: Number.parseInt(form.original_scale_percent, 10),
+    original_position: form.original_position === "below" ? "below" : "above",
+    furigana_first_only: form.furigana_first_only,
   };
 }
 
@@ -467,6 +529,11 @@ export function formFromSettings(s: Settings): SettingsForm {
     max_lines: String(s.subtitle.max_lines),
     min_display_secs: String(s.subtitle.min_display_ms / 1000),
     idle_clear_secs: String(s.subtitle.idle_clear_secs),
+    pace_by_length: s.subtitle.pace_by_length,
+    max_line_em: String(s.subtitle.max_line_em),
+    original_scale_percent: String(s.subtitle.original_scale_percent),
+    original_position: s.subtitle.original_position,
+    furigana_first_only: s.subtitle.furigana_first_only,
     obs_output: s.obs_output,
     auto_save_transcripts: s.ui.auto_save_transcripts,
   };
@@ -611,6 +678,11 @@ export function formFieldForEnginePath(message: string): keyof SettingsForm | nu
     "subtitle.max_lines": "max_lines",
     "subtitle.min_display_ms": "min_display_secs",
     "subtitle.idle_clear_secs": "idle_clear_secs",
+    "subtitle.pace_by_length": "pace_by_length",
+    "subtitle.max_line_em": "max_line_em",
+    "subtitle.original_scale_percent": "original_scale_percent",
+    "subtitle.original_position": "original_position",
+    "subtitle.furigana_first_only": "furigana_first_only",
     "subtitle.obs_output": "obs_output",
     "ui.auto_save_transcripts": "auto_save_transcripts",
   };

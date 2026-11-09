@@ -17,7 +17,7 @@
 
 import { rubyParts, type RubyParts, type RubySpan } from "./ruby";
 import { splitStable, type TextParts } from "./stable";
-import type { SubtitleEvent } from "./types";
+import type { Speaker, SubtitleEvent } from "./types";
 
 export interface SubtitleLine {
   readonly utteranceId: number;
@@ -30,6 +30,12 @@ export interface SubtitleLine {
   readonly endSample: number;
   /** Partials: code points of `original` that have settled (null = none known). */
   readonly stableChars: number | null;
+  /** Partials: code points of `translation` that have settled (G1; null = none known). */
+  readonly translationStableChars: number | null;
+  /** Interpret mode: who said it (G3); null in media mode. */
+  readonly speaker: Speaker | null;
+  /** Media mode with speaker labels: which speaker (from 1) said it; null = unlabelled. */
+  readonly voice: number | null;
   /** Furigana over the original (docs/specs/furigana.md); null = none. */
   readonly ruby: readonly RubySpan[] | null;
 }
@@ -56,6 +62,9 @@ function toLine(ev: SubtitleEvent): SubtitleLine {
     startSample: ev.start_sample,
     endSample: ev.end_sample,
     stableChars: ev.stable_chars,
+    translationStableChars: ev.translation_stable_chars ?? null,
+    speaker: ev.speaker ?? null,
+    voice: ev.voice ?? null,
     ruby: ev.ruby,
   };
 }
@@ -137,6 +146,11 @@ export interface LineDisplay {
   /** Empty when translations are hidden; the translation line is then left out. */
   translation: string;
   /**
+   * `translation` split like the original (G1): a partial's settled prefix at
+   * normal emphasis, the tail that may change faded. Both empty when hidden.
+   */
+  translationParts: TextParts;
+  /**
    * Translations are off: the original takes the translation's primary style
    * (size, colour, weight) instead of sitting small above an empty line.
    */
@@ -151,9 +165,19 @@ export interface LineDisplay {
 export function lineDisplay(line: SubtitleLine, showTranslation: boolean): LineDisplay {
   const originalParts = splitStable(line.original, line.stableChars, line.isFinal);
   const originalRuby = rubyParts(line.original, line.ruby, line.stableChars, line.isFinal);
-  return showTranslation
-    ? { original: line.original, originalParts, originalRuby, translation: line.translation, originalOnly: false }
-    : { original: line.original, originalParts, originalRuby, translation: "", originalOnly: true };
+  if (!showTranslation) {
+    const translationParts = { stable: "", unstable: "" };
+    return { original: line.original, originalParts, originalRuby, translation: "", translationParts, originalOnly: true };
+  }
+  const translationParts = splitStable(line.translation, line.translationStableChars, line.isFinal);
+  return {
+    original: line.original,
+    originalParts,
+    originalRuby,
+    translation: line.translation,
+    translationParts,
+    originalOnly: false,
+  };
 }
 
 /** Trims to a new limit (e.g. after the user changes "lines on screen"). */

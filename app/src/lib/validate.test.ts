@@ -15,6 +15,7 @@ import {
   parseModels,
   parseObsStatus,
   parseOutputInfo,
+  parseOverlayNotice,
   parseOverlaySnapshot,
   parseOverlayStyle,
   parseRecommendationPreview,
@@ -140,8 +141,25 @@ describe("command results", () => {
   });
 
   it("validates overlay style ranges", () => {
-    const ok = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2, min_display_ms: 0, idle_clear_secs: 600 };
+    const ok = {
+      font_size: 32,
+      background_opacity: 0.5,
+      position: "bottom",
+      max_lines: 2,
+      min_display_ms: 0,
+      idle_clear_secs: 600,
+      pace_by_length: true,
+      max_line_em: 13,
+      original_scale_percent: 120,
+      original_position: "below",
+      furigana_first_only: true,
+    };
     expect(parseOverlayStyle(ok)).toEqual(ok);
+    expect(parseOverlayStyle({ ...ok, max_line_em: 0 }).max_line_em).toBe(0);
+    expect(() => parseOverlayStyle({ ...ok, max_line_em: 5 })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, original_scale_percent: 151 })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, original_position: "left" })).toThrow();
+    expect(() => parseOverlayStyle({ ...ok, pace_by_length: "yes" })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, font_size: 200 })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, background_opacity: 2 })).toThrow();
     expect(() => parseOverlayStyle({ ...ok, position: "left" })).toThrow();
@@ -152,7 +170,7 @@ describe("command results", () => {
 
   it("defaults the reading rhythm when an older Rust build has no such fields", () => {
     const old = { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 };
-    expect(parseOverlayStyle(old)).toEqual({ ...old, min_display_ms: 1500, idle_clear_secs: 8 });
+    expect(parseOverlayStyle(old)).toEqual({ ...old, min_display_ms: 1500, idle_clear_secs: 8, pace_by_length: false, max_line_em: 0, original_scale_percent: 62, original_position: "above", furigana_first_only: false });
   });
 
   it("reads the shortcut list, dropping unknown actions, and the OBS and output results", () => {
@@ -531,6 +549,24 @@ describe("furigana (docs/specs/furigana.md)", () => {
 });
 
 describe("competitive features: subtitle hints, metrics, model deletion", () => {
+  it("keeps translation_stable_chars on partials only (G1)", () => {
+    const partial = { ...subtitle, is_final: false, translation_stable_chars: 3 };
+    expect(parseSubtitle(partial)).toMatchObject({ translation_stable_chars: 3 });
+    expect(parseSubtitle({ ...subtitle, translation_stable_chars: 3 })).toMatchObject({
+      translation_stable_chars: null,
+    });
+    expect(parseSubtitle({ ...subtitle, is_final: false })).toMatchObject({ translation_stable_chars: null });
+    expect(() => parseSubtitle({ ...partial, translation_stable_chars: -1 })).toThrow(ValidationError);
+  });
+
+  it("keeps a known speaker and drops anything else (G3)", () => {
+    expect(parseSubtitle({ ...subtitle, speaker: "self" }).speaker).toBe("self");
+    expect(parseSubtitle({ ...subtitle, speaker: "partner" }).speaker).toBe("partner");
+    expect(parseSubtitle({ ...subtitle, speaker: "narrator" }).speaker).toBeNull();
+    expect(parseSubtitle({ ...subtitle, speaker: 1 }).speaker).toBeNull();
+    expect(parseSubtitle(subtitle).speaker).toBeNull();
+  });
+
   it("keeps stable_chars on partials and latency_ms on finals only", () => {
     const partial = { ...subtitle, is_final: false, stable_chars: 2, latency_ms: 900 };
     expect(parseSubtitle(partial)).toMatchObject({ stable_chars: 2, latency_ms: null });
@@ -550,12 +586,19 @@ describe("competitive features: subtitle hints, metrics, model deletion", () => 
       level_dbfs: -20.5,
       backlog: 1,
       latency_ms_median: 800,
+      speech_level_dbfs: null,
+      background_level_dbfs: null,
     });
+    // G8 split levels: kept when in range, otherwise unknown (the event itself is fine).
+    const split = parseMetrics({ level_dbfs: -20, backlog: 0, speech_level_dbfs: -18, background_level_dbfs: 3 });
+    expect([split.speech_level_dbfs, split.background_level_dbfs]).toEqual([-18, null]);
     expect(parseMetrics({ level_dbfs: -200, backlog: 0 })).toEqual({
       session_id: null,
       level_dbfs: -120,
       backlog: 0,
       latency_ms_median: null,
+      speech_level_dbfs: null,
+      background_level_dbfs: null,
     });
     expect(parseMetrics({ level_dbfs: 4, backlog: 0 }).level_dbfs).toBe(0);
     for (const bad of [
@@ -587,5 +630,63 @@ describe("competitive features: subtitle hints, metrics, model deletion", () => 
     });
     expect(() => parseModelDeleteResult({ model: "small" })).toThrow(ValidationError);
     expect(() => parseModelDeleteResult({ model: 1, freed_bytes: 0 })).toThrow(ValidationError);
+  });
+});
+
+describe("parseOverlayNotice (G3)", () => {
+  it("accepts a short sentence with its language", () => {
+    expect(parseOverlayNotice({ text: "もう一度？", lang: "ja" })).toEqual({ text: "もう一度？", lang: "ja" });
+  });
+
+  it("rejects empty, overlong or untagged notices", () => {
+    expect(() => parseOverlayNotice({ text: " ", lang: "ja" })).toThrow(ValidationError);
+    expect(() => parseOverlayNotice({ text: "あ".repeat(201), lang: "ja" })).toThrow(ValidationError);
+    expect(() => parseOverlayNotice({ text: "hi", lang: "not a tag" })).toThrow(ValidationError);
+    expect(() => parseOverlayNotice({ text: 1, lang: "ja" })).toThrow(ValidationError);
+    expect(() => parseOverlayNotice(null)).toThrow(ValidationError);
+  });
+});
+
+describe("speaker labels (docs/specs/speaker-labels.md)", () => {
+  it("keeps voice 1-64 on finals and drops it elsewhere without losing the line", () => {
+    expect(parseSubtitle({ ...subtitle, voice: 2 }).voice).toBe(2);
+    expect(parseSubtitle({ ...subtitle, voice: 64 }).voice).toBe(64);
+    for (const bad of [0, 65, 1.5, "2", -1, null]) {
+      expect(parseSubtitle({ ...subtitle, voice: bad }).voice).toBeNull();
+    }
+    expect(parseSubtitle({ ...subtitle, is_final: false, voice: 2 }).voice).toBeNull();
+    expect(parseSubtitle(subtitle).voice).toBeNull();
+  });
+
+  it("reads models.list.speaker_model and tolerates engines without it", () => {
+    const speaker_model = {
+      id: "speaker-embedding",
+      name: "3D-Speaker CAM++",
+      installed: false,
+      download_bytes: 28281164,
+      installed_bytes: 28281164,
+      disk_bytes: null,
+      path: null,
+      license: "Apache-2.0",
+      license_url: "https://example.invalid/model",
+    };
+    const list = engine["models.list"];
+    expect(parseModels({ ...list, speaker_model }).speaker_model).toEqual(speaker_model);
+    expect(parseModels(list).speaker_model).toBeNull();
+    expect(() => parseModels({ ...list, speaker_model: { ...speaker_model, installed: 1 } })).toThrow(ValidationError);
+  });
+
+  it("reads overlay speaker names, blanking bad entries", () => {
+    const snap = {
+      style: { font_size: 32, background_opacity: 0.5, position: "bottom", max_lines: 2 },
+      click_through: false,
+      visible: true,
+      shortcut: "CommandOrControl+Alt+K",
+      shortcut_registered: true,
+    };
+    expect(parseOverlaySnapshot(snap).speaker_names).toEqual([]);
+    expect(parseOverlaySnapshot({ ...snap, speaker_names: ["ぺこら", ""] }).speaker_names).toEqual(["ぺこら", ""]);
+    expect(parseOverlaySnapshot({ ...snap, speaker_names: [1, "あ".repeat(41), "ok"] }).speaker_names).toEqual(["", "", "ok"]);
+    expect(parseOverlaySnapshot({ ...snap, speaker_names: Array(17).fill("x") }).speaker_names).toEqual([]);
   });
 });

@@ -13,6 +13,9 @@ import type { RubySpan } from "./ruby";
 
 export type Mode = "media" | "interpret";
 
+/** Who said a line in interpret mode (G3). */
+export type Speaker = "self" | "partner";
+
 export interface SubtitleEvent {
   utterance_id: number;
   original: string;
@@ -28,6 +31,23 @@ export interface SubtitleEvent {
    * any more (competitive-features.md F2). null for finals and older engines.
    */
   stable_chars: number | null;
+  /**
+   * Partials only: code points at the start of `translation` that match the
+   * previous complete partial translation (docs/specs/v0.3-features.md G1).
+   * Absent or null for finals and older engines.
+   */
+  translation_stable_chars?: number | null;
+  /**
+   * Interpret mode only (G3): who said this line — "self" when the original
+   * is the user's own language, "partner" otherwise. Absent or null in media mode.
+   */
+  speaker?: Speaker | null;
+  /**
+   * Media-mode finals with speaker labels on (docs/specs/speaker-labels.md):
+   * which speaker said the line, from 1, numbered afresh each session. Absent
+   * or null when unlabelled.
+   */
+  voice?: number | null;
   /** Finals only: end of speech → final sent, in ms (F4); null when unknown. */
   latency_ms: number | null;
   /**
@@ -48,6 +68,10 @@ export interface MetricsEvent {
   backlog: number;
   /** Median of recent final latencies in ms; null before the first final. */
   latency_ms_median: number | null;
+  /** v0.3 G8: level inside sentences over ~10 s; null when there were none (or an older engine). */
+  speech_level_dbfs?: number | null;
+  /** v0.3 G8: level between sentences (music, game sounds) over the same window. */
+  background_level_dbfs?: number | null;
 }
 
 export type EngineState = "idle" | "loading" | "running" | "error";
@@ -67,7 +91,7 @@ export interface StatusEvent {
 export type DownloadState = "downloading" | "done" | "error";
 
 /** What a `download_progress` event is about; null from engines older than Milestone 13. */
-export type DownloadKind = "asr" | "gpu_runtime" | "translation" | "furigana";
+export type DownloadKind = "asr" | "gpu_runtime" | "translation" | "furigana" | "speaker";
 
 export interface DownloadProgressEvent {
   model: string;
@@ -115,16 +139,45 @@ export interface OverlayStyle {
   min_display_ms: number;
   /** Seconds after the last change before the overlay fades out; 0 = never. */
   idle_clear_secs: number;
+  /** G7: long lines stay longer (characters ÷ reading speed). */
+  pace_by_length: boolean;
+  /** G7: widest line in em; 0 = no limit. */
+  max_line_em: number;
+  /** G7: original size as a percentage of the translation's (62 = the old fixed size). */
+  original_scale_percent: number;
+  /** G7: the original above or below the translation. */
+  original_position: OriginalPosition;
+  /** G7: furigana only on a word's first appearance in the session (overlay only). */
+  furigana_first_only: boolean;
 }
 
+/** Where the original sits relative to the translation on the overlay (G7). */
+export type OriginalPosition = "above" | "below";
+
 /** What a global shortcut does (Rust `ShortcutAction`). */
-export type ShortcutAction = "click_through" | "toggle_translation" | "clear_subtitles";
+export type ShortcutAction =
+  | "click_through"
+  | "toggle_translation"
+  | "clear_subtitles"
+  /** Interpret mode: "could you say that again?" in the partner's language (G3). */
+  | "say_again"
+  /** Freeze / unfreeze the overlay (G6). */
+  | "pause_subtitles"
+  /** Briefly show the last final lines on the overlay (G6). */
+  | "show_history";
 
 export interface ShortcutInfo {
   action: ShortcutAction;
   keys: string;
   /** False when another app owns the combination. */
   registered: boolean;
+}
+
+/** `overlay://notice` (G3): shown on the overlay for a few seconds. */
+export interface OverlayNotice {
+  text: string;
+  /** Language tag of `text` (HTML `lang`). */
+  lang: string;
 }
 
 /** Which text the OBS file holds (`settings.subtitle.obs_output`). */
@@ -159,6 +212,8 @@ export interface OverlaySnapshot {
   show_translation: boolean;
   /** Every global shortcut; older Rust builds list only `shortcut` (click-through). */
   shortcuts: ShortcutInfo[];
+  /** Names given to the speaker labels this session; index i names voice i + 1 ("" = default). */
+  speaker_names: string[];
 }
 
 export interface DeviceInfo {
@@ -335,11 +390,28 @@ export interface FuriganaDictionary {
   in_use: boolean;
 }
 
+/** `models.list.speaker_model`: the speaker embedding model (docs/specs/speaker-labels.md). */
+export interface SpeakerModel {
+  /** `models.download` / `models.delete` id (`speaker-embedding`). */
+  id: string;
+  name: string;
+  installed: boolean;
+  download_bytes: number;
+  installed_bytes: number;
+  /** Measured disk use when installed, else null. */
+  disk_bytes: number | null;
+  path: string | null;
+  license: string;
+  license_url: string;
+}
+
 export interface ModelsList {
   asr: AsrModel[];
   gpu_runtime: GpuRuntime;
   /** null from engines without furigana. */
   furigana: FuriganaDictionary | null;
+  /** null from engines without speaker labels. */
+  speaker_model: SpeakerModel | null;
   translation: {
     server: { base_url: string; is_local: boolean; reachable: boolean; error: string | null };
     models: TranslationModel[];
@@ -398,9 +470,16 @@ export interface Settings {
     allow_restricted: boolean;
     /** `translation.glossary` (docs/specs/vtuber-profile.md); edited on the settings page. */
     glossary: GlossarySettings;
+    /** Stream info for the translator, reference only (v0.3 G5); edited in the rail. */
+    session_info: string;
   };
   /** Furigana over Japanese originals; switched at once with `session.set_furigana`. */
   furigana: { enabled: boolean };
+  /**
+   * Speaker labels in media mode (docs/specs/speaker-labels.md); read when a
+   * session starts. `count` null = guess how many people; 2–6 = that many.
+   */
+  speakers: { enabled: boolean; count: number | null };
   subtitle: OverlayStyle;
   /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
   obs_output: ObsContent;
@@ -416,10 +495,20 @@ export interface GlossaryEntry {
   target_language: string | null;
 }
 
+/** An ASR correction rule (`translation.glossary.corrections`, v0.3 G4). */
+export interface CorrectionEntry {
+  /** How the recogniser writes it. */
+  wrong: string;
+  /** What to show (and translate) instead. */
+  right: string;
+}
+
 export interface GlossarySettings {
   /** The engine's built-in livestream glossary is used. */
   builtin: boolean;
   entries: GlossaryEntry[];
+  /** ASR correction rules (G4); empty when the engine has none. */
+  corrections: CorrectionEntry[];
 }
 
 export interface UiState {

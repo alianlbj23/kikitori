@@ -56,9 +56,9 @@
 
 - 每句一列：時間碼（`start_sample / 16000`，`m:ss`）、來源語言單字標籤（日／英／中，滑鼠移上去顯示「日語譯成繁體中文」）、原文（較大）、譯文。原文與譯文都加 `dir="auto"`（阿拉伯語由右到左）。譯文是空字串時以 CSS `attr(data-empty)` 顯示字典裡的「（沒有譯文）」／「翻譯中」（第一階段寫死在 CSS 的中文移到字典）。
 - 「顯示翻譯」關閉時只列原文（譯文列不顯示，`lib/subtitles.ts` 的 `lineDisplay`）；已翻譯的句子保留譯文，再打開時重新顯示。
-- 即時字幕（`is_final=false`）在左側加字幕黃細條，原文只有**還可能改變的尾巴**是淡色、已穩定的前段（`stable_chars`）照一般亮度，譯文整句淡色（見「穩定的即時字幕」）；同一個 `utterance_id` 的完整翻譯到達時原地取代。最多保留 300 句。使用者停在底部時自動捲動，往上翻時不打擾。
+- 即時字幕（`is_final=false`）在左側加字幕黃細條，原文與譯文都只有**還可能改變的尾巴**是淡色、已穩定的前段（`stable_chars`、`translation_stable_chars`）照一般亮度（見「穩定的即時字幕」）；同一個 `utterance_id` 的完整翻譯到達時原地取代。最多保留 300 句。使用者停在底部時自動捲動，往上翻時不打擾。
 - 每一列 `content-visibility: auto`（最新 3 列除外，跟著捲到底需要它們的實際高度）：畫面外的列不排版、不塑形、不繪製，切換「顯示翻譯」或介面語系時不必重排最多 300 列（v0.2.0 長時間測試中主視窗 renderer 因此每次多留約 80 MiB，見 `experiments/memory_soak/README.md`「CDP soak」）。音量表以 `transform: scaleX()` 動畫（不觸發排版），每秒的狀態列與匯出說明只寫入改變的值。
-- 工具：顯示字幕視窗、滑鼠穿透、**顯示翻譯**三個開關、「清除紀錄」與「**匯出**」選單（見「匯出字幕紀錄」）。開關下方逐行說明三個全域快速鍵（滑鼠穿透、切換顯示翻譯、清除字幕）；被其他程式占用的快速鍵改為提示「已被其他程式占用，無法使用」，其餘照常（不擋其他功能）。
+- 工具：顯示字幕視窗、滑鼠穿透、**顯示翻譯**三個開關、「清除紀錄」與「**匯出**」選單（見「匯出字幕紀錄」）。開關下方逐行說明全域快速鍵（滑鼠穿透、切換顯示翻譯、清除字幕，以及 v0.3 的請對方再說一次、暫停字幕、顯示最近字幕）；被其他程式占用的快速鍵改為提示「已被其他程式占用，無法使用」，其餘照常（不擋其他功能）。
 - 「清除紀錄」同時清掉匯出用的紀錄：清掉的內容之後不會被匯出。
 - 空狀態：說明下一步（選模式與來源後按「開始」）。
 
@@ -184,6 +184,7 @@
 - 規則：完整字幕整句穩定；即時字幕沒有 `stable_chars`（舊引擎、或還沒有穩定的部分）整句視為不穩定，看起來和以前一樣；超過原文長度＝整句；負數視為 0、小數無條件捨去。切點換算成 UTF-16 位置（`𠮷`、emoji 不會被切成一半），而且**不切在字素叢集中間**（e＋結合重音、ZWJ 連起來的 emoji 整個算不穩定，直到整個叢集都被涵蓋）；沒有 `Intl.Segmenter` 的 WebView 退回以 code point 切。
 - 繪製：字幕紀錄的原文 `<p dir="auto">` 裡兩個沒有自己 `dir` 的 `<span>`（`.utt-stable`、`.utt-unstable`），由段落的方向排列，所以阿拉伯語等由右到左的文字順序正確；只有 `.utt-unstable` 與譯文淡色。字幕視窗同樣在 `.orig` 裡放 `.stable`／`.unstable`，只淡化不穩定的尾巴。
 - Rust 端把超過原文長度的 `stable_chars` 夾到原文的字元數，不合理的 `latency_ms`（超過一天）改成 `null`——輔助欄位出錯不應讓整句字幕被丟掉；型別錯誤（負數、字串）仍然整行拒絕。前端只在即時字幕讀 `stable_chars`、只在完整字幕讀 `latency_ms`。
+- **譯文也一樣**（v0.3 G1）：即時字幕的 `translation_stable_chars`（Rust 夾到譯文的字元數）存成 `SubtitleLine.translationStableChars`，`lineDisplay` 回傳 `translationParts`，用同一個 `splitStable` 切。字幕紀錄的 `.utt-tr` 與字幕視窗的 `.tr` 裡同樣放穩定／不穩定兩個 `<span>`，只淡化尾巴；舊引擎沒有這個欄位時整句譯文淡色（與以前相同）。字幕紀錄「翻譯中…／沒有譯文」的提示改由 `.utt-tr.is-empty` 顯示（`<p>` 裡有兩個 `<span>`，不再是 `:empty`）。
 
 ### 振假名
 
@@ -200,7 +201,9 @@
 - **引擎錯誤**：`invalid_settings` 的訊息路徑 `translation.glossary.entries[3].source` 對到第 4 列的原文欄（`glossaryErrorForEnginePath`；`entries[3]` 本身或不認得的欄位標在該列原文欄，`translation.glossary.entries`／`translation.glossary`／`.builtin` 顯示在表格下方）。之後修改那一列、或新增／刪除／匯入（列的位置變了）時清掉這個錯誤。
 - **匯出 CSV**（`glossaryToCsv`）：UTF-8 BOM、標頭 `source,target,target_language`（`null` 寫空白）、CRLF、RFC 4180 引號與匯出字幕相同的公式防護（`csvField`）。寫到字幕紀錄資料夾，檔名 `glossary_YYYY-MM-DD_HHMMSS.csv`，沿用 Rust 的 `transcript_save`（檔名規則與原子寫入相同，不新增寫檔指令）；存好的訊息附「開啟資料夾」。匯出的是表格目前的內容（包含尚未儲存的修改）。
 - **匯入 CSV**（`<input type="file">`，不需要外掛；上限 1 MB）：`parseGlossaryCsv` 接受有或沒有 BOM；分隔字元依第一行決定（`,`、`;` 或 Tab：許多語系的 Excel 存成分號）；引號欄位可含分隔字元、`""` 與換行；CRLF／LF／CR。第一行同時有 `source` 與 `target`（不分大小寫）就當標頭、依名稱找欄位（`target_language` 或 `language`，順序不限、多的欄位忽略），否則依序是原文、譯文、字幕語言。欄位去頭尾空白，匯出時加的 `'` 公式防護會拿掉（匯出再匯入完全相同）；字幕語言空白、`*`、`all` ＝全部語言。空行略過；缺原文或譯文的行列出行號、不匯入。匯入的詞條接在表格後面（`mergeGlossary`：與既有詞條完全相同——同一個比對鍵、字幕語言與譯文——的略過；同一詞不同譯文的保留，讓檢查標出衝突由使用者決定），顯示匯入與略過的筆數，之後一樣要按「儲存術語表」。
-- 診斷資訊不列出詞條內容，只列筆數（`settingsForReport`）：詞條是使用者自己的資料。
+- 診斷資訊不列出詞條與原文校正的內容，只列筆數（`settingsForReport`）：詞條是使用者自己的資料。
+- **原文校正**（v0.3 G4，`lib/corrections.ts`）：表格下方的文字框，每行一筆「錯的寫法 => 正確寫法」（也接受「→」），空行略過。本地檢查與引擎的 `Correction`／`_parse_corrections` 相同：每邊 1–100 字、不含控制字元、兩邊不能完全相同（只差大小寫可以，例如統一成 Apex）、錯的寫法在比對規則（NFKC＋不分大小寫）下不重複、最多 200 筆；錯誤列出行號。和術語表一起用「儲存術語表」送出（`translation.glossary.corrections`），CSV 匯入匯出不含校正。
+- **從字幕紀錄加入**（G4）：字幕紀錄頁工具列「加入術語表」在**選取了某一句原文中的文字**時才可按（`selectionchange`；跨列或選到譯文不算）；按下後切到設定頁、在術語表新增一列（原文＝選取的文字，截到 100 字；字幕語言＝那一句的字幕語言），游標停在譯文欄。
 
 ### 延遲、落後與音量
 
@@ -211,6 +214,7 @@
 - **辨識跟不上**：`backlog` > 3 時訊息「辨識跟不上…建議到『模型』頁改用較小的模型」與「前往模型頁」；降到 1 以下才收起（在 2–3 之間保持原狀，避免在門檻附近閃爍）。
 - **沒有聲音**：執行中 `level_dbfs` < −60 連續 15 秒時提示檢查聲音來源；任何一次 ≥ −60 重新計時。到期時間另外設計時器檢查（`noAudioDueAt`），引擎不再送 metrics 時也會準時出現。
 - 使用者按「關閉」的提示在條件解除前不再出現；新的 session 從頭開始。較舊 session 的 metrics 丟棄。
+- **背景音太大聲**（v0.3 G8）：引擎的 `metrics` 另帶 `speech_level_dbfs`／`background_level_dbfs`（最近約 10 秒內句子進行中／句子之外的音量，沒有那一類時為 null；Rust 與前端把範圍外的值當成未知）。`background_level_dbfs` > −30 dBFS、且比 `speech_level_dbfs` 低不到 6 dB，連續 15 秒時提示「背景音樂或遊戲音效很大聲…可以的話把背景音量調小」；條件一不成立就收起（`backgroundTooLoud`、`loudBackgroundSince`）。門檻是推論值，之後以 `experiments/vtuber_eval` 調整。
 
 ### 刪除模型
 
@@ -231,6 +235,18 @@
 - 新 session 與「清除字幕」快速鍵從空白開始（清除時保留 `lastFinalId`，舊句的即時字幕不會回來）。
 - 兩個欄位存在 `settings.subtitle`，透過 `overlay_set_style` 送到 Rust（`OverlayStyle.min_display_ms` 0–10 000、`idle_clear_secs` 0–600；缺欄位時用預設值 1500／8，舊的主視窗送來的外觀仍然有效）。
 
+### 閱讀版面（v0.3 G7）
+
+設定頁「字幕」區塊，存在 `settings.subtitle`、經 `overlay_set_style` 送到 Rust（`OverlayStyle`，`deny_unknown_fields`；缺少的欄位用預設值，0.2.0 的設定看起來和以前一樣）：
+
+| 欄位 | 預設 | 範圍 | 效果 |
+|---|---|---|---|
+| `pace_by_length` | 關 | — | 每句最短顯示改成 max(`min_display_ms`, `readingTimeMs`)：讀的文字（有譯文就是譯文，否則原文）字數 ÷ cps；cps 在中日韓為 4（Netflix 日文規範）、其他語言 15。「等待不得累積成延遲」照舊優先（`lib/rhythm.ts` 的 `minDisplayFor`） |
+| `max_line_em` | 0（不限） | 0 或 10–60 | 字幕視窗的原文與譯文最寬 `min(100%, Nem)`，長句換成兩行短行（XAG 104 建議每行 ≤ 40 字元） |
+| `original_scale_percent` | 62 | 50–150 | 原文字級＝譯文字級 × 這個比例（CSS `--orig-scale`；設定頁預覽同步） |
+| `original_position` | `above` | `above`／`below` | `below` 時原文在譯文下方（`flex-direction: column-reverse`），給日語學習者「原文為主」的版面（SSLA 2023：學習者大多讀母語那行） |
+| `furigana_first_only` | 關 | — | 字幕視窗只在詞（寫法＋讀音）本場第一次出現的那一句標振假名，之後同一個詞不標（`lib/ruby.ts` 的 `firstReadingsOnly`，新 session 與清除字幕時重來）；字幕紀錄照舊全標 |
+
 ### OBS 文字檔
 
 規格見 `competitive-features.md` F6。在 Rust（`obs.rs`）做，而不是在網頁：引擎的字幕事件本來就經過 Rust，而主視窗與字幕視窗在最小化／隱藏時計時器會被瀏覽器節流，直播時兩個視窗常常都是隱藏的。
@@ -250,6 +266,12 @@
 - 設定頁「翻譯服務」區塊內：「連不上翻譯服務 {url}…」與三個按鈕——「**安裝 Ollama**」（以 opener 開 `https://ollama.com/download`；只在伺服器位址是這台電腦時出現，遠端服務裝在本機沒有用）、「**只顯示原文**」（與「顯示翻譯」開關相同的流程，設 `translation.enabled=false`）、「重新偵測」（重新送 `models.list`）。
 - 引導出現時另外在訊息列顯示一次（有「安裝 Ollama」「只顯示原文」），所以按「開始」之前就看得到；恢復連線或關閉翻譯時自動收起。
 
+### 本場資訊（v0.3 G5）
+
+- 左欄「音訊來源」下方的可收合區塊（`<details>`，有內容時自動展開）：文字框最多 500 字，提示可填主播名、遊戲名、連動成員或貼上說明欄。
+- 停止輸入 0.8 秒或離開文字框時以 `settings.set {translation: {session_info}}` 儲存；按「開始」前一定先存（所以剛打的字這次就生效），
+  執行中修改則提示「下一次開始字幕時生效」。翻譯怎麼用它見 `translate.md`「本場資訊」。
+
 ### 全域快速鍵
 
 | 快速鍵 | 動作 | 處理 |
@@ -257,9 +279,20 @@
 | Ctrl+Alt+K（macOS ⌘+Option+K） | 切換滑鼠穿透 | Rust 直接切換 |
 | Ctrl+Alt+J（macOS ⌘+Option+J） | 切換「顯示翻譯」 | Rust 送 `shortcut://action`（`"toggle_translation"`）給主視窗，主視窗用與開關相同的流程（引擎未就緒或切換中時忽略） |
 | Ctrl+Alt+U（macOS ⌘+Option+U） | 清除字幕 | Rust 清空 OBS 文字檔並廣播 `overlay://clear`，字幕視窗清空畫面；字幕紀錄不受影響 |
+| Ctrl+Alt+R（macOS ⌘+Option+R） | 請對方再說一次（v0.3 G3） | Rust 送 `shortcut://action`（`"say_again"`）給主視窗；只有口譯 session 執行中時，主視窗以 `overlay_notice {text, lang}` 讓字幕視窗用**對方的語言**顯示固定的「可以請你再說一次嗎？」5 秒（`src/locales/phrases/say-again.ts`，20 種語言，不呼叫翻譯）；不記進字幕紀錄 |
+| Ctrl+Alt+P（macOS ⌘+Option+P） | 暫停字幕（G6） | Rust 送 `overlay://action`（`"pause_subtitles"`）給字幕視窗：凍結目前畫面並顯示「已暫停」小標，再按一次恢復並立刻跳到最新；引擎、字幕紀錄、OBS 照常 |
+| Ctrl+Alt+H（macOS ⌘+Option+H） | 顯示最近字幕（G6） | Rust 送 `overlay://action`（`"show_history"`）給字幕視窗：以最近 10 句完整字幕（`lib/recent.ts`）取代畫面上的字幕 8 秒，或到再按一次為止 |
 
 - 都用 `tauri-plugin-global-shortcut` 註冊；任何一個註冊失敗（被其他程式占用）只記 log、在 `OverlaySnapshot.shortcuts` 標 `registered: false`，字幕紀錄頁的說明改為「已被其他程式占用，無法使用」，不影響其他快速鍵。
-- 選 J／U 而不是 T／C：GNOME 的 Ctrl+Alt+T 是開終端機、Ctrl+Alt+L 是鎖定畫面；波蘭文等鍵盤的 AltGr（= Ctrl+Alt）加 C／E／L／S／X 會打出字母。
+- 選 J／U 而不是 T／C：GNOME 的 Ctrl+Alt+T 是開終端機、Ctrl+Alt+L 是鎖定畫面；波蘭文等鍵盤的 AltGr（= Ctrl+Alt）加 C／E／L／S／X 會打出字母。R／P／H 同樣避開波蘭文（A C E L N O S X Z）、德文（Q E M）與法文 AZERTY（E）的 AltGr 字母。
+- 設定頁「字幕」區塊的「重設字幕視窗位置」（G6）：`overlay_reset_position` 把字幕視窗移回主螢幕（找不到時用目前所在的螢幕），預設大小 960×200（乘以縮放比例、不超過螢幕），水平置中、離下緣留螢幕高度的 1/10，並顯示出來；解決視窗留在已拔掉的螢幕上找不回來的問題。
+
+### 口譯模式的說話者（v0.3 G3）
+
+- 引擎在口譯模式的 `subtitle` 事件帶 `speaker`（`"self"`：原文是「我的語言」；`"partner"`：其他），影片翻譯不帶。Rust 與前端只接受這兩個值，其他值丟掉這個提示、保留字幕。
+- 字幕視窗：換說話者時在原文前加「你」／「對方」的標籤（`lib/speaker.ts` 的 `speakerLabels`，同一人連續說話不重複）；標籤有文字，顏色（自己藍、對方黃）只是輔助。
+- 字幕紀錄：每一列都標（清單是掃讀的，不是一眼看完），以 `.utt-orig[data-who]::before` 畫，不改 DOM 結構。
+- 匯出：口譯 session 的 SRT／VTT／TXT 每則第一行前加「名字: 」；CSV 多一欄 `speaker`、文字不加前綴。OBS 文字檔不加（給直播主顯示自己的字幕用，口譯模式很少接 OBS）。
 
 ### 診斷資訊
 
@@ -316,7 +349,7 @@
 
 - 設定：透明、無邊框、無陰影、置頂、不顯示在工作列、可調整大小、啟動時隱藏、顯示時不搶焦點、macOS 所有桌面空間可見（`tauri.conf.json`）。
 - 內容：每句兩行，原文（字級 × 0.62，近白色）在上，譯文（設定的字級，字幕黃、粗體）在下。每行有可調不透明度的深色底板（0 = 無底板），文字另有八方向描邊與柔和陰影，無底板時在亮畫面也看得清楚。
-- 即時字幕：譯文降低不透明度並維持白色；原文只淡化還可能改變的尾巴（`.unstable`，見「穩定的即時字幕」）；完整翻譯到達時原地取代並轉成字幕黃。較舊的句子略淡，最新一句最醒目。
+- 即時字幕：譯文維持白色；原文與譯文都只淡化還可能改變的尾巴（`.unstable`，見「穩定的即時字幕」）。同一句新出現在尾端的字（與上一次畫面的共同前綴之後）以 180 ms 淡入（`.fresh`，`prefers-reduced-motion` 時不做動畫）；完整字幕到達前，這句的高度只增不減（`lib/fresh.ts` 的 `HeightLatch` 記下出現過的最大高度當 `min-height`），尾巴變短時整塊不會上下跳（v0.3 G2）。有振假名的原文不做淡入；完整翻譯到達時原地取代並轉成字幕黃。較舊的句子略淡，最新一句最醒目。
 - **只顯示原文**（快照的 `show_translation=false`）：每句只有原文一行，原文改用譯文的字級、粗細與字幕黃（即時字幕時為白色），不留空白的第二行（`lineDisplay` 決定、`.line.is-original-only`）。
 - 原文與譯文的 `<span>` 都有 `lang` 與 `dir="auto"`：阿拉伯語由右到左；無空白的語言（ja、zh、th）靠 `overflow-wrap` 換行，泰文用 `break-word`（由瀏覽器找字詞邊界）。
 - 句數：顯示最新 `max_lines` 句（1–3），依閱讀節奏換句與淡出（見「閱讀節奏」）；位置依設定貼齊視窗下緣或上緣。「清除字幕」快速鍵（`overlay://clear`）清空畫面。
@@ -346,7 +379,7 @@
 | `commands.rs` | 每個協定方法一個 Tauri 指令，先驗證參數（模型 id 字元集與長度、裝置 id 長度、設定必須是物件且 ≤ 64 KiB、模式只能 `media`／`interpret`；`accept_license` 只能用在 `gpu-runtime`，且只有前端明確傳 `true` 才送出），再依方法給不同期限：一般 10 s、背景方法（`hardware.detect`、`models.list`、`models.validate`、`settings.apply_recommendation`、`settings.preview_recommendation`）45 s（引擎以單一工作執行緒依序處理，要算進排在前面的請求）、`models.delete`（引擎同步刪除，但多 GB 的資料夾在慢的磁碟上仍可能要幾秒）45 s、`session.start` 30 s、`session.stop` 15 s、握手 120 s（第一次 `uv run` 可能要建立虛擬環境）。另有 `engine_restart`、`bridge_status`、`app_about`、`open_third_party_licenses`、`output_info`、`transcript_save`、`open_output_folder`、`obs_set_output` 與字幕視窗指令（`overlay_set_style`／`overlay_set_show_translation` 也更新 `ObsOutput`）。 |
 | `output.rs` | 使用者看得到的輸出檔：`<文件>/kikitori/{transcripts,obs}` 的位置、字幕紀錄檔名驗證與資料夾內的路徑檢查（`validate_transcript_name`、`contained_path`）、原子寫入（`write_atomic`）、`OutputFolder`（`transcripts`／`obs`）。見「匯出字幕紀錄」。 |
 | `obs.rs` | OBS 文字檔：與字幕視窗相同規則的 `ObsLines`、專用寫入執行緒（節流、合併、閒置清空、結束時清空）、`ObsStatus`。見「OBS 文字檔」。 |
-| `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查；含閱讀節奏的 `min_display_ms`、`idle_clear_secs`，缺少時用預設值）、三個全域快速鍵（`ShortcutAction`、各自是否註冊成功）、穿透與可見狀態、介面語系（`locale`，`validate_locale` 只檢查格式：2–3 個字母，可接一個 2–8 字元的子標籤，最長 16 字元）、`show_translation`（「顯示翻譯」，初始 `true`）。`show_translation` 刻意不放進 `OverlayStyle`：它不是外觀、引擎存在 `translation.enabled` 而不是不透明的 `subtitle` 物件；放進 style 會讓 `settings.subtitle` 多一個與 `translation.enabled` 重複的欄位，也得放寬 `deny_unknown_fields`。改由獨立指令 `overlay_set_show_translation {enabled}` 設定並放進快照。 |
+| `overlay.rs` | 字幕外觀（`deny_unknown_fields` 與範圍檢查；含閱讀節奏的 `min_display_ms`、`idle_clear_secs`，缺少時用預設值）、六個全域快速鍵（`ShortcutAction`、各自是否註冊成功）、穿透與可見狀態、介面語系（`locale`，`validate_locale` 只檢查格式：2–3 個字母，可接一個 2–8 字元的子標籤，最長 16 字元）、`show_translation`（「顯示翻譯」，初始 `true`）。`show_translation` 刻意不放進 `OverlayStyle`：它不是外觀、引擎存在 `translation.enabled` 而不是不透明的 `subtitle` 物件；放進 style 會讓 `settings.subtitle` 多一個與 `translation.enabled` 重複的欄位，也得放寬 `deny_unknown_fields`。改由獨立指令 `overlay_set_show_translation {enabled}` 設定並放進快照。 |
 | `updater.rs` | 檢查與安裝更新的指令 `update_check`／`update_install`（tauri-plugin-updater 的 Rust API），安裝前關閉引擎（見「自動更新」）。 |
 | `lib.rs` | 外掛（log、window-state、updater、process、opener、global-shortcut）、狀態（含 `ObsOutput`）、事件轉發（字幕事件同時交給 `ObsOutput`；`idle`／`error` 狀態與引擎不在就緒時清空 OBS 文字檔）、三個全域快速鍵（`run_shortcut`）、生命週期（關閉主視窗即結束程式；結束時清空 OBS 文字檔）。 |
 

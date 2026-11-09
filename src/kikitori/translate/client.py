@@ -16,7 +16,7 @@ import re
 import ssl
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -284,6 +284,12 @@ class OpenAICompatibleTranslator:
         req = validate_request(
             request, self.preset.languages, self.preset.pairs, context_lines
         )
+        if req.background and (
+            self.preset.prompt_style != "generic" or not self.preset.supports_context
+        ):
+            # 本場資訊和前文一樣是「參考資料」：不收前文的格式（HY-MT、Sakura）也不收它，
+            # 前文保險才不會因為用不到的本場資訊多重翻一次
+            req = replace(req, background="")
         terms = (
             ()
             if self.glossary is None

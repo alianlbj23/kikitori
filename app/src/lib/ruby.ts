@@ -131,3 +131,25 @@ export function segmentNodes(segments: readonly RubySegment[]): Node[] {
     s.reading === null ? document.createTextNode(s.text) : h("ruby", {}, s.text, h("rt", {}, s.reading)),
   );
 }
+
+/**
+ * Furigana on a word's first appearance only (v0.3 G7; Netflix's Japanese
+ * guide marks readings once). `owners` maps a word and its reading to the
+ * utterance that first showed it and is updated here: that utterance keeps the
+ * reading on every redraw (partials and its final), later ones show the word
+ * plain. The caller keeps one map per session.
+ */
+export function firstReadingsOnly(parts: RubyParts, utteranceId: number, owners: Map<string, number>): RubyParts {
+  const strip = (segments: readonly RubySegment[]): RubySegment[] =>
+    segments.map((s) => {
+      if (s.reading === null) return s;
+      const key = `${s.text}\u0000${s.reading}`;
+      const owner = owners.get(key);
+      if (owner === undefined) {
+        owners.set(key, utteranceId);
+        return s;
+      }
+      return owner === utteranceId ? s : { text: s.text, reading: null };
+    });
+  return { stable: strip(parts.stable), unstable: strip(parts.unstable) };
+}

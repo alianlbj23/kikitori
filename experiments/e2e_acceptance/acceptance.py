@@ -41,6 +41,8 @@ from e2e_common import (
     synthesize_lines,
 )
 
+from kikitori.evaluation.stability import normalized_erasure
+
 logger = logging.getLogger("e2e.acceptance")
 
 RELEASE_ENGINE = Path(
@@ -396,6 +398,28 @@ def analyze_session(
         "simplified_failures": simplified_fail,
         "false_finals": false_finals,
         "false_finals_tolerance": FALSE_FINALS_TOLERANCE,
+    }
+    # v0.3 G1：即時字幕的閃爍程度（normalized erasure，含最後的完整字幕）；只算有即時字幕的句子
+    ne_original: list[float] = []
+    ne_translation: list[float] = []
+    for u in utts.values():
+        # 沒有即時字幕、或最後判定不是語音（完整字幕為空）的句子不算：分母會失真
+        if u.final is None or not u.partials or not u.final[1]["original"]:
+            continue
+        ne_original.append(
+            normalized_erasure(
+                [p[1]["original"] for p in u.partials] + [u.final[1]["original"]]
+            )
+        )
+        ne_translation.append(
+            normalized_erasure(
+                [p[1]["translation"] for p in u.partials] + [u.final[1]["translation"]]
+            )
+        )
+    report["stability"] = {
+        "normalized_erasure_original": median(ne_original),
+        "normalized_erasure_translation": median(ne_translation),
+        "utterances": len(ne_original),
     }
     report["latency"] = {
         "first_partial_from_utterance_start": {

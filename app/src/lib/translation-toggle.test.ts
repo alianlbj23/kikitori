@@ -24,6 +24,7 @@ const snapshot = (show: boolean): OverlaySnapshot => ({
   shortcuts: [],
   locale: null,
   show_translation: show,
+  speaker_names: [],
 });
 
 function deps(overlayFails = false) {
@@ -107,6 +108,7 @@ describe("original-only lines", () => {
       originalParts: { stable: "次の駅で降りましょう。", unstable: "" },
       originalRuby: null,
       translation: "我們在下一站下車吧。",
+      translationParts: { stable: "我們在下一站下車吧。", unstable: "" },
       originalOnly: false,
     });
   });
@@ -117,6 +119,7 @@ describe("original-only lines", () => {
       originalParts: { stable: "次の駅で降りましょう。", unstable: "" },
       originalRuby: null,
       translation: "",
+      translationParts: { stable: "", unstable: "" },
       originalOnly: true,
     });
     // The translation stays in the state, so switching back shows it again.
