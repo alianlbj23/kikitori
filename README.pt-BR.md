@@ -12,7 +12,7 @@ Qualquer outra combinação entre os 20 idiomas também funciona.
 
 - Plataformas: Windows 10/11 x64 (principal plataforma validada), Linux x64, macOS Apple Silicon
 - Licença: MIT (os modelos têm licenças próprias; veja "Licenças")
-- Versão atual: 0.2.0 ([novidades](docs/release-notes/v0.2.0.md))
+- Versão atual: 0.3.0 ([novidades](docs/release-notes/v0.3.0.md))
 
 ## Recursos
 
@@ -21,17 +21,19 @@ Qualquer outra combinação entre os 20 idiomas também funciona.
 | Tradução de vídeo | Captura o som reproduzido pelo sistema (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit) e traduz o idioma de escuta para o idioma das legendas |
 | Interpretação ao vivo | Captura o microfone; o que você diz em "Meu idioma" é traduzido para o idioma da outra pessoa, e o que a outra pessoa diz é traduzido para o seu idioma |
 | Legendas em dois caminhos: primeiro rápidas, depois precisas | Enquanto a frase ainda está sendo dita, um modelo mais rápido gera primeiro a "legenda ao vivo"; quando a frase termina, um modelo mais preciso recalcula a "legenda final" e a substitui |
-| Legendas ao vivo estáveis | O início da legenda ao vivo que não vai mais mudar aparece normalmente, e o final que ainda muda aparece em tom mais claro; a tradução não fica mais piscando junto com o final |
+| Legendas ao vivo estáveis | No original e na tradução da legenda ao vivo, o início que não vai mais mudar aparece normalmente, e o final que ainda muda aparece em tom mais claro; as palavras novas surgem com um fade e o bloco não fica mais pulando para cima e para baixo |
+| Rótulos de falante | Em collabs com várias pessoas, marca cada frase com "Falante 1, 2…"; o número de pessoas pode ser detectado automaticamente ou definido (2–6), e dá para renomear um rótulo clicando nele; no modo de interpretação marca "Você / A outra pessoa" |
 | 20 idiomas em qualquer combinação | O idioma de escuta (pode ser "Detectar automaticamente") e o idioma das legendas são escolhidos livremente entre 20 idiomas; veja "Idiomas suportados" |
 | 13 idiomas de interface | Por padrão segue o sistema operacional; pode ser alterado nas Configurações |
 | Mostrar só o original | Desligue "Mostrar tradução" para ver só o original: não precisa do Ollama nem ocupa a GPU; dá para alternar durante a execução |
 | Furigana | Mostra a leitura sobre os kanji do original em japonês (SudachiDict, cerca de 69 MiB, baixado só na primeira vez que é ativado) |
 | Modelos recomendados conforme o hardware | Detecta CPU, memória, placa de vídeo NVIDIA e Ollama e escolhe automaticamente a combinação de modelos; os modelos que faltam só são baixados na primeira vez que você clica em "Iniciar" |
 | Glossário | 53 termos de lives japonesas integrados (赤スパ, 推し, メン限…) e palavras chinês-japonês fáceis de confundir para chinês → japonês; também aceita termos personalizados e importação/exportação em CSV |
+| Correções do reconhecimento e informações da live | Corrige automaticamente palavras que o reconhecimento costuma errar; preencha o nome do streamer, o nome do jogo ou a descrição da live para que os nomes sejam traduzidos sempre do mesmo jeito |
 | Exportar transcrição | SRT, VTT, TXT, CSV; é possível salvar automaticamente ao fim de cada sessão |
 | Arquivo de texto para o OBS | Grava a legenda atual em um arquivo de texto para usar no OBS em "Texto (GDI+) → Carregar do arquivo"; nenhuma porta de rede é aberta |
-| Janela de legendas | Transparente, sempre no topo, com clique através; tamanho da fonte, fundo, posição, número de frases, tempo mínimo de exibição de cada frase e tempo ocioso até esmaecer são ajustáveis |
-| Barra de status | Medidor de volume, latência (mediana do fim da fala até a legenda final); avisa quando o reconhecimento não está dando conta ou quando não chega som por 15 segundos |
+| Janela de legendas | Transparente, sempre no topo, com clique através; tamanho da fonte, fundo, posição, número de frases, tempo mínimo de exibição de cada frase, tempo ocioso até esmaecer, tamanho e posição do original e largura da linha são ajustáveis; dá para pausar e rever as legendas recentes |
+| Barra de status | Medidor de volume, latência (mediana do fim da fala até a legenda final); avisa quando o reconhecimento não está dando conta, quando não chega som por 15 segundos ou quando o som de fundo está alto demais |
 | Gerenciamento de modelos | Baixa, mostra o uso de disco e exclui modelos de reconhecimento; baixa para você os modelos de tradução no Ollama |
 | Atualização automática | Verifica o GitHub Releases ao iniciar, baixa, verifica a assinatura e instala |
 
@@ -125,6 +127,9 @@ Nenhuma porta de rede é aberta, por isso não há a opção de usar uma fonte "
 | Ctrl+Alt+K | ⌘+Option+K | Alterna o clique através da janela de legendas |
 | Ctrl+Alt+J | ⌘+Option+J | Alterna "Mostrar tradução" |
 | Ctrl+Alt+U | ⌘+Option+U | Limpa a janela de legendas (e o arquivo de texto do OBS); a transcrição não é afetada |
+| Ctrl+Alt+P | ⌘+Option+P | Pausa/retoma a janela de legendas; a transcrição continua normalmente |
+| Ctrl+Alt+H | ⌘+Option+H | Mostra por um momento as últimas 10 frases na janela de legendas |
+| Ctrl+Alt+R | ⌘+Option+R | Na interpretação, mostra "Pode repetir, por favor?" no idioma da outra pessoa na janela de legendas |
 
 Atalhos ocupados por outros programas aparecem na página Transcrição como indisponíveis, sem afetar os outros atalhos. No Linux com Wayland, pode não ser possível registrar nenhum atalho global.
 
@@ -136,32 +141,29 @@ Atalhos ocupados por outros programas aparecem na página Transcrição como ind
 - "Copiar diagnóstico", na página Sobre, copia só para a área de transferência; oculta chaves, credenciais em URLs e nomes de usuário, e do glossário só informa o número de termos.
 - O mecanismo e o app desktop se comunicam só pela entrada e saída padrão, sem abrir portas de rede.
 
-## Novidades da 0.2.0
+## Novidades da 0.3.0
 
-Resumo (descrição completa e observações sobre a atualização em [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
+Resumo (descrição completa e observações sobre a atualização em [docs/release-notes/v0.3.0.md](docs/release-notes/v0.3.0.md); para a 0.2.0, veja [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
 
-- 20 idiomas em qualquer combinação, 13 idiomas de interface, modo só original, furigana em japonês
-- Nova escolha de modelos pensada para lives de VTubers japoneses (GPU: ao vivo large-v3-turbo, final large-v3; temperatura de tradução 0)
-- Glossário integrado de termos de live e termos personalizados
-- Legendas ao vivo estáveis, medidor de volume e latência, aviso de atraso no reconhecimento
-- Exportação em SRT/VTT/TXT/CSV, arquivo de texto para o OBS, ajustes de ritmo de leitura
-- Modelos que faltam só são baixados ao iniciar; uso de disco e exclusão de modelos
-- Novos atalhos Ctrl+Alt+J/U, "Copiar diagnóstico"
-- Tradução de chinês para japonês mais precisa (instruções escritas em chinês e lista de falsos cognatos chinês-japonês), modelo de tradução escolhido em lista suspensa, e ao fechar o kikitori o modelo de tradução do Ollama local também é descarregado para liberar memória de vídeo
-- "Iniciar" mais rápido (combinação recomendada de 12 GB com tradução: logo após abrir, de cerca de 11 → 6 segundos; depois, de cerca de 7.8 → 2.4 segundos); o aviso de atualização mostra as notas da versão
-- Correções: o modelo ficava na GPU quando a abertura do dispositivo falhava; cada início de legendas ocupava cerca de 17 MiB a mais de memória de vídeo; a memória da janela principal crescia continuamente em execuções longas
+- Rótulos de falante: em collabs com várias pessoas, cada frase é marcada com "Falante 1, 2…"; o número pode ser detectado automaticamente ou definido como 2–6 pessoas; clique no rótulo para renomeá-lo, e rótulos com o mesmo nome são mesclados (modelo de cerca de 27 MiB, baixado na primeira vez que você o escolhe)
+- A tradução ao vivo é dividida em uma parte estável e outra que ainda muda, então a frase inteira não pisca mais; palavras novas surgem com um fade e as legendas não pulam para cima e para baixo
+- O modo de interpretação marca "Você / A outra pessoa"; Ctrl+Alt+R mostra "Pode repetir, por favor?" no idioma da outra pessoa
+- Regras de correção do reconhecimento, adicionar ao glossário palavras selecionadas na transcrição, informações da live (nome do streamer, nome do jogo, descrição da live)
+- Layout de leitura: tamanho e posição do original, largura da linha, tempo de exibição maior conforme o tamanho da frase, furigana só na primeira vez
+- Novos atalhos Ctrl+Alt+P para pausar as legendas e Ctrl+Alt+H para rever as legendas recentes; redefinir a posição da janela de legendas; aviso quando o som de fundo está alto demais
 
 ## Limitações conhecidas
 
 - **Testado por completo só no Windows (RTX 5070)**. A captura real no macOS e no Linux e a velocidade de tradução no Apple Silicon e na CPU não foram medidas; o Linux só foi validado em um contêiner Docker.
 - **As novas combinações recomendadas só foram medidas de ponta a ponta na RTX 5070 (12 GB)**: com turbo + large-v3 (int8_float16) e qwen3.5:9b rodando ao mesmo tempo, a placa inteira chegou a no máximo 10.8 GB, a latência da legenda ao vivo foi de cerca de 0.31 segundo e do fim da fala até a legenda final, de cerca de 0.92 segundo (mediana; veja [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
 - **O material de avaliação da precisão do reconhecimento não é de VTubers**: foram usados fala coloquial geral do YouTube (YODAS), leitura em voz alta e áudio de TV, com BGM misturada; não há dados de lives de canto, gritos ou collabs com várias pessoas. O canto passa pela detecção de voz e pode gerar legendas estranhas.
+- **Os rótulos de falante só foram medidos em trechos do YouTube emendados** (cerca de 92–100% de acerto com 2 pessoas, cerca de 80–85% com 3–4): não há dados de pessoas falando por cima umas das outras, interjeições de menos de 1 segundo nem de uma mesma pessoa mudando de voz, então em collabs reais o resultado pode ser pior; os rótulos não são gravados no arquivo de texto do OBS.
 - Para idiomas além do inglês só há benchmarks públicos e testes de alucinação com áudio sem fala, sem medições com fala real; a lista de frases de alucinação não foi revisada por falantes nativos.
 - Algumas frases de encerramento (por exemplo, "チャンネル登録よろしくお願いします") são descartadas por inteiro como alucinação do Whisper, mesmo quando o streamer realmente as diz.
 - Para traduzir é preciso instalar o Ollama separadamente; com servidores compatíveis com OpenAI que não sejam o Ollama, você mesmo precisa instalar os modelos.
 - Testes de uso de memória em execuções longas foram feitos no Windows (mecanismo estável em uma sessão de 20 minutos; janela principal +0.7 MiB/min em 22 minutos); macOS e Linux não foram testados.
 - Só pode haver uma sessão de legendas por vez; se o dispositivo for desconectado, não há reconexão automática.
-- Não suportado: consultar palavras com um clique, capturar o som de um único app, modo de live de canto, separação de falantes, fonte "Navegador" do OBS (motivos na seção "Por enquanto não" ("先不做") do documento em chinês [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) e em [`docs/adr/`](docs/adr/)).
+- Não suportado: consultar palavras com um clique, capturar o som de um único app, modo de live de canto, separação de falantes que mudam no meio da frase ou falam ao mesmo tempo, fonte "Navegador" do OBS (motivos na seção "Por enquanto não" ("先不做") do documento em chinês [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) e em [`docs/adr/`](docs/adr/)).
 - O instalador não tem assinatura de código paga (o Windows SmartScreen e o macOS Gatekeeper mostram avisos).
 
 ## Licenças
@@ -174,6 +176,7 @@ Os modelos não são distribuídos com o instalador; ao baixá-los, valem as lic
 |---|---|---|
 | Whisper (versão convertida para CTranslate2) | MIT | — |
 | Silero VAD (incluído no programa) | MIT | — |
+| 3D-Speaker CAM++ (rótulos de falante, baixado quando escolhido) | Apache-2.0 | — |
 | Qwen3.5 (modelo de tradução padrão) | Apache-2.0 | — |
 | Tencent HY-MT1.5 | Tencent HY Community License | **Não vale na União Europeia, no Reino Unido nem na Coreia do Sul**; o kikitori não o recomenda por padrão, e é preciso confirmar a região nas Configurações |
 | Sakura-GalTransl | CC BY-NC-SA 4.0 | **Uso comercial proibido**; nunca é recomendado, só pode ser escolhido manualmente |

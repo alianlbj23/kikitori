@@ -12,7 +12,7 @@ Beliebige andere Kombinationen der 20 Sprachen funktionieren ebenfalls.
 
 - Plattformen: Windows 10/11 x64 (wichtigste getestete Plattform), Linux x64, macOS Apple Silicon
 - Lizenz: MIT (für die Modelle gelten eigene Lizenzen, siehe „Lizenzen“)
-- Aktuelle Version: 0.2.0 ([Änderungen](docs/release-notes/v0.2.0.md))
+- Aktuelle Version: 0.3.0 ([Änderungen](docs/release-notes/v0.3.0.md))
 
 ## Funktionen
 
@@ -21,17 +21,19 @@ Beliebige andere Kombinationen der 20 Sprachen funktionieren ebenfalls.
 | Videoübersetzung | Nimmt den vom System abgespielten Ton auf (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit) und übersetzt die Hörsprache in die Untertitelsprache |
 | Live-Dolmetschen | Nimmt das Mikrofon auf; was Sie in „Meine Sprache“ sagen, wird in die Sprache des Gegenübers übersetzt, was das Gegenüber sagt, in Ihre Sprache |
 | Zweistufige Untertitel: erst schnell, dann genau | Solange ein Satz noch gesprochen wird, liefert ein schnelleres Modell zunächst „Live-Untertitel“; danach berechnet ein genaueres Modell den „endgültigen Untertitel“ und ersetzt ihn |
-| Stabile Live-Untertitel | Der Anfang eines Live-Untertitels, der sich nicht mehr ändert, wird normal angezeigt, das noch veränderliche Ende blass; die Übersetzung flackert nicht mehr mit dem Ende mit |
+| Stabile Live-Untertitel | Der Anfang eines Live-Untertitels, der sich nicht mehr ändert, wird in Original und Übersetzung normal angezeigt, das noch veränderliche Ende blass; neue Wörter werden eingeblendet, und der Block springt nicht mehr auf und ab |
+| Sprecherlabels | Bei Kollaborationen mehrerer Personen steht vor jedem Satz „Sprecher 1, 2 …“; die Anzahl wird automatisch erkannt oder auf 2–6 Personen festgelegt, ein Klick auf ein Label benennt es um; im Dolmetschmodus steht „Sie / Gegenüber“ |
 | 20 Sprachen frei kombinierbar | Hörsprache (auch „Automatisch erkennen“) und Untertitelsprache frei aus 20 Sprachen wählbar, siehe „Unterstützte Sprachen“ |
 | 13 Oberflächensprachen | Folgt standardmäßig dem Betriebssystem, umstellbar in den Einstellungen |
 | Nur Original anzeigen | Schalten Sie „Übersetzung anzeigen“ aus, sehen Sie nur das Original: kein Ollama nötig, keine GPU belegt; auch während des Betriebs umschaltbar |
 | Furigana | Lesungen über den Kanji des japanischen Originals (SudachiDict, ca. 69 MiB, wird erst beim ersten Einschalten heruntergeladen) |
 | Modellempfehlung nach Hardware | Erkennt CPU, Arbeitsspeicher, NVIDIA-Grafikkarte und Ollama und wählt automatisch eine Modellkombination; fehlende Modelle werden erst beim ersten Klick auf „Starten“ heruntergeladen |
 | Glossar | 53 eingebaute japanische Stream-Begriffe (赤スパ, 推し, メン限 …) und leicht verwechselbare chinesisch-japanische Wörter für Chinesisch → Japanisch; eigene Einträge möglich, CSV-Import/-Export |
+| Erkennungskorrekturen und Infos zum Stream | Korrigiert automatisch Wörter, die die Erkennung häufig falsch schreibt; Name des Streamers, Spielname oder Stream-Beschreibung eintragen, damit Namen einheitlich übersetzt werden |
 | Transkript exportieren | SRT, VTT, TXT, CSV; optional automatisches Speichern am Ende jeder Sitzung |
 | OBS-Textdatei | Schreibt die aktuellen Untertitel in eine Textdatei für OBS „Text (GDI+) → Aus Datei lesen“; es wird kein Netzwerkport geöffnet |
-| Untertitelfenster | Transparent, immer im Vordergrund, klickdurchlässig; Schriftgröße, Hintergrund, Position, Anzahl der Sätze, Mindestanzeigedauer pro Satz und Ausblenden nach Leerlauf einstellbar |
-| Statusleiste | Pegelanzeige, Latenz (Median vom Satzende bis zum endgültigen Untertitel); Hinweis, wenn die Erkennung nicht hinterherkommt oder 15 Sekunden lang kein Ton ankommt |
+| Untertitelfenster | Transparent, immer im Vordergrund, klickdurchlässig; Schriftgröße, Hintergrund, Position, Anzahl der Sätze, Mindestanzeigedauer pro Satz, Ausblenden nach Leerlauf, Größe und Position des Originals sowie Zeilenbreite einstellbar; lässt sich anhalten, letzte Untertitel lassen sich nachlesen |
+| Statusleiste | Pegelanzeige, Latenz (Median vom Satzende bis zum endgültigen Untertitel); Hinweis, wenn die Erkennung nicht hinterherkommt, 15 Sekunden lang kein Ton ankommt oder der Hintergrundton zu laut ist |
 | Modellverwaltung | Erkennungsmodelle herunterladen, Speicherplatz anzeigen, löschen; lädt Übersetzungsmodelle für Sie in Ollama herunter |
 | Automatische Updates | Prüft beim Start GitHub Releases, lädt herunter, prüft die Signatur und installiert |
 
@@ -125,6 +127,9 @@ Es wird kein Netzwerkport geöffnet, deshalb gibt es keine Lösung über eine OB
 | Ctrl+Alt+K | ⌘+Option+K | Klickdurchlässigkeit des Untertitelfensters umschalten |
 | Ctrl+Alt+J | ⌘+Option+J | „Übersetzung anzeigen“ umschalten |
 | Ctrl+Alt+U | ⌘+Option+U | Untertitelfenster (und OBS-Textdatei) leeren; das Transkript bleibt unberührt |
+| Ctrl+Alt+P | ⌘+Option+P | Untertitelfenster anhalten/fortsetzen; das Transkript läuft normal weiter |
+| Ctrl+Alt+H | ⌘+Option+H | Die letzten 10 Sätze kurz im Untertitelfenster anzeigen |
+| Ctrl+Alt+R | ⌘+Option+R | Beim Dolmetschen „Bitte noch einmal sagen“ in der Sprache des Gegenübers im Untertitelfenster anzeigen |
 
 Tastenkürzel, die von anderen Programmen belegt sind, werden auf der Seite „Transkript“ als nicht verfügbar gekennzeichnet; die übrigen Tastenkürzel sind davon nicht betroffen. Unter Linux Wayland lassen sich globale Tastenkürzel möglicherweise gar nicht registrieren.
 
@@ -136,32 +141,29 @@ Tastenkürzel, die von anderen Programmen belegt sind, werden auf der Seite „T
 - „Diagnose kopieren“ auf der Seite „Über“ kopiert nur in die Zwischenablage; Schlüssel, Zugangsdaten in URLs und Benutzernamen werden maskiert, vom Glossar wird nur die Anzahl der Einträge angegeben.
 - Engine und Desktop-App kommunizieren nur über Standardein- und -ausgabe; es wird kein Netzwerkport geöffnet.
 
-## Neu in 0.2.0
+## Neu in 0.3.0
 
-Zusammenfassung (vollständige Beschreibung und Hinweise zum Upgrade in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
+Zusammenfassung (vollständige Beschreibung und Hinweise zum Upgrade in [docs/release-notes/v0.3.0.md](docs/release-notes/v0.3.0.md); zu 0.2.0 siehe [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
 
-- 20 Sprachen frei kombinierbar, 13 Oberflächensprachen, Nur-Original-Anzeige, Furigana für Japanisch
-- Neue Modellauswahl für japanische VTuber-Livestreams (GPU: live large-v3-turbo, endgültig large-v3; Übersetzungstemperatur 0)
-- Eingebautes Glossar mit Stream-Begriffen und eigene Einträge
-- Stabile Live-Untertitel, Pegelanzeige und Latenz, Hinweis bei Erkennungsrückstand
-- Export als SRT/VTT/TXT/CSV, OBS-Textdatei, Einstellungen für das Lesetempo
-- Fehlende Modelle werden erst beim Start heruntergeladen; Speicherplatz der Modelle anzeigen und Modelle löschen
-- Neue Tastenkürzel Ctrl+Alt+J/U, „Diagnose kopieren“
-- Genauere Übersetzung Chinesisch → Japanisch (Anweisungen auf Chinesisch und Liste chinesisch-japanischer falscher Freunde), Übersetzungsmodell als Dropdown-Liste, beim Beenden von kikitori wird auch das Übersetzungsmodell im lokalen Ollama entladen, um Grafikspeicher freizugeben
-- Schnelleres „Starten“ (empfohlene 12-GB-Kombination mit Übersetzung: direkt nach dem Öffnen ca. 11 → 6 Sekunden, danach ca. 7.8 → 2.4 Sekunden); der Update-Hinweis zeigt die Versionshinweise
-- Behoben: Modell blieb auf der GPU, wenn das Öffnen des Geräts fehlschlug; jeder Start der Untertitel belegte ca. 17 MiB zusätzlichen Grafikspeicher; der Speicher des Hauptfensters wuchs bei langem Betrieb stetig
+- Sprecherlabels: Bei Kollaborationen mehrerer Personen wird jeder Satz mit „Sprecher 1, 2 …“ markiert; Anzahl automatisch erkennen oder 2–6 Personen festlegen, per Klick auf ein Label umbenennen, Labels mit gleichem Namen werden zusammengeführt (Modell ca. 27 MiB, wird bei der ersten Auswahl heruntergeladen)
+- Die Live-Übersetzung ist in einen stabilen und einen veränderlichen Teil getrennt und flackert nicht mehr als ganzer Satz; neue Wörter werden eingeblendet, die Untertitel springen nicht mehr auf und ab
+- Der Dolmetschmodus markiert „Sie / Gegenüber“; Ctrl+Alt+R zeigt „Bitte noch einmal sagen“ in der Sprache des Gegenübers
+- Regeln für Erkennungskorrekturen, im Transkript markierte Wörter ins Glossar übernehmen, Infos zum Stream (Name des Streamers, Spielname, Stream-Beschreibung)
+- Leselayout: Größe und Position des Originals, Zeilenbreite, längere Anzeigedauer je nach Textlänge, Furigana nur beim ersten Vorkommen
+- Neue Tastenkürzel Ctrl+Alt+P zum Anhalten der Untertitel und Ctrl+Alt+H zum Nachlesen der letzten Untertitel; Position des Untertitelfensters zurücksetzen; Hinweis bei zu lautem Hintergrundton
 
 ## Bekannte Einschränkungen
 
 - **Vollständig getestet nur unter Windows (RTX 5070)**. Echte Audioaufnahme unter macOS und Linux sowie die Übersetzungsgeschwindigkeit auf Apple Silicon und CPU wurden nicht gemessen; Linux wurde nur in einem Docker-Container abgenommen.
 - **Die neuen empfohlenen Kombinationen wurden nur auf der RTX 5070 (12 GB) Ende-zu-Ende gemessen**: Laufen turbo + large-v3 (int8_float16) und qwen3.5:9b gleichzeitig, belegt die gesamte Karte höchstens 10.8 GB, die Latenz der Live-Untertitel liegt bei ca. 0.31 Sekunden, vom Satzende bis zum endgültigen Untertitel bei ca. 0.92 Sekunden (Median, siehe [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
 - **Das Evaluationsmaterial für die Erkennungsgenauigkeit stammt nicht von VTubern**: Verwendet wurden allgemeine gesprochene Sprache von YouTube (YODAS), vorgelesene Texte und Fernsehton, jeweils mit beigemischter BGM; Daten von Gesangsstreams, Schreien oder Kollaborationen mehrerer Personen fehlen. Gesang passiert die Sprachaktivitätserkennung und kann zu seltsamen Untertiteln führen.
+- **Sprecherlabels wurden nur an zusammengeschnittenen YouTube-Ausschnitten gemessen** (bei 2 Personen ca. 92–100 %, bei 3–4 Personen ca. 80–85 % richtig zugeordnet): Daten mit Ins-Wort-Fallen, Zustimmungslauten unter 1 Sekunde oder einer Person, die ihre Stimme verstellt, fehlen, daher kann die Trefferquote in echten Kollaborationen niedriger sein; die Labels werden nicht in die OBS-Textdatei geschrieben.
 - Für andere Sprachen als Englisch gibt es nur öffentliche Benchmarks und Halluzinationstests mit Nicht-Sprachaudio, keine Messungen mit echter Sprache; die Liste der Halluzinationsphrasen wurde nicht von Muttersprachlern geprüft.
 - Manche Abschlussfloskeln (z. B. „チャンネル登録よろしくお願いします“) werden als Whisper-Halluzination komplett herausgefiltert, auch wenn sie im Stream tatsächlich gesagt werden.
 - Zum Übersetzen muss Ollama separat installiert werden; bei anderen OpenAI-kompatiblen Servern als Ollama müssen Sie die Modelle selbst installieren.
 - Speicher-Langzeittests wurden unter Windows durchgeführt (Engine: 20-Minuten-Sitzung stabil, Hauptfenster: 22 Minuten, +0.7 MiB/min); macOS und Linux wurden nicht getestet.
 - Es kann immer nur eine Untertitelsitzung gleichzeitig laufen; wird ein Gerät abgezogen, wird nicht automatisch neu verbunden.
-- Nicht unterstützt: Wörter per Klick nachschlagen, Ton nur einer einzelnen App aufnehmen, Gesangsstream-Modus, Sprechertrennung, OBS-Quelle „Browser“ (Gründe siehe Abschnitt „Vorerst nicht umgesetzt“ („先不做“) im chinesischsprachigen Dokument [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) und [`docs/adr/`](docs/adr/)).
+- Nicht unterstützt: Wörter per Klick nachschlagen, Ton nur einer einzelnen App aufnehmen, Gesangsstream-Modus, Trennung von Sprechern, die mitten im Satz wechseln oder gleichzeitig sprechen, OBS-Quelle „Browser“ (Gründe siehe Abschnitt „Vorerst nicht umgesetzt“ („先不做“) im chinesischsprachigen Dokument [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) und [`docs/adr/`](docs/adr/)).
 - Die Installer haben keine kostenpflichtige Codesignatur (Windows SmartScreen und macOS Gatekeeper zeigen Warnungen).
 
 ## Lizenzen
@@ -174,6 +176,7 @@ Modelle werden nicht mit dem Installer verteilt; wenn Sie sie herunterladen, gel
 |---|---|---|
 | Whisper (CTranslate2-Konvertierung) | MIT | — |
 | Silero VAD (mitgeliefert) | MIT | — |
+| 3D-Speaker CAM++ (Sprecherlabels, wird bei Auswahl heruntergeladen) | Apache-2.0 | — |
 | Qwen3.5 (Standard-Übersetzungsmodell) | Apache-2.0 | — |
 | Tencent HY-MT1.5 | Tencent HY Community License | **Gilt nicht in der EU, im Vereinigten Königreich und in Südkorea**; kikitori empfiehlt es standardmäßig nicht, die Region muss in den Einstellungen bestätigt werden |
 | Sakura-GalTransl | CC BY-NC-SA 4.0 | **Kommerzielle Nutzung verboten**; wird nie empfohlen, nur manuell wählbar |

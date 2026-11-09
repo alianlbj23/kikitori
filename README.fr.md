@@ -12,7 +12,7 @@ Toute autre combinaison entre les 20 langues fonctionne aussi.
 
 - Plateformes : Windows 10/11 x64 (principale plateforme testée), Linux x64, macOS Apple Silicon
 - Licence : MIT (les modèles ont leurs propres licences, voir « Licence »)
-- Version actuelle : 0.2.0 ([notes de version](docs/release-notes/v0.2.0.md))
+- Version actuelle : 0.3.0 ([notes de version](docs/release-notes/v0.3.0.md))
 
 ## Fonctionnalités
 
@@ -21,17 +21,19 @@ Toute autre combinaison entre les 20 langues fonctionne aussi.
 | Traduction de vidéos | Capture le son lu par le système (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit) et traduit la langue écoutée dans la langue des sous-titres |
 | Interprétation en direct | Capture le micro ; quand vous parlez dans « Ma langue », c’est traduit dans la « Langue de l’interlocuteur », et quand votre interlocuteur parle, c’est traduit dans la vôtre |
 | Sous-titres en deux passes : rapides d’abord, précis ensuite | Pendant que la phrase est encore prononcée, un modèle plus rapide produit des « sous-titres en direct » ; une fois la phrase finie, un modèle plus précis recalcule des « sous-titres définitifs » qui les remplacent |
-| Sous-titres en direct stables | Le début du sous-titre en direct qui ne changera plus s’affiche normalement, la fin qui change encore s’affiche estompée ; la traduction ne clignote plus au rythme de cette fin |
+| Sous-titres en direct stables | Dans l’original comme dans la traduction du sous-titre en direct, le début qui ne changera plus s’affiche normalement et la fin qui change encore s’affiche estompée ; les nouveaux mots apparaissent en fondu et le bloc ne saute plus de haut en bas |
+| Étiquettes de locuteur | Lors des collaborations à plusieurs, indique « Locuteur 1, 2… » devant chaque phrase ; le nombre de locuteurs peut être détecté automatiquement ou fixé (2–6), et un clic sur une étiquette permet de la renommer ; en mode interprétation, indique « Vous / L’autre personne » |
 | Toute combinaison de 20 langues | La langue écoutée (« Détecter automatiquement » possible) et la langue des sous-titres se choisissent parmi 20 langues, voir « Langues prises en charge » |
 | 13 langues d’interface | Suit le système d’exploitation par défaut ; modifiable sur la page Paramètres |
 | N’afficher que l’original | Désactivez « Afficher la traduction » pour ne voir que l’original : pas besoin d’Ollama, le GPU n’est pas utilisé ; modifiable aussi en cours d’exécution |
 | Furigana | Affiche la lecture au-dessus des kanji de l’original japonais (SudachiDict, environ 69 Mio, téléchargé uniquement la première fois que vous l’activez) |
 | Modèles recommandés selon le matériel | Détecte le CPU, la mémoire, la carte graphique NVIDIA et Ollama, et choisit automatiquement une combinaison de modèles ; les modèles manquants ne sont téléchargés que la première fois que vous cliquez sur « Démarrer » |
 | Glossaire | 53 termes intégrés du vocabulaire des lives japonais (赤スパ, 推し, メン限…) et des mots sino-japonais faciles à confondre pour le chinois vers le japonais ; vous pouvez aussi ajouter vos propres entrées et importer/exporter en CSV |
+| Corrections de la reconnaissance et infos du live | Corrige automatiquement les mots sur lesquels la reconnaissance se trompe souvent ; renseignez le nom du streamer, le nom du jeu ou la description du live pour que les noms soient toujours traduits pareil |
 | Export des transcriptions | SRT, VTT, TXT, CSV ; enregistrement automatique configurable à la fin de chaque session |
 | Fichier texte pour OBS | Écrit les sous-titres en cours dans un fichier texte, à utiliser avec l’option « Lire à partir d’un fichier » d’une source OBS « Texte (GDI+) » ; aucun port réseau n’est ouvert |
-| Fenêtre des sous-titres | Transparente, toujours au premier plan, laisse passer les clics ; taille du texte, fond, position, nombre de phrases, durée d’affichage minimale de chaque phrase et délai d’inactivité avant le fondu sont réglables |
-| Barre d’état | Vumètre, latence (médiane entre la fin de la parole et le sous-titre définitif) ; avertit quand la reconnaissance n’arrive pas à suivre ou quand il n’y a aucun son pendant 15 secondes |
+| Fenêtre des sous-titres | Transparente, toujours au premier plan, laisse passer les clics ; taille du texte, fond, position, nombre de phrases, durée d’affichage minimale de chaque phrase, délai d’inactivité avant le fondu, taille et position de l’original et largeur de ligne sont réglables ; mise en pause et rappel des sous-titres récents possibles |
+| Barre d’état | Vumètre, latence (médiane entre la fin de la parole et le sous-titre définitif) ; avertit quand la reconnaissance n’arrive pas à suivre, quand il n’y a aucun son pendant 15 secondes ou quand le son de fond est trop fort |
 | Gestion des modèles | Télécharge les modèles de reconnaissance, affiche l’espace disque utilisé et les supprime ; télécharge pour vous les modèles de traduction dans Ollama |
 | Mise à jour automatique | Au démarrage, vérifie GitHub Releases, télécharge la mise à jour, vérifie sa signature puis l’installe |
 
@@ -125,6 +127,9 @@ Aucun port réseau n’est ouvert, il n’y a donc pas de méthode passant par u
 | Ctrl+Alt+K | ⌘+Option+K | Basculer « Laisser passer les clics » pour la fenêtre des sous-titres |
 | Ctrl+Alt+J | ⌘+Option+J | Basculer « Afficher la traduction » |
 | Ctrl+Alt+U | ⌘+Option+U | Effacer la fenêtre des sous-titres (et le fichier texte pour OBS) ; la transcription n’est pas affectée |
+| Ctrl+Alt+P | ⌘+Option+P | Mettre en pause / reprendre la fenêtre des sous-titres ; la transcription continue normalement |
+| Ctrl+Alt+H | ⌘+Option+H | Afficher un instant les 10 dernières phrases dans la fenêtre des sous-titres |
+| Ctrl+Alt+R | ⌘+Option+R | En interprétation, afficher « Pouvez-vous répéter ? » dans la langue de l’interlocuteur dans la fenêtre des sous-titres |
 
 Un raccourci déjà pris par un autre programme est signalé comme non disponible sur la page Transcription, sans effet sur les autres raccourcis. Sous Linux avec Wayland, il est possible qu’aucun raccourci global ne puisse être enregistré.
 
@@ -136,32 +141,29 @@ Un raccourci déjà pris par un autre programme est signalé comme non disponibl
 - « Copier le diagnostic » sur la page « À propos » copie seulement dans le presse-papiers ; les clés, les identifiants contenus dans les URL et les noms d’utilisateur sont masqués, et le glossaire n’est indiqué que par son nombre d’entrées.
 - Le moteur et l’application de bureau communiquent uniquement par l’entrée et la sortie standard ; aucun port réseau n’est ouvert.
 
-## Nouveautés de la 0.2.0
+## Nouveautés de la 0.3.0
 
-Résumé (détails complets et remarques de mise à niveau dans [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)) :
+Résumé (détails complets et remarques de mise à niveau dans [docs/release-notes/v0.3.0.md](docs/release-notes/v0.3.0.md) ; pour la 0.2.0, voir [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)) :
 
-- Toute combinaison de 20 langues, 13 langues d’interface, « N’afficher que l’original », furigana pour le japonais
-- Modèles choisis à nouveau pour les lives de VTubers en japonais (GPU : large-v3-turbo en direct, large-v3 en définitif ; température de traduction 0)
-- Glossaire intégré du vocabulaire des lives et entrées personnalisées
-- Sous-titres en direct stables, vumètre et latence, avertissement quand la reconnaissance prend du retard
-- Export SRT/VTT/TXT/CSV, fichier texte pour OBS, réglages du rythme de lecture
-- Modèles manquants téléchargés seulement au démarrage, espace disque des modèles et suppression
-- Nouveaux raccourcis Ctrl+Alt+J/U, « Copier le diagnostic »
-- Chinois vers japonais plus précis (instructions rédigées en chinois et liste de mots sino-japonais faciles à confondre), modèle de traduction choisi dans une liste déroulante, et la fermeture de kikitori décharge aussi le modèle de traduction de l’Ollama local pour libérer la VRAM
-- « Démarrer » plus rapide (combinaison recommandée 12 Go avec traduction : juste après l’ouverture, environ 11 → 6 secondes ; ensuite, environ 7,8 → 2,4 secondes), l’avis de mise à jour affiche les notes de version
-- Corrections : modèles laissés sur le GPU en cas d’échec d’ouverture du périphérique, environ 17 Mio de VRAM en plus à chaque démarrage des sous-titres, mémoire de la fenêtre principale en hausse continue lors d’une longue exécution
+- Étiquettes de locuteur : lors des collaborations à plusieurs, chaque phrase est marquée « Locuteur 1, 2… » ; nombre détecté automatiquement ou fixé à 2–6 personnes ; cliquez sur une étiquette pour la renommer, les étiquettes portant le même nom sont fusionnées (modèle d’environ 27 Mio, téléchargé la première fois que vous le choisissez)
+- La traduction en direct est séparée en une partie stable et une partie qui change, la phrase entière ne clignote plus ; les nouveaux mots apparaissent en fondu et les sous-titres ne sautent plus de haut en bas
+- Le mode interprétation indique « Vous / L’autre personne » ; Ctrl+Alt+R affiche « Pouvez-vous répéter ? » dans la langue de l’interlocuteur
+- Règles de correction de la reconnaissance, ajout au glossaire de mots sélectionnés dans la transcription, infos du live (nom du streamer, nom du jeu, description du live)
+- Mise en page de lecture : taille et position de l’original, largeur de ligne, durée d’affichage allongée selon la longueur, furigana seulement à la première occurrence
+- Nouveaux raccourcis Ctrl+Alt+P pour mettre les sous-titres en pause et Ctrl+Alt+H pour revoir les sous-titres récents ; réinitialisation de la position de la fenêtre des sous-titres ; avertissement quand le son de fond est trop fort
 
 ## Limitations connues
 
 - **Testé complètement uniquement sous Windows (RTX 5070)**. La capture sur machines réelles sous macOS et Linux, ainsi que la vitesse de traduction sur Apple Silicon et sur CPU, n’ont pas été mesurées ; Linux n’a été validé que dans un conteneur Docker.
 - **La nouvelle combinaison recommandée n’a été mesurée de bout en bout que sur une RTX 5070 (12 Go)** : avec turbo + large-v3 (int8_float16) et qwen3.5:9b en même temps, la carte entière atteint au maximum 10,8 Go, la latence des sous-titres en direct est d’environ 0,31 seconde et il faut environ 0,92 seconde entre la fin de la parole et le sous-titre définitif (médianes, voir [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
 - **Le corpus d’évaluation de la précision de la reconnaissance n’est pas du contenu VTuber** : il s’agit de parole courante sur YouTube (YODAS), de lecture à voix haute et d’audio télévisé, avec de la BGM mélangée ; il n’y a pas de données de lives chantés, de cris ni de collaborations à plusieurs. Le chant passe à travers la détection de voix et peut donner des sous-titres étranges.
+- **Les étiquettes de locuteur n’ont été mesurées que sur des extraits YouTube assemblés** (environ 92–100 % d’étiquettes correctes à 2 personnes, environ 80–85 % à 3–4) : il n’y a pas de données avec des personnes qui se coupent la parole, des acquiescements de moins de 1 seconde ni une même personne qui change de voix, donc les résultats en collaboration réelle peuvent être plus bas ; les étiquettes ne sont pas écrites dans le fichier texte pour OBS.
 - Les langues autres que l’anglais n’ont que des bancs d’essai publics et des tests d’hallucination sur du non-vocal, sans mesure sur de la parole réelle ; la liste des phrases d’hallucination n’a pas été relue par des locuteurs natifs.
 - Certaines formules de fin toutes faites (p. ex. 「チャンネル登録よろしくお願いします」) sont filtrées comme des hallucinations de Whisper et la phrase entière est supprimée, même si le streamer l’a vraiment dite.
 - La traduction nécessite d’installer Ollama séparément ; avec un serveur compatible OpenAI autre qu’Ollama, vous devez installer les modèles vous-même.
 - Les tests de charge mémoire de longue durée ont été faits sous Windows (moteur stable sur une session de 20 minutes, fenêtre principale +0,7 Mio/min sur 22 minutes) ; macOS et Linux n’ont pas été testés.
 - Une seule session de sous-titres peut tourner à la fois ; après le débranchement d’un périphérique, la reconnexion n’est pas automatique.
-- Non pris en charge : recherche de mots au clic, capture du son d’une seule application, mode lives chantés, séparation des locuteurs, source OBS « Navigateur web » (les raisons figurent dans la section « Pas pour l’instant » (「先不做」) de [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md), document en chinois, et dans [`docs/adr/`](docs/adr/)).
+- Non pris en charge : recherche de mots au clic, capture du son d’une seule application, mode lives chantés, séparation des locuteurs qui changent au milieu d’une phrase ou parlent en même temps, source OBS « Navigateur web » (les raisons figurent dans la section « Pas pour l’instant » (「先不做」) de [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md), document en chinois, et dans [`docs/adr/`](docs/adr/)).
 - Les installateurs n’ont pas de signature de code payante (Windows SmartScreen et macOS Gatekeeper afficheront un avertissement).
 
 ## Licence
@@ -174,6 +176,7 @@ Les modèles ne sont pas distribués avec l’installateur ; leur propre licence
 |---|---|---|
 | Whisper (version convertie pour CTranslate2) | MIT | — |
 | Silero VAD (fourni avec le programme) | MIT | — |
+| 3D-Speaker CAM++ (étiquettes de locuteur, téléchargé si choisi) | Apache-2.0 | — |
 | Qwen3.5 (modèle de traduction par défaut) | Apache-2.0 | — |
 | Tencent HY-MT1.5 | Tencent HY Community License | **Ne s’applique pas dans l’UE, au Royaume-Uni ni en Corée du Sud** ; kikitori ne le recommande pas par défaut, il faut confirmer votre région sur la page Paramètres |
 | Sakura-GalTransl | CC BY-NC-SA 4.0 | **Usage commercial interdit** ; jamais recommandé, ne peut être choisi que manuellement |

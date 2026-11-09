@@ -12,7 +12,7 @@ mọi cặp kết hợp khác giữa 20 ngôn ngữ cũng dùng được.
 
 - Nền tảng: Windows 10/11 x64 (nền tảng kiểm chứng chính), Linux x64, macOS Apple Silicon
 - Giấy phép: MIT (mỗi mô hình có giấy phép riêng, xem "Giấy phép")
-- Phiên bản hiện tại: 0.2.0 ([nội dung cập nhật](docs/release-notes/v0.2.0.md))
+- Phiên bản hiện tại: 0.3.0 ([nội dung cập nhật](docs/release-notes/v0.3.0.md))
 
 ## Tính năng
 
@@ -21,17 +21,19 @@ mọi cặp kết hợp khác giữa 20 ngôn ngữ cũng dùng được.
 | Dịch video | Thu âm thanh hệ thống đang phát (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit), dịch từ ngôn ngữ nghe sang ngôn ngữ phụ đề |
 | Phiên dịch trực tiếp | Thu micrô; khi bạn nói "Ngôn ngữ của tôi" thì dịch sang ngôn ngữ của người kia, khi người kia nói thì dịch sang ngôn ngữ của bạn |
 | Phụ đề hai luồng: nhanh trước, chính xác sau | Khi câu vẫn đang được nói, dùng mô hình nhanh hơn để hiện "phụ đề tức thời"; nói xong thì dùng mô hình chính xác hơn tính lại "phụ đề hoàn chỉnh" để thay thế |
-| Phụ đề tức thời ổn định | Phần đầu của phụ đề tức thời đã không còn thay đổi được hiển thị bình thường, phần đuôi còn đang thay đổi hiển thị màu nhạt; bản dịch không còn nhấp nháy theo phần đuôi |
+| Phụ đề tức thời ổn định | Trong bản gốc và bản dịch của phụ đề tức thời, phần đầu đã không còn thay đổi được hiển thị bình thường, phần đuôi còn đang thay đổi hiển thị màu nhạt; chữ mới hiện ra từ từ, cả khối không còn nhảy lên xuống |
+| Nhãn người nói | Khi collab nhiều người, ghi "Người nói 1, 2…" trước mỗi câu; có thể tự động xác định số người hoặc chỉ định 2–6 người, nhấp vào nhãn để đổi tên; ở chế độ phiên dịch ghi "Bạn / Đối phương" |
 | Kết hợp tùy ý 20 ngôn ngữ | Ngôn ngữ nghe (có thể chọn "Tự động phát hiện") và ngôn ngữ phụ đề chọn tùy ý trong 20 ngôn ngữ, xem "Ngôn ngữ được hỗ trợ" |
 | 13 ngôn ngữ giao diện | Mặc định theo hệ điều hành, có thể đổi ở trang Cài đặt |
 | Chỉ hiển thị bản gốc | Tắt "Hiển thị bản dịch" để chỉ xem bản gốc: không cần Ollama, không chiếm GPU; có thể chuyển cả khi đang chạy |
 | Furigana | Ghi cách đọc trên chữ Hán của bản gốc tiếng Nhật (SudachiDict, chỉ tải khoảng 69 MiB khi bật lần đầu) |
 | Đề xuất mô hình theo phần cứng | Phát hiện CPU, bộ nhớ, card đồ họa NVIDIA và Ollama, tự chọn tổ hợp mô hình; chỉ tải các mô hình còn thiếu khi bạn nhấn "Bắt đầu" lần đầu |
 | Bảng thuật ngữ | Có sẵn 53 từ lóng livestream tiếng Nhật (赤スパ, 推し, メン限…) và các từ Trung–Nhật dễ nhầm khi dịch Trung sang Nhật; cũng có thể tự thêm mục, nhập/xuất CSV |
+| Sửa kết quả nhận dạng và thông tin buổi phát | Tự động sửa những chữ mà nhận dạng hay sai; điền tên streamer, tên game hoặc phần mô tả buổi phát để tên được dịch thống nhất |
 | Xuất bản ghi phụ đề | SRT, VTT, TXT, CSV; có thể đặt tự động lưu mỗi khi kết thúc |
 | Tệp văn bản cho OBS | Ghi phụ đề hiện tại vào tệp văn bản để nguồn "Văn bản (GDI+)" của OBS dùng qua tùy chọn "Đọc từ tệp"; không mở cổng mạng |
-| Cửa sổ phụ đề | Trong suốt, luôn nằm trên cùng, cho chuột xuyên qua được; cỡ chữ, nền, vị trí, số câu, thời gian hiển thị tối thiểu của mỗi câu, thời gian không hoạt động trước khi mờ dần đều chỉnh được |
-| Thanh trạng thái | Đồng hồ âm lượng, độ trễ (trung vị từ lúc nói xong đến khi có phụ đề hoàn chỉnh); cảnh báo khi nhận dạng không theo kịp hoặc 15 giây không có âm thanh |
+| Cửa sổ phụ đề | Trong suốt, luôn nằm trên cùng, cho chuột xuyên qua được; cỡ chữ, nền, vị trí, số câu, thời gian hiển thị tối thiểu của mỗi câu, thời gian không hoạt động trước khi mờ dần, cỡ và vị trí bản gốc, độ rộng mỗi dòng đều chỉnh được; có thể tạm dừng và xem lại phụ đề gần đây |
+| Thanh trạng thái | Đồng hồ âm lượng, độ trễ (trung vị từ lúc nói xong đến khi có phụ đề hoàn chỉnh); cảnh báo khi nhận dạng không theo kịp, 15 giây không có âm thanh hoặc âm thanh nền quá to |
 | Quản lý mô hình | Tải, xem dung lượng đĩa, xóa mô hình nhận dạng; tải mô hình dịch trong Ollama giúp bạn |
 | Tự động cập nhật | Kiểm tra GitHub Releases khi khởi động, tải về và xác minh chữ ký rồi cài đặt |
 
@@ -125,6 +127,9 @@ Không mở bất kỳ cổng mạng nào, vì vậy không có cách dùng ngu�
 | Ctrl+Alt+K | ⌘+Option+K | Bật/tắt chuột xuyên qua cửa sổ phụ đề |
 | Ctrl+Alt+J | ⌘+Option+J | Bật/tắt "Hiển thị bản dịch" |
 | Ctrl+Alt+U | ⌘+Option+U | Xóa cửa sổ phụ đề (và tệp văn bản OBS); bản ghi phụ đề không bị ảnh hưởng |
+| Ctrl+Alt+P | ⌘+Option+P | Tạm dừng / tiếp tục cửa sổ phụ đề; bản ghi phụ đề vẫn ghi như thường |
+| Ctrl+Alt+H | ⌘+Option+H | Tạm hiện 10 câu gần nhất trên cửa sổ phụ đề |
+| Ctrl+Alt+R | ⌘+Option+R | Khi phiên dịch, hiện "Xin hãy nói lại" bằng ngôn ngữ của đối phương trên cửa sổ phụ đề |
 
 Phím tắt bị chương trình khác chiếm sẽ được đánh dấu là không dùng được trên trang Bản ghi, không ảnh hưởng các phím tắt khác. Trên Linux Wayland có thể hoàn toàn không đăng ký được phím tắt toàn cục.
 
@@ -136,32 +141,29 @@ Phím tắt bị chương trình khác chiếm sẽ được đánh dấu là kh
 - "Sao chép thông tin chẩn đoán" ở trang "Giới thiệu" chỉ sao chép vào clipboard, che khóa API, thông tin đăng nhập trong URL và tên người dùng; bảng thuật ngữ chỉ liệt kê số mục.
 - Engine và ứng dụng desktop chỉ giao tiếp qua đầu vào/đầu ra chuẩn, không mở cổng mạng.
 
-## Tính năng mới của 0.2.0
+## Tính năng mới của 0.3.0
 
-Tóm tắt (mô tả đầy đủ và lưu ý khi nâng cấp xem [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
+Tóm tắt (mô tả đầy đủ và lưu ý khi nâng cấp xem [docs/release-notes/v0.3.0.md](docs/release-notes/v0.3.0.md); 0.2.0 xem [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
 
-- Kết hợp tùy ý 20 ngôn ngữ, 13 ngôn ngữ giao diện, chỉ hiển thị bản gốc, furigana cho tiếng Nhật
-- Chọn lại mô hình cho livestream VTuber tiếng Nhật (GPU: tức thời large-v3-turbo, hoàn chỉnh large-v3; nhiệt độ dịch 0)
-- Bảng thuật ngữ từ lóng livestream có sẵn và mục tự định nghĩa
-- Phụ đề tức thời ổn định, đồng hồ âm lượng và độ trễ, cảnh báo khi nhận dạng bị tụt lại
-- Xuất SRT / VTT / TXT / CSV, tệp văn bản OBS, cài đặt nhịp độ đọc
-- Chỉ tải mô hình còn thiếu khi bắt đầu, xem dung lượng đĩa và xóa mô hình
-- Phím tắt mới Ctrl+Alt+J / U, "Sao chép thông tin chẩn đoán"
-- Dịch Trung sang Nhật chính xác hơn (chỉ dẫn viết bằng tiếng Trung và bảng từ Trung–Nhật dễ nhầm), mô hình dịch chuyển thành danh sách thả xuống, khi đóng kikitori sẽ đồng thời gỡ mô hình dịch khỏi Ollama cục bộ để giải phóng bộ nhớ đồ họa
-- Nhấn "Bắt đầu" nhanh hơn (tổ hợp đề xuất 12 GB có dịch: ngay sau khi mở khoảng 11 → 6 giây, các lần sau khoảng 7.8 → 2.4 giây), thông báo cập nhật hiển thị ghi chú phát hành
-- Sửa lỗi: mô hình vẫn nằm trên GPU khi mở thiết bị thất bại, mỗi lần bắt đầu phụ đề chiếm thêm khoảng 17 MiB bộ nhớ đồ họa, bộ nhớ của cửa sổ chính tăng liên tục khi chạy lâu
+- Nhãn người nói: khi collab nhiều người, mỗi câu được ghi "Người nói 1, 2…"; có thể tự động xác định số người hoặc chỉ định 2–6 người, nhấp vào nhãn để đổi tên, đổi thành cùng tên thì gộp lại (mô hình khoảng 27 MiB, tải khi chọn lần đầu)
+- Bản dịch tức thời chia thành hai phần ổn định và đang thay đổi, không còn nhấp nháy cả câu; chữ mới hiện ra từ từ, phụ đề không nhảy lên xuống
+- Chế độ phiên dịch ghi "Bạn / Đối phương", Ctrl+Alt+R hiện "Xin hãy nói lại" bằng ngôn ngữ của đối phương
+- Quy tắc sửa kết quả nhận dạng, chọn chữ trong bản ghi phụ đề để thêm vào bảng thuật ngữ, thông tin buổi phát (tên streamer, tên game, phần mô tả buổi phát)
+- Bố cục đọc: cỡ và vị trí bản gốc, độ rộng mỗi dòng, kéo dài thời gian hiển thị theo số chữ, furigana chỉ ghi lần đầu
+- Phím tắt mới Ctrl+Alt+P tạm dừng phụ đề, Ctrl+Alt+H xem lại phụ đề gần đây; đặt lại vị trí cửa sổ phụ đề; cảnh báo khi âm thanh nền quá to
 
 ## Hạn chế đã biết
 
 - **Chỉ được kiểm thử đầy đủ trên Windows (RTX 5070)**. Việc thu âm trên máy thật macOS và Linux, tốc độ dịch trên Apple Silicon và CPU đều chưa được đo; Linux chỉ được nghiệm thu trong container Docker.
 - **Tổ hợp đề xuất mới chỉ được đo đầu cuối trên RTX 5070 (12 GB)**: khi turbo + large-v3 (int8_float16) và qwen3.5:9b chạy đồng thời, toàn bộ card dùng tối đa 10.8 GB, độ trễ phụ đề tức thời khoảng 0.31 giây, từ lúc nói xong đến phụ đề hoàn chỉnh khoảng 0.92 giây (trung vị, xem [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
 - **Dữ liệu đánh giá độ chính xác nhận dạng không phải là VTuber**: dùng lời nói thông thường trên YouTube (YODAS), giọng đọc và giọng truyền hình, có trộn thêm BGM; không có dữ liệu buổi hát, tiếng hét hay collab nhiều người. Giọng hát sẽ lọt qua bộ phát hiện giọng nói, có thể sinh ra phụ đề kỳ lạ.
+- **Nhãn người nói chỉ được đo trên các đoạn YouTube ghép lại** (2 người gắn nhãn đúng khoảng 92–100%, 3–4 người khoảng 80–85%): không có dữ liệu nói chen, tiếng đệm ngắn dưới 1 giây và một người đổi giọng, nên trong collab thật có thể thấp hơn; không ghi vào tệp văn bản OBS.
 - Các ngôn ngữ ngoài tiếng Anh chỉ có benchmark công khai và bài kiểm tra ảo giác trên âm thanh không phải giọng nói, chưa được đo trên giọng nói thật; danh sách cụm từ ảo giác chưa được người bản ngữ rà soát.
 - Một số câu chào cuối video (ví dụ "チャンネル登録よろしくお願いします") bị coi là ảo giác của Whisper và bị lọc bỏ cả câu, ngay cả khi streamer thực sự nói.
 - Cần cài thêm Ollama mới dịch được; với các máy chủ tương thích OpenAI khác ngoài Ollama, bạn phải tự cài mô hình.
 - Kiểm tra áp lực bộ nhớ khi chạy lâu đã được làm trên Windows (session của engine 20 phút giữ ổn định, cửa sổ chính 22 phút +0.7 MiB/phút); chưa kiểm tra trên macOS, Linux.
 - Mỗi lúc chỉ có một session phụ đề; sau khi thiết bị bị rút ra sẽ không tự kết nối lại.
-- Không hỗ trợ: nhấp vào từ để tra, chỉ thu âm thanh của một ứng dụng, chế độ buổi hát, phân tách người nói, nguồn "Trình duyệt" của OBS (lý do xem mục "Tạm chưa làm" (先不做) trong tài liệu tiếng Trung [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) và [`docs/adr/`](docs/adr/)).
+- Không hỗ trợ: nhấp vào từ để tra, chỉ thu âm thanh của một ứng dụng, chế độ buổi hát, phân tách khi đổi người nói giữa câu hoặc nhiều người nói cùng lúc, nguồn "Trình duyệt" của OBS (lý do xem mục "Tạm chưa làm" (先不做) trong tài liệu tiếng Trung [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) và [`docs/adr/`](docs/adr/)).
 - Bộ cài không có chữ ký mã trả phí (Windows SmartScreen, macOS Gatekeeper sẽ cảnh báo).
 
 ## Giấy phép
@@ -174,6 +176,7 @@ Các mô hình không được phân phối kèm bộ cài; khi bạn tải về
 |---|---|---|
 | Whisper (bản chuyển đổi CTranslate2) | MIT | — |
 | Silero VAD (đi kèm chương trình) | MIT | — |
+| 3D-Speaker CAM++ (nhãn người nói, tải khi chọn dùng) | Apache-2.0 | — |
 | Qwen3.5 (mô hình dịch mặc định) | Apache-2.0 | — |
 | Tencent HY-MT1.5 | Tencent HY Community License | **Không áp dụng tại EU, Vương quốc Anh, Hàn Quốc**; kikitori mặc định không đề xuất, cần xác nhận khu vực của bạn ở trang Cài đặt |
 | Sakura-GalTransl | CC BY-NC-SA 4.0 | **Cấm sử dụng thương mại**; không được đề xuất, chỉ có thể chọn thủ công |

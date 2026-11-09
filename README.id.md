@@ -12,7 +12,7 @@ kombinasi lain di antara 20 bahasa juga bisa digunakan.
 
 - Platform: Windows 10/11 x64 (platform verifikasi utama), Linux x64, macOS Apple Silicon
 - Lisensi: MIT (setiap model memiliki lisensinya sendiri, lihat "Lisensi")
-- Versi saat ini: 0.2.0 ([catatan pembaruan](docs/release-notes/v0.2.0.md))
+- Versi saat ini: 0.3.0 ([catatan pembaruan](docs/release-notes/v0.3.0.md))
 
 ## Fitur
 
@@ -21,17 +21,19 @@ kombinasi lain di antara 20 bahasa juga bisa digunakan.
 | Terjemahan video | Menangkap suara yang diputar sistem (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit) dan menerjemahkan bahasa yang didengar ke bahasa subtitle |
 | Penerjemahan lisan langsung | Menangkap mikrofon; saat Anda berbicara dalam "Bahasa saya", diterjemahkan ke bahasa lawan bicara, dan saat lawan bicara berbicara, diterjemahkan ke bahasa Anda |
 | Subtitle dua jalur: cepat dulu, akurat kemudian | Selagi kalimat masih diucapkan, model yang lebih cepat menampilkan "subtitle langsung"; setelah selesai, model yang lebih akurat menghitung ulang "subtitle lengkap" untuk menggantikannya |
-| Subtitle langsung yang stabil | Bagian awal subtitle langsung yang sudah tidak berubah ditampilkan normal, bagian akhir yang masih berubah ditampilkan dengan warna pudar; terjemahan tidak lagi berkedip mengikuti bagian akhir |
+| Subtitle langsung yang stabil | Pada teks asli dan terjemahan subtitle langsung, bagian awal yang sudah tidak berubah ditampilkan normal, bagian akhir yang masih berubah ditampilkan dengan warna pudar; kata baru muncul perlahan dan blok subtitle tidak lagi melompat naik-turun |
+| Label pembicara | Saat kolaborasi banyak orang, menandai setiap kalimat dengan "Pembicara 1, 2…"; jumlah pembicara bisa ditentukan otomatis atau ditetapkan 2–6 orang, dan label bisa diganti namanya dengan mengekliknya; di mode penerjemahan lisan ditandai "Anda / Lawan bicara" |
 | Kombinasi bebas 20 bahasa | Bahasa yang didengar (bisa memilih "Deteksi otomatis") dan bahasa subtitle dipilih bebas dari 20 bahasa, lihat "Bahasa yang didukung" |
 | 13 bahasa antarmuka | Secara default mengikuti sistem operasi, bisa diganti di halaman Pengaturan |
 | Tampilkan teks asli saja | Matikan "Tampilkan terjemahan" untuk melihat teks asli saja: tidak perlu Ollama, tidak memakai GPU; bisa diganti saat sedang berjalan |
 | Furigana | Menampilkan cara baca di atas kanji pada teks asli bahasa Jepang (SudachiDict, sekitar 69 MiB, baru diunduh saat pertama kali diaktifkan) |
 | Rekomendasi model sesuai perangkat keras | Mendeteksi CPU, memori, kartu grafis NVIDIA, dan Ollama, lalu memilih kombinasi model secara otomatis; model yang kurang baru diunduh saat pertama kali menekan "Mulai" |
 | Glosarium | Bawaan 53 istilah siaran langsung bahasa Jepang (赤スパ, 推し, メン限…) dan kata Mandarin–Jepang yang mudah tertukar untuk terjemahan Mandarin ke Jepang; Anda juga bisa menambah entri sendiri serta mengimpor/mengekspor CSV |
+| Koreksi pengenalan dan info siaran | Otomatis membetulkan kata yang sering salah dikenali; isi nama streamer, nama game, atau deskripsi siaran agar nama diterjemahkan secara konsisten |
 | Ekspor transkrip | SRT, VTT, TXT, CSV; bisa diatur agar disimpan otomatis setiap kali sesi selesai |
 | File teks untuk OBS | Menulis subtitle saat ini ke file teks untuk dipakai opsi "Baca dari berkas" pada sumber "Teks (GDI+)" di OBS; tidak membuka port jaringan |
-| Jendela subtitle | Transparan, selalu di atas, bisa ditembus klik mouse; ukuran huruf, latar, posisi, jumlah kalimat, durasi tampil minimum tiap kalimat, dan lama diam sebelum memudar semuanya bisa diatur |
-| Bilah status | Meter volume, latensi (median dari selesai berbicara sampai subtitle lengkap); peringatan saat pengenalan tertinggal atau tidak ada suara selama 15 detik |
+| Jendela subtitle | Transparan, selalu di atas, bisa ditembus klik mouse; ukuran huruf, latar, posisi, jumlah kalimat, durasi tampil minimum tiap kalimat, lama diam sebelum memudar, ukuran dan posisi teks asli, serta lebar baris semuanya bisa diatur; bisa dijeda dan subtitle terbaru bisa dilihat kembali |
+| Bilah status | Meter volume, latensi (median dari selesai berbicara sampai subtitle lengkap); peringatan saat pengenalan tertinggal, tidak ada suara selama 15 detik, atau suara latar terlalu keras |
 | Pengelolaan model | Mengunduh, melihat penggunaan disk, dan menghapus model pengenalan; mengunduhkan model terjemahan di Ollama untuk Anda |
 | Pembaruan otomatis | Memeriksa GitHub Releases saat dijalankan, mengunduh dan memverifikasi tanda tangan, lalu memasang |
 
@@ -125,6 +127,9 @@ Tidak ada port jaringan yang dibuka, jadi tidak ada cara yang memakai sumber "Pe
 | Ctrl+Alt+K | ⌘+Option+K | Mengalihkan mode tembus klik mouse pada jendela subtitle |
 | Ctrl+Alt+J | ⌘+Option+J | Mengalihkan "Tampilkan terjemahan" |
 | Ctrl+Alt+U | ⌘+Option+U | Membersihkan jendela subtitle (dan file teks OBS); transkrip tidak terpengaruh |
+| Ctrl+Alt+P | ⌘+Option+P | Menjeda / melanjutkan jendela subtitle; transkrip tetap berjalan seperti biasa |
+| Ctrl+Alt+H | ⌘+Option+H | Menampilkan sebentar 10 kalimat terakhir di jendela subtitle |
+| Ctrl+Alt+R | ⌘+Option+R | Saat penerjemahan lisan, menampilkan "Tolong ulangi sekali lagi" dalam bahasa lawan bicara di jendela subtitle |
 
 Pintasan yang sudah dipakai program lain akan ditandai tidak bisa digunakan di halaman Transkrip, tanpa memengaruhi pintasan lainnya. Di Linux Wayland, pintasan global mungkin sama sekali tidak bisa didaftarkan.
 
@@ -136,32 +141,29 @@ Pintasan yang sudah dipakai program lain akan ditandai tidak bisa digunakan di h
 - "Salin info diagnostik" di halaman "Tentang" hanya menyalin ke papan klip, menyamarkan kunci, kredensial di URL, dan nama pengguna; glosarium hanya dicantumkan jumlah entrinya.
 - Engine dan aplikasi desktop berkomunikasi hanya lewat input/output standar, tanpa membuka port jaringan.
 
-## Fitur baru 0.2.0
+## Fitur baru 0.3.0
 
-Ringkasan (penjelasan lengkap dan catatan peningkatan versi lihat [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
+Ringkasan (penjelasan lengkap dan catatan peningkatan versi lihat [docs/release-notes/v0.3.0.md](docs/release-notes/v0.3.0.md); untuk 0.2.0 lihat [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
 
-- Kombinasi bebas 20 bahasa, 13 bahasa antarmuka, tampilkan teks asli saja, furigana bahasa Jepang
-- Pemilihan ulang model untuk siaran langsung VTuber berbahasa Jepang (GPU: langsung large-v3-turbo, lengkap large-v3; suhu terjemahan 0)
-- Glosarium istilah siaran langsung bawaan dan entri kustom
-- Subtitle langsung yang stabil, meter volume dan latensi, peringatan saat pengenalan tertinggal
-- Ekspor SRT / VTT / TXT / CSV, file teks OBS, pengaturan ritme baca
-- Model yang kurang baru diunduh saat mulai, penggunaan disk model dan penghapusannya
-- Pintasan baru Ctrl+Alt+J / U, "Salin info diagnostik"
-- Terjemahan Mandarin ke Jepang lebih akurat (instruksi berbahasa Mandarin dan daftar kata Mandarin–Jepang yang mudah tertukar), model terjemahan kini berupa menu tarik-turun, dan saat kikitori ditutup model terjemahan di Ollama lokal ikut dibongkar dari memori untuk membebaskan memori grafis
-- Menekan "Mulai" lebih cepat (kombinasi rekomendasi 12 GB dengan terjemahan: tepat setelah dibuka sekitar 11 → 6 detik, berikutnya sekitar 7.8 → 2.4 detik), pemberitahuan pembaruan menampilkan catatan rilis
-- Perbaikan: model tertinggal di GPU saat gagal membuka perangkat, setiap kali subtitle dimulai memakai sekitar 17 MiB memori grafis tambahan, memori jendela utama terus bertambah saat berjalan lama
+- Label pembicara: saat kolaborasi banyak orang, setiap kalimat ditandai "Pembicara 1, 2…"; jumlah bisa ditentukan otomatis atau ditetapkan 2–6 orang; klik label untuk mengganti nama, label dengan nama sama digabung (model sekitar 27 MiB, diunduh saat pertama kali dipilih)
+- Terjemahan langsung dibagi menjadi bagian stabil dan bagian yang masih berubah sehingga seluruh kalimat tidak lagi berkedip; kata baru muncul perlahan, subtitle tidak melompat naik-turun
+- Mode penerjemahan lisan menandai "Anda / Lawan bicara", Ctrl+Alt+R menampilkan "Tolong ulangi sekali lagi" dalam bahasa lawan bicara
+- Aturan koreksi pengenalan, memilih kata dari transkrip untuk ditambahkan ke glosarium, info siaran (nama streamer, nama game, deskripsi siaran)
+- Tata letak baca: ukuran dan posisi teks asli, lebar baris, durasi tampil diperpanjang sesuai jumlah karakter, furigana hanya pada kemunculan pertama
+- Pintasan baru Ctrl+Alt+P untuk menjeda subtitle, Ctrl+Alt+H untuk melihat kembali subtitle terbaru; atur ulang posisi jendela subtitle; peringatan saat suara latar terlalu keras
 
 ## Keterbatasan yang diketahui
 
 - **Hanya diuji lengkap di Windows (RTX 5070)**. Penangkapan suara di perangkat nyata macOS dan Linux, serta kecepatan terjemahan di Apple Silicon dan CPU belum diukur; Linux hanya diuji penerimaan di dalam kontainer Docker.
 - **Kombinasi rekomendasi baru hanya diukur ujung ke ujung di RTX 5070 (12 GB)**: saat turbo + large-v3 (int8_float16) dan qwen3.5:9b berjalan bersamaan, seluruh kartu memakai maksimal 10.8 GB, latensi subtitle langsung sekitar 0.31 detik, dari selesai berbicara sampai subtitle lengkap sekitar 0.92 detik (median, lihat [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
 - **Materi evaluasi akurasi pengenalan bukan VTuber**: yang dipakai adalah percakapan umum di YouTube (YODAS), bacaan, dan suara televisi, ditambah campuran BGM; tidak ada data siaran bernyanyi, teriakan, atau kolaborasi banyak orang. Suara nyanyian bisa lolos dari deteksi suara manusia dan memunculkan subtitle yang aneh.
+- **Label pembicara hanya diukur pada potongan YouTube yang disambung** (2 orang sekitar 92–100%, 3–4 orang sekitar 80–85% berlabel benar): tidak ada data saling menyela, sahutan singkat kurang dari 1 detik, maupun satu orang yang berganti suara, sehingga pada kolaborasi sungguhan hasilnya bisa lebih rendah; label tidak ditulis ke file teks OBS.
 - Bahasa selain bahasa Inggris hanya memiliki tolok ukur publik dan uji halusinasi dengan audio non-ucapan, belum diukur pada ucapan nyata; daftar frasa halusinasi belum ditinjau penutur asli.
 - Beberapa kalimat penutup baku (misalnya "チャンネル登録よろしくお願いします") dianggap sebagai halusinasi Whisper dan disaring seluruh kalimatnya, meskipun streamer benar-benar mengucapkannya.
 - Ollama harus dipasang terpisah untuk menerjemahkan; untuk server kompatibel OpenAI selain Ollama, model harus dipasang sendiri.
 - Uji tekanan memori untuk penggunaan lama sudah dilakukan di Windows (sesi engine 20 menit stabil, jendela utama 22 menit +0.7 MiB/menit); macOS dan Linux belum diuji.
 - Hanya bisa ada satu sesi subtitle dalam satu waktu; setelah perangkat dicabut, tidak tersambung ulang otomatis.
-- Tidak didukung: klik kata untuk mencari arti, menangkap suara dari satu aplikasi saja, mode siaran bernyanyi, pemisahan pembicara, sumber "Peramban" di OBS (alasannya lihat bagian "Belum dikerjakan untuk saat ini" (先不做) di dokumen berbahasa Mandarin [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) dan [`docs/adr/`](docs/adr/)).
+- Tidak didukung: klik kata untuk mencari arti, menangkap suara dari satu aplikasi saja, mode siaran bernyanyi, pemisahan pembicara yang berganti di tengah kalimat atau berbicara bersamaan, sumber "Peramban" di OBS (alasannya lihat bagian "Belum dikerjakan untuk saat ini" (先不做) di dokumen berbahasa Mandarin [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) dan [`docs/adr/`](docs/adr/)).
 - Penginstal tidak memiliki penandatanganan kode berbayar (Windows SmartScreen dan macOS Gatekeeper akan memberi peringatan).
 
 ## Lisensi
@@ -174,6 +176,7 @@ Model tidak didistribusikan bersama penginstal; saat Anda mengunduhnya, lisensi 
 |---|---|---|
 | Whisper (versi konversi CTranslate2) | MIT | — |
 | Silero VAD (disertakan dalam program) | MIT | — |
+| 3D-Speaker CAM++ (label pembicara, diunduh saat dipilih) | Apache-2.0 | — |
 | Qwen3.5 (model terjemahan default) | Apache-2.0 | — |
 | Tencent HY-MT1.5 | Tencent HY Community License | **Tidak berlaku di Uni Eropa, Inggris, Korea Selatan**; kikitori tidak merekomendasikannya secara default, wilayah Anda perlu dikonfirmasi di halaman Pengaturan |
 | Sakura-GalTransl | CC BY-NC-SA 4.0 | **Dilarang untuk penggunaan komersial**; tidak akan direkomendasikan, hanya bisa dipilih manual |

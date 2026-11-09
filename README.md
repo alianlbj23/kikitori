@@ -12,7 +12,7 @@ Any other combination of the 20 supported languages works too.
 
 - Platforms: Windows 10/11 x64 (main tested platform), Linux x64, macOS Apple Silicon
 - License: MIT (models have their own licenses, see "License")
-- Current version: 0.2.0 ([release notes](docs/release-notes/v0.2.0.md))
+- Current version: 0.3.0 ([release notes](docs/release-notes/v0.3.0.md))
 
 ## Features
 
@@ -21,17 +21,19 @@ Any other combination of the 20 supported languages works too.
 | Video translation | Captures the audio the system is playing (Windows WASAPI loopback / Linux PulseAudio monitor / macOS ScreenCaptureKit) and translates the listening language into the subtitle language |
 | Live interpreting | Captures the microphone; when you speak in "My language" it is translated into the "Other person's language", and when they speak it is translated into yours |
 | Two-pass subtitles: fast first, accurate after | While a sentence is still being spoken, a faster model produces "live subtitles"; once it ends, a more accurate model recomputes "final subtitles" that replace them |
-| Stable live subtitles | The beginning of a live subtitle that will no longer change is shown normally, and the tail that is still changing is shown faded; the translation no longer flickers along with the tail |
+| Stable live subtitles | In both the original and the translation of a live subtitle, the beginning that will no longer change is shown normally and the tail that is still changing is shown faded; new words fade in and the whole block no longer jumps up and down |
+| Speaker labels | In multi-person collabs, marks each line with "Speaker 1, 2…"; the number of speakers can be detected automatically or set to 2–6, and you can rename a label by clicking it; in interpreting mode, lines are marked "You" / "Them" |
 | Any combination of 20 languages | Pick the listening language (or "Detect automatically") and the subtitle language from 20 languages, see "Supported languages" |
 | 13 interface languages | Follows the operating system by default; can be changed on the Settings page |
 | Show originals only | Turn off "Show translation" to see only the original: no Ollama needed, no GPU used; can be switched while running |
 | Furigana | Shows readings above the kanji of Japanese originals (SudachiDict, about 69 MiB, downloaded only the first time you turn it on) |
 | Hardware-based model recommendations | Detects CPU, memory, NVIDIA GPU and Ollama and picks a model combination automatically; missing models are downloaded only the first time you press "Start" |
 | Glossary | 53 built-in Japanese livestream terms (赤スパ, 推し, メン限…) plus easily confused Chinese–Japanese words for Chinese-to-Japanese; you can also add your own entries and import/export CSV |
+| Recognition fixes and stream info | Automatically corrects words that recognition often gets wrong; fill in the streamer's name, the game's name or the stream description so names are translated consistently |
 | Transcript export | SRT, VTT, TXT, CSV; can be set to save automatically each time a session ends |
 | OBS text file | Writes the current subtitles to a text file for the "Read from file" option of an OBS "Text (GDI+)" source; no network port is opened |
-| Subtitle window | Transparent, always on top, click-through; font size, background, position, number of lines, minimum display time per line and idle fade-out time are all adjustable |
-| Status bar | Volume meter, latency (median from end of speech to final subtitle); warns when recognition can't keep up or there has been no sound for 15 seconds |
+| Subtitle window | Transparent, always on top, click-through; font size, background, position, number of lines, minimum display time per line, idle fade-out time, original size and position, and line width are all adjustable; you can pause it and look back at recent subtitles |
+| Status bar | Volume meter, latency (median from end of speech to final subtitle); warns when recognition can't keep up, there has been no sound for 15 seconds, or the background sound is too loud |
 | Model management | Download speech recognition models, view their disk usage and delete them; downloads translation models into Ollama for you |
 | Auto-update | Checks GitHub Releases at startup, downloads the update, verifies its signature and installs it |
 
@@ -125,6 +127,9 @@ No network port is opened, so there is no approach using an OBS "Browser" source
 | Ctrl+Alt+K | ⌘+Option+K | Toggle click-through for the subtitle window |
 | Ctrl+Alt+J | ⌘+Option+J | Toggle "Show translation" |
 | Ctrl+Alt+U | ⌘+Option+U | Clear the subtitle window (and the OBS text file); the transcript is not affected |
+| Ctrl+Alt+P | ⌘+Option+P | Pause/resume the subtitle window; the transcript keeps recording as usual |
+| Ctrl+Alt+H | ⌘+Option+H | Briefly show the last 10 lines in the subtitle window |
+| Ctrl+Alt+R | ⌘+Option+R | While interpreting, show "Please say that again" in the other person's language in the subtitle window |
 
 A shortcut taken by another program is marked as unavailable on the Transcript page; the other shortcuts are not affected. On Linux Wayland, global shortcuts may not be registered at all.
 
@@ -136,32 +141,29 @@ A shortcut taken by another program is marked as unavailable on the Transcript p
 - "Copy diagnostics" on the "About" page only copies to the clipboard; it masks keys, credentials in URLs and user names, and lists only the number of glossary entries.
 - The engine and the desktop app communicate only through standard input/output; no network port is opened.
 
-## What's new in 0.2.0
+## What's new in 0.3.0
 
-Summary (for full details and upgrade notes see [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
+Summary (for full details and upgrade notes see [docs/release-notes/v0.3.0.md](docs/release-notes/v0.3.0.md); for 0.2.0 see [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md)):
 
-- Any combination of 20 languages, 13 interface languages, "Show originals only", furigana for Japanese
-- Models re-selected for Japanese VTuber livestreams (GPU: live large-v3-turbo, final large-v3; translation temperature 0)
-- Built-in livestream glossary and custom entries
-- Stable live subtitles, volume meter and latency, warning when recognition falls behind
-- Export to SRT/VTT/TXT/CSV, OBS text file, reading pace settings
-- Missing models downloaded only at start, model disk usage and deletion
-- New shortcuts Ctrl+Alt+J/U, "Copy diagnostics"
-- More accurate Chinese-to-Japanese (instructions written in Chinese and a list of easily confused Chinese–Japanese words), translation model chosen from a drop-down list, and closing kikitori also unloads the translation model from local Ollama to free VRAM
-- Faster "Start" (12 GB recommended combination with translation: right after launch about 11 → 6 seconds, afterwards about 7.8 → 2.4 seconds), update prompts show the release notes
-- Fixes: models left on the GPU when opening the device failed, each subtitle session using about 17 MiB more VRAM, main window memory growing steadily during long runs
+- Speaker labels: in multi-person collabs each line is marked "Speaker 1, 2…"; the number of speakers can be detected automatically or set to 2–6; click a label to rename it, and labels given the same name are merged (model about 27 MiB, downloaded the first time you choose it)
+- Live translations are split into a stable part and a changing part, so the whole line no longer flickers; new words fade in and subtitles no longer jump up and down
+- Interpreting mode marks lines "You" / "Them"; Ctrl+Alt+R shows "Please say that again" in the other person's language
+- Recognition fix rules, adding words selected in the transcript to the glossary, stream info (streamer name, game name, stream description)
+- Reading layout: original size and position, line width, longer display time for longer lines, furigana only the first time
+- New shortcuts Ctrl+Alt+P to pause subtitles and Ctrl+Alt+H to look back at recent subtitles; reset subtitle window position; warning when the background sound is too loud
 
 ## Known limitations
 
 - **Fully tested only on Windows (RTX 5070)**. Real-device capture on macOS and Linux, and translation speed on Apple Silicon and the CPU, have not been measured; Linux has only been verified in a Docker container.
 - **The new recommended combination has been measured end to end only on an RTX 5070 (12 GB)**: with turbo + large-v3 (int8_float16) and qwen3.5:9b running together, the whole card peaks at 10.8 GB, live subtitle latency is about 0.31 seconds, and end of speech to final subtitle is about 0.92 seconds (medians, see [`tasks/acceptance-report-v0.2.0.md`](tasks/acceptance-report-v0.2.0.md)).
 - **The recognition accuracy evaluation material is not VTuber content**: it is everyday YouTube speech (YODAS), read speech and TV audio, mixed with BGM; there is no data from singing streams, screaming or multi-person collabs. Singing passes through voice activity detection and may produce odd subtitles.
+- **Speaker labels have only been measured on stitched-together YouTube clips** (about 92–100% labeled correctly with 2 people, about 80–85% with 3–4): there is no data with people talking over each other, backchannel sounds shorter than 1 second, or one person switching voices, so accuracy in real collabs may be lower; labels are not written to the OBS text file.
 - Languages other than English have only public benchmarks and non-speech hallucination tests, with no measurements on real speech; the hallucination phrase list has not been reviewed by native speakers.
 - Some stock closing phrases (e.g. 「チャンネル登録よろしくお願いします」) are filtered out as whole-sentence Whisper hallucinations, even when the streamer really says them.
 - Translation requires installing Ollama separately; with OpenAI-compatible servers other than Ollama, you have to install the models yourself.
 - Long-running memory stress tests were done on Windows (engine flat over a 20-minute session, main window +0.7 MiB/min over 22 minutes); macOS and Linux have not been tested.
 - Only one subtitle session can run at a time; it does not reconnect automatically after a device is unplugged.
-- Not supported: click-to-look-up words, capturing audio from a single app only, singing stream mode, speaker diarization, OBS "Browser" source (for the reasons see the "Not doing for now" (先不做) section of [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) (in Chinese) and [`docs/adr/`](docs/adr/)).
+- Not supported: click-to-look-up words, capturing audio from a single app only, singing stream mode, separating speakers who change mid-sentence or talk at the same time, OBS "Browser" source (for the reasons see the "Not doing for now" (先不做) section of [`docs/specs/competitive-features.md`](docs/specs/competitive-features.md) (in Chinese) and [`docs/adr/`](docs/adr/)).
 - The installers have no paid code signing (Windows SmartScreen and macOS Gatekeeper will warn).
 
 ## License
@@ -174,6 +176,7 @@ Models are not distributed with the installer; their own licenses apply when you
 |---|---|---|
 | Whisper (CTranslate2 conversion) | MIT | — |
 | Silero VAD (bundled with the app) | MIT | — |
+| 3D-Speaker CAM++ (speaker labels, downloaded when chosen) | Apache-2.0 | — |
 | Qwen3.5 (default translation model) | Apache-2.0 | — |
 | Tencent HY-MT1.5 | Tencent HY Community License | **Not applicable in the EU, the UK or South Korea**; kikitori does not recommend it by default, and your region must be confirmed on the Settings page |
 | Sakura-GalTransl | CC BY-NC-SA 4.0 | **Commercial use prohibited**; never recommended, can only be chosen manually |
