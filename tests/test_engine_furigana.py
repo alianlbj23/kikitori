@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -28,7 +29,7 @@ from kikitori.engine.testing import (
     fake_services,
 )
 from kikitori.furigana.dictionary import DICTIONARY_ID
-from kikitori.pipeline import PipelineComponents
+from kikitori.pipeline import PipelineComponents, SubtitleUpdate
 from kikitori.pipeline.types import Mode
 
 WAIT = 10.0
@@ -153,7 +154,9 @@ class SubtitleRubyTest(FuriganaEngineCase):
         subtitles = self.sink.events("subtitle")
         partials = [d for d in subtitles if not d["is_final"]]
         finals = [d for d in subtitles if d["is_final"] and d["original"]]
-        self.assertTrue(partials and finals)
+        # 假裝置一次送完整段音訊（不是即時），句子結束前有沒有即時字幕取決於執行緒排程
+        # （CI 的 macOS 曾經一則都沒有）；即時字幕的標註由下面的 test_partials_get_ruby 確定地測
+        self.assertTrue(finals)
         for data in partials + finals:
             self.assertTrue(data["original"].startswith("今日は天気"))
             self.assertEqual(data["ruby"], [[0, 2, "きょう"], [3, 5, "てんき"]])
@@ -161,6 +164,17 @@ class SubtitleRubyTest(FuriganaEngineCase):
         self.assertEqual(len(self.furigana.opened), 1)
         self.assertTrue(self.furigana.opened[0].closed)
         self.assertFalse(self.server._furigana.in_use)
+
+    def test_partials_get_ruby(self) -> None:
+        # 標註不看 is_final：直接把一則即時字幕交給伺服器送出事件的那一步
+        self.set_furigana_setting(True)
+        self.server._furigana.begin_session(7, True)
+        partial = SubtitleUpdate(1, "今日は天気", "", "ja", "zh-TW", False, 0, 16000, 2)
+        self.server._on_subtitle(SimpleNamespace(id=7), partial)  # type: ignore[arg-type]
+        data = self.sink.events("subtitle")[-1]
+        self.assertFalse(data["is_final"])
+        self.assertEqual(data["ruby"], [[0, 2, "きょう"], [3, 5, "てんき"]])
+        self.server._furigana.end_session(7)
 
     def test_non_japanese_subtitles_have_no_ruby(self) -> None:
         self.request("settings.set", {"source_language": "en"})
