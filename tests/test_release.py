@@ -411,15 +411,15 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertIn("latest.json", self.notes)
 
     def test_install_tips_per_platform(self) -> None:
-        tips = self.notes.split("## 安裝提示", 1)[1]
+        tips = self.notes.split("## Installing", 1)[1]
         for fact in (
             # Windows：沒有 Authenticode 簽章
             "SmartScreen",
-            "其他資訊 → 仍要執行",
+            "More info → Run anyway",
             # macOS：ad-hoc 簽章、沒有公證
             "Gatekeeper",
-            "系統設定 → 隱私權與安全性",
-            "強制打開",
+            "System Settings → Privacy & Security",
+            "Open Anyway",
             "xattr -dr com.apple.quarantine /Applications/kikitori.app",
             # Linux AppImage：type2-runtime 需要 /dev/fuse 與 fusermount（fuse3），不需要 libfuse2
             "chmod +x kikitori_1.2.3_amd64.AppImage",
@@ -427,7 +427,7 @@ class ReleaseNotesTest(unittest.TestCase):
             "`/dev/fuse`",
             "`fusermount`",
             "./kikitori_1.2.3_amd64.AppImage --appimage-extract-and-run",
-            "不需要 libfuse2",
+            "libfuse2 is not needed",
             # 精簡系統的中日文字型、deb 的安裝方式
             "`fonts-noto-cjk`",
             "sudo apt install ./kikitori_1.2.3_amd64.deb",
@@ -440,12 +440,12 @@ class ReleaseNotesTest(unittest.TestCase):
             encoding="utf-8"
         )
         for fact in (
-            "其他資訊 → 仍要執行",
-            "強制打開",
+            "More info → Run anyway",
+            "Open Anyway",
             "xattr -dr com.apple.quarantine /Applications/kikitori.app",
             "`fuse3`",
             "--appimage-extract-and-run",
-            "不需要 libfuse2",
+            "libfuse2 is not needed",
             "`fonts-noto-cjk`",
             "sudo apt install ./kikitori_<v>_amd64.deb",
         ):
@@ -474,8 +474,8 @@ class VersionNotesTest(unittest.TestCase):
     def test_absent_file_keeps_the_old_body(self) -> None:
         text = self._notes()
         self.assertEqual(text, rel.release_notes("kikitori", VERSION, "v1.2.3"))
-        self.assertTrue(text.startswith("kikitori v1.2.3\n\n| 平台 | 下載 |\n"))
-        self.assertNotIn("## 下載", text)
+        self.assertTrue(text.startswith("kikitori v1.2.3\n\n| Platform | Download |\n"))
+        self.assertNotIn("## Download", text)
 
     def test_included_before_the_download_table(self) -> None:
         _write(
@@ -487,9 +487,9 @@ class VersionNotesTest(unittest.TestCase):
         # Release 標題已是「kikitori v1.2.3」，重複的 H1 拿掉。
         self.assertNotIn("# kikitori v1.2.3", text)
         self.assertNotIn("\r", text)
-        self.assertLess(text.index("- 術語表"), text.index("## 下載"))
-        self.assertLess(text.index("## 下載"), text.index("| 平台 | 下載 |"))
-        self.assertIn("## 安裝提示", text)
+        self.assertLess(text.index("- 術語表"), text.index("## Download"))
+        self.assertLess(text.index("## Download"), text.index("| Platform | Download |"))
+        self.assertIn("## Installing", text)
 
     def test_h1_without_the_version_is_kept(self) -> None:
         _write(self.path, "﻿# 大改版\n\n內容\n")
@@ -523,7 +523,7 @@ class VersionNotesTest(unittest.TestCase):
             with self.subTest(file=path.name):
                 text = rel.release_notes("kikitori", version, f"v{version}")
                 self.assertNotIn(f"# kikitori v{version}\n", text)
-                self.assertIn("## 下載", text)
+                self.assertIn("## Download", text)
 
 
 class ManifestNotesTest(unittest.TestCase):
@@ -810,7 +810,7 @@ class CommandLineTest(unittest.TestCase):
         )
         text = out_file.read_text(encoding="utf-8")
         self.assertEqual(text, rel.release_notes("kikitori", VERSION, "v1.2.3"))
-        self.assertIn("## 安裝提示", text)
+        self.assertIn("## Installing", text)
         self.assertEqual(
             self._run("notes", "--tag", "v9.9.9", "--out", str(out_file)), 1
         )
@@ -827,7 +827,7 @@ class CommandLineTest(unittest.TestCase):
         )
         text = out_file.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("kikitori v1.2.3\n\n本版重點\n"))
-        self.assertIn("## 下載", text)
+        self.assertIn("## Download", text)
 
     def test_notes_invalid_version_notes_fail(self) -> None:
         _write(self.root / "docs" / "release-notes" / "v1.2.3.md", b"\xff\xfe")

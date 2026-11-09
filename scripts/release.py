@@ -544,13 +544,14 @@ def manifest_notes(root: Path, product: str, version: str, tag: str, repo: str) 
     if newline > 0:
         cut = cut[:newline]
     url = f"https://github.com/{repo}/releases/tag/{quote(tag)}"
-    return f"{cut.rstrip()}\n\n…（以下省略，完整說明：{url}）"
+    return f"{cut.rstrip()}\n\n… (truncated; full release notes: {url})"
 
 
 def release_notes(product: str, version: str, tag: str, root: Path = ROOT) -> str:
     """GitHub Release 頁面的說明（Markdown）：這一版的更新說明（若有）、下載表與安裝提示。
 
-    `root/docs/release-notes/v<版本>.md` 存在時放在下載表之前並加上「下載」標題，讓表格
+    說明是英文（給全世界的使用者看；app 介面雖有 13 種語言，Release 頁面只有一份）。
+    `root/docs/release-notes/v<版本>.md` 存在時放在下載表之前並加上「Download」標題，讓表格
     不會落在更新說明最後一節底下；不存在時輸出與以往相同。
 
     程式沒有付費簽章，第一次安裝會遇到 SmartScreen／Gatekeeper；Linux 的 AppImage 與字型
@@ -565,24 +566,24 @@ def release_notes(product: str, version: str, tag: str, root: Path = ROOT) -> st
     deb = _asset_name_ending("linux", ".deb", product, version)
     dmg = _asset_name_ending("macos", ".dmg", product, version)
     changes = read_version_notes(root, version)
-    intro = f"{changes}\n\n## 下載\n\n" if changes is not None else ""
+    intro = f"{changes}\n\n## Download\n\n" if changes is not None else ""
     return f"""{product} {tag}
 
-{intro}| 平台 | 下載 |
+{intro}| Platform | Download |
 |---|---|
 | Windows 10/11 x64 | `{setup}` |
-| Linux x64 | `{appimage}` 或 `{deb}` |
+| Linux x64 | `{appimage}` or `{deb}` |
 | macOS Apple Silicon | `{dmg}` |
 
-已安裝的 {product} 會在啟動時自動檢查更新（`latest.json`）。
+An installed {product} checks for updates automatically when it starts (`latest.json`).
 
-## 安裝提示
+## Installing
 
-- **Windows**：安裝檔沒有 Authenticode 簽章，SmartScreen 會顯示「Windows 已保護您的電腦」，請選「其他資訊 → 仍要執行」。
-- **macOS**：沒有 Apple 開發者簽章與公證（只有 ad-hoc 簽章），第一次開啟會被 Gatekeeper 擋下。把 {product} 拖到「應用程式」後開啟一次，再到「系統設定 → 隱私權與安全性」，在下方找到 {product} 按「強制打開」（macOS 15 起不能再用右鍵「打開」略過）。進階使用者也可以執行 `xattr -dr com.apple.quarantine /Applications/{product}.app`。之後的自動更新不會再出現這個警告。
-- **Linux AppImage**：先 `chmod +x {appimage}`。不需要 libfuse2，但要有 `/dev/fuse` 與 `fusermount`（Debian／Ubuntu 套件 `fuse3`，桌面版通常已安裝）。出現「Cannot mount AppImage, please check your FUSE setup.」時請安裝 `fuse3`，或不掛載直接執行：`./{appimage} --appimage-extract-and-run`（每次啟動會先解壓，較慢）。
-- **Linux deb**：`sudo apt install ./{deb}`。
-- **Linux 字型**：介面與字幕需要中日文字型；沒有 Noto CJK 的精簡系統請安裝 `fonts-noto-cjk`（deb 已列為建議套件），否則文字會顯示成方塊。
+- **Windows**: the installer has no Authenticode signature, so SmartScreen shows "Windows protected your PC". Choose "More info → Run anyway".
+- **macOS**: there is no Apple Developer ID signature or notarization (only an ad-hoc signature), so Gatekeeper blocks the first launch. Drag {product} into Applications and open it once, then go to "System Settings → Privacy & Security", find {product} near the bottom and click "Open Anyway" (since macOS 15, right-click "Open" no longer skips the check). Advanced users can instead run `xattr -dr com.apple.quarantine /Applications/{product}.app`. Later automatic updates do not show this warning again.
+- **Linux AppImage**: first run `chmod +x {appimage}`. libfuse2 is not needed, but `/dev/fuse` and `fusermount` are (Debian/Ubuntu package `fuse3`, usually installed on desktops). If you see "Cannot mount AppImage, please check your FUSE setup.", install `fuse3`, or run it without mounting: `./{appimage} --appimage-extract-and-run` (it extracts itself on every launch, so it starts more slowly).
+- **Linux deb**: `sudo apt install ./{deb}`.
+- **Linux fonts**: the interface and subtitles need CJK fonts; on minimal systems without Noto CJK install `fonts-noto-cjk` (the deb lists it as a recommended package), otherwise text shows up as boxes.
 """
 
 
