@@ -10,7 +10,7 @@ O reconhecimento de fala (Whisper) e a tradução (Ollama local) rodam no seu pr
 O cenário principal é **assistir a lives de VTubers japoneses** (com BGM, efeitos sonoros de jogos e gírias de live); as recomendações de modelos e os parâmetros foram ajustados com base nas medições deste projeto.
 Qualquer outra combinação entre os 20 idiomas também funciona.
 
-- Plataformas: Windows 10/11 x64 (principal plataforma validada), Linux x64, macOS Apple Silicon
+- Plataformas: Windows 10/11 x64 (principal plataforma validada), Linux x64. O macOS (Apple Silicon) ainda não foi testado em um Mac de verdade, então por enquanto não há instalador para macOS.
 - Licença: MIT (os modelos têm licenças próprias; veja "Licenças")
 - Versão atual: 0.3.1 ([novidades](docs/release-notes/v0.3.1.md))
 

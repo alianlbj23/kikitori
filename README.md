@@ -10,7 +10,7 @@ Speech recognition (Whisper) and translation (local Ollama) both run on your own
 The main use case is **watching Japanese VTuber livestreams** (with BGM, game sound effects and livestream slang); the recommended models and parameters were tuned from this project's own measurements.
 Any other combination of the 20 supported languages works too.
 
-- Platforms: Windows 10/11 x64 (main tested platform), Linux x64, macOS Apple Silicon
+- Platforms: Windows 10/11 x64 (main tested platform), Linux x64. macOS (Apple Silicon) has not been tested on a real Mac yet, so no macOS installer is offered for now.
 - License: MIT (models have their own licenses, see "License")
 - Current version: 0.3.1 ([release notes](docs/release-notes/v0.3.1.md))
 

@@ -10,7 +10,7 @@ Spracherkennung (Whisper) und Übersetzung (lokales Ollama) laufen auf Ihrem eig
 Der Hauptanwendungsfall sind **japanische VTuber-Livestreams** (mit BGM, Spielgeräuschen und Stream-Jargon); Modellempfehlungen und Parameter wurden anhand der Messungen dieses Projekts abgestimmt.
 Beliebige andere Kombinationen der 20 Sprachen funktionieren ebenfalls.
 
-- Plattformen: Windows 10/11 x64 (wichtigste getestete Plattform), Linux x64, macOS Apple Silicon
+- Plattformen: Windows 10/11 x64 (wichtigste getestete Plattform), Linux x64. macOS (Apple Silicon) wurde noch nicht auf einem echten Mac getestet, daher gibt es vorerst kein macOS-Installationsprogramm.
 - Lizenz: MIT (für die Modelle gelten eigene Lizenzen, siehe „Lizenzen“)
 - Aktuelle Version: 0.3.1 ([Änderungen](docs/release-notes/v0.3.1.md))
 

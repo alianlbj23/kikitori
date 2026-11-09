@@ -10,7 +10,7 @@ Nhận dạng giọng nói (Whisper) và dịch (Ollama cục bộ) đều chạ
 Tình huống sử dụng chính là **xem livestream của VTuber tiếng Nhật** (có BGM, hiệu ứng âm thanh game, từ lóng livestream); mô hình đề xuất và các tham số đều đã được điều chỉnh theo kết quả đo thực tế của dự án này;
 mọi cặp kết hợp khác giữa 20 ngôn ngữ cũng dùng được.
 
-- Nền tảng: Windows 10/11 x64 (nền tảng kiểm chứng chính), Linux x64, macOS Apple Silicon
+- Nền tảng: Windows 10/11 x64 (nền tảng kiểm chứng chính), Linux x64. macOS (Apple Silicon) chưa được thử trên máy Mac thật nên tạm thời chưa có bộ cài cho macOS.
 - Giấy phép: MIT (mỗi mô hình có giấy phép riêng, xem "Giấy phép")
 - Phiên bản hiện tại: 0.3.1 ([nội dung cập nhật](docs/release-notes/v0.3.1.md))
 

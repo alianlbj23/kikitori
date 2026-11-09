@@ -10,7 +10,7 @@ kikitori 收听你电脑正在播放的声音（或麦克风），实时识别�
 主要场景是**看日语 VTuber 直播**（有 BGM、游戏音效、直播用语），模型推荐与参数都依本项目的实测调整过；
 20 种语言之间的其他组合也能用。
 
-- 平台：Windows 10/11 x64（主要验证平台）、Linux x64、macOS Apple Silicon
+- 平台：Windows 10/11 x64（主要验证平台）、Linux x64。macOS（Apple Silicon）还没有在真机上测试，暂时不提供安装包。
 - 许可：MIT（各模型另有许可，见“许可”）
 - 当前版本：0.3.1（[更新内容](docs/release-notes/v0.3.1.md)）
 

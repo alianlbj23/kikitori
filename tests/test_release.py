@@ -265,8 +265,6 @@ class ManifestTest(unittest.TestCase):
                 "linux-x86_64",
                 "linux-x86_64-appimage",
                 "linux-x86_64-deb",
-                "darwin-aarch64",
-                "darwin-aarch64-app",
             },
         )
         base = "https://github.com/alianlbj23/kikitori/releases/download/v1.2.3/"
@@ -280,11 +278,10 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(
             p["linux-x86_64-deb"]["url"], base + "kikitori_1.2.3_amd64.deb"
         )
-        self.assertEqual(
-            p["darwin-aarch64"]["url"], base + "kikitori_1.2.3_aarch64.app.tar.gz"
-        )
         # signature 是 .sig 的內容本身（不是路徑或網址）。
-        self.assertEqual(p["darwin-aarch64"]["signature"], _sig("kikitori.app.tar.gz"))
+        self.assertEqual(
+            p["windows-x86_64"]["signature"], _sig("kikitori_1.2.3_x64-setup.exe")
+        )
         self.assertEqual(
             p["linux-x86_64-deb"]["signature"], _sig("kikitori_1.2.3_amd64.deb")
         )
@@ -292,14 +289,21 @@ class ManifestTest(unittest.TestCase):
     def test_stages_every_release_asset(self) -> None:
         self._build()
         names = {p.name for p in self.stage.iterdir()}
-        self.assertEqual(len(names), 10)  # 5 個檔案 + 4 個 .sig + latest.json
-        self.assertIn("kikitori_1.2.3_aarch64.dmg", names)
-        self.assertNotIn("kikitori_1.2.3_aarch64.dmg.sig", names)
+        self.assertEqual(len(names), 7)  # 3 個檔案 + 3 個 .sig + latest.json
+        # macOS 暫停發布（RELEASED_PLATFORMS）：就算建置產物裡有，也不放上 Release
+        self.assertFalse(any("aarch64" in n for n in names), names)
+
+    def test_macos_is_not_released_while_paused(self) -> None:
+        self.assertNotIn("macos", rel.RELEASED_PLATFORMS)
+        self.assertNotIn("darwin-aarch64", rel.REQUIRED_UPDATER_KEYS)
+        self.assertTrue(all(a.platform != "macos" for a in rel.released_assets()))
+        manifest = self._build()
+        self.assertFalse(any(k.startswith("darwin") for k in manifest["platforms"]))
 
     def test_missing_platform_fails(self) -> None:
-        for f in (self.artifacts / "bundle-macos").iterdir():
+        for f in (self.artifacts / "bundle-linux").iterdir():
             f.unlink()
-        with self.assertRaisesRegex(rel.ReleaseError, "aarch64.dmg not found"):
+        with self.assertRaisesRegex(rel.ReleaseError, "AppImage not found"):
             self._build()
 
     def test_duplicate_file_fails(self) -> None:
@@ -403,9 +407,11 @@ class ReleaseNotesTest(unittest.TestCase):
             "kikitori_1.2.3_x64-setup.exe",
             "kikitori_1.2.3_amd64.AppImage",
             "kikitori_1.2.3_amd64.deb",
-            "kikitori_1.2.3_aarch64.dmg",
         ):
             self.assertIn(f"`{name}`", self.notes)
+        # macOS 暫停發布：下載表與安裝提示都不提
+        self.assertNotIn("aarch64", self.notes)
+        self.assertNotIn("macOS", self.notes)
         # 更新器專用的 tarball 不是給人下載的。
         self.assertNotIn("app.tar.gz", self.notes)
         self.assertIn("latest.json", self.notes)
@@ -416,11 +422,6 @@ class ReleaseNotesTest(unittest.TestCase):
             # Windows：沒有 Authenticode 簽章
             "SmartScreen",
             "More info → Run anyway",
-            # macOS：ad-hoc 簽章、沒有公證
-            "Gatekeeper",
-            "System Settings → Privacy & Security",
-            "Open Anyway",
-            "xattr -dr com.apple.quarantine /Applications/kikitori.app",
             # Linux AppImage：type2-runtime 需要 /dev/fuse 與 fusermount（fuse3），不需要 libfuse2
             "chmod +x kikitori_1.2.3_amd64.AppImage",
             "`fuse3`",
@@ -441,8 +442,6 @@ class ReleaseNotesTest(unittest.TestCase):
         )
         for fact in (
             "More info → Run anyway",
-            "Open Anyway",
-            "xattr -dr com.apple.quarantine /Applications/kikitori.app",
             "`fuse3`",
             "--appimage-extract-and-run",
             "libfuse2 is not needed",
@@ -488,7 +487,9 @@ class VersionNotesTest(unittest.TestCase):
         self.assertNotIn("# kikitori v1.2.3", text)
         self.assertNotIn("\r", text)
         self.assertLess(text.index("- 術語表"), text.index("## Download"))
-        self.assertLess(text.index("## Download"), text.index("| Platform | Download |"))
+        self.assertLess(
+            text.index("## Download"), text.index("| Platform | Download |")
+        )
         self.assertIn("## Installing", text)
 
     def test_h1_without_the_version_is_kept(self) -> None:
@@ -746,7 +747,7 @@ class CommandLineTest(unittest.TestCase):
         )
         self.assertEqual(code, 0, self.err)
         self.assertTrue((self.root / "stage" / "latest.json").is_file())
-        self.assertIn("  darwin-aarch64: ", "\n".join(self.out))
+        self.assertIn("  linux-x86_64: ", "\n".join(self.out))
 
     def _manifest(self, *extra: str) -> int:
         bundle = self.root / "bundle"
