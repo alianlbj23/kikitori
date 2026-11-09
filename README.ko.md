@@ -12,7 +12,7 @@ kikitori는 컴퓨터에서 재생 중인 소리(또는 마이크)를 듣고 실
 
 - 플랫폼: Windows 10/11 x64(주요 검증 플랫폼), Linux x64, macOS Apple Silicon
 - 라이선스: MIT(각 모델은 별도 라이선스, '라이선스' 참고)
-- 현재 버전: 0.3.0([변경 내용](docs/release-notes/v0.3.0.md))
+- 현재 버전: 0.3.1([변경 내용](docs/release-notes/v0.3.1.md))
 
 ## 기능
 

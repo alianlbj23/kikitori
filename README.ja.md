@@ -12,7 +12,7 @@ kikitori は、パソコンで再生中の音声（またはマイク）を聞�
 
 - 対応プラットフォーム：Windows 10/11 x64（主な検証環境）、Linux x64、macOS Apple Silicon
 - ライセンス：MIT（各モデルには別のライセンスがあります。「ライセンス」を参照）
-- 現在のバージョン：0.3.0（[更新内容](docs/release-notes/v0.3.0.md)）
+- 現在のバージョン：0.3.1（[更新内容](docs/release-notes/v0.3.1.md)）
 
 ## 機能
 

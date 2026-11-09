@@ -12,7 +12,7 @@ Any other combination of the 20 supported languages works too.
 
 - Platforms: Windows 10/11 x64 (main tested platform), Linux x64, macOS Apple Silicon
 - License: MIT (models have their own licenses, see "License")
-- Current version: 0.3.0 ([release notes](docs/release-notes/v0.3.0.md))
+- Current version: 0.3.1 ([release notes](docs/release-notes/v0.3.1.md))
 
 ## Features
 

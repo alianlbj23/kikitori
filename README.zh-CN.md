@@ -12,7 +12,7 @@ kikitori 收听你电脑正在播放的声音（或麦克风），实时识别�
 
 - 平台：Windows 10/11 x64（主要验证平台）、Linux x64、macOS Apple Silicon
 - 许可：MIT（各模型另有许可，见“许可”）
-- 当前版本：0.3.0（[更新内容](docs/release-notes/v0.3.0.md)）
+- 当前版本：0.3.1（[更新内容](docs/release-notes/v0.3.1.md)）
 
 ## 功能
 

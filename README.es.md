@@ -12,7 +12,7 @@ También funciona cualquier otra combinación entre los 20 idiomas.
 
 - Plataformas: Windows 10/11 x64 (plataforma principal de pruebas), Linux x64, macOS Apple Silicon
 - Licencia: MIT (los modelos tienen sus propias licencias, ver «Licencia»)
-- Versión actual: 0.3.0 ([novedades](docs/release-notes/v0.3.0.md))
+- Versión actual: 0.3.1 ([novedades](docs/release-notes/v0.3.1.md))
 
 ## Funciones
 

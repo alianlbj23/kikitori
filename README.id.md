@@ -12,7 +12,7 @@ kombinasi lain di antara 20 bahasa juga bisa digunakan.
 
 - Platform: Windows 10/11 x64 (platform verifikasi utama), Linux x64, macOS Apple Silicon
 - Lisensi: MIT (setiap model memiliki lisensinya sendiri, lihat "Lisensi")
-- Versi saat ini: 0.3.0 ([catatan pembaruan](docs/release-notes/v0.3.0.md))
+- Versi saat ini: 0.3.1 ([catatan pembaruan](docs/release-notes/v0.3.1.md))
 
 ## Fitur
 
