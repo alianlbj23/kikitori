@@ -600,11 +600,14 @@ mod tests {
             let mut g = obs.0.lock();
             g.config.idle_clear = Some(Duration::from_millis(300));
         }
+        // The idle countdown starts when the subtitle arrives (`last_change`), not when
+        // this thread notices it in the file: timing from before `on_subtitle` gives a
+        // bound that holds however late the poll sees "A" on a slow CI runner.
+        let sent = Instant::now();
         obs.on_subtitle(&ev(1, "a", "A", true));
         wait_for(&path, "A");
-        let shown = Instant::now();
         wait_for(&path, "");
-        assert!(shown.elapsed() >= Duration::from_millis(200));
+        assert!(sent.elapsed() >= Duration::from_millis(300));
         obs.finish();
         std::fs::remove_dir_all(&dir).unwrap();
     }
