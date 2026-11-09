@@ -59,6 +59,12 @@ LATEST_NOTES_MAX_CHARS = 4_000
 Mode = Literal["publish", "dry-run", "skip"]
 Platform = Literal["windows", "linux", "macos"]
 PLATFORMS: tuple[Platform, ...] = ("windows", "linux", "macos")
+RELEASED_PLATFORMS: tuple[Platform, ...] = ("windows", "linux")
+"""發布到 Release 頁面、附件與 `latest.json` 的平台。
+
+macOS 沒有在實機上驗證過，2026-11-09 起暫停發布（使用者決定）：它的建置、`collect` 與冒煙測試
+程式都保留，`ci`（test.yml／app.yml）照常在 macOS 上檢查；恢復時把 "macos" 加回這裡，並在
+`.github/workflows/release.yml` 的 build matrix 加回 macos。"""
 
 
 class ReleaseError(RuntimeError):
@@ -277,7 +283,17 @@ ASSETS: tuple[AssetSpec, ...] = (
     ),
 )
 
-REQUIRED_UPDATER_KEYS = ("windows-x86_64", "linux-x86_64", "darwin-aarch64")
+_UPDATER_KEY_FOR: dict[Platform, str] = {
+    "windows": "windows-x86_64",
+    "linux": "linux-x86_64",
+    "macos": "darwin-aarch64",
+}
+REQUIRED_UPDATER_KEYS = tuple(_UPDATER_KEY_FOR[p] for p in RELEASED_PLATFORMS)
+
+
+def released_assets() -> list[AssetSpec]:
+    """這次要發布的檔案（只含 `RELEASED_PLATFORMS`）。"""
+    return [a for a in ASSETS if a.platform in RELEASED_PLATFORMS]
 
 
 def assets_for(platform: str) -> list[AssetSpec]:
@@ -435,7 +451,7 @@ def build_manifest(
         raise ReleaseError(f"invalid repository name: {repo!r}")
     stage_dir.mkdir(parents=True, exist_ok=True)
     platforms: dict[str, dict[str, str]] = {}
-    for spec in ASSETS:
+    for spec in released_assets():
         name = spec.asset_name(product, version)
         src = _find_unique(search_dir, name)
         shutil.copy2(src, stage_dir / name)
@@ -564,26 +580,37 @@ def release_notes(product: str, version: str, tag: str, root: Path = ROOT) -> st
     setup = _asset_name_ending("windows", "-setup.exe", product, version)
     appimage = _asset_name_ending("linux", ".AppImage", product, version)
     deb = _asset_name_ending("linux", ".deb", product, version)
-    dmg = _asset_name_ending("macos", ".dmg", product, version)
     changes = read_version_notes(root, version)
     intro = f"{changes}\n\n## Download\n\n" if changes is not None else ""
+    rows = [
+        f"| Windows 10/11 x64 | `{setup}` |",
+        f"| Linux x64 | `{appimage}` or `{deb}` |",
+    ]
+    tips = [
+        '- **Windows**: the installer has no Authenticode signature, so SmartScreen shows "Windows protected your PC". Choose "More info → Run anyway".',
+    ]
+    if "macos" in RELEASED_PLATFORMS:
+        dmg = _asset_name_ending("macos", ".dmg", product, version)
+        rows.append(f"| macOS Apple Silicon | `{dmg}` |")
+        tips.append(
+            f'- **macOS**: there is no Apple Developer ID signature or notarization (only an ad-hoc signature), so Gatekeeper blocks the first launch. Drag {product} into Applications and open it once, then go to "System Settings → Privacy & Security", find {product} near the bottom and click "Open Anyway" (since macOS 15, right-click "Open" no longer skips the check). Advanced users can instead run `xattr -dr com.apple.quarantine /Applications/{product}.app`. Later automatic updates do not show this warning again.'
+        )
+    tips += [
+        f'- **Linux AppImage**: first run `chmod +x {appimage}`. libfuse2 is not needed, but `/dev/fuse` and `fusermount` are (Debian/Ubuntu package `fuse3`, usually installed on desktops). If you see "Cannot mount AppImage, please check your FUSE setup.", install `fuse3`, or run it without mounting: `./{appimage} --appimage-extract-and-run` (it extracts itself on every launch, so it starts more slowly).',
+        f"- **Linux deb**: `sudo apt install ./{deb}`.",
+        "- **Linux fonts**: the interface and subtitles need CJK fonts; on minimal systems without Noto CJK install `fonts-noto-cjk` (the deb lists it as a recommended package), otherwise text shows up as boxes.",
+    ]
+    table = "\n".join(["| Platform | Download |", "|---|---|", *rows])
+    tip_lines = "\n".join(tips)
     return f"""{product} {tag}
 
-{intro}| Platform | Download |
-|---|---|
-| Windows 10/11 x64 | `{setup}` |
-| Linux x64 | `{appimage}` or `{deb}` |
-| macOS Apple Silicon | `{dmg}` |
+{intro}{table}
 
 An installed {product} checks for updates automatically when it starts (`latest.json`).
 
 ## Installing
 
-- **Windows**: the installer has no Authenticode signature, so SmartScreen shows "Windows protected your PC". Choose "More info → Run anyway".
-- **macOS**: there is no Apple Developer ID signature or notarization (only an ad-hoc signature), so Gatekeeper blocks the first launch. Drag {product} into Applications and open it once, then go to "System Settings → Privacy & Security", find {product} near the bottom and click "Open Anyway" (since macOS 15, right-click "Open" no longer skips the check). Advanced users can instead run `xattr -dr com.apple.quarantine /Applications/{product}.app`. Later automatic updates do not show this warning again.
-- **Linux AppImage**: first run `chmod +x {appimage}`. libfuse2 is not needed, but `/dev/fuse` and `fusermount` are (Debian/Ubuntu package `fuse3`, usually installed on desktops). If you see "Cannot mount AppImage, please check your FUSE setup.", install `fuse3`, or run it without mounting: `./{appimage} --appimage-extract-and-run` (it extracts itself on every launch, so it starts more slowly).
-- **Linux deb**: `sudo apt install ./{deb}`.
-- **Linux fonts**: the interface and subtitles need CJK fonts; on minimal systems without Noto CJK install `fonts-noto-cjk` (the deb lists it as a recommended package), otherwise text shows up as boxes.
+{tip_lines}
 """
 
 

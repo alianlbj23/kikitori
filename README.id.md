@@ -10,7 +10,7 @@ Pengenalan suara (Whisper) dan terjemahan (Ollama lokal) berjalan di komputer An
 Skenario utamanya adalah **menonton siaran langsung VTuber berbahasa Jepang** (dengan BGM, efek suara game, dan istilah khas siaran langsung); rekomendasi model dan parameternya disesuaikan berdasarkan pengukuran nyata proyek ini;
 kombinasi lain di antara 20 bahasa juga bisa digunakan.
 
-- Platform: Windows 10/11 x64 (platform verifikasi utama), Linux x64, macOS Apple Silicon
+- Platform: Windows 10/11 x64 (platform verifikasi utama), Linux x64. macOS (Apple Silicon) belum diuji di Mac sungguhan, jadi untuk sementara belum ada penginstal macOS.
 - Lisensi: MIT (setiap model memiliki lisensinya sendiri, lihat "Lisensi")
 - Versi saat ini: 0.3.1 ([catatan pembaruan](docs/release-notes/v0.3.1.md))
 

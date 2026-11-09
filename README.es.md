@@ -10,7 +10,7 @@ El reconocimiento de voz (Whisper) y la traducción (Ollama local) se ejecutan e
 El caso de uso principal es **ver directos de VTubers en japonés** (con BGM, efectos de sonido de juegos y jerga de directos); los modelos recomendados y los parámetros se ajustaron con las mediciones de este proyecto.
 También funciona cualquier otra combinación entre los 20 idiomas.
 
-- Plataformas: Windows 10/11 x64 (plataforma principal de pruebas), Linux x64, macOS Apple Silicon
+- Plataformas: Windows 10/11 x64 (plataforma principal de pruebas), Linux x64. macOS (Apple Silicon) aún no se ha probado en un Mac real, así que por ahora no se ofrece instalador para macOS.
 - Licencia: MIT (los modelos tienen sus propias licencias, ver «Licencia»)
 - Versión actual: 0.3.1 ([novedades](docs/release-notes/v0.3.1.md))
 

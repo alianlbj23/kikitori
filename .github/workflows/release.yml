@@ -105,12 +105,13 @@ jobs:
             bundles: appimage,deb
             cargo_about: x86_64-unknown-linux-musl
             cargo_about_sha256: 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
-          # macos-latest 是 Apple Silicon（arm64）。
-          - platform: macos
-            os: macos-latest
-            bundles: app,dmg
-            cargo_about: aarch64-apple-darwin
-            cargo_about_sha256: ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
+          # macOS 暫停發布（2026-11-09：沒有在實機驗證過；見 scripts/release.py 的 RELEASED_PLATFORMS）。
+          # 恢復時加回下面這項，並把 "macos" 加回 RELEASED_PLATFORMS；下方的 macOS 冒煙測試步驟保留著。
+          # - platform: macos
+          #   os: macos-latest   # Apple Silicon（arm64）
+          #   bundles: app,dmg
+          #   cargo_about: aarch64-apple-darwin
+          #   cargo_about_sha256: ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:

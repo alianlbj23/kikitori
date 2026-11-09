@@ -95,6 +95,8 @@ gate ──┬─ test（重用 test.yml）────────────�
 
 ### build（每個平台）
 
+> **macOS 暫停發布（2026-11-09）**：macOS 沒有在實機上驗證過，使用者決定先不提供安裝檔。`release.yml` 的 build matrix 拿掉 macos，`scripts/release.py` 的 `RELEASED_PLATFORMS` 只有 windows、linux（Release 附件、`latest.json`、Release 說明都不含 macOS）；macOS 的建置、冒煙測試與下面的安裝說明保留，恢復時兩處加回即可。v0.3.0、v0.3.1 已上架的 macOS 附件與 `latest.json` 的 darwin 項目已撤下。
+
 | 平台 | runner | `--bundles` | 發布的檔案 |
 |---|---|---|---|
 | Windows x64 | windows-latest | `nsis` | `kikitori_<v>_x64-setup.exe`＋`.sig` |
@@ -200,6 +202,8 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body (Get-Content -Raw C:\Use
 私鑰與密碼只放在維護者本機與 GitHub Secrets，不進 repo、不印到 log。遺失私鑰就無法再發布已安裝的 app 接受的更新（只能請使用者手動重裝帶新公鑰的版本），請另外備份。密碼錯誤時 `tauri build` 會失敗；私鑰與 app 公鑰不符時 assemble 的驗證會失敗——兩者都發生在建立 Release 之前。
 
 ## 給使用者的安裝說明（未簽章程式）
+
+> **macOS 暫停發布（2026-11-09）**：macOS 沒有在實機上驗證過，使用者決定先不提供安裝檔。`release.yml` 的 build matrix 拿掉 macos，`scripts/release.py` 的 `RELEASED_PLATFORMS` 只有 windows、linux（Release 附件、`latest.json`、Release 說明都不含 macOS）；macOS 的建置、冒煙測試與下面的安裝說明保留，恢復時兩處加回即可。v0.3.0、v0.3.1 已上架的 macOS 附件與 `latest.json` 的 darwin 項目已撤下。
 
 Release 頁面的說明由 `release.py notes --tag v<版本> --out <檔案>` 產生：若 `docs/release-notes/v<版本>.md` 存在（必須 commit），它的內容放在最前面（去掉含版本號的開頭 H1；檔案不是 UTF-8、含 NUL、空白或超過 100 KB 時 assemble 失敗，不會悄悄略過），接著是 `## Download`、下載表（檔名取自 `ASSETS`，與實際附件一致）加上「Installing」——下面每一點的精簡版。**Release 頁面與 `latest.json` 的 `notes` 一律用英文**（給全世界的使用者；app 介面雖有 13 種語言，Release 頁面只有一份），所以 `docs/release-notes/v<版本>.md` 也寫英文（v0.3.0 起）。同一份說明也寫進 `latest.json` 的 `notes`（`release.py manifest --notes-from-version`，見「`latest.json`」），App 內的更新提示可展開「看更新內容」顯示（`ui.md`「自動更新」）；它只有說明本身，沒有下載表與安裝提示。說明不放在 `release-files` 裡（那個資料夾的每個檔案都會成為附件），另存成 `release-notes` artifact；試建置也會產生，可在該次 run 的 job summary 或 artifact 先看到。`tests/test_release.py` 檢查說明含各平台的提示，且關鍵事實（「其他資訊 → 仍要執行」、「強制打開」、`xattr` 指令、`fuse3`、`--appimage-extract-and-run`、不需要 libfuse2、`fonts-noto-cjk`、`apt install` 指令）在本節與說明裡都出現；改其中一邊時兩邊一起改。
 
