@@ -400,6 +400,9 @@ export const en: Messages = {
   "gpu.situationMissing":
     "This computer's NVIDIA graphics card can accelerate recognition, but this component is missing, so the CPU is used for now.",
   "gpu.situationNoGpu": "No NVIDIA graphics card detected; without one there is no need to download this.",
+  "gpuReminder.text":
+    "This computer has an NVIDIA graphics card, but the GPU acceleration component has not been downloaded, so speech recognition runs on the CPU, which is slower. Accept the NVIDIA license and download it on the Models page to use the graphics card.",
+  "gpuReminder.open": "Go to Models",
   "gpu.readLicense": "Read the license",
   "gpu.download": "Download GPU acceleration component",
   "gpu.consentNotice":
@@ -438,6 +441,8 @@ export const en: Messages = {
   "speed.slowest": "Slowest",
   "download.done": "{model} downloaded.",
   "download.failed": "{what} failed to download: {error}",
+  "download.ollamaOutdated":
+    "The Ollama on this computer is too old to download this translation model. Update Ollama from https://ollama.com/download, then press Retry.",
 
   "tr.title": "Translation models",
   "tr.unreachable": "Can't reach the translation service at {url}. If you use a local Ollama, start it first.",

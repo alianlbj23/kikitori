@@ -13,6 +13,7 @@
  * Pure logic with injected engine calls, so `main.ts` only renders the state.
  */
 
+import { downloadErrorText } from "./download-error";
 import { formatBytes, percent } from "./format";
 import { joinList, t } from "./i18n";
 import type { DownloadProgressEvent } from "./types";
@@ -264,7 +265,7 @@ function itemView(i: StartItem): StartItemView {
     case "done":
       return { label, percent: 100, text: t("startdl.done"), tone: "ok" };
     case "error":
-      return { label, percent: null, text: t("startdl.failed", { error: i.error ?? t("common.unknownReason") }), tone: "bad" };
+      return { label, percent: null, text: t("startdl.failed", { error: downloadErrorText(i.error) }), tone: "bad" };
   }
 }
 

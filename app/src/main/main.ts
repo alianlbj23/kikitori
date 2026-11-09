@@ -163,6 +163,8 @@ import {
 import { SessionEndSave } from "../lib/session-end";
 import { StartDownloads, startDownloadsView, type StartItemRequest } from "../lib/start-downloads";
 import { correctionsToText, parseCorrectionsText } from "../lib/corrections";
+import { downloadErrorText } from "../lib/download-error";
+import { showGpuReminder } from "../lib/gpu-reminder";
 import { sayAgainPhrase, voiceColor, voiceName } from "../lib/speaker";
 import {
   SPEAKER_CHOICES,
@@ -250,6 +252,8 @@ interface State {
   preview: RecommendationPreview | null;
   /** Offers closed with 關閉 in this window (not stored; "不要再提醒" is). */
   closedOffers: Set<string>;
+  /** The GPU acceleration reminder was closed during this launch (lib/gpu-reminder.ts). */
+  gpuReminderClosed: boolean;
   /** Models the missing-models notice is about (null when it is not shown). */
   missing: MissingModel[] | null;
   /** Interface language preference shown in the settings page menu. */
@@ -362,6 +366,7 @@ const state: State = {
   firstRunActive: false,
   preview: null,
   closedOffers: new Set(),
+  gpuReminderClosed: false,
   missing: null,
   uiLocale: "system",
   uiLocaleUnsaved: false,
@@ -2030,6 +2035,7 @@ function showAppliedSettings(result: AppliedRecommendation, force: boolean): voi
 
 const FIRST_RUN_NOTICE = "first-run";
 const OFFER_NOTICE = "recommendation-offer";
+const GPU_NOTICE = "gpu-reminder";
 const MISSING_NOTICE = "missing-models";
 const previews = new Latest();
 
@@ -2112,7 +2118,66 @@ async function checkRecommendation(): Promise<void> {
   renderOffer();
 }
 
+/**
+ * The startup reminder to download the GPU acceleration component (lib/gpu-reminder.ts):
+ * an NVIDIA machine without cuBLAS recognises on the CPU until the user accepts the
+ * NVIDIA license on the Models page. Shown again on every launch until it is installed
+ * or the user picks "don't remind me".
+ */
+function renderGpuReminder(): void {
+  const runtime = state.models?.gpu_runtime ?? null;
+  const show = showGpuReminder({
+    runtimeMissing:
+      state.preview?.recommendation.gpu_runtime_missing ?? state.hardware?.recommendation.gpu_runtime_missing ?? null,
+    runtime,
+    downloading: state.downloads.get(runtime?.id ?? GPU_RUNTIME_ID)?.state === "downloading",
+    dismissed: state.settings?.ui.gpu_reminder_dismissed ?? false,
+    closed: state.gpuReminderClosed,
+  });
+  if (!show) {
+    noticeFor(GPU_NOTICE)?.remove();
+    return;
+  }
+  if (noticeFor(GPU_NOTICE)) return;
+  notify(
+    t("gpuReminder.text"),
+    "update",
+    [
+      { label: t("gpuReminder.open"), run: () => void openGpuRuntime() },
+      { label: t("offer.dismiss"), run: () => void dismissGpuReminder() },
+    ],
+    { key: GPU_NOTICE, onClose: () => (state.gpuReminderClosed = true) },
+  );
+}
+
+/** "前往模型頁": the Models page, scrolled to the GPU acceleration component and its license. */
+async function openGpuRuntime(): Promise<void> {
+  const loaded = showPage("models");
+  const reveal = () => {
+    // Centred: the notices stay pinned over the top of the page.
+    el.gpuRuntime.scrollIntoView({ block: "center" });
+    el.gpuRuntime.querySelector<HTMLInputElement>("#gpu-eula-consent")?.focus({ preventScroll: true });
+  };
+  reveal();
+  // The page grows while the models list and the recommendation load; show the block again after.
+  await loaded;
+  reveal();
+}
+
+/** "不要再提醒": saved in the settings' opaque `ui` object, so it holds across launches. */
+async function dismissGpuReminder(): Promise<void> {
+  state.gpuReminderClosed = true;
+  noticeFor(GPU_NOTICE)?.remove();
+  try {
+    const { settings, revision } = await api.settingsSet({ ui: { gpu_reminder_dismissed: true } });
+    adoptSettings(settings, revision);
+  } catch (e) {
+    reportError("error.saveDismissal", e);
+  }
+}
+
 function renderOffer(): void {
+  renderGpuReminder();
   const preview = state.preview;
   const dismissed = state.settings?.ui.dismissed_recommendations ?? [];
   if (!preview || !shouldOfferRecommendation(preview, dismissed) || state.closedOffers.has(preview.fingerprint)) {
@@ -2451,7 +2516,7 @@ function downloadCell(model: AsrModel): HTMLElement {
   const wrap = h("div", {});
   if (progress?.state === "error") {
     wrap.append(
-      h("p", { class: "field-error" }, t("asr.downloadFailed", { error: progress.error ?? t("common.unknownReason") })),
+      h("p", { class: "field-error" }, t("asr.downloadFailed", { error: downloadErrorText(progress.error) })),
     );
   }
   const button = h(
@@ -2481,6 +2546,7 @@ function renderModels(): void {
   const m = state.models;
   const s = state.settings;
   renderGpuRuntime();
+  renderGpuReminder();
   renderFurigana();
   renderSpeakers();
   if (!m) {
@@ -3770,16 +3836,17 @@ function onLocaleChanged(): void {
 
 // ---------------------------------------------------------------- navigation
 
-function showPage(page: Page): void {
+/** Switches pages; resolves when what the page loads on opening (the models list) is drawn. */
+function showPage(page: Page): Promise<void> {
   state.page = page;
   for (const [name, section] of Object.entries(el.pages)) section.hidden = name !== page;
   for (const item of el.navItems) {
     if (item.dataset.page === page) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   }
-  if (page === "models") void loadModels().then(checkRecommendation);
   // The diagnostics report and the guide use the hardware summary; detect it once.
   if (page === "settings" && !state.hardware && engineReady()) void detectHardwareQuietly();
+  return page === "models" ? loadModels().then(checkRecommendation) : Promise.resolve();
 }
 
 async function detectHardwareQuietly(): Promise<void> {
@@ -4205,7 +4272,7 @@ async function subscribe(): Promise<void> {
         }
       } else if (p.state === "error" && !quiet) {
         const what = p.model === GPU_RUNTIME_ID ? t("gpu.name") : p.model;
-        notify(t("download.failed", { what, error: p.error ?? t("common.unknownReason") }), "bad");
+        notify(t("download.failed", { what, error: downloadErrorText(p.error) }), "bad");
       }
       if (state.page === "models") renderModels();
       renderMissingNotice();

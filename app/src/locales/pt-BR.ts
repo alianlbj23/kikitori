@@ -429,6 +429,9 @@ export const ptBR: Messages = {
   "gpu.situationMissing":
     "A placa de vídeo NVIDIA deste computador pode acelerar o reconhecimento, mas falta este componente, então a CPU está sendo usada por enquanto.",
   "gpu.situationNoGpu": "Nenhuma placa de vídeo NVIDIA detectada; sem ela, não é preciso baixar isto.",
+  "gpuReminder.text":
+    "Este computador tem uma placa de vídeo NVIDIA, mas o componente de aceleração por GPU ainda não foi baixado, então o reconhecimento de fala usa a CPU e fica mais lento. Aceite a licença da NVIDIA e baixe-o na página Modelos para usar a placa de vídeo.",
+  "gpuReminder.open": "Ir para Modelos",
   "gpu.readLicense": "Ler a licença",
   "gpu.download": "Baixar componente de aceleração por GPU",
   "gpu.consentNotice":
@@ -469,6 +472,8 @@ export const ptBR: Messages = {
   "speed.slowest": "Mais lento",
   "download.done": "{model} baixado.",
   "download.failed": "Falha ao baixar {what}: {error}",
+  "download.ollamaOutdated":
+    "O Ollama deste computador é antigo demais para baixar este modelo de tradução. Atualize o Ollama em https://ollama.com/download e clique em Tentar novamente.",
 
   "tr.title": "Modelos de tradução",
   "tr.unreachable": "Não foi possível acessar o serviço de tradução em {url}. Se você usa um Ollama local, inicie-o primeiro.",

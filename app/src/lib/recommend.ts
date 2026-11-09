@@ -10,6 +10,7 @@
  * builds the messages (in the interface language) from the engine's answers.
  */
 
+import { downloadErrorText } from "./download-error";
 import { formatBytes, percent } from "./format";
 import { joinList, t } from "./i18n";
 import { MAX_DISMISSED } from "./settings";
@@ -233,7 +234,7 @@ export function missingModelsView(
     const d = downloads.get(m.id);
     if (d?.state === "downloading") downloading.push(`${m.id} ${percent(d.downloaded_bytes, d.total_bytes)}%`);
     else if (d?.state === "error") {
-      failed.push(t("missing.itemFailed", { model: m.id, error: d.error ?? t("common.unknownReason") }));
+      failed.push(t("missing.itemFailed", { model: m.id, error: downloadErrorText(d.error) }));
     } else pending.push(m);
   }
   if (downloading.length) {

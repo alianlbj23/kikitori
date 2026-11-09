@@ -438,6 +438,9 @@ export const fr: Messages = {
   "gpu.situationMissing":
     "La carte graphique NVIDIA de cet ordinateur peut accélérer la reconnaissance, mais ce composant est manquant, le CPU est donc utilisé pour l’instant.",
   "gpu.situationNoGpu": "Aucune carte graphique NVIDIA détectée ; sans elle, inutile de télécharger ce composant.",
+  "gpuReminder.text":
+    "Cet ordinateur a une carte graphique NVIDIA, mais le composant d’accélération GPU n’a pas encore été téléchargé : la reconnaissance vocale tourne sur le processeur, plus lentement. Acceptez la licence NVIDIA et téléchargez-le dans la page Modèles pour utiliser la carte graphique.",
+  "gpuReminder.open": "Aller aux Modèles",
   "gpu.readLicense": "Lire la licence",
   "gpu.download": "Télécharger le composant d’accélération GPU",
   "gpu.consentNotice":
@@ -477,6 +480,8 @@ export const fr: Messages = {
   "speed.slowest": "Très lente",
   "download.done": "{model} téléchargé.",
   "download.failed": "Le téléchargement de {what} a échoué : {error}",
+  "download.ollamaOutdated":
+    "L’Ollama de cet ordinateur est trop ancien pour télécharger ce modèle de traduction. Mettez Ollama à jour depuis https://ollama.com/download, puis cliquez sur Réessayer.",
 
   "tr.title": "Modèles de traduction",
   "tr.unreachable":

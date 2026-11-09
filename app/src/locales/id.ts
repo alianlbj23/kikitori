@@ -416,6 +416,9 @@ export const id: Messages = {
     "Kartu grafis NVIDIA di komputer ini dapat mempercepat pengenalan, tetapi komponen ini belum ada, jadi CPU digunakan untuk sementara.",
   "gpu.situationNoGpu":
     "Tidak ada kartu grafis NVIDIA yang terdeteksi; tanpa kartu tersebut, komponen ini tidak perlu diunduh.",
+  "gpuReminder.text":
+    "Komputer ini memiliki kartu grafis NVIDIA, tetapi komponen akselerasi GPU belum diunduh, sehingga pengenalan suara berjalan di CPU dan lebih lambat. Setujui lisensi NVIDIA dan unduh di halaman Model untuk memakai kartu grafis.",
+  "gpuReminder.open": "Buka halaman Model",
   "gpu.readLicense": "Baca lisensi",
   "gpu.download": "Unduh komponen akselerasi GPU",
   "gpu.consentNotice":
@@ -455,6 +458,8 @@ export const id: Messages = {
   "speed.slowest": "Paling lambat",
   "download.done": "{model} sudah diunduh.",
   "download.failed": "{what} gagal diunduh: {error}",
+  "download.ollamaOutdated":
+    "Ollama di komputer ini terlalu lama untuk mengunduh model terjemahan ini. Perbarui Ollama dari https://ollama.com/download, lalu tekan Coba lagi.",
 
   "tr.title": "Model terjemahan",
   "tr.unreachable":

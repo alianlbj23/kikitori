@@ -521,6 +521,8 @@ export interface UiState {
   locale: UiLocalePreference;
   /** Save SRT and TXT of every session when it ends (`ui.auto_save_transcripts`). */
   auto_save_transcripts: boolean;
+  /** "Don't remind me" on the startup reminder to download the GPU acceleration component. */
+  gpu_reminder_dismissed: boolean;
 }
 
 /** `settings.preview_recommendation`: what applying would write, without saving. */

@@ -378,6 +378,9 @@ export const zhTW = {
   "gpu.sizeUnknown": "數百 MB",
   "gpu.situationMissing": "這台電腦的 NVIDIA 顯示卡可以加速辨識，但缺少這個元件，目前改用 CPU。",
   "gpu.situationNoGpu": "沒有偵測到 NVIDIA 顯示卡；沒有顯示卡時不需要下載。",
+  "gpuReminder.text":
+    "這台電腦有 NVIDIA 顯示卡，但還沒下載「GPU 加速元件」，語音辨識目前用 CPU，比較慢。到「模型」頁同意 NVIDIA 授權並下載後，就能用顯示卡加速。",
+  "gpuReminder.open": "前往模型頁",
   "gpu.readLicense": "閱讀授權條款",
   "gpu.download": "下載 GPU 加速元件",
   "gpu.consentNotice": "這會從 PyPI 下載 NVIDIA cuBLAS（{package}，{size}），使用即表示同意 NVIDIA CUDA EULA（{license}）。",
@@ -415,6 +418,8 @@ export const zhTW = {
   "speed.slowest": "最慢",
   "download.done": "{model} 下載完成。",
   "download.failed": "{what}下載失敗：{error}",
+  "download.ollamaOutdated":
+    "這台電腦的 Ollama 版本太舊，無法下載這個翻譯模型。請到 https://ollama.com/download 更新 Ollama，再按「重試」。",
 
   // ------------------------------------------------------------ 模型頁：翻譯模型
   "tr.title": "翻譯模型",

@@ -436,6 +436,9 @@ export const de: Messages = {
   "gpu.situationMissing":
     "Die NVIDIA-Grafikkarte dieses Computers kann die Erkennung beschleunigen, aber diese Komponente fehlt, daher wird vorerst die CPU verwendet.",
   "gpu.situationNoGpu": "Keine NVIDIA-Grafikkarte erkannt; ohne eine ist dieser Download nicht nötig.",
+  "gpuReminder.text":
+    "Dieser Computer hat eine NVIDIA-Grafikkarte, aber die GPU-Beschleunigungskomponente ist noch nicht heruntergeladen. Die Spracherkennung läuft deshalb langsamer auf der CPU. Stimmen Sie auf der Seite „Modelle“ der NVIDIA-Lizenz zu und laden Sie sie herunter, um die Grafikkarte zu nutzen.",
+  "gpuReminder.open": "Zu den Modellen",
   "gpu.readLicense": "Lizenz lesen",
   "gpu.download": "GPU-Beschleunigungskomponente herunterladen",
   "gpu.consentNotice":
@@ -476,6 +479,8 @@ export const de: Messages = {
   "speed.slowest": "Am langsamsten",
   "download.done": "{model} heruntergeladen.",
   "download.failed": "{what} konnte nicht heruntergeladen werden: {error}",
+  "download.ollamaOutdated":
+    "Das Ollama auf diesem Computer ist zu alt, um dieses Übersetzungsmodell herunterzuladen. Aktualisieren Sie Ollama über https://ollama.com/download und klicken Sie dann auf „Erneut versuchen“.",
 
   "tr.title": "Übersetzungsmodelle",
   "tr.unreachable":
