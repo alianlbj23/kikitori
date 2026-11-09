@@ -384,6 +384,9 @@ export const ja: Messages = {
   "gpu.sizeUnknown": "数百 MB",
   "gpu.situationMissing": "このパソコンの NVIDIA GPU で認識を高速化できますが、このコンポーネントがないため現在は CPU を使用しています。",
   "gpu.situationNoGpu": "NVIDIA GPU が検出されません。GPU がない場合はダウンロード不要です。",
+  "gpuReminder.text":
+    "このパソコンには NVIDIA のグラフィックボードがありますが、「GPU 高速化コンポーネント」がまだダウンロードされていないため、音声認識は CPU で動いていて遅くなります。「モデル」ページで NVIDIA のライセンスに同意してダウンロードすると、グラフィックボードで高速化できます。",
+  "gpuReminder.open": "モデルページへ",
   "gpu.readLicense": "ライセンス条項を読む",
   "gpu.download": "GPU 高速化コンポーネントをダウンロード",
   "gpu.consentNotice":
@@ -422,6 +425,8 @@ export const ja: Messages = {
   "speed.slowest": "最も遅い",
   "download.done": "{model} のダウンロードが完了しました。",
   "download.failed": "{what}のダウンロードに失敗しました：{error}",
+  "download.ollamaOutdated":
+    "このパソコンの Ollama が古いため、この翻訳モデルをダウンロードできません。https://ollama.com/download から Ollama を更新してから「再試行」を押してください。",
 
   "tr.title": "翻訳モデル",
   "tr.unreachable": "翻訳サービス {url} に接続できません。ローカルの Ollama を使う場合は、先に起動してください。",

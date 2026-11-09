@@ -297,7 +297,12 @@ describe("parseSettingsResult", () => {
       dismissed_recommendations: [],
       locale: "system",
       auto_save_transcripts: false,
+      gpu_reminder_dismissed: false,
     });
+    expect(parseSettingsResult({ settings: { ui: { gpu_reminder_dismissed: true } } }).settings.ui.gpu_reminder_dismissed).toBe(true);
+    const badGpu = parseSettingsResult({ settings: { ui: { gpu_reminder_dismissed: "yes" } } });
+    expect(badGpu.settings.ui.gpu_reminder_dismissed).toBe(false);
+    expect(badGpu.warnings).toContain("ui.gpu_reminder_dismissed");
     const ok = parseSettingsResult({ settings: { ui: { dismissed_recommendations: ["0123456789abcdef"], other: 1 } } });
     expect(ok.settings.ui.dismissed_recommendations).toEqual(["0123456789abcdef"]);
     expect(ok.warnings).toEqual([]);

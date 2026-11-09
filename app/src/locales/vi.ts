@@ -403,6 +403,9 @@ export const vi: Messages = {
   "gpu.situationMissing":
     "Card đồ họa NVIDIA của máy tính này có thể tăng tốc nhận dạng, nhưng thiếu thành phần này nên tạm thời dùng CPU.",
   "gpu.situationNoGpu": "Không phát hiện card đồ họa NVIDIA; không có card này thì không cần tải.",
+  "gpuReminder.text":
+    "Máy tính này có card đồ họa NVIDIA nhưng chưa tải thành phần tăng tốc GPU, nên nhận dạng giọng nói đang chạy bằng CPU và chậm hơn. Hãy đồng ý giấy phép NVIDIA và tải về ở trang Mô hình để dùng card đồ họa.",
+  "gpuReminder.open": "Đến trang Mô hình",
   "gpu.readLicense": "Đọc giấy phép",
   "gpu.download": "Tải thành phần tăng tốc GPU",
   "gpu.consentNotice":
@@ -442,6 +445,8 @@ export const vi: Messages = {
   "speed.slowest": "Chậm nhất",
   "download.done": "Đã tải {model}.",
   "download.failed": "Tải {what} thất bại: {error}",
+  "download.ollamaOutdated":
+    "Ollama trên máy tính này quá cũ để tải mô hình dịch này. Hãy cập nhật Ollama tại https://ollama.com/download rồi nhấn Thử lại.",
 
   "tr.title": "Mô hình dịch",
   "tr.unreachable": "Không kết nối được dịch vụ dịch tại {url}. Nếu bạn dùng Ollama cục bộ, hãy khởi động nó trước.",

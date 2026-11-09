@@ -12,7 +12,7 @@ mọi cặp kết hợp khác giữa 20 ngôn ngữ cũng dùng được.
 
 - Nền tảng: Windows 10/11 x64 (nền tảng kiểm chứng chính), Linux x64, macOS Apple Silicon
 - Giấy phép: MIT (mỗi mô hình có giấy phép riêng, xem "Giấy phép")
-- Phiên bản hiện tại: 0.3.0 ([nội dung cập nhật](docs/release-notes/v0.3.0.md))
+- Phiên bản hiện tại: 0.3.1 ([nội dung cập nhật](docs/release-notes/v0.3.1.md))
 
 ## Tính năng
 

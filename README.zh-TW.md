@@ -10,7 +10,7 @@ kikitori 聽你電腦正在播放的聲音（或麥克風），即時辨識成�
 
 - 平台：Windows 10/11 x64（主要驗證平台）、Linux x64、macOS Apple Silicon
 - 授權：MIT（各模型另有授權，見「授權」）
-- 目前版本：0.3.0（[更新內容](docs/release-notes/v0.3.0.md)）
+- 目前版本：0.3.1（[更新內容](docs/release-notes/v0.3.1.md)）
 
 ## 功能
 

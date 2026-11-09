@@ -110,7 +110,7 @@ export const DEFAULT_SETTINGS: Settings = {
   speakers: { enabled: false, count: null },
   subtitle: DEFAULT_OVERLAY_STYLE,
   obs_output: "off",
-  ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false },
+  ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false, gpu_reminder_dismissed: false },
 };
 
 /** Recommendation fingerprints are short hex strings (engine `recommendation_fingerprint`). */
@@ -220,6 +220,7 @@ export function uiStateFromSettings(ui: unknown, warn: Warn): UiState {
     dismissed_recommendations: dismissedFromUi(o.dismissed_recommendations, warn),
     locale: localeFromUi(o.locale, warn),
     auto_save_transcripts: pickBool(o, "auto_save_transcripts", false, warn, "ui."),
+    gpu_reminder_dismissed: pickBool(o, "gpu_reminder_dismissed", false, warn, "ui."),
   };
 }
 

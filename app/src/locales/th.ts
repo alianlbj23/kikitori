@@ -405,6 +405,9 @@ export const th: Messages = {
   "gpu.situationMissing":
     "การ์ดแสดงผล NVIDIA ของคอมพิวเตอร์เครื่องนี้ช่วยเร่งความเร็วการรู้จำได้ แต่ยังขาดคอมโพเนนต์นี้ จึงใช้ CPU ไปก่อน",
   "gpu.situationNoGpu": "ไม่พบการ์ดแสดงผล NVIDIA หากไม่มีการ์ดดังกล่าวก็ไม่จำเป็นต้องดาวน์โหลด",
+  "gpuReminder.text":
+    "คอมพิวเตอร์เครื่องนี้มีการ์ดจอ NVIDIA แต่ยังไม่ได้ดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU การรู้จำเสียงจึงทำงานบน CPU และช้ากว่า ยอมรับสัญญาอนุญาตของ NVIDIA และดาวน์โหลดได้ที่หน้าโมเดลเพื่อใช้การ์ดจอเร่งความเร็ว",
+  "gpuReminder.open": "ไปที่หน้าโมเดล",
   "gpu.readLicense": "อ่านสัญญาอนุญาต",
   "gpu.download": "ดาวน์โหลดคอมโพเนนต์เร่งความเร็ว GPU",
   "gpu.consentNotice":
@@ -443,6 +446,8 @@ export const th: Messages = {
   "speed.slowest": "ช้าที่สุด",
   "download.done": "ดาวน์โหลด {model} แล้ว",
   "download.failed": "ดาวน์โหลด {what} ไม่สำเร็จ: {error}",
+  "download.ollamaOutdated":
+    "Ollama ในคอมพิวเตอร์เครื่องนี้เก่าเกินไปจึงดาวน์โหลดโมเดลแปลนี้ไม่ได้ อัปเดต Ollama ที่ https://ollama.com/download แล้วกดลองอีกครั้ง",
 
   "tr.title": "โมเดลแปลภาษา",
   "tr.unreachable": "เข้าถึงบริการแปลภาษาที่ {url} ไม่ได้ หากใช้ Ollama ในเครื่อง โปรดเริ่ม Ollama ก่อน",

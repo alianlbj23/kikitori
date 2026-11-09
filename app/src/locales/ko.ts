@@ -387,6 +387,9 @@ export const ko: Messages = {
   "gpu.sizeUnknown": "수백 MB",
   "gpu.situationMissing": "이 컴퓨터의 NVIDIA 그래픽 카드로 인식을 가속할 수 있지만, 이 구성 요소가 없어 현재 CPU를 사용합니다.",
   "gpu.situationNoGpu": "NVIDIA 그래픽 카드를 감지하지 못했습니다. 그래픽 카드가 없으면 다운로드할 필요가 없습니다.",
+  "gpuReminder.text":
+    "이 컴퓨터에는 NVIDIA 그래픽 카드가 있지만 'GPU 가속 구성 요소'를 아직 다운로드하지 않아 음성 인식이 CPU로 실행되어 느립니다. '모델' 페이지에서 NVIDIA 라이선스에 동의하고 다운로드하면 그래픽 카드로 가속할 수 있습니다.",
+  "gpuReminder.open": "모델 페이지로 이동",
   "gpu.readLicense": "라이선스 조항 읽기",
   "gpu.download": "GPU 가속 구성 요소 다운로드",
   "gpu.consentNotice":
@@ -425,6 +428,8 @@ export const ko: Messages = {
   "speed.slowest": "가장 느림",
   "download.done": "{model} 다운로드를 완료했습니다.",
   "download.failed": "{what} 다운로드 실패: {error}",
+  "download.ollamaOutdated":
+    "이 컴퓨터의 Ollama 버전이 오래되어 이 번역 모델을 다운로드할 수 없습니다. https://ollama.com/download 에서 Ollama를 업데이트한 뒤 '다시 시도'를 누르세요.",
 
   "tr.title": "번역 모델",
   "tr.unreachable": "번역 서비스 {url}에 연결할 수 없습니다. 로컬 Ollama를 사용한다면 먼저 실행하세요.",

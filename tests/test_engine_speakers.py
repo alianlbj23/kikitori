@@ -91,7 +91,9 @@ class SubtitleVoiceTest(SpeakerEngineCase):
         subtitles = self.run_speech_session()
         finals = [d for d in subtitles if d["is_final"] and d["original"]]
         partials = [d for d in subtitles if not d["is_final"]]
-        self.assertTrue(finals and partials)
+        # 假裝置一次送完整段音訊，句子結束前有沒有即時字幕取決於排程（CI 的 macOS 曾一則都沒有）；
+        # 「即時字幕不帶 voice」由 test_pipeline 的 VoiceLabelTest 確定地測
+        self.assertTrue(finals)
         self.assertEqual([d["voice"] for d in finals], list(range(1, len(finals) + 1)))
         self.assertTrue(all("voice" not in d for d in partials))
 
