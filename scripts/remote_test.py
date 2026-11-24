@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -201,6 +202,10 @@ def _configured(input_fn: InputFn, out: OutFn, config_path: Path) -> Config | No
 
 def open_app(runner: Runner, root: Path, out: OutFn) -> None:
     """`tauri dev`：介面與引擎都用 repo 裡目前的程式碼。關掉 app 視窗後回到選單。"""
+    missing = [name for name in ("node", "cargo") if shutil.which(name) is None]
+    if missing:
+        out(_missing_tools_help(missing))
+        return
     tauri = root / "app" / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"
     if not tauri.is_file():
         out("找不到 Tauri CLI，請先在 app/ 執行 npm install。")
@@ -212,6 +217,24 @@ def open_app(runner: Runner, root: Path, out: OutFn) -> None:
     except OSError as exc:
         logger.error("cannot start tauri dev: %s", exc)
         out(f"無法啟動（有安裝 Node.js 嗎？）：{exc}")
+
+
+def _missing_tools_help(missing: Sequence[str]) -> str:
+    """缺少編譯 app 的工具時的說明（tauri dev 本身只會丟出英文的 cargo metadata 錯誤）。"""
+    lines = [f"這台電腦缺少編譯 app 需要的工具：{'、'.join(missing)}。"]
+    if "cargo" in missing:
+        lines.append("  Rust：https://rustup.rs 安裝（不需要系統管理員權限）。")
+    if "node" in missing:
+        lines.append("  Node.js：https://nodejs.org 安裝。")
+    if sys.platform.startswith("linux"):
+        lines.append(
+            "  Linux 另外要裝 Tauri 的系統套件（例如 libwebkit2gtk-4.1-dev），見 "
+            "https://v2.tauri.app/start/prerequisites/"
+        )
+    lines.append(
+        "只讓這台當運算主機不需要 app：直接執行 `uv run kikitori` → 4「運算主機」。"
+    )
+    return "\n".join(lines)
 
 
 def sync(runner: Runner, root: Path, config: Config, out: OutFn) -> bool:

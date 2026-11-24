@@ -13,6 +13,7 @@ import unittest
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -174,6 +175,19 @@ class MenuTest(Case):
         self.assertEqual(call["argv"][-1], "dev")
         self.assertEqual(call["cwd"], ROOT / "app")
         self.assertEqual(call["env"]["KIKITORI_ENGINE_CWD"], str(ROOT))
+
+    def test_missing_build_tools_are_explained_instead_of_failing(self) -> None:
+        # Linux 運算主機常沒有 Rust：直接跑 tauri dev 只會看到「cargo metadata」的英文錯誤
+        runner = FakeRunner()
+        with mock.patch.object(
+            rt.shutil,
+            "which",
+            lambda name: None if name == "cargo" else "/usr/bin/" + name,
+        ):
+            self.menu(runner, "1", "5")
+        self.assertEqual(runner.calls, [])
+        self.assertTrue(self.said("Rust"))
+        self.assertTrue(self.said("運算主機"))  # 說明只當運算主機不需要 app
 
     def test_bad_host_input_is_refused(self) -> None:
         runner = FakeRunner()
