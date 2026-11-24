@@ -50,8 +50,26 @@
           <div class="compute-addresses" id="compute-addresses" hidden></div>
           <p class="rail-hint" id="compute-hint" aria-live="polite"></p>
           <p class="rail-hint compute-rtt" id="compute-rtt" hidden></p>
+          <!-- Another computer does the work: its card and the recognition model asked of it
+               (docs/specs/compute-capacity.md, lib/remote.ts hostModelOptions). Filled by main.ts. -->
+          <div class="host-info host-info-rail" id="compute-host-info" hidden></div>
           <button type="button" class="link-button" id="compute-settings" data-i18n="compute.goSettings" hidden></button>
           <button type="button" class="link-button" id="compute-pair" data-i18n="compute.pairNew" hidden></button>
+        </section>
+
+        <!-- Computing load while subtitles run (docs/specs/compute-capacity.md, lib/load.ts): a bar, the last
+             two minutes as a line, plain words and small print. On a remote session these are the compute host's. -->
+        <section class="rail-block load" id="load-block" aria-labelledby="load-heading" data-level="unknown" hidden>
+          <h2 id="load-heading" class="rail-heading" data-i18n="rail.load"></h2>
+          <div class="load-bar" id="load-bar" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="load-fill" id="load-fill"></span></div>
+          <svg class="load-chart" viewBox="0 0 240 40" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+            <!-- 接近上限 (70 %) and 跟不上 (90 %) of the busy share: y = 40 × (1 − share). -->
+            <line class="load-guide" x1="0" y1="12" x2="240" y2="12" />
+            <line class="load-guide load-guide-over" x1="0" y1="4" x2="240" y2="4" />
+            <path class="load-line" id="load-line" d="" />
+          </svg>
+          <p class="load-text" id="load-text"></p>
+          <p class="rail-hint load-detail" id="load-detail" hidden></p>
         </section>
 
         <!-- Speaker labels (docs/specs/speaker-labels.md): media mode only, chosen before 開始 (read when a session
@@ -626,6 +644,9 @@
                 <button type="button" class="ghost" id="remote-pair" data-i18n="remote.pair"></button>
                 <span class="form-status" id="remote-status" role="status"></span>
               </div>
+              <!-- What the compute host can run and the model asked of it (compute-capacity.md); filled by main.ts. -->
+              <h3 class="remote-subhead" data-i18n="host.heading"></h3>
+              <div class="host-info" id="remote-host-info"></div>
               <h3 class="remote-subhead" data-i18n="remote.servers"></h3>
               <ul class="remote-list" id="remote-servers"></ul>
             </fieldset>

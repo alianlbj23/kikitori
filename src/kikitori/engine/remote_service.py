@@ -4,23 +4,29 @@
 
 - **B 的角色**：在引擎行程裡開關 `RemoteServer`（GPU 使用權與本機 session 共用，由
   `EngineServer` 提供 `acquire_gpu`／`release_gpu`）、開配對窗口、管理允許連進來的電腦。
-- **A 的角色**：連到運算主機的配對埠、管理配對過的運算主機。遠端 session 本身在
+- **A 的角色**：連到運算主機的配對埠、管理配對過的運算主機、查詢運算主機的能力
+  （`remote.host_info`，docs/specs/compute-capacity.md「四」）。遠端 session 本身在
   `EngineServer._load_remote_session`。
+- B 的能力（`welcome.host`）由 `remote.capacity.HostCapacity` 組出，用引擎的硬體偵測與模型清單。
 
 配對狀態與伺服器狀態以 `remote` 事件送給介面。所有方法都可以在 stdio 請求執行緒上呼叫；
-開伺服器或配對埠只是開 socket，不會阻塞太久。
+開伺服器或配對埠只是開 socket，不會阻塞太久。例外是 `host_info()`（連線運算主機，最多
+`HOST_INFO_TIMEOUT` 秒），引擎在背景工作執行緒上呼叫它。
 """
 
 import ipaddress
 import logging
 import socket
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
 from kikitori.config import Settings, SettingsError, SettingsStore
 from kikitori.engine import protocol as p
+from kikitori.hardware import HardwareInfo
 from kikitori.pipeline.types import PipelineComponents
+from kikitori.remote.capacity import HostCapacity
+from kikitori.remote.client import PROBE_TIMEOUT, RemoteError, probe_host_info
 from kikitori.remote.host import fingerprint, local_addresses
 from kikitori.remote.identity import (
     Identity,
@@ -49,6 +55,8 @@ REMOTE_PAIRING_CLOSED = "remote_pairing_closed"
 REMOTE_IDENTITY_ERROR = "remote_identity_error"
 REMOTE_NOT_FOUND = "remote_not_found"
 PAIRING_JOIN = 5.0
+HOST_INFO_TIMEOUT = PROBE_TIMEOUT
+"""`remote.host_info` 最多等運算主機多久（秒）。"""
 
 SendEvent = Callable[[str, Mapping[str, Any]], None]
 ComponentBuilder = Callable[..., PipelineComponents]
@@ -93,13 +101,30 @@ class RemoteService:
         acquire_gpu: Callable[[], bool],
         release_gpu: Callable[[], None],
         app_version: str,
+        detect_hardware: Callable[[Settings], HardwareInfo],
+        downloaded_models: Callable[[], Collection[str]],
     ) -> None:
+        """
+        Args:
+            store: 設定。
+            send_event: 送 `remote` 事件給介面。
+            build_components: 替別台運算時建立 pipeline 元件。
+            acquire_gpu: 取得 GPU 使用權（與本機 session 共用）。
+            release_gpu: 歸還 GPU 使用權。
+            app_version: 握手時告訴對方的版本。
+            detect_hardware: 硬體偵測（替別台運算時告訴它這台的顯示卡與建議）。
+            downloaded_models: 這台已下載的 ASR 模型 id（別台指定模型時檢查）。
+        """
         self._store = store
         self._send_event = send_event
         self._build_components = build_components
         self._acquire_gpu = acquire_gpu
         self._release_gpu = release_gpu
         self._app_version = app_version
+        # 引擎一個、跨伺服器重開都沿用：偵測快取 30 秒（compute-capacity 二）
+        self._capacity = HostCapacity(
+            store.get, detect=detect_hardware, downloaded=downloaded_models
+        )
         self._lock = threading.Lock()
         self._identity: Identity | None = None
         self._identity_error: str | None = None
@@ -270,6 +295,7 @@ class RemoteService:
             port=compute.listen_port,
             app_version=self._app_version,
             on_change=self._server_event,
+            capacity=self._capacity,
         )
         try:
             server.start()
@@ -300,12 +326,54 @@ class RemoteService:
             server.stop()
             self._server_event()
 
+    def invalidate_capacity(self) -> None:
+        """硬體或翻譯模型變了（GPU 加速元件、拉完翻譯模型）：下次回答 A 時重新偵測。"""
+        self._capacity.invalidate()
+
+    def session_models(self) -> tuple[str, ...]:
+        """替別台運算的那一場用的 ASR 模型（那台可以指定，不一定是這台設定的）；沒有時空的。"""
+        with self._lock:
+            server = self._server
+        return () if server is None else tuple(server.session_models())
+
     def disconnect(self, params: dict[str, Any]) -> dict[str, Any]:
         """`remote.disconnect`：斷開正在使用這台電腦的那台（B 的使用者拿回 GPU）。"""
         p.reject_unknown_params(params)
         with self._lock:
             server = self._server
         return {"disconnected": bool(server is not None and server.disconnect())}
+
+    # --- 運算主機的能力（A） ---------------------------------------------------------
+
+    def host_info(self) -> dict[str, Any]:
+        """`remote.host_info`：用 `compute.host`／`compute.port` 查運算主機的能力（不開始字幕）。
+
+        會連線（最多 `HOST_INFO_TIMEOUT` 秒），要在背景工作執行緒上呼叫。
+
+        Returns:
+            `{"host": HostInfo | None}`；運算主機沒送能力（舊版）或內容不合格時 `host` 為 null。
+
+        Raises:
+            p.ProtocolError: `remote_not_configured`、`remote_unreachable`、`remote_not_paired`、
+                `remote_incompatible`、`remote_identity_error`、`remote_error`（回應不合格）。
+        """
+        compute = self._store.get().compute
+        if not compute.host:
+            raise p.ProtocolError("remote_not_configured", "no compute host is set")
+        identity = self.identity()
+        try:
+            host = probe_host_info(
+                identity=identity,
+                servers=self.servers,
+                host=compute.host,
+                port=compute.port,
+                app_version=self._app_version,
+                timeout=HOST_INFO_TIMEOUT,
+            )
+        except RemoteError as exc:
+            logger.info("cannot ask the compute host what it can do: %s", exc)
+            raise p.ProtocolError(exc.code, str(exc)) from exc
+        return {"host": host}
 
     # --- 配對 -------------------------------------------------------------------
 

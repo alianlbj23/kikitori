@@ -5,6 +5,7 @@ import { setLocale, t } from "./i18n";
 import {
   DEFAULT_COMPUTE,
   DEFAULT_COMPUTE_PORT,
+  MAX_HOST_MODELS,
   PAIRING_FAILURES,
   addressKind,
   addressLabel,
@@ -17,11 +18,16 @@ import {
   formatDigits,
   formatFingerprint,
   formatHostPort,
+  hostHasMoreModels,
+  hostInfoErrorText,
+  hostModelOptions,
+  hostSummary,
   isPairDialogFinished,
   isPairingDigits,
   isValidHost,
   listenHostOptions,
   needsLocalModels,
+  needsOverConfirm,
   normalizeDigits,
   openPairDialog,
   pairAnswering,
@@ -30,6 +36,8 @@ import {
   pairDialogView,
   pairFailureText,
   pairedDate,
+  parseHostInfo,
+  parseHostInfoResult,
   parseListenPort,
   parsePairingState,
   parsePort,
@@ -41,9 +49,11 @@ import {
   remoteFormDiffers,
   remoteFormFromSettings,
   remoteFormPatch,
+  remoteModelPatch,
   roleChange,
   serverPeerText,
   serverStateText,
+  shortGpuName,
   validateRemoteForm,
   withServerEvent,
   type ComputeSettings,
@@ -105,6 +115,8 @@ describe("settings.compute", () => {
         server_enabled: true,
         listen_host: "fd7a::1",
         listen_port: 47300,
+        remote_fast_model: "",
+        remote_final_model: "large-v3",
       },
       () => {
         throw new Error("no warning expected");
@@ -117,7 +129,28 @@ describe("settings.compute", () => {
       server_enabled: true,
       listen_host: "fd7a::1",
       listen_port: 47300,
+      remote_fast_model: "",
+      remote_final_model: "large-v3",
     });
+  });
+
+  it("reads the models asked of the compute host, defaulting to its own setting", () => {
+    const quiet = () => {
+      throw new Error("no warning expected");
+    };
+    expect(DEFAULT_COMPUTE.remote_fast_model).toBe("");
+    expect(DEFAULT_COMPUTE.remote_final_model).toBe("");
+    expect(computeFromSettings({ mode: "remote" }, quiet).remote_final_model).toBe("");
+    expect(computeFromSettings({ remote_fast_model: "large-v3-turbo" }, quiet).remote_fast_model).toBe("large-v3-turbo");
+    const warnings: string[] = [];
+    const c = computeFromSettings(
+      { remote_fast_model: "../x", remote_final_model: 3 },
+      (f) => warnings.push(f),
+    );
+    expect([c.remote_fast_model, c.remote_final_model]).toEqual(["", ""]);
+    expect(warnings).toEqual(["compute.remote_fast_model", "compute.remote_final_model"]);
+    expect(remoteModelPatch("large-v3")).toEqual({ compute: { remote_final_model: "large-v3" } });
+    expect(remoteModelPatch("")).toEqual({ compute: { remote_final_model: "" } });
   });
 
   it("keeps the listening port apart from the port this computer connects to", () => {
@@ -612,5 +645,121 @@ describe("rail and compute host section", () => {
   it("shows the pairing date locally, or the raw text when it does not parse", () => {
     expect(pairedDate("2026-11-20T03:04:05Z", "en")).toMatch(/2026/);
     expect(pairedDate("not a date", "en")).toBe("not a date");
+  });
+});
+
+/** The `HostInfo` example of compute-capacity.md, with a few more models. */
+function hostPayload(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    gpu: { name: "NVIDIA GeForce GTX 1080 Ti", vram_total_mb: 11264 },
+    device: "cuda",
+    compute_type: "int8",
+    current: { fast: "large-v3-turbo", final: "large-v3" },
+    recommended: { fast: "large-v3-turbo", final: "kotoba-whisper-v2.0" },
+    models: [
+      { id: "large-v3", downloaded: true, need_mb: 2140, fit: "ok" },
+      { id: "kotoba-whisper-v2.0", downloaded: true, need_mb: 1600, fit: "tight" },
+      { id: "huge-model", downloaded: true, need_mb: 12000, fit: "over" },
+      { id: "small", downloaded: false, need_mb: 600, fit: "ok" },
+    ],
+    translation_model: "qwen3.5:9b",
+    ...over,
+  };
+}
+
+describe("compute host capacity", () => {
+  it("parses a valid report", () => {
+    const host = parseHostInfo(hostPayload());
+    expect(host?.gpu).toEqual({ name: "NVIDIA GeForce GTX 1080 Ti", vram_total_mb: 11264 });
+    expect(host?.device).toBe("cuda");
+    expect(host?.models.map((m) => m.fit)).toEqual(["ok", "tight", "over", "ok"]);
+    // The compute host could not measure its hardware: fit is unknown, the report is kept.
+    const unknown = parseHostInfo({ ...hostPayload(), models: [{ id: "large-v3", downloaded: true, need_mb: 2140, fit: null }] });
+    expect(unknown?.models[0]?.fit).toBeNull();
+    expect(hostModelOptions(unknown, "").map((o) => o.label).join(" ")).toContain("無法判斷負荷");
+    expect(parseHostInfoResult({ host: hostPayload() })).toEqual(host);
+    const cpu = parseHostInfo(hostPayload({ gpu: null, device: "cpu", recommended: null, translation_model: null }));
+    expect([cpu?.gpu, cpu?.recommended, cpu?.translation_model]).toEqual([null, null, null]);
+    // 64 characters, counted like Rust (code points), not UTF-16 units.
+    expect(parseHostInfo(hostPayload({ gpu: { name: "🎮".repeat(64), vram_total_mb: 1 } }))).not.toBeNull();
+    expect(parseHostInfo(hostPayload({ gpu: { name: "🎮".repeat(65), vram_total_mb: 1 } }))).toBeNull();
+  });
+
+  it("drops the whole report when any field is malformed", () => {
+    const bad: Record<string, unknown>[] = [
+      { gpu: { name: "x".repeat(65), vram_total_mb: 1 } },
+      { gpu: { name: "GPU", vram_total_mb: -1 } },
+      { gpu: { name: "GPU", vram_total_mb: 2_000_000 } },
+      { device: "rocm" },
+      { compute_type: "INT8; rm" },
+      { current: { fast: "large-v3-turbo" } },
+      { current: { fast: "../x", final: "large-v3" } },
+      { recommended: { fast: 1, final: "large-v3" } },
+      { models: "large-v3" },
+      { models: [{ id: "large-v3", downloaded: "yes", need_mb: 1, fit: "ok" }] },
+      { models: [{ id: "large-v3", downloaded: true, need_mb: Number.NaN, fit: "ok" }] },
+      { models: [{ id: "large-v3", downloaded: true, need_mb: 1, fit: "maybe" }] },
+      { models: Array.from({ length: MAX_HOST_MODELS + 1 }, (_, i) => ({ id: `m${i}`, downloaded: true, need_mb: 1, fit: "ok" })) },
+      { translation_model: "../x" },
+    ];
+    for (const over of bad) expect(parseHostInfo(hostPayload(over)), JSON.stringify(over)).toBeNull();
+    for (const none of [null, undefined, "host", []]) expect(parseHostInfo(none)).toBeNull();
+    expect(parseHostInfoResult({ host: null })).toBeNull();
+    expect(parseHostInfoResult(null)).toBeNull();
+  });
+
+  it("names the graphics card briefly", () => {
+    expect(shortGpuName("NVIDIA GeForce GTX 1080 Ti")).toBe("GTX 1080 Ti");
+    expect(shortGpuName("NVIDIA RTX A6000")).toBe("RTX A6000");
+    expect(shortGpuName("NVIDIA")).toBe("NVIDIA");
+    const host = parseHostInfo(hostPayload())!;
+    expect(hostSummary(host)).toBe("GTX 1080 Ti・11 GB");
+    expect(hostSummary({ ...host, gpu: null, device: "cpu" })).toBe(t("host.cpu"));
+  });
+
+  it("offers the compute host's setting and its downloaded models, labelled", () => {
+    const host = parseHostInfo(hostPayload())!;
+    const options = hostModelOptions(host, "");
+    expect(options.map((o) => o.value)).toEqual(["", "large-v3", "kotoba-whisper-v2.0", "huge-model"]);
+    expect(options.map((o) => o.label)).toEqual([
+      "照運算主機的設定（large-v3）",
+      "large-v3（跑得動）",
+      "kotoba-whisper-v2.0（建議・可能吃緊）",
+      "huge-model（超出負荷）",
+    ]);
+    expect(options.map((o) => o.fit)).toEqual([null, "ok", "tight", "over"]);
+    expect(hostHasMoreModels(host)).toBe(true);
+    expect(hostHasMoreModels({ ...host, models: host.models.filter((m) => m.downloaded) })).toBe(false);
+    expect(hostHasMoreModels(null)).toBe(false);
+  });
+
+  it("keeps a saved choice the compute host no longer has, marked", () => {
+    const host = parseHostInfo(hostPayload())!;
+    expect(hostModelOptions(host, "small").at(-1)).toEqual({ value: "small", label: "small（運算主機上沒有）", fit: null });
+    expect(hostModelOptions(null, "")).toEqual([{ value: "", label: "照運算主機的設定", fit: null }]);
+    expect(hostModelOptions(null, "large-v3").map((o) => o.value)).toEqual(["", "large-v3"]);
+  });
+
+  it("asks again only for a model reported as too heavy", () => {
+    const host = parseHostInfo(hostPayload())!;
+    expect(needsOverConfirm(host, "huge-model")).toBe(true);
+    expect(needsOverConfirm(host, "kotoba-whisper-v2.0")).toBe(false);
+    expect(needsOverConfirm(host, "")).toBe(false);
+    expect(needsOverConfirm(null, "huge-model")).toBe(false);
+  });
+
+  it("explains a failed query with the session's words for the remote codes", () => {
+    for (const code of ["remote_not_configured", "remote_unreachable", "remote_not_paired", "remote_incompatible", "remote_identity_error"]) {
+      expect(hostInfoErrorText(code, "fallback")).toBe(describeStatusError(code, null));
+    }
+    expect(hostInfoErrorText("remote_unreachable", "x")).toContain("連不上運算主機");
+    expect(hostInfoErrorText("internal_error", "fallback")).toBe("fallback");
+    expect(hostInfoErrorText(null, "fallback")).toBe("fallback");
+  });
+
+  it("has every label in every interface language", () => {
+    setLocale("en");
+    const host = parseHostInfo(hostPayload())!;
+    expect(hostModelOptions(host, "")[2]!.label).toBe("kotoba-whisper-v2.0 (recommended · May be tight)");
   });
 });

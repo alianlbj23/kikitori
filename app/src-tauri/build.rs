@@ -22,6 +22,7 @@ fn main() {
             "session_set_translation",
             "session_set_furigana",
             "remote_status",
+            "remote_host_info",
             "remote_server_set",
             "remote_identity_reset",
             "remote_disconnect",

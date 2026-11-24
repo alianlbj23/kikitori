@@ -5,7 +5,9 @@
  * without touching the DOM — validating the untrusted `remote.status` result
  * and `engine://remote` events (T13 contract), host/port and pairing-digit
  * input, the pairing dialog's state machine and its wording, the left rail's
- * "運算位置" text, and which extra actions a remote session status offers.
+ * "運算位置" text, and which extra actions a remote session status offers;
+ * and the compute host's capacity report (`remote.host_info`,
+ * docs/specs/compute-capacity.md) with the model menu built from it.
  * `main.ts` only renders these views and calls the Tauri commands.
  *
  * Rust validates every command argument and event again; the checks here exist
@@ -13,7 +15,9 @@
  * like `validate.ts`).
  */
 
+import { describeStatusError } from "./format";
 import { t, type StringKey } from "./i18n";
+import { formatGb } from "./load";
 import type { EngineState } from "./types";
 import { ValidationError } from "./validate";
 
@@ -35,6 +39,13 @@ export interface ComputeSettings {
   listen_host: string;
   /** This computer's listening port as a compute host (B); pairing uses the next port. */
   listen_port: number;
+  /**
+   * compute-capacity.md: the models this computer asks the compute host for
+   * (`session.start` `settings.asr`); "" = the compute host's own setting. Only
+   * the compute host knows which are downloaded, so only the id format is checked here.
+   */
+  remote_fast_model: string;
+  remote_final_model: string;
 }
 
 export const DEFAULT_COMPUTE_PORT = 47100;
@@ -54,7 +65,16 @@ export const DEFAULT_COMPUTE: ComputeSettings = {
   server_enabled: false,
   listen_host: "",
   listen_port: DEFAULT_COMPUTE_PORT,
+  remote_fast_model: "",
+  remote_final_model: "",
 };
+
+/** The engine's ASR model id format (registry ids such as `large-v3-turbo`). */
+const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
+
+export function isModelId(v: unknown): v is string {
+  return typeof v === "string" && MODEL_ID_PATTERN.test(v);
+}
 
 export function isValidHost(host: string): boolean {
   return host.length >= 1 && host.length <= MAX_HOST_CHARS && HOST_PATTERN.test(host);
@@ -104,7 +124,22 @@ export function computeFromSettings(v: unknown, warn: (field: string) => void): 
   let listenPort = isValidListenPort(port) ? port : d.listen_port;
   if (isValidListenPort(o.listen_port)) listenPort = o.listen_port;
   else if (o.listen_port !== undefined) warn("compute.listen_port");
-  return { mode, host, port, server_enabled: serverEnabled, listen_host: listenHost, listen_port: listenPort };
+  const model = (key: "remote_fast_model" | "remote_final_model"): string => {
+    const v = o[key];
+    if (v === "" || isModelId(v)) return v;
+    if (v !== undefined) warn(`compute.${key}`);
+    return d[key];
+  };
+  return {
+    mode,
+    host,
+    port,
+    server_enabled: serverEnabled,
+    listen_host: listenHost,
+    listen_port: listenPort,
+    remote_fast_model: model("remote_fast_model"),
+    remote_final_model: model("remote_final_model"),
+  };
 }
 
 // ---------------------------------------------------------------- the rail's three roles
@@ -791,4 +826,238 @@ export function pairedDate(isoUtc: string, locale: string): string {
     console.error("paired_at formatting failed:", e);
     return isoUtc;
   }
+}
+
+// ---------------------------------------------------------------- the compute host's capacity (compute-capacity.md 二、五)
+
+/** Whether a model, as the final pass next to the compute host's real-time model, fits its memory. */
+export type ModelFit = "ok" | "tight" | "over";
+const MODEL_FITS: readonly ModelFit[] = ["ok", "tight", "over"];
+
+export interface HostGpu {
+  /** ≤ 64 characters, e.g. "NVIDIA GeForce GTX 1080 Ti". */
+  name: string;
+  vram_total_mb: number;
+}
+
+export interface ModelPair {
+  fast: string;
+  final: string;
+}
+
+export interface HostModel {
+  id: string;
+  downloaded: boolean;
+  /** Memory this model needs on the compute host (GPU memory on CUDA, RAM on CPU), MiB. */
+  need_mb: number;
+  /** Null when the compute host could not measure its hardware. */
+  fit: ModelFit | null;
+}
+
+/** `remote.host_info` → `host`: what the compute host can run, asked before connecting. */
+export interface HostInfo {
+  /** null: no NVIDIA GPU (`device` is "cpu"). */
+  gpu: HostGpu | null;
+  device: "cuda" | "cpu";
+  compute_type: string;
+  /** The compute host's own settings. */
+  current: ModelPair;
+  /** Its hardware recommendation; null when detection failed. */
+  recommended: ModelPair | null;
+  models: HostModel[];
+  translation_model: string | null;
+}
+
+export const MAX_HOST_MODELS = 32;
+/** Same bound as `metrics.gpu` (1 TiB in MiB): anything larger is not a GPU. */
+const MAX_MEMORY_MB = 1_048_576;
+const COMPUTE_TYPE_PATTERN = /^[a-z0-9_]{1,32}$/;
+const TRANSLATION_MODEL_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
+
+function modelId(o: Obj, key: string, path: string): string {
+  const v = o[key];
+  if (!isModelId(v)) throw new ValidationError(`${path}.${key}`, "not a model id");
+  return v;
+}
+
+function megabytes(o: Obj, key: string, path: string): number {
+  const v = o[key];
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > MAX_MEMORY_MB) {
+    throw new ValidationError(`${path}.${key}`, `expected a number in 0–${MAX_MEMORY_MB}`);
+  }
+  return v;
+}
+
+function modelPair(v: unknown, path: string): ModelPair {
+  const o = obj(v, path);
+  return { fast: modelId(o, "fast", path), final: modelId(o, "final", path) };
+}
+
+function hostModel(v: unknown, path: string): HostModel {
+  const o = obj(v, path);
+  const fit = o.fit;
+  if (fit !== null && !(MODEL_FITS as readonly unknown[]).includes(fit)) {
+    throw new ValidationError(`${path}.fit`, "expected ok, tight, over or null");
+  }
+  return {
+    id: modelId(o, "id", path),
+    downloaded: flag(o, "downloaded", path),
+    need_mb: megabytes(o, "need_mb", path),
+    fit: fit as ModelFit | null,
+  };
+}
+
+function hostInfoStrict(v: unknown): HostInfo {
+  const p = "host";
+  const o = obj(v, p);
+  let gpu: HostGpu | null = null;
+  if (o.gpu !== null && o.gpu !== undefined) {
+    const g = obj(o.gpu, `${p}.gpu`);
+    // Counted in characters (code points), as Rust and the engine count them.
+    const name = boundedStr(g, "name", `${p}.gpu`, MAX_NAME_CHARS * 2);
+    if ([...name].length > MAX_NAME_CHARS) {
+      throw new ValidationError(`${p}.gpu.name`, `longer than ${MAX_NAME_CHARS}`);
+    }
+    gpu = {
+      name,
+      vram_total_mb: megabytes(g, "vram_total_mb", `${p}.gpu`),
+    };
+  }
+  const device = o.device;
+  if (device !== "cuda" && device !== "cpu") throw new ValidationError(`${p}.device`, "expected cuda or cpu");
+  const computeType = boundedStr(o, "compute_type", p, 32);
+  if (!COMPUTE_TYPE_PATTERN.test(computeType)) throw new ValidationError(`${p}.compute_type`, "not a precision name");
+  const models = o.models;
+  if (!Array.isArray(models)) throw new ValidationError(`${p}.models`, "expected an array");
+  if (models.length > MAX_HOST_MODELS) throw new ValidationError(`${p}.models`, `more than ${MAX_HOST_MODELS} entries`);
+  const translation = optBoundedStr(o, "translation_model", p, 200);
+  if (translation !== null && !TRANSLATION_MODEL_PATTERN.test(translation)) {
+    throw new ValidationError(`${p}.translation_model`, "not a model name");
+  }
+  return {
+    gpu,
+    device,
+    compute_type: computeType,
+    current: modelPair(o.current, `${p}.current`),
+    recommended:
+      o.recommended === null || o.recommended === undefined ? null : modelPair(o.recommended, `${p}.recommended`),
+    models: models.map((m, i) => hostModel(m, `${p}.models[${i}]`)),
+    translation_model: translation,
+  };
+}
+
+/**
+ * A `HostInfo` from the compute host, or null when any field is malformed:
+ * half a capacity report would label models wrongly, so it is all or nothing
+ * (the spec's rule for `welcome.host` too). The reason is logged.
+ */
+export function parseHostInfo(v: unknown): HostInfo | null {
+  if (v === null || v === undefined) return null;
+  try {
+    return hostInfoStrict(v);
+  } catch (e) {
+    if (!(e instanceof ValidationError)) throw e;
+    console.warn("ignoring the compute host's capacity report:", e.message);
+    return null;
+  }
+}
+
+/** `remote.host_info` → `{host}`. */
+export function parseHostInfoResult(v: unknown): HostInfo | null {
+  return parseHostInfo(asObj(v).host);
+}
+
+/** "NVIDIA GeForce GTX 1080 Ti" → "GTX 1080 Ti": the brand words say nothing the user needs. */
+export function shortGpuName(name: string): string {
+  const short = name
+    .replace(/^\s*NVIDIA\s+/i, "")
+    .replace(/^GeForce\s+/i, "")
+    .trim();
+  return short === "" ? name.trim() : short;
+}
+
+/** "GTX 1080 Ti・11 GB", or that the compute host has no graphics card. */
+export function hostSummary(host: HostInfo): string {
+  if (!host.gpu) return t("host.cpu");
+  return t("host.gpu", { name: shortGpuName(host.gpu.name), memory: formatGb(host.gpu.vram_total_mb) });
+}
+
+const FIT_TEXT: Readonly<Record<ModelFit, StringKey>> = {
+  ok: "host.fit.ok",
+  tight: "host.fit.tight",
+  over: "host.fit.over",
+};
+
+export interface HostModelOption {
+  /** "" = the compute host's own setting. */
+  value: string;
+  label: string;
+  fit: ModelFit | null;
+}
+
+/**
+ * The 辨識模型 menu: "照運算主機的設定（large-v3）", then the models the compute
+ * host has downloaded, each labelled 建議 and how well it fits. A saved choice
+ * the compute host no longer has stays listed (marked so) rather than the menu
+ * silently showing another value; without a report only the saved choice is listed.
+ */
+export function hostModelOptions(host: HostInfo | null, selected: string): HostModelOption[] {
+  const follow: HostModelOption = {
+    value: "",
+    label: host ? t("host.followHost", { model: host.current.final }) : t("host.followHostUnknown"),
+    fit: null,
+  };
+  if (!host) return selected ? [follow, { value: selected, label: selected, fit: null }] : [follow];
+  const options = host.models
+    .filter((m) => m.downloaded)
+    .map(
+      (m): HostModelOption => ({
+        value: m.id,
+        label: t(host.recommended?.final === m.id ? "host.optionRecommended" : "host.option", {
+          model: m.id,
+          fit: t(m.fit ? FIT_TEXT[m.fit] : "host.fit.unknown"),
+        }),
+        fit: m.fit,
+      }),
+    );
+  if (selected && !options.some((o) => o.value === selected)) {
+    options.push({ value: selected, label: t("host.optionMissing", { model: selected }), fit: null });
+  }
+  return [follow, ...options];
+}
+
+/** Some models are only on the compute host's list, not on its disk: say where to get them. */
+export function hostHasMoreModels(host: HostInfo | null): boolean {
+  return host?.models.some((m) => !m.downloaded) ?? false;
+}
+
+/** Choosing this model needs a second "yes": the compute host reports it would not keep up. */
+export function needsOverConfirm(host: HostInfo | null, id: string): boolean {
+  return id !== "" && host?.models.find((m) => m.id === id)?.fit === "over";
+}
+
+/** Patch for the final model asked of the compute host ("" = its own); the real-time model stays its own. */
+export function remoteModelPatch(finalModel: string): Record<string, unknown> {
+  return { compute: { remote_final_model: finalModel } };
+}
+
+/** `remote.host_info` failures that already have plain words (the same as a session's). */
+const HOST_INFO_CODES = [
+  "remote_not_configured",
+  "remote_unreachable",
+  "remote_not_paired",
+  "remote_incompatible",
+  "remote_identity_error",
+  // The compute host answered with an error or a malformed reply (engine `remote.host_info`).
+  "remote_error",
+] as const;
+
+/**
+ * Why the compute host could not be asked: the session's wording for the
+ * remote_* codes ("連不上運算主機…"), else `fallback` (lib/api describeError).
+ */
+export function hostInfoErrorText(code: string | null, fallback: string): string {
+  return code !== null && (HOST_INFO_CODES as readonly string[]).includes(code)
+    ? describeStatusError(code, null)
+    : fallback;
 }

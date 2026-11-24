@@ -376,6 +376,8 @@ class ValidationTest(unittest.TestCase):
                 "server_enabled": False,
                 "listen_host": "",
                 "listen_port": 47100,
+                "remote_fast_model": "",
+                "remote_final_model": "",
             },
         )
         data = s.to_dict()
@@ -424,6 +426,34 @@ class ValidationTest(unittest.TestCase):
                 with self.assertRaises(SettingsError) as ctx:
                     Settings.from_dict(_with("compute", {"listen_port": value}))
                 self.assertIn("compute.listen_port", str(ctx.exception))
+
+    def test_compute_remote_models(self) -> None:
+        # compute-capacity 四：在運算主機上用哪個模型；空字串＝照運算主機的設定（舊檔沒有這兩欄）
+        old = Settings().to_dict()
+        for key in ("remote_fast_model", "remote_final_model"):
+            del old["compute"][key]
+        loaded = Settings.from_dict(old).compute
+        self.assertEqual(
+            (loaded.remote_fast_model, loaded.remote_final_model), ("", "")
+        )
+        s = Settings.from_dict(
+            _with(
+                "compute",
+                {"remote_fast_model": "base", "remote_final_model": "large-v3"},
+            )
+        )
+        self.assertEqual(
+            (s.compute.remote_fast_model, s.compute.remote_final_model),
+            ("base", "large-v3"),
+        )
+        self.assertEqual(s.to_dict()["compute"]["remote_final_model"], "large-v3")
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
+        # 只驗證格式：是否在運算主機上下載好由運算主機判斷
+        for value in ("../evil", "large v3", "large-v3\n", "x" * 101, 5, None):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as ctx:
+                    Settings.from_dict(_with("compute", {"remote_final_model": value}))
+                self.assertIn("compute.remote_final_model", str(ctx.exception))
 
     def test_compute_validation(self) -> None:
         for value, path in (

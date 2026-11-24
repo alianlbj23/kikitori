@@ -19,7 +19,7 @@ from kikitori.config import Settings
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
 from kikitori.engine.testing import ENDLESS_DEVICE, SPEECH_DEVICE, fake_services
-from kikitori.remote.identity import load_or_create_identity
+from kikitori.remote.identity import IdentityError, load_or_create_identity
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.paths import compute_dir, servers_path
 from kikitori.remote.server import RemoteServer
@@ -86,6 +86,30 @@ class Gate:
             self.held = False
 
 
+HOST_INFO: dict[str, Any] = {
+    "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "current": {"fast": "base", "final": "small"},
+    "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
+    "models": [
+        {"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"},
+        {"id": "large-v3", "downloaded": False, "need_mb": 2140, "fit": "tight"},
+    ],
+    "translation_model": "qwen3.5:4b",
+}
+
+
+class FakeCapacity:
+    """B 的能力（`remote.capacity.HostCapacitySource`）：固定的 HostInfo 與已下載的模型。"""
+
+    def host_info(self, *, detect: bool = True) -> dict[str, Any]:
+        return HOST_INFO
+
+    def downloaded_models(self) -> frozenset[str]:
+        return frozenset({"base", "small"})
+
+
 class EngineRemoteCase(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -112,6 +136,7 @@ class EngineRemoteCase(unittest.TestCase):
             port=0,
             app_version="0.3.1",
             metrics_interval=0.2,
+            capacity=FakeCapacity(),
         )
         self.remote.start()
         self.addCleanup(self.remote.stop)
@@ -141,12 +166,32 @@ class EngineRemoteCase(unittest.TestCase):
         self.addCleanup(self.engine.close)
         self.next_id = 0
 
-    def request(self, method: str, params: dict[str, Any] | None = None) -> None:
+    def request(self, method: str, params: dict[str, Any] | None = None) -> int:
         self.next_id += 1
         message: dict[str, Any] = {"id": self.next_id, "method": method}
         if params is not None:
             message["params"] = params
         self.engine.handle_line(json.dumps(message).encode())
+        return self.next_id
+
+    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """送一個請求並等它的回應（`result` 或 `error`）。"""
+        request_id = self.request(method, params)
+        found: list[dict[str, Any]] = []
+
+        def seen() -> bool:
+            found[:] = [m for m in self.sink.messages if m.get("id") == request_id]
+            return bool(found)
+
+        with self.sink.cond:
+            if not self.sink.cond.wait_for(seen, WAIT):
+                raise AssertionError(f"no reply to {method}")
+        return found[0]
+
+    def error_code(self, method: str, params: dict[str, Any] | None = None) -> str:
+        reply = self.call(method, params)
+        self.assertIn("error", reply, reply)
+        return str(reply["error"]["code"])
 
     def wait_gpu_released(self) -> bool:
         for _ in range(int(WAIT / 0.05)):
@@ -237,6 +282,73 @@ class RemoteSessionTest(EngineRemoteCase):
         self.request("session.start", {"mode": "media", "device_id": ENDLESS_DEVICE})
         status = self.sink.wait_status(1, "error", "idle")
         self.assertEqual(status["code"], "remote_busy")
+
+
+class HostInfoTest(EngineRemoteCase):
+    """compute-capacity 四：`remote.host_info` 連上設定的運算主機查它的能力。"""
+
+    def test_host_info_returns_the_compute_hosts_capabilities(self) -> None:
+        reply = self.call("remote.host_info", {})
+        self.assertEqual(reply.get("result"), {"host": HOST_INFO}, reply)
+        # 只是查詢：沒有佔 B 的 GPU、沒有開始任何 session
+        self.assertFalse(self.gate.held)
+        self.assertIsNone(self.remote.owner_spki())
+        self.assertEqual(self.sink.events("status"), [])
+
+    def test_host_info_is_answered_while_the_host_is_busy(self) -> None:
+        self.assertTrue(self.gate.acquire())  # B 正在替別台或自己跑字幕
+        self.assertEqual(self.call("remote.host_info")["result"], {"host": HOST_INFO})
+
+    def test_host_info_errors(self) -> None:
+        self.assertEqual(
+            self.error_code("remote.host_info", {"x": 1}), "invalid_params"
+        )
+        self.b_trust.remove(load_or_create_identity(compute_dir()).spki)
+        self.assertEqual(self.error_code("remote.host_info"), "remote_not_paired")
+        port = self.remote.port
+        self.remote.stop()
+        self.services.settings_store.update({"compute": {"port": port}})
+        self.assertEqual(self.error_code("remote.host_info"), "remote_unreachable")
+        self.services.settings_store.update({"compute": {"host": ""}})
+        self.assertEqual(self.error_code("remote.host_info"), "remote_not_configured")
+
+    def test_an_unreadable_identity_is_reported(self) -> None:
+        with mock.patch(
+            "kikitori.engine.remote_service.load_or_create_identity",
+            side_effect=IdentityError("damaged key"),
+        ):
+            code = self.error_code("remote.host_info")
+        self.assertEqual(code, "remote_identity_error")
+
+
+class RemoteModelTest(EngineRemoteCase):
+    """compute-capacity 四：`compute.remote_*_model` 隨遠端 session 送給運算主機。"""
+
+    def test_the_chosen_model_runs_on_the_compute_host(self) -> None:
+        self.services.settings_store.update({"compute": {"remote_final_model": "base"}})
+        self.request("session.start", {"mode": "media", "device_id": ENDLESS_DEVICE})
+        self.sink.wait_status(1, "running")
+        self.assertEqual(
+            self.remote.session_models(), (Settings().asr.fast_model, "base")
+        )
+        # 只影響這一場：這台與 B 的 asr 設定都不變
+        self.assertEqual(
+            self.services.settings_store.get().asr.final_model,
+            Settings().asr.final_model,
+        )
+        self.request("session.stop")
+        self.sink.wait_status(1, "idle")
+
+    def test_a_model_the_compute_host_lacks_is_remote_model_not_downloaded(
+        self,
+    ) -> None:
+        self.services.settings_store.update(
+            {"compute": {"remote_final_model": "large-v3"}}
+        )
+        self.request("session.start", {"mode": "media", "device_id": ENDLESS_DEVICE})
+        status = self.sink.wait_status(1, "error", "idle")
+        self.assertEqual(status["code"], "remote_model_not_downloaded")
+        self.assertTrue(self.wait_gpu_released())
 
 
 if __name__ == "__main__":

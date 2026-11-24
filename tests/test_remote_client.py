@@ -6,8 +6,10 @@
 """
 
 import os
+import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,12 @@ from kikitori.capture import ArraySource, CaptureError
 from kikitori.config import Settings
 from kikitori.engine.testing import EndlessSource, _speech_track, fake_services
 from kikitori.remote import protocol as rp
-from kikitori.remote.client import RemoteClientSession, RemoteError
+from kikitori.remote.client import (
+    RemoteClientSession,
+    RemoteError,
+    _check_metrics,
+    probe_host_info,
+)
 from kikitori.remote.identity import Identity, load_or_create_identity
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.server import RemoteServer
@@ -99,7 +106,7 @@ class RemoteClientCase(unittest.TestCase):
         self.gate = Gate()
         self.server = self.start_server()
 
-    def start_server(self) -> RemoteServer:
+    def start_server(self, **kwargs: Any) -> RemoteServer:
         server = RemoteServer(
             identity=self.server_id,
             trust=self.trust,
@@ -111,6 +118,7 @@ class RemoteClientCase(unittest.TestCase):
             port=0,
             app_version="0.3.1",
             metrics_interval=0.2,
+            **kwargs,
         )
         server.start()
         self.addCleanup(server.stop)
@@ -346,6 +354,222 @@ class UntrustedEventsTest(RemoteClientCase):
         ):
             with self.subTest(bad=str(bad)[:60]):
                 self.assertIsNone(self.check(bad))
+
+
+GOOD_METRICS: dict[str, Any] = {
+    "level_dbfs": -20.0,
+    "speech_level_dbfs": None,
+    "background_level_dbfs": -50.0,
+    "backlog": 1,
+    "latency_ms_median": 900,
+    "final_busy": 0.45,
+    "rtf": 0.3,
+    "gpu": {
+        "name": "NVIDIA GeForce GTX 1080 Ti",
+        "vram_used_mb": 6246,
+        "vram_total_mb": 11264,
+        "util_pct": 37,
+    },
+    "session_id": 99,
+}
+
+
+class MetricsTest(unittest.TestCase):
+    """compute-capacity 一：B 的負荷欄位逐欄驗證；不合格的那一欄變 null，其餘照常顯示。"""
+
+    def check(self, **overrides: Any) -> dict[str, Any] | None:
+        data = dict(GOOD_METRICS)
+        data.update(overrides)
+        return _check_metrics(data)
+
+    def test_good_load_fields_pass_and_unknown_fields_are_dropped(self) -> None:
+        out = self.check(injected="<img onerror=x>")
+        assert out is not None
+        self.assertEqual(out["final_busy"], 0.45)
+        self.assertEqual(out["rtf"], 0.3)
+        self.assertEqual(out["gpu"], GOOD_METRICS["gpu"])
+        self.assertNotIn("injected", out)
+        self.assertNotIn("session_id", out)
+
+    def test_old_compute_hosts_without_load_fields(self) -> None:
+        data = {
+            k: v
+            for k, v in GOOD_METRICS.items()
+            if k not in ("final_busy", "rtf", "gpu")
+        }
+        out = _check_metrics(data)
+        assert out is not None
+        self.assertEqual(
+            (out["final_busy"], out["rtf"], out["gpu"]), (None, None, None)
+        )
+
+    def test_a_bad_load_field_becomes_null_only(self) -> None:
+        gpu = GOOD_METRICS["gpu"]
+        for field, value in (
+            ("final_busy", 1.5),
+            ("final_busy", -0.1),
+            ("final_busy", "0.5"),
+            ("final_busy", True),
+            ("rtf", -1),
+            ("rtf", 1000.5),
+            ("rtf", float("inf")),
+            ("gpu", "GTX"),
+            ("gpu", dict(gpu, name="x" * 65)),
+            ("gpu", dict(gpu, name="")),
+            ("gpu", dict(gpu, name=5)),
+            ("gpu", dict(gpu, vram_used_mb=-1)),
+            ("gpu", dict(gpu, vram_total_mb=1_048_577)),
+            ("gpu", dict(gpu, vram_used_mb=20000)),  # 比總量還多
+            ("gpu", dict(gpu, util_pct=101)),
+            ("gpu", dict(gpu, util_pct=None)),
+            ("gpu", {k: v for k, v in gpu.items() if k != "name"}),
+        ):
+            with self.subTest(field=field, value=str(value)[:40]):
+                out = self.check(**{field: value})
+                assert out is not None, "the whole metrics event was dropped"
+                self.assertIsNone(out[field])
+                self.assertEqual(out["backlog"], 1)  # 其他欄位照常
+                self.assertEqual(out["level_dbfs"], -20.0)
+
+    def test_a_bad_existing_field_still_drops_the_event(self) -> None:
+        self.assertIsNone(self.check(backlog=-1))
+        self.assertIsNone(self.check(level_dbfs="loud"))
+
+
+HOST_INFO: dict[str, Any] = {
+    "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "current": {"fast": "base", "final": "small"},
+    "recommended": None,
+    "models": [{"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"}],
+    "translation_model": "qwen3.5:4b",
+}
+
+
+class FakeCapacity:
+    """B 的能力（`remote.capacity.HostCapacitySource`）：固定的 HostInfo 與已下載的模型。"""
+
+    def __init__(self) -> None:
+        self.info: dict[str, Any] = HOST_INFO
+
+    def host_info(self, *, detect: bool = True) -> dict[str, Any]:
+        return self.info
+
+    def downloaded_models(self) -> frozenset[str]:
+        return frozenset({"base", "small"})
+
+
+class ProbeTest(RemoteClientCase):
+    """compute-capacity 三、四：`probe_host_info` 只查 B 的能力，不開始字幕、不佔 GPU。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.capacity = FakeCapacity()
+        self.server.stop()
+        self.server = self.start_server(capacity=self.capacity)
+
+    def probe(self, **kwargs: Any) -> dict[str, Any] | None:
+        options: dict[str, Any] = {
+            "identity": self.client_id,
+            "servers": self.servers,
+            "host": "127.0.0.1",
+            "app_version": "0.3.1",
+        }
+        options.update(kwargs)
+        if "port" not in options:
+            options["port"] = self.server.port
+        return probe_host_info(**options)
+
+    def test_probe_returns_the_validated_host_info(self) -> None:
+        self.assertEqual(self.probe(), HOST_INFO)
+        self.assertFalse(self.gate.held)
+        self.assertIsNone(self.server.owner_spki())
+
+    def test_probe_works_while_the_host_is_busy(self) -> None:
+        self.assertTrue(self.gate.acquire())
+        self.assertEqual(self.probe(), HOST_INFO)
+
+    def test_a_malicious_host_info_is_null(self) -> None:
+        self.capacity.info = dict(HOST_INFO, device="<script>")
+        with self.assertLogs("kikitori.remote.protocol", "WARNING"):
+            self.assertIsNone(self.probe())
+
+    def test_probe_errors(self) -> None:
+        with self.assertRaises(RemoteError) as ctx:
+            self.probe(host="")
+        self.assertEqual(ctx.exception.code, "remote_not_configured")
+        empty = TrustStore(self.root / "a" / "none.json")
+        with self.assertRaises(RemoteError) as ctx:
+            self.probe(servers=empty)
+        self.assertEqual(ctx.exception.code, "remote_not_paired")
+        self.trust.remove(self.client_id.spki)
+        with self.assertRaises(RemoteError) as ctx:
+            self.probe()
+        self.assertEqual(ctx.exception.code, "remote_not_paired")
+        port = self.server.port
+        self.server.stop()
+        with self.assertRaises(RemoteError) as ctx:
+            self.probe(port=port)
+        self.assertEqual(ctx.exception.code, "remote_unreachable")
+
+    def test_probe_is_bounded_by_its_timeout(self) -> None:
+        # 只接受 TCP、什麼都不回的主機（TLS 握手卡住）：不會等超過 timeout
+        with socket.socket() as silent:
+            silent.bind(("127.0.0.1", 0))
+            silent.listen()
+            began = time.monotonic()
+            with self.assertRaises(RemoteError):
+                self.probe(port=silent.getsockname()[1], timeout=1.0)
+            self.assertLess(time.monotonic() - began, 4.0)
+
+    def test_an_old_compute_host_that_rejects_probe_is_incompatible(self) -> None:
+        # 舊版 B 不認得 hello 的 intent：以 1008 protocol violation 關閉
+        real = rp.parse_client
+
+        def old(text: str) -> Any:
+            if '"intent"' in text:
+                raise rp.ProtocolViolation("hello: unknown field 'intent'")
+            return real(text)
+
+        with (
+            mock.patch.object(rp, "parse_client", old),
+            self.assertRaises(RemoteError) as ctx,
+        ):
+            self.probe()
+        self.assertEqual(ctx.exception.code, "remote_incompatible")
+
+
+class RemoteModelTest(RemoteClientCase):
+    """compute-capacity 四：A 選的模型隨 `session.start` 送給 B。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.server.stop()
+        self.server = self.start_server(capacity=FakeCapacity())
+
+    def test_a_downloaded_model_is_used(self) -> None:
+        rec = Recorder()
+        session = self.client(rec, final_model="base")
+        session.connect()
+        session.start(EndlessSource())
+        self.assertTrue(
+            rec.wait_for(lambda: any(s[0] == "running" for s in rec.statuses))
+        )
+        self.assertEqual(
+            self.server.session_models(), (Settings().asr.fast_model, "base")
+        )
+
+    def test_a_model_missing_on_the_host_is_remote_model_not_downloaded(self) -> None:
+        rec = Recorder()
+        session = self.client(rec, final_model="large-v3")
+        session.connect()
+        session.start(EndlessSource())
+        self.assertTrue(rec.ended.wait(WAIT))
+        self.assertEqual(rec.statuses[-1][0], "error")
+        self.assertEqual(rec.statuses[-1][2], "remote_model_not_downloaded")
+        self.assertIn("large-v3", rec.statuses[-1][1] or "")
+        self.assertTrue(self.wait_gpu_released())
 
 
 if __name__ == "__main__":

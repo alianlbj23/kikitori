@@ -75,6 +75,25 @@ export interface MetricsEvent {
   background_level_dbfs?: number | null;
   /** Remote compute: round trip to the compute host in ms; null/absent when local or unknown. */
   rtt_ms?: number | null;
+  /**
+   * compute-capacity.md: share of the last 30 s the final pass spent computing (0–1);
+   * null before the first final sentence, from an older engine, or when out of range.
+   */
+  final_busy?: number | null;
+  /** Median compute seconds per audio second of the last 10 finals (< 1 keeps up); null when unknown. */
+  rtf?: number | null;
+  /** The recognition GPU's memory and load; null on CPU, when sampling failed, or when malformed. */
+  gpu?: GpuUsage | null;
+}
+
+/** `metrics.gpu` (compute-capacity.md): one `nvidia-smi` sample, every 5 s. */
+export interface GpuUsage {
+  /** ≤ 64 characters, e.g. "NVIDIA GeForce GTX 1080 Ti". */
+  name: string;
+  vram_used_mb: number;
+  vram_total_mb: number;
+  /** 0–100; null when the driver does not report it. */
+  util_pct: number | null;
 }
 
 export type EngineState = "idle" | "loading" | "running" | "error";

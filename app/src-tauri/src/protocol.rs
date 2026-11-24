@@ -11,7 +11,8 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 /// Protocol version this app speaks (`engine.info.protocol_version`).
@@ -144,6 +145,50 @@ pub struct MetricsPayload {
     /// so an out-of-range value is dropped (a hint), not the event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<f64>,
+    /// compute-capacity.md: share of the last 30 s the final pass spent
+    /// computing (0–1). This and the next two only drive the rail's load
+    /// chart, so a wrong type or range loses the hint, not the event.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub final_busy: Option<f64>,
+    /// Median compute seconds per audio second of the last 10 finals.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rtf: Option<f64>,
+    /// The recognition GPU's memory and load; absent on CPU.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gpu: Option<GpuUsage>,
+}
+
+/// `metrics.gpu`: one `nvidia-smi` sample of the recognition GPU.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuUsage {
+    pub name: String,
+    pub vram_used_mb: f64,
+    pub vram_total_mb: f64,
+    #[serde(default)]
+    pub util_pct: Option<f64>,
+}
+
+/// An optional hint field: anything that does not deserialize as `T` is
+/// "unknown" (`None`) instead of failing the whole payload.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let v = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// Bounds of `metrics.level_dbfs` (the engine floors silence at −120 dBFS).
@@ -154,6 +199,14 @@ const RTT_MS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=60_000.0;
 /// Anything above this is a broken clock or counter, not a measurement.
 const MAX_LATENCY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_BACKLOG: u64 = 1_000_000;
+/// Load hint bounds, the same as the engine's `_check_metrics` on a remote
+/// session (compute-capacity.md 一).
+const FINAL_BUSY_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1.0;
+const RTF_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1000.0;
+/// 1 TiB in MiB: no GPU has more memory than this.
+const VRAM_MB_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1_048_576.0;
+const UTIL_PCT_RANGE: std::ops::RangeInclusive<f64> = 0.0..=100.0;
+const MAX_GPU_NAME_CHARS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -623,6 +676,16 @@ fn validate_metrics(p: &mut MetricsPayload) -> Result<(), ParseError> {
     if p.rtt_ms.is_some_and(|ms| !RTT_MS_RANGE.contains(&ms)) {
         p.rtt_ms = None;
     }
+    if p.final_busy.is_some_and(|b| !FINAL_BUSY_RANGE.contains(&b)) {
+        p.final_busy = None;
+    }
+    if p.rtf.is_some_and(|r| !RTF_RANGE.contains(&r)) {
+        p.rtf = None;
+    }
+    // The sample is shown as a whole ("6.1 / 11 GB"), so one bad field drops all of it.
+    if p.gpu.as_ref().is_some_and(|g| !valid_gpu_usage(g)) {
+        p.gpu = None;
+    }
     if !LEVEL_DBFS_RANGE.contains(&p.level_dbfs) {
         return Err(shape(format!(
             "metrics.level_dbfs {} is outside -120..0",
@@ -636,6 +699,13 @@ fn validate_metrics(p: &mut MetricsPayload) -> Result<(), ParseError> {
         return Err(shape("metrics.latency_ms_median is too large"));
     }
     Ok(())
+}
+
+fn valid_gpu_usage(g: &GpuUsage) -> bool {
+    g.name.chars().count() <= MAX_GPU_NAME_CHARS
+        && VRAM_MB_RANGE.contains(&g.vram_used_mb)
+        && VRAM_MB_RANGE.contains(&g.vram_total_mb)
+        && g.util_pct.is_none_or(|u| UTIL_PCT_RANGE.contains(&u))
 }
 
 fn check_len(field: &str, s: &str, max_chars: usize) -> Result<(), ParseError> {
@@ -1160,6 +1230,89 @@ mod tests {
         let bad =
             json!({"event": "metrics", "data": {"level_dbfs": -20, "backlog": 0, "rtt_ms": "2"}});
         assert!(matches!(parse(&bad.to_string()), Err(ParseError::Shape(_))));
+    }
+
+    #[test]
+    fn metrics_load_hints() {
+        let gpu = json!({"name": "NVIDIA GeForce GTX 1080 Ti", "vram_used_mb": 6200, "vram_total_mb": 11264, "util_pct": 71});
+        let m = parse_metrics(
+            &json!({"level_dbfs": -20, "backlog": 0, "final_busy": 0.42, "rtf": 0.35, "gpu": gpu}),
+        );
+        assert_eq!(m.final_busy, Some(0.42));
+        assert_eq!(m.rtf, Some(0.35));
+        let g = m.gpu.as_ref().expect("gpu kept");
+        assert_eq!(
+            (g.vram_used_mb, g.vram_total_mb, g.util_pct),
+            (6200.0, 11264.0, Some(71.0))
+        );
+        let out = serde_json::to_value(&m).unwrap();
+        assert_eq!(out["final_busy"], json!(0.42));
+        assert_eq!(out["gpu"]["name"], json!("NVIDIA GeForce GTX 1080 Ti"));
+        // The boundaries are inside.
+        let edge =
+            parse_metrics(&json!({"level_dbfs": -20, "backlog": 0, "final_busy": 1, "rtf": 1000}));
+        assert_eq!((edge.final_busy, edge.rtf), (Some(1.0), Some(1000.0)));
+        // Absent (an older engine) or null (no final yet, CPU): nothing forwarded.
+        for data in [
+            json!({"level_dbfs": -20, "backlog": 0}),
+            json!({"level_dbfs": -20, "backlog": 0, "final_busy": null, "rtf": null, "gpu": null}),
+        ] {
+            let m = parse_metrics(&data);
+            assert!(m.final_busy.is_none() && m.rtf.is_none() && m.gpu.is_none());
+            let out = serde_json::to_value(&m).unwrap();
+            assert!(out.get("final_busy").is_none() && out.get("gpu").is_none());
+        }
+    }
+
+    #[test]
+    fn metrics_bad_load_hints_are_dropped_not_the_event() {
+        let gpu = json!({"name": "GPU", "vram_used_mb": 100, "vram_total_mb": 8192, "util_pct": 3});
+        let with = |key: &str, value: Value| {
+            let mut data = json!({"level_dbfs": -20, "backlog": 1});
+            data[key] = value;
+            parse_metrics(&data)
+        };
+        for busy in [
+            json!(-0.1),
+            json!(1.01),
+            json!("0.5"),
+            json!(1e300),
+            json!([0.5]),
+        ] {
+            let m = with("final_busy", busy.clone());
+            assert!(m.final_busy.is_none(), "{busy}");
+            assert_eq!(m.backlog, 1);
+        }
+        for rtf in [json!(-1), json!(1000.5), json!("0.3"), json!({})] {
+            assert!(with("rtf", rtf.clone()).rtf.is_none(), "{rtf}");
+        }
+        let mut long = gpu.clone();
+        long["name"] = json!("x".repeat(65));
+        let mut used = gpu.clone();
+        used["vram_used_mb"] = json!(-1);
+        let mut total = gpu.clone();
+        total["vram_total_mb"] = json!(1_048_577);
+        let mut util = gpu.clone();
+        util["util_pct"] = json!(101);
+        let mut util_type = gpu.clone();
+        util_type["util_pct"] = json!("3");
+        let mut missing = gpu.clone();
+        missing.as_object_mut().unwrap().remove("vram_total_mb");
+        for bad in [
+            long,
+            used,
+            total,
+            util,
+            util_type,
+            missing,
+            json!("gpu"),
+            json!(7),
+        ] {
+            assert!(with("gpu", bad.clone()).gpu.is_none(), "{bad}");
+        }
+        let mut no_util = gpu.clone();
+        no_util["util_pct"] = Value::Null;
+        assert_eq!(with("gpu", no_util).gpu.unwrap().util_pct, None);
     }
 
     fn remote_line(data: Value) -> String {

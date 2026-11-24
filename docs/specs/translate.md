@@ -35,7 +35,8 @@ class TranslationRequest:
     text: str
     source_language: str
     target_language: str = "zh-TW"
-    context: tuple[str, ...] = ()   # 前幾句原文，提升連貫性
+    context: tuple[str, ...] = ()  # 前幾句原文，提升連貫性
+
 
 class Translator(Protocol):
     def translate(self, request: TranslationRequest) -> str: ...
@@ -59,18 +60,19 @@ class TranslatorConfig:
     model: str
     base_url: str = "http://localhost:11434/v1"
     api_key_env: str = "KIKITORI_TRANSLATE_API_KEY"
-    temperature: float | None = None     # None = 用預設組（preset）的建議值
-    connect_timeout: float = 3.0         # 秒
-    read_timeout: float = 30.0           # 秒；送出請求後每次 socket 讀取的上限
-    max_retries: int = 2                 # 暫時性錯誤的重試次數（不含第一次）
-    retry_backoff: float = 0.5           # 秒；指數退避的基數
-    max_tokens: int = 256                # 防止模型失控輸出長文
-    max_context_lines: int = 3           # 只取最後幾句前文
-    convert_script: bool = True          # 依譯文語言做字形轉換（見「後處理」）
+    temperature: float | None = None  # None = 用預設組（preset）的建議值
+    connect_timeout: float = 3.0  # 秒
+    read_timeout: float = 30.0  # 秒；送出請求後每次 socket 讀取的上限
+    max_retries: int = 2  # 暫時性錯誤的重試次數（不含第一次）
+    retry_backoff: float = 0.5  # 秒；指數退避的基數
+    max_tokens: int = 256  # 防止模型失控輸出長文
+    max_context_lines: int = 3  # 只取最後幾句前文
+    convert_script: bool = True  # 依譯文語言做字形轉換（見「後處理」）
+
 
 translator = OpenAICompatibleTranslator(
     TranslatorConfig(model="qwen3.5:9b"),
-    glossary=Glossary(),                 # 選用：術語表（見「術語表」）
+    glossary=Glossary(),  # 選用：術語表（見「術語表」）
 )
 translator.translate(TranslationRequest("おはよう", "ja"))
 ```

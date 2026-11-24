@@ -107,3 +107,24 @@
 
 **下一步**
 - 使用者決定 commit／PR；之後可在 alian_server 重跑一次「準備模型」確認設定不再被蓋掉。
+
+## 2026-11-24 — 運算能力與負荷：運算主機可用的模型、會不會超出負荷、負荷圖
+
+**完成**
+- 規格 `docs/specs/compute-capacity.md`（使用者要求：知道連上的電腦能用什麼模型、會不會超出負荷；本機與遠端都要圖形化負荷）。三塊由 agent 平行實作後整合：
+  - 負荷量測：`pipeline/metrics.py` `BusyMeter`（完整辨識忙碌度，30 秒窗、分母至少 10 秒）、`RtfMeter`；`hardware/nvidia.py` `sample_gpu_usage`；`engine/events.py` `GpuSampler`（CUDA 時每 5 秒）；metrics 事件新增 `final_busy`、`rtf`、`gpu`，B 的 metrics 經遠端轉送。
+  - 運算主機能力：`remote/capacity.py` `HostInfo`（顯示卡、建議組合、每個模型跑得動／可能吃緊／超出負荷；扣掉同一台的翻譯模型）；hello `intent: probe`（先握手後佔 GPU，B 忙碌時也回答）；`remote.host_info`／`remote_host_info`；A 可指定 B 上的完整辨識模型（`compute.remote_*_model`，B 只接受已下載的 registry 模型）；無介面主機選單「選擇模型」與提供運算中按 `s` 看負荷。
+  - 介面：`app/src/lib/load.ts`；左側欄「運算負荷」（色條＋折線＋白話）；遠端角色顯示運算主機的顯示卡與模型選單；13 種語言。
+- 整合時修正：`fit` 可為 null（偵測失敗）三方一致；`remote_error` 白話說明；開字幕的握手只用快取的偵測結果；agent 對無關檔案（docs/learning、packaging/engine/build.py）的格式化已還原。code-reviewer 第二輪：id 驗證改 fullmatch、忙碌度分母下限、socket 洩漏、查模型例外範圍、命名統一、`invalidate` 接上。
+
+**指令與結果**
+- `uv run python -m unittest discover -s tests` → 2013 個 OK（skipped=1）；`ruff check`、`ruff format --check` → 通過。
+- `npx tsc --noEmit`、`npx vitest run`（40 檔 1536 個）、`npm run build`（無大小警告）→ 通過；`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`（110 個）→ 通過。
+- 實機：這台 RTX 5070 的 HostInfo 正確；硬體偵測耗時這台 0.13 秒、alian_server 0.02 秒。
+
+**未完成 / 卡住**
+- 尚未 commit／push；alian_server 上還是舊版，遠端「主機資訊／負荷圖」尚未實機驗證。
+- 未處理（低）：`gpu` 欄位在 Python A、Rust、TS 對 `used > total` 的判斷不完全一致；nvidia-smi 卡住時第一次 probe 可能超過 A 的 10 秒。
+
+**下一步**
+- commit／push 後在 alian_server `git pull`、重開 app，實機看主機資訊與負荷圖。

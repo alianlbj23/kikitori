@@ -19,13 +19,14 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from kikitori.asr.registry import MODELS
 from kikitori.capture import ArraySource
 from kikitori.config import Settings
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
 from kikitori.engine.testing import ENDLESS_DEVICE, _speech_track, fake_services
 from kikitori.remote import pair_net as pn
-from kikitori.remote.client import RemoteClientSession
+from kikitori.remote.client import RemoteClientSession, probe_host_info
 from kikitori.remote.identity import load_or_create_identity
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.paths import compute_dir, servers_path
@@ -406,6 +407,35 @@ class ComputeHostTest(EngineCase):
             self.error("remote.pair_confirm", {"digits": "123456"}),
             "remote_pairing_closed",
         )
+
+    def test_a_paired_computer_sees_this_computers_capabilities(self) -> None:
+        # compute-capacity 二：這台當運算主機時，用引擎的硬體偵測與模型清單回報能力
+        port = self.start_server()
+        a_id, a_servers = self.pair_a(port)
+        host = probe_host_info(
+            identity=a_id,
+            servers=a_servers,
+            host="127.0.0.1",
+            port=port,
+            app_version="0.3.1",
+        )
+        assert host is not None
+        asr = self.services.settings_store.get().asr
+        self.assertEqual(
+            host["current"], {"fast": asr.fast_model, "final": asr.final_model}
+        )
+        models = {m["id"]: m for m in host["models"]}
+        self.assertEqual(set(models), set(MODELS))
+        # 假的模型清單：base、small、large-v3-turbo 已下載
+        downloaded = {
+            m.id for m in self.services.models.asr_models() if m.downloaded
+        } & set(MODELS)
+        self.assertEqual({k for k, m in models.items() if m["downloaded"]}, downloaded)
+        # 只是查詢：沒有佔用這台
+        self.assertIsNone(self.ok("remote.status")["server"]["peer"])
+        self.assertEqual(
+            self.error("remote.host_info"), "remote_not_configured"
+        )  # 這台自己沒有設定要連的運算主機
 
 
 class ClientSideTest(EngineCase):

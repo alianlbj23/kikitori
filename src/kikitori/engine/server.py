@@ -30,6 +30,7 @@ from kikitori.engine import protocol as p
 from kikitori.engine.deferred import Deferred, DeferredRunner
 from kikitori.engine.events import (  # noqa: F401 - 測試從這裡取用
     METRICS_JOIN_TIMEOUT,
+    gpu_sampler_for,
     subtitle_event,
 )
 from kikitori.engine.events import MetricsReporter as _MetricsReporter
@@ -289,6 +290,7 @@ class EngineServer:
             "remote.pair_cancel": lambda params: self._remote.pair_cancel(params),
             "remote.unpair": lambda params: self._remote.unpair(params),
             "remote.identity_reset": self._remote_identity_reset,
+            "remote.host_info": self._remote_host_info,
         }
         # 這台電腦替別台運算（B）：與本機 session 共用 GPU 使用權（見 `_acquire_gpu_for_remote`）
         self._serving_peer = False
@@ -299,6 +301,11 @@ class EngineServer:
             acquire_gpu=self._acquire_gpu_for_remote,
             release_gpu=self._release_gpu_for_remote,
             app_version=self._version,
+            # 替別台運算時告訴它這台的能力（顯示卡、已下載的模型；compute-capacity 二）
+            detect_hardware=services.hardware.detect,
+            downloaded_models=lambda: [
+                m.id for m in services.models.asr_models() if m.downloaded
+            ],
         )
 
     # --- 主迴圈 ---------------------------------------------------------------
@@ -757,6 +764,7 @@ class EngineServer:
             finally:
                 # 不論成功與否，cuBLAS 的狀態可能變了；下一次偵測不能用舊結果
                 self._hardware.invalidate()
+                self._remote.invalidate_capacity()
 
         thread = self._register_download(
             "gpu_runtime", GPU_RUNTIME_ID, status.download_bytes or 0, install
@@ -871,6 +879,7 @@ class EngineServer:
             finally:
                 # 伺服器上的模型可能變了：推薦與總覽不能用舊的偵測結果
                 self._hardware.invalidate()
+                self._remote.invalidate_capacity()
 
         def job() -> Mapping[str, Any]:
             # 要連線檢查伺服器（數秒），所以在背景工作執行緒上；錯誤以錯誤碼回應，
@@ -959,13 +968,15 @@ class EngineServer:
         """正在使用這個 ASR 模型的 session 與下載（給錯誤訊息用）。"""
         users: list[str] = []
         asr = self._services.settings_store.get().asr
+        # 替別台電腦運算時用的是這台設定的模型，或那台指定的模型（compute-capacity 三）。
+        # 在 _session_lock 外查：RemoteServer 拿著自己的鎖時會呼叫 acquire_gpu（要 _session_lock）
+        serving = {asr.fast_model, asr.final_model, *self._remote.session_models()}
         with self._session_lock:
             self._prune_live_sessions()
             users += [
                 f"session {s.id}" for s in self._live_sessions if model in s.asr_models
             ]
-            # 替別台電腦運算時用的是這台電腦目前設定的模型
-            if self._serving_peer and model in (asr.fast_model, asr.final_model):
+            if self._serving_peer and model in serving:
                 users.append("a session for another computer")
         with self._downloads_lock:
             if ("asr", model) in self._downloads:
@@ -1258,8 +1269,14 @@ class EngineServer:
                 session.pipeline = pipeline
                 if session.translation_override is not None:
                     pipeline.set_translation_enabled(session.translation_override)
+                # 辨識用 CUDA 時 metrics 帶 GPU 使用量（compute-capacity 一）
+                sampler = gpu_sampler_for(components)
                 reporter = _MetricsReporter(
-                    session.id, pipeline, self._send_event, self._metrics_interval
+                    session.id,
+                    pipeline,
+                    self._send_event,
+                    self._metrics_interval,
+                    gpu_usage=None if sampler is None else sampler.get,
                 )
                 with self._session_lock:
                     # 結束狀態送出時取走並停止；已經結束（不會發生，保險）就不啟動
@@ -1370,6 +1387,9 @@ class EngineServer:
             on_status=on_status,
             on_event=lambda name, data: self._on_remote_event(session, name, data),
             capture_code=_capture_code,
+            # 使用者為遠端選的模型（空字串＝照運算主機的設定；compute-capacity 四）
+            fast_model=compute.remote_fast_model,
+            final_model=compute.remote_final_model,
         )
 
     def _on_remote_event(
@@ -1683,6 +1703,11 @@ class EngineServer:
     def _remote_status(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)
         return self._remote.status()
+
+    def _remote_host_info(self, params: dict[str, Any]) -> Deferred:
+        """`remote.host_info`：連上運算主機查它的能力（最多約 10 秒，在背景工作執行緒上）。"""
+        p.reject_unknown_params(params)
+        return Deferred(self._remote.host_info)
 
     def _remote_identity_reset(self, params: dict[str, Any]) -> Mapping[str, Any]:
         """`remote.identity_reset`：字幕進行中、或有電腦正在用這台時不重建。

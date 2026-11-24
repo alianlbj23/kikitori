@@ -34,6 +34,7 @@ from kikitori.engine.testing import (
     fake_services,
 )
 from kikitori.pipeline import PipelineComponents, SubtitleUpdate
+from kikitori.pipeline.metrics import PipelineMetrics
 from kikitori.pipeline.types import Mode
 
 WAIT = 10.0
@@ -261,6 +262,9 @@ class MetricsEventTest(EngineCase):
                     "backlog": 0,
                     "latency_ms_median": None,
                     "speech_level_dbfs": None,
+                    "final_busy": None,
+                    "rtf": None,
+                    "gpu": None,
                 },
             )
 
@@ -443,7 +447,7 @@ class _StuckPipeline:
         return False
 
     def metrics(self) -> Any:
-        return mock.Mock(level_dbfs=-20.0, backlog=0, latency_ms_median=None)
+        return PipelineMetrics(level_dbfs=-20.0, backlog=0, latency_ms_median=None)
 
 
 class MetricsReporterStopTest(unittest.TestCase):

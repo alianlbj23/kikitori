@@ -599,6 +599,9 @@ describe("competitive features: subtitle hints, metrics, model deletion", () => 
       speech_level_dbfs: null,
       background_level_dbfs: null,
       rtt_ms: null,
+      final_busy: null,
+      rtf: null,
+      gpu: null,
     });
     // G8 split levels: kept when in range, otherwise unknown (the event itself is fine).
     const split = parseMetrics({ level_dbfs: -20, backlog: 0, speech_level_dbfs: -18, background_level_dbfs: 3 });
@@ -611,12 +614,42 @@ describe("competitive features: subtitle hints, metrics, model deletion", () => 
       speech_level_dbfs: null,
       background_level_dbfs: null,
       rtt_ms: null,
+      final_busy: null,
+      rtf: null,
+      gpu: null,
     });
     expect(parseMetrics({ level_dbfs: 4, backlog: 0 }).level_dbfs).toBe(0);
     // Remote compute's round trip: a hint, so a bad value is "unknown", not a dropped event.
     expect(parseMetrics({ level_dbfs: -3, backlog: 0, rtt_ms: 12.5 }).rtt_ms).toBe(12.5);
     for (const rtt of [-1, "12", Number.NaN, Infinity, 600_000]) {
       expect(parseMetrics({ level_dbfs: -3, backlog: 0, rtt_ms: rtt }).rtt_ms).toBeNull();
+    }
+    // compute-capacity.md load hints: in range kept, anything else null (the event survives).
+    const gpu = { name: "NVIDIA GeForce GTX 1080 Ti", vram_used_mb: 6200, vram_total_mb: 11264, util_pct: 71 };
+    const load = parseMetrics({ level_dbfs: -3, backlog: 0, final_busy: 0.42, rtf: 0.35, gpu });
+    expect([load.final_busy, load.rtf, load.gpu]).toEqual([0.42, 0.35, gpu]);
+    expect(parseMetrics({ level_dbfs: -3, backlog: 0, gpu: { ...gpu, util_pct: null } }).gpu?.util_pct).toBeNull();
+    // The name limit counts characters like Rust does, not UTF-16 units.
+    const emoji = { ...gpu, name: "🎮".repeat(64) };
+    expect(parseMetrics({ level_dbfs: -3, backlog: 0, gpu: emoji }).gpu?.name).toBe(emoji.name);
+    for (const busy of [-0.1, 1.01, "0.5", Number.NaN, null]) {
+      expect(parseMetrics({ level_dbfs: -3, backlog: 0, final_busy: busy }).final_busy).toBeNull();
+    }
+    for (const rtf of [-1, 1000.5, Infinity, "0.3"]) {
+      expect(parseMetrics({ level_dbfs: -3, backlog: 0, rtf }).rtf).toBeNull();
+    }
+    for (const badGpu of [
+      "gpu",
+      [],
+      { ...gpu, name: "x".repeat(65) },
+      { ...gpu, name: 3 },
+      { ...gpu, vram_used_mb: -1 },
+      { ...gpu, vram_total_mb: 1_048_577 },
+      { ...gpu, util_pct: 101 },
+      { ...gpu, util_pct: "71" },
+      { name: "GPU", vram_total_mb: 11264, util_pct: 3 },
+    ]) {
+      expect(parseMetrics({ level_dbfs: -3, backlog: 0, gpu: badGpu }).gpu, JSON.stringify(badGpu)).toBeNull();
     }
     for (const bad of [
       { backlog: 0 },

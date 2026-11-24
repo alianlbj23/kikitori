@@ -272,11 +272,14 @@ sequenceDiagram
 
 - **GUI 引擎**：設定頁的「提供運算給其他電腦」開關 → 引擎方法 `remote.server_set {enabled}` 在引擎行程裡啟動 `RemoteServer`。GPU 使用權（審查第 10 點）：`acquire_gpu` 在 `_session_lock` 內檢查「沒有本機 session、上一個載入執行緒已結束、沒有正在釋放的元件」並設 `_serving_peer`；`_session_start` 在同一把鎖內檢查它（遠端進行中回 `session_active`）。遠端進行中 `models.delete`／`models.download` 的 ASR 模型與改 ASR 設定視為使用中；`engine.shutdown` 先停 `RemoteServer`。
 - **無介面主機（`kikitori` 選單 →「運算主機」）**：給 alian_server 這種用 SSH 管理的 Linux 主機。互動選單（不靠參數）：
-  1. 開始提供運算（前景執行；執行中仍可用按鍵進入配對、列出連線、斷開目前的電腦，Ctrl+C 停止）
+  1. 開始提供運算（前景執行；執行中仍可用按鍵進入配對、列出連線、斷開目前的電腦、`s` 看目前負荷，Ctrl+C 停止）
   2. 允許新的電腦配對（輸入另一台電腦上顯示的 6 位數）
   3. 已配對的電腦（列出／移除）
   4. 準備模型（依硬體建議設定模型並下載 ASR、說話者模型；翻譯模型用 Ollama 下載）
-  5. 離開
+  5. 選擇模型（列出每個辨識模型需要的記憶體、跑不跑得動、是否已下載、建議與目前；換完整辨識模型，見 `docs/specs/compute-capacity.md`「六」）
+  6. 變更監聽位址
+  7. 重建這台電腦的身分
+  8. 返回
 
   與 GUI 共用同一個設定資料夾與 `compute/`。啟動時顯示本機 SPKI 指紋；**不預設 `0.0.0.0`**（威脅模型筆記 §190）：第一次啟動列出這台電腦的私有網段與 Tailscale 位址讓使用者選，存進 `compute.listen_host`。「準備模型」重用引擎既有的建議與下載邏輯，不另寫一份。不做 systemd（見「尚未決定」）。
 
@@ -306,6 +309,7 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 | `remote.pair_cancel` | `{}` | `{}` | — |
 | `remote.unpair` | `{spki: str, role: "peer"|"server"}`（`peer`＝允許連進來的電腦，`server`＝配對過的運算主機） | `RemoteStatus` | `invalid_params`、`remote_not_found` |
 | `remote.identity_reset` | `{}`：停止配對與監聽、刪掉並重建本機憑證、清空兩份配對清單，原本開著就用新身分繼續監聽（失敗寫進 `server.error`） | `RemoteStatus` | `invalid_params`、`session_active`（字幕進行中）、`settings_io_error` |
+| `remote.host_info` | `{}`：用 `compute.host`／`compute.port` 以 `intent: "probe"` 連一次（不開始字幕、不佔 B 的 GPU、B 忙碌時也回答），逾時 10 秒；在背景工作執行緒上處理（2026-11-24，compute-capacity） | `{host: HostInfo \| null}`（B 沒送或內容不合格時 null） | `invalid_params`、`remote_not_configured`、`remote_unreachable`（含逾時）、`remote_not_paired`、`remote_incompatible`（B 是不認得 probe 的舊版）、`remote_identity_error`、`remote_error`（B 的回應不合格） |
 
 `RemoteStatus`：
 
@@ -340,6 +344,34 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 - `metrics` 多一個 `rtt_ms`（數字或 null）。
 - 這台電腦在替別台運算時，`session.start` 回 `session_active`。
 
+**運算主機的能力與 A 選的模型**（2026-11-24，`docs/specs/compute-capacity.md`「二～四」）
+
+- `HostInfo`（B 的 `remote/capacity.py` 組出，A 在 `remote/protocol.py` 的 `parse_host_info` 逐欄驗證，只留下列欄位；任一欄不合格整個當 null，不中斷連線）：
+
+  ```json
+  {
+    "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "current": {"fast": "large-v3-turbo", "final": "large-v3"},
+    "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
+    "models": [
+      {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok"}
+    ],
+    "translation_model": "qwen3.5:9b"
+  }
+  ```
+
+  - `gpu`：VRAM 最大的 NVIDIA 卡，沒有或偵測失敗時 null（`name` 1–64 個可列印字元、`vram_total_mb` 0–1,048,576 的整數）。
+  - `device`：`"cuda"`／`"cpu"`（B 設定的裝置；`auto` 依硬體建議，偵測失敗時 `cpu`）。`compute_type`：完整辨識的精度（`[a-z0-9_]{1,32}`）。
+  - `current`／`recommended`：`{fast, final}` 兩個模型 id（`[A-Za-z0-9._-]{1,100}`）；`recommended` 在偵測失敗時 null，`current` 必有。
+  - `models`：registry 的全部 ASR 模型（≤ 32 筆、id 不重複）；`need_mb` 是單一模型的需求（CUDA 為 VRAM、CPU 為 RAM，0–1,048,576 整數）；`fit` 是「這個模型當完整辨識＋B 目前的即時模型」對照可用量：`"ok"`／`"tight"`／`"over"`，**偵測失敗、不知道可用量時 null**。
+  - `translation_model`：B 的完整路徑翻譯模型（≤ 200 個可列印字元）或 null。
+- `hello` 新增可選的 `intent: "session" | "probe"`（省略＝`session`；A 只在 probe 時送，舊版 B 照樣接受 session 的 hello）。B 先握手、後佔 GPU：`probe` 送 `welcome`（含 `host`）後以 1000 關閉，不呼叫 `_claim`；舊版 B 不認得 `intent`，以 1008 `protocol violation` 關閉，A 回 `remote_incompatible`。
+- `welcome` 新增 `host: HostInfo | null`（session 與 probe 都送；B 偵測失敗時照送，`gpu`／`recommended` 為 null）。
+- `session.start` 的 `settings` 新增可選的 `asr: {fast_model?, final_model?}`（只有模型 id；裝置、精度仍用 B 的設定）。A 只送設定 `compute.remote_fast_model`／`compute.remote_final_model` 中非空的（都空時整個不送）。B 只接受 registry 裡且已下載的：不認得回 `status error` `unknown_model`、沒下載回 `model_not_downloaded`（不開始這一場）；A 都轉成 `remote_model_not_downloaded`。
+- 設定 `compute.remote_fast_model`、`compute.remote_final_model`：空字串（預設，＝照運算主機的設定）或模型 id 的格式；是否下載由 B 判斷。`settings.get`／`set` 的 `compute` 多這兩欄。
+
 **Tauri 指令**（只進 `capabilities/main.json`；Rust 端再驗一次格式才轉給引擎）
 
 | 指令 | 參數 | 對應 |
@@ -353,6 +385,7 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 | `remote_pair_cancel` | — | `remote.pair_cancel` |
 | `remote_unpair` | `spki: string, role: "peer" \| "server"` | `remote.unpair` |
 | `remote_identity_reset` | — | `remote.identity_reset` |
+| `remote_host_info` | — | `remote.host_info`（結果再驗證一次 `HostInfo`，規則同上） |
 
 Rust 端驗證：`host` 1–253 字、只有 `[A-Za-z0-9.:-]`；`listenHost` 是 IP 位址；`port` 1024–65535；`digits` 去掉空白後 6 個 ASCII 數字（全形由介面先轉）；`spki` 64 個小寫十六進位；`role` 列舉。`remote` 事件：`kind`／`role`／`state`／`code` 列舉或識別字、`digits` 只能是 6 位數字、名稱 ≤ 64 字、`fingerprint` 只有十六進位與空白。
 

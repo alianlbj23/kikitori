@@ -19,7 +19,9 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from websockets.sync.client import ClientConnection, connect
 
 from kikitori.config import Settings
+from kikitori.engine import events
 from kikitori.engine.testing import _speech_track, fake_services
+from kikitori.hardware.nvidia import GpuUsage
 from kikitori.pipeline import Pipeline
 from kikitori.remote import protocol as rp
 from kikitori.remote.identity import Identity, load_or_create_identity
@@ -58,6 +60,35 @@ class Gate:
             self.held = False
 
 
+HOST_INFO: dict[str, Any] = {
+    "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "current": {"fast": "base", "final": "small"},
+    "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
+    "models": [
+        {"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"},
+        {"id": "large-v3", "downloaded": False, "need_mb": 2140, "fit": "ok"},
+    ],
+    "translation_model": "qwen3.5:4b",
+}
+
+
+class FakeCapacity:
+    """B 的能力（`remote.capacity.HostCapacity` 的介面）：固定的 HostInfo 與已下載的模型。"""
+
+    def __init__(self, downloaded: set[str]) -> None:
+        self.downloaded = downloaded
+        self.calls = 0
+
+    def host_info(self, *, detect: bool = True) -> dict[str, Any]:
+        self.calls += 1
+        return HOST_INFO
+
+    def downloaded_models(self) -> frozenset[str]:
+        return frozenset(self.downloaded)
+
+
 class RemoteServerCase(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -75,6 +106,7 @@ class RemoteServerCase(unittest.TestCase):
         self.other = load_or_create_identity(root / "c")
         self.trust.add(self.other.cert_path.read_bytes(), "C")
         self.gate = Gate()
+        self.capacity = FakeCapacity({"base", "small"})
         self.server = RemoteServer(
             identity=self.server_id,
             trust=self.trust,
@@ -86,6 +118,7 @@ class RemoteServerCase(unittest.TestCase):
             port=0,
             app_version="0.3.1",
             metrics_interval=0.2,
+            capacity=self.capacity,
         )
         self.server.start()
         self.addCleanup(self.server.stop)
@@ -217,10 +250,11 @@ class HandshakeTest(RemoteServerCase):
                     ws.recv(timeout=WAIT)
 
     def test_a_second_computer_is_told_busy(self) -> None:
+        # compute-capacity 三：B 先握手（看 hello 的 intent）才決定佔不佔 GPU，busy 在 hello 之後
         with self.connect() as first:
             self.hello(first)
             with self.connect(self.other) as second:
-                reply = rp.parse_server(second.recv(timeout=WAIT))
+                reply = self.hello(second)
             # 第一台不受影響
             first.send(json.dumps({"type": "ping", "nonce": 7}))
             self.assertEqual(rp.parse_server(first.recv(timeout=WAIT))["type"], "pong")
@@ -394,10 +428,202 @@ class SessionTest(RemoteServerCase):
         self.assertTrue(overlaps, "the pipeline was never stopped")
         self.assertFalse(any(overlaps), "stop() ran while start() was in progress")
 
+    def first_metrics(self) -> dict[str, Any]:
+        with self.connect() as ws:
+            self.hello(ws)
+            ws.send(rp.client_session_start("media", Settings()))
+            ws.send(rp.encode_audio(0, 0, np.zeros(1600, dtype=np.int16)))
+            while True:
+                m = rp.parse_server(ws.recv(timeout=WAIT))
+                if m["type"] == "event" and m["name"] == "metrics":
+                    ws.send(json.dumps({"type": "session.stop"}))
+                    return m["data"]
+
+    def test_metrics_carry_the_load_fields(self) -> None:
+        # compute-capacity 一：B 的負荷欄位原樣送回 A；假元件不是 CUDA，所以沒有 gpu
+        data = self.first_metrics()
+        self.assertIn("final_busy", data)
+        self.assertIn("rtf", data)
+        self.assertIsNone(data["gpu"])
+
+    def test_metrics_carry_the_gpu_usage_when_b_uses_cuda(self) -> None:
+        real = fake_services().build_components
+
+        def on_cuda(*args: Any, **kwargs: Any) -> Any:
+            components = real(*args, **kwargs)
+            components.final_transcriber.device = "cuda"
+            return components
+
+        self.server._build_components = on_cuda
+        usage = GpuUsage("NVIDIA GeForce GTX 1080 Ti", 6144, 11264, 37)
+        with (
+            mock.patch.object(events, "find_nvidia_smi", return_value=Path("smi")),
+            mock.patch.object(events, "sample_gpu_usage", return_value=usage),
+        ):
+            data = self.first_metrics()
+        self.assertEqual(
+            data["gpu"],
+            {
+                "name": "NVIDIA GeForce GTX 1080 Ti",
+                "vram_used_mb": 6144,
+                "vram_total_mb": 11264,
+                "util_pct": 37,
+            },
+        )
+
     def test_the_gpu_is_released_after_disconnect(self) -> None:
         with self.connect() as ws:
             self.hello(ws)
         self.assertTrue(self.wait_gpu_released())
+
+
+class ProbeTest(RemoteServerCase):
+    """compute-capacity 三：`hello {intent: probe}` 只查能力，不佔 GPU，B 忙碌時也回答。"""
+
+    def probe(self, who: Identity | None = None) -> tuple[dict[str, Any], int | None]:
+        """送 probe，回傳 welcome 與 B 關閉連線的 close code。"""
+        with self.connect(who) as ws:
+            ws.send(rp.client_hello("0.3.1", "probe"))
+            welcome = rp.parse_server(ws.recv(timeout=WAIT))
+            with self.assertRaises(ConnectionClosed) as ctx:
+                ws.recv(timeout=WAIT)
+        rcvd = ctx.exception.rcvd
+        return welcome, None if rcvd is None else rcvd.code
+
+    def test_probe_answers_the_host_info_and_closes(self) -> None:
+        welcome, code = self.probe()
+        self.assertEqual(welcome["type"], "welcome")
+        self.assertEqual(welcome["host"], HOST_INFO)
+        self.assertEqual(code, 1000)
+        # 沒有佔 GPU、沒有變成「正在使用這台的電腦」
+        self.assertFalse(self.gate.held)
+        self.assertIsNone(self.server.owner_spki())
+        self.assertIsNone(self.server.peer_state())
+
+    def test_probe_is_answered_while_another_computer_runs_a_session(self) -> None:
+        with self.connect() as first:
+            self.hello(first)
+            first.send(rp.client_session_start("media", Settings()))
+            self.assertTrue(self.gate.held)
+            welcome, _ = self.probe(self.other)
+            self.assertEqual(welcome["host"], HOST_INFO)
+            # 正在用的那台不受影響：GPU 仍是它的，連線照常
+            self.assertEqual(self.server.owner_spki(), self.client_id.spki)
+            first.send(json.dumps({"type": "ping", "nonce": 3}))
+            while rp.parse_server(first.recv(timeout=WAIT))["type"] != "pong":
+                pass
+            # 主動停止（直接斷線的話 B 會保留 session 等續接）
+            first.send(json.dumps({"type": "session.stop"}))
+        self.assertTrue(self.wait_gpu_released())
+
+    def test_probe_is_answered_while_this_computer_runs_its_own_subtitles(self) -> None:
+        self.assertTrue(self.gate.acquire())  # B 自己在跑字幕
+        welcome, code = self.probe()
+        self.assertEqual((welcome["type"], code), ("welcome", 1000))
+        self.assertTrue(self.gate.held)  # 沒有被 probe 放掉
+
+    def test_the_same_computer_probing_does_not_kick_its_session(self) -> None:
+        # 同一台電腦在字幕進行中打開設定頁（又 probe 一次）：不能被當成重連而取代舊連線
+        with self.connect() as first:
+            self.hello(first)
+            self.probe()
+            first.send(json.dumps({"type": "ping", "nonce": 4}))
+            while rp.parse_server(first.recv(timeout=WAIT))["type"] != "pong":
+                pass
+
+    def test_session_welcome_also_carries_the_host_info(self) -> None:
+        with self.connect() as ws:
+            welcome = self.hello(ws)
+        self.assertEqual(welcome["host"], HOST_INFO)
+
+    def test_a_failing_capacity_still_welcomes_without_host(self) -> None:
+        def broken() -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        self.capacity.host_info = broken  # type: ignore[method-assign]
+        with self.assertLogs("kikitori.remote.server", "ERROR"):
+            welcome, _ = self.probe()
+        self.assertEqual(welcome["type"], "welcome")
+        self.assertIsNone(welcome["host"])
+
+    def test_a_probe_with_a_wrong_version_is_incompatible(self) -> None:
+        with self.connect() as ws:
+            ws.send(
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "protocol_version": 99,
+                        "app_version": "9.9.9",
+                        "intent": "probe",
+                    }
+                )
+            )
+            self.assertEqual(
+                rp.parse_server(ws.recv(timeout=WAIT))["type"], "incompatible"
+            )
+        self.assertFalse(self.gate.held)
+
+
+class AsrModelTest(RemoteServerCase):
+    """compute-capacity 三：A 在 `session.start` 指定 B 的 ASR 模型（只能是 B 已下載的）。"""
+
+    def start_with(self, asr: dict[str, Any]) -> list[dict[str, Any]]:
+        """送 session.start，收到第一則 status error／running 為止。"""
+        messages: list[dict[str, Any]] = []
+        with self.connect() as ws:
+            self.hello(ws)
+            ws.send(
+                json.dumps(
+                    {"type": "session.start", "mode": "media", "settings": {"asr": asr}}
+                )
+            )
+            while True:
+                m = rp.parse_server(ws.recv(timeout=WAIT))
+                messages.append(m)
+                if m["type"] == "status" and m["state"] in ("running", "error"):
+                    break
+            ws.send(json.dumps({"type": "session.stop"}))
+        return messages
+
+    def test_an_unknown_model_is_refused(self) -> None:
+        last = self.start_with({"final_model": "huge-v9"})[-1]
+        self.assertEqual((last["state"], last["code"]), ("error", "unknown_model"))
+        self.assertTrue(self.wait_gpu_released())
+
+    def test_a_model_this_computer_has_not_downloaded_is_refused(self) -> None:
+        # A 不能叫 B 下載：B 的主人自己決定要放哪些模型
+        last = self.start_with({"final_model": "large-v3"})[-1]
+        self.assertEqual(
+            (last["state"], last["code"]), ("error", "model_not_downloaded")
+        )
+        self.assertIn("large-v3", last["detail"])
+
+    def test_a_downloaded_model_is_used_for_this_session_only(self) -> None:
+        loaded: list[Settings] = []
+        real = fake_services().build_components
+
+        def record(settings: Settings, *args: Any, **kwargs: Any) -> Any:
+            loaded.append(settings)
+            return real(settings, *args, **kwargs)
+
+        self.server._build_components = record
+        seen: list[tuple[str, ...]] = []
+        with self.connect() as ws:
+            self.hello(ws)
+            ws.send(rp.client_session_start("media", Settings(), final_model="base"))
+            while True:
+                m = rp.parse_server(ws.recv(timeout=WAIT))
+                if m["type"] == "status" and m["state"] == "running":
+                    seen.append(self.server.session_models())
+                    break
+                self.assertNotEqual(m.get("state"), "error", m)
+            ws.send(json.dumps({"type": "session.stop"}))
+        self.assertEqual(loaded[0].asr.final_model, "base")
+        # 裝置與精度仍是 B 的；B 的設定本身不變
+        self.assertEqual(loaded[0].asr.device, Settings().asr.device)
+        self.assertEqual(seen, [(Settings().asr.fast_model, "base")])
+        self.assertTrue(self.wait_gpu_released())
+        self.assertEqual(self.server.session_models(), ())
 
 
 class SourceAddressTest(unittest.TestCase):

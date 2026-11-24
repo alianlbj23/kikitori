@@ -6,21 +6,30 @@
 
 - 音訊訊框（A → B，二進位）：`>IQ` 標頭（序號 u32、起始樣本 u64）＋ 16 kHz 單聲道 int16 little-endian。
 - `session.start` 帶的設定**只接受白名單**：語言、翻譯開關、術語表、原文校正、本場資訊、
-  說話者標籤、切句時間。翻譯伺服器網址、模型、金鑰的環境變數、ASR、遠端設定都不能由 A 改
-  （否則能讓 B 的引擎連到任意網址或載入任意模型），一律用 B 自己的設定。
+  說話者標籤、切句時間，以及 ASR 模型的 id（`asr.fast_model`／`final_model`，
+  docs/specs/compute-capacity.md「三」）。翻譯伺服器網址、翻譯模型、金鑰的環境變數、ASR 的
+  裝置與精度、遠端設定都不能由 A 改（否則能讓 B 的引擎連到任意網址），一律用 B 自己的設定；
+  ASR 模型只能是 B 的 registry 裡、而且 B 已下載的（由 `remote.server` 檢查，A 不能叫 B 下載）。
+- `hello` 的 `intent`：`probe` 只查 B 的能力（`welcome.host`，見 `remote.capacity`），B 回完就
+  關閉、不佔 GPU；省略＝`session`（舊版 A）。
+- `welcome.host`（B 的能力）由 A 逐欄驗證（`parse_host_info`）：不合格整個當 null，連線照常。
 """
 
 import json
+import logging
 import re
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
 
 from kikitori.config import Settings, SettingsError
 from kikitori.pipeline.types import MODES, Mode
+
+logger = logging.getLogger(__name__)
 
 PATH = "/kikitori/v1"
 """運算主機的 WebSocket 路徑（其他路徑一律 404）。"""
@@ -47,7 +56,24 @@ _SESSION_SETTINGS: dict[str, frozenset[str] | None] = {
     "speakers": frozenset({"enabled", "count"}),
     "media": frozenset({"pause_secs", "max_secs"}),
     "interpret": frozenset({"pause_secs", "max_secs"}),
+    # 只有模型 id；裝置、精度、CUDA 函式庫位置仍用 B 的設定
+    "asr": frozenset({"fast_model", "final_model"}),
 }
+_ASR_MODEL_KEYS = ("fast_model", "final_model")
+_MODEL_ID = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+"""ASR 模型 id 的格式（與設定檔 `asr.*_model` 相同）；是否在 registry 裡由 B 判斷。"""
+
+Intent = Literal["session", "probe"]
+INTENTS: tuple[Intent, ...] = ("session", "probe")
+
+# B 的能力（welcome.host）的上限：A 逐欄驗證，B 壞掉或惡意時不能塞進大量或怪異的資料
+MAX_HOST_MODELS = 32
+MAX_GPU_NAME_CHARS = 64
+MAX_VRAM_MB = 1_048_576
+MAX_HOST_TRANSLATION_MODEL_CHARS = 200
+_COMPUTE_TYPE = re.compile(r"^[a-z0-9_]{1,32}$")
+_HOST_DEVICES = ("cuda", "cpu")
+_FITS = ("ok", "tight", "over")
 
 _SERVER_EVENTS = frozenset({"subtitle", "metrics", "log"})
 _STATES = frozenset({"loading", "running", "idle", "error"})
@@ -110,10 +136,11 @@ def decode_audio(data: bytes) -> AudioFrame:
 
 @dataclass(frozen=True)
 class Hello:
-    """握手：A 的協定版本與 app 版本。"""
+    """握手：A 的協定版本與 app 版本；`intent` 是 `probe` 時只查 B 的能力。"""
 
     protocol_version: int
     app_version: str
+    intent: Intent = "session"
 
 
 @dataclass(frozen=True)
@@ -213,6 +240,9 @@ def _session_patch(value: object) -> dict[str, Any]:
             extra = set(sub) - allowed
             if extra:
                 raise ProtocolViolation(f"session.start may not set {key}.{min(extra)}")
+    for name, model in (value.get("asr") or {}).items():
+        if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
+            raise ProtocolViolation(f"session.start asr.{name} must be a model id")
     return value
 
 
@@ -225,12 +255,15 @@ def parse_client(text: str) -> ClientMessage:
     data = _load(text)
     kind = data["type"]
     if kind == "hello":
-        _fields(data, ("protocol_version", "app_version"))
+        _fields(data, ("protocol_version", "app_version", "intent"))
         version = _int(data.get("protocol_version"), "protocol_version", 0, _U32_MAX)
         app = data.get("app_version")
-        if not isinstance(app, str) or not _APP_VERSION.match(app):
+        if not isinstance(app, str) or not _APP_VERSION.fullmatch(app):
             raise ProtocolViolation("app_version must be a short version string")
-        return Hello(version, app)
+        intent = data.get("intent", "session")
+        if not _is_one_of(intent, INTENTS):
+            raise ProtocolViolation(f"intent must be one of {list(INTENTS)}")
+        return Hello(version, app, cast(Intent, intent))
     if kind == "session.start":
         _fields(data, ("mode", "settings"))
         mode = data.get("mode")
@@ -261,6 +294,15 @@ def parse_client(text: str) -> ClientMessage:
     raise ProtocolViolation(f"unknown message type {kind[:40]!r}")
 
 
+def requested_models(start: SessionStart) -> dict[str, str]:
+    """A 指定的 ASR 模型（`{"fast_model"?: id, "final_model"?: id}`；沒指定時空的）。
+
+    格式已由 `parse_client` 驗證；是否在 registry 裡、B 是否已下載由 B 判斷。
+    """
+    asr = start.settings.get("asr") or {}
+    return {key: str(asr[key]) for key in _ASR_MODEL_KEYS if key in asr}
+
+
 def session_settings(base: Settings, start: SessionStart) -> Settings:
     """B 的設定加上 A 帶來的白名單設定（照本機設定的規則驗證）。
 
@@ -273,26 +315,46 @@ def session_settings(base: Settings, start: SessionStart) -> Settings:
         raise ProtocolViolation(f"session.start settings: {exc}") from exc
 
 
-def client_hello(app_version: str) -> str:
-    """A 端：握手訊息。"""
-    return json.dumps(
-        {
-            "type": "hello",
-            "protocol_version": PROTOCOL_VERSION,
-            "app_version": app_version,
-        }
-    )
+def client_hello(app_version: str, intent: Intent = "session") -> str:
+    """A 端：握手訊息。`session` 不送 `intent`（省略＝session），舊版 B 才不會拒絕。"""
+    message: dict[str, Any] = {
+        "type": "hello",
+        "protocol_version": PROTOCOL_VERSION,
+        "app_version": app_version,
+    }
+    if intent != "session":
+        message["intent"] = intent
+    return json.dumps(message)
 
 
-def client_session_start(mode: Mode, settings: Settings) -> str:
-    """A 端：開始一場，帶上這台電腦的白名單設定。"""
+def client_session_start(
+    mode: Mode, settings: Settings, *, fast_model: str = "", final_model: str = ""
+) -> str:
+    """A 端：開始一場，帶上這台電腦的白名單設定。
+
+    Args:
+        mode: session 模式。
+        settings: A 的設定（只送白名單內的欄位）。
+        fast_model: 要 B 用的即時辨識模型；空字串＝照 B 的設定（不送）。
+        final_model: 要 B 用的完整辨識模型；同上。
+    """
     full = settings.to_dict()
     patch: dict[str, Any] = {}
     for key, allowed in _SESSION_SETTINGS.items():
+        if key == "asr":
+            continue  # 不送 A 自己的 ASR 設定；只送使用者為遠端選的模型（下面）
         value = full[key]
         patch[key] = (
             value if allowed is None else {k: value[k] for k in sorted(allowed)}
         )
+    # 都沒選時整個不送：舊版 B 不認得 `asr`，會當成不合法的設定
+    asr = {
+        key: model
+        for key, model in (("fast_model", fast_model), ("final_model", final_model))
+        if model
+    }
+    if asr:
+        patch["asr"] = asr
     return json.dumps(
         {"type": "session.start", "mode": mode, "settings": patch}, ensure_ascii=False
     )
@@ -332,15 +394,21 @@ def client_ping(nonce: int) -> str:
 # --------------------------------------------------------------------------- B → A
 
 
-def welcome(app_version: str, models: dict[str, str]) -> str:
-    """握手成功；`models` 是 B 會用的模型（給 A 顯示）。"""
+def welcome(
+    app_version: str,
+    models: dict[str, str],
+    host: Mapping[str, Any] | None = None,
+) -> str:
+    """握手成功；`models` 是 B 會用的模型（給 A 顯示），`host` 是 B 的能力（`HostInfo`）。"""
     return json.dumps(
         {
             "type": "welcome",
             "protocol_version": PROTOCOL_VERSION,
             "app_version": app_version,
             "models": models,
-        }
+            "host": None if host is None else dict(host),
+        },
+        ensure_ascii=False,
     )
 
 
@@ -433,6 +501,131 @@ def _check_status(data: dict[str, Any]) -> None:
     _int(progress["done"], "status.data.done", 0, total)
 
 
+class _BadHost(ValueError):
+    """`welcome.host` 的某個欄位不合格（整個 host 當 null）。"""
+
+
+def _host_text(value: object, name: str, pattern: re.Pattern[str]) -> str:
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise _BadHost(f"{name} is not valid")
+    return value
+
+
+def _host_int(value: object, name: str, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= high:
+        raise _BadHost(f"{name} must be an integer in [0, {high}]")
+    return value
+
+
+def _host_object(value: object, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _BadHost(f"{name} must be an object")
+    return value
+
+
+def _host_pair(value: object, name: str) -> dict[str, str] | None:
+    """`current`／`recommended`：`{fast, final}` 兩個模型 id。"""
+    if value is None:
+        return None
+    pair = _host_object(value, name)
+    return {
+        key: _host_text(pair.get(key), f"{name}.{key}", _MODEL_ID)
+        for key in ("fast", "final")
+    }
+
+
+def _host_gpu(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    gpu = _host_object(value, "gpu")
+    name = gpu.get("name")
+    if (
+        not isinstance(name, str)
+        or not 0 < len(name) <= MAX_GPU_NAME_CHARS
+        or not name.isprintable()
+    ):
+        raise _BadHost(f"gpu.name must be 1-{MAX_GPU_NAME_CHARS} printable characters")
+    return {
+        "name": name,
+        "vram_total_mb": _host_int(
+            gpu.get("vram_total_mb"), "gpu.vram_total_mb", MAX_VRAM_MB
+        ),
+    }
+
+
+def _host_models(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > MAX_HOST_MODELS:
+        raise _BadHost(f"models must be a list of at most {MAX_HOST_MODELS}")
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for i, raw in enumerate(value):
+        entry = _host_object(raw, f"models[{i}]")
+        model_id = _host_text(entry.get("id"), f"models[{i}].id", _MODEL_ID)
+        if model_id in seen:
+            raise _BadHost(f"models[{i}].id is repeated")
+        seen.add(model_id)
+        downloaded = entry.get("downloaded")
+        if not isinstance(downloaded, bool):
+            raise _BadHost(f"models[{i}].downloaded must be true or false")
+        fit = entry.get("fit")
+        if fit is not None and not _is_one_of(fit, _FITS):
+            raise _BadHost(f"models[{i}].fit must be one of {list(_FITS)} or null")
+        models.append(
+            {
+                "id": model_id,
+                "downloaded": downloaded,
+                "need_mb": _host_int(
+                    entry.get("need_mb"), f"models[{i}].need_mb", MAX_VRAM_MB
+                ),
+                "fit": fit,
+            }
+        )
+    return models
+
+
+def _host_translation_model(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_HOST_TRANSLATION_MODEL_CHARS
+        or not value.isprintable()
+    ):
+        raise _BadHost("translation_model must be a short printable string")
+    return value
+
+
+def parse_host_info(value: object) -> dict[str, Any] | None:
+    """A 端：驗證 B 送來的 `HostInfo`，只留認得的欄位；不合格（或沒有）時 None。
+
+    不合格不中斷連線：能力只是給使用者參考的資訊，舊版或壞掉的 B 照樣能跑字幕。
+    """
+    if value is None:
+        return None
+    try:
+        host = _host_object(value, "host")
+        device = host.get("device")
+        if not _is_one_of(device, _HOST_DEVICES):
+            raise _BadHost(f"device must be one of {list(_HOST_DEVICES)}")
+        current = _host_pair(host.get("current"), "current")
+        if current is None:
+            raise _BadHost("current is required")
+        return {
+            "gpu": _host_gpu(host.get("gpu")),
+            "device": device,
+            "compute_type": _host_text(
+                host.get("compute_type"), "compute_type", _COMPUTE_TYPE
+            ),
+            "current": current,
+            "recommended": _host_pair(host.get("recommended"), "recommended"),
+            "models": _host_models(host.get("models")),
+            "translation_model": _host_translation_model(host.get("translation_model")),
+        }
+    except _BadHost as exc:
+        logger.warning("ignoring the compute host's capabilities: %s", exc)
+        return None
+
+
 def parse_server(text: str) -> dict[str, Any]:
     """A 端：驗證 B 送來的一則訊息的外形（事件內容再由現有的事件驗證處理）。
 
@@ -445,6 +638,7 @@ def parse_server(text: str) -> dict[str, Any]:
         _int(data.get("protocol_version"), "protocol_version", 0, _U32_MAX)
         if not isinstance(data.get("models"), dict):
             raise ProtocolViolation("welcome.models must be an object")
+        data["host"] = parse_host_info(data.get("host"))
     elif kind == "session.started":
         _fields(data, ("session_id",))
         _int(data.get("session_id"), "session_id", 1, _MAX_NONCE)

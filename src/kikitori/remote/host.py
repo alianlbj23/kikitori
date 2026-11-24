@@ -3,11 +3,16 @@
 位於 remote 模組的宿主層（docs/specs/remote-compute.md「B 的兩種宿主」）。與 GUI 共用同一個設定
 資料夾與 `compute/`（憑證、信任清單）。依使用者規則做成編號選單，不靠記指令參數：
 
-1. 開始提供運算（前景執行；執行中可按鍵配對、列出、斷開目前的電腦）
+1. 開始提供運算（前景執行；執行中可按鍵配對、列出、斷開目前的電腦、看目前負荷）
 2. 允許新的電腦配對（輸入另一台電腦上顯示的 6 位數）
 3. 已配對的電腦（列出／移除）
 4. 準備模型（套用硬體建議、下載辨識模型與翻譯模型；重用引擎的下載邏輯）
-5. 變更監聽位址（從這台電腦的私有網段與 Tailscale 位址選，不預設 0.0.0.0）
+5. 選擇模型（列出每個辨識模型在這台跑不跑得動；換完整辨識模型，沒下載的先下載）
+6. 變更監聽位址（從這台電腦的私有網段與 Tailscale 位址選，不預設 0.0.0.0）
+7. 重建這台電腦的身分
+
+「選擇模型」與連進來的電腦看到的是同一份能力（`remote.capacity`，docs/specs/compute-capacity.md
+「六」）。
 """
 
 import json
@@ -19,7 +24,18 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from kikitori.config import Settings, SettingsStore, default_settings_path
+from kikitori.config import (
+    Settings,
+    SettingsError,
+    SettingsStore,
+    default_settings_path,
+)
+from kikitori.remote.capacity import (
+    HostCapacity,
+    HostCapacitySource,
+    default_detect,
+    default_downloaded,
+)
 from kikitori.remote.identity import (
     Identity,
     IdentityError,
@@ -48,17 +64,27 @@ MENU = """
   2) 允許新的電腦配對
   3) 已配對的電腦
   4) 準備模型
-  5) 變更監聽位址
-  6) 重建這台電腦的身分（所有配對都要重做）
-  7) 返回
+  5) 選擇模型
+  6) 變更監聽位址
+  7) 重建這台電腦的身分（所有配對都要重做）
+  8) 返回
 """
 
-SERVING_HELP = "執行中：p＝配對新電腦  l＝已配對的電腦  d＝斷開目前的電腦  q＝停止"
+SERVING_HELP = (
+    "執行中：p＝配對新電腦  l＝已配對的電腦  d＝斷開目前的電腦  s＝目前負荷  q＝停止"
+)
 
 # 只用來讓作業系統挑出「往那個方向」會用的本機位址；UDP connect 不送出任何封包
 _PROBES = ("192.0.2.1", "100.100.100.100")
 DOWNLOAD_TIMEOUT = 6 * 3600.0
 REQUEST_TIMEOUT = 120.0
+VRAM_QUERY_TIMEOUT = 2.0
+"""按 s 時查顯示卡記憶體最多等多久：卡住時寧可這次不顯示。"""
+
+_FIT_LABELS = {"ok": "跑得動", "tight": "可能吃緊", "over": "超出負荷"}
+
+VramFn = Callable[[], tuple[int, int] | None]
+"""目前顯示卡記憶體 `(已用, 總量)`（MiB）；沒有 NVIDIA 或查不到時 None。"""
 
 
 def fingerprint(spki: bytes) -> str:
@@ -127,6 +153,31 @@ class _Gate:
             self._held = False
 
 
+def query_vram(timeout: float = VRAM_QUERY_TIMEOUT) -> tuple[int, int] | None:
+    """VRAM 最大那張 NVIDIA 顯示卡目前的 `(已用, 總量)`（MiB）；沒有或查不到時 None。"""
+    from kikitori.hardware.nvidia import (
+        NvidiaSmiError,
+        find_nvidia_smi,
+        query_nvidia_gpus,
+    )
+    from kikitori.hardware.system import os_name
+
+    try:
+        executable = find_nvidia_smi(os_name())
+        if executable is None:
+            return None
+        gpus, _ = query_nvidia_gpus(executable, timeout=timeout)
+    except (NvidiaSmiError, OSError) as exc:
+        logger.info("cannot read the GPU memory: %s", exc)
+        return None
+    if not gpus:
+        return None
+    gpu = max(gpus, key=lambda g: g.memory_total_mb)
+    if gpu.memory_used_mb is None:
+        return None
+    return gpu.memory_used_mb, gpu.memory_total_mb
+
+
 class ComputeHost:
     """無介面主機的狀態：本機憑證、信任清單、設定，以及執行中的伺服器。"""
 
@@ -136,11 +187,28 @@ class ComputeHost:
         identity: Identity,
         trust: TrustStore,
         app_version: str,
+        *,
+        capacity: HostCapacitySource | None = None,
+        vram: VramFn = query_vram,
     ) -> None:
+        """
+        Args:
+            store: 設定。
+            identity: 這台電腦的憑證。
+            trust: 允許連進來的電腦。
+            app_version: 握手時告訴對方的版本。
+            capacity: 這台的能力（連進來的電腦與「選擇模型」看到的同一份）；None 時用真的
+                硬體偵測與模型快取。
+            vram: 目前顯示卡記憶體（「目前負荷」用）。
+        """
         self.store = store
         self.identity = identity
         self.trust = trust
         self.app_version = app_version
+        self.capacity: HostCapacitySource = capacity or HostCapacity(
+            self.reload_settings, detect=default_detect, downloaded=default_downloaded
+        )
+        self.vram = vram
         self.server: Any = None  # RemoteServer（延後載入：pipeline 依賴較重）
 
     @property
@@ -180,6 +248,7 @@ class ComputeHost:
             host=compute.listen_host,
             port=compute.listen_port,
             app_version=self.app_version,
+            capacity=self.capacity,
         )
         self.server.start()
 
@@ -277,10 +346,12 @@ def host_menu(
         elif choice == "4":
             prepare_models(host, input_fn, out)
         elif choice == "5":
-            choose_listen_host(host, input_fn, out)
+            choose_model(host, input_fn, out)
         elif choice == "6":
-            reset_from_menu(host, input_fn, out)
+            choose_listen_host(host, input_fn, out)
         elif choice == "7":
+            reset_from_menu(host, input_fn, out)
+        elif choice == "8":
             return 0
         else:
             out(f"無效的選項：{choice!r}")
@@ -369,6 +440,8 @@ def serve(host: ComputeHost, input_fn: InputFn, out: OutFn) -> None:
                 server = host.server
                 kicked = server is not None and server.disconnect()
                 out("已斷開目前的電腦。" if kicked else "目前沒有電腦連線。")
+            elif command == "s":
+                out(load_line(host))
             elif command:
                 out(SERVING_HELP)
     except KeyboardInterrupt:
@@ -376,6 +449,28 @@ def serve(host: ComputeHost, input_fn: InputFn, out: OutFn) -> None:
     finally:
         host.stop_server()
         out("已停止提供運算。")
+
+
+def load_line(host: ComputeHost) -> str:
+    """目前負荷一行：完整辨識忙碌度、待處理句數、顯示卡記憶體（compute-capacity 六）。"""
+    server = host.server
+    if server is None or server.owner_spki() is None:
+        return "目前沒有電腦在用這台。"
+    metrics = server.current_metrics()
+    if metrics is None:
+        return "有電腦在用這台，模型還在載入（或正在等它重新連線）。"
+    busy = metrics.final_busy
+    parts = [
+        "完整辨識忙碌度：還沒有資料"
+        if busy is None
+        else f"完整辨識忙碌度 {round(busy * 100)}%",
+        f"待處理 {metrics.backlog} 句",
+    ]
+    vram = host.vram()
+    if vram is not None:
+        used, total = vram
+        parts.append(f"顯示卡記憶體 {used / 1024:.1f}／{total / 1024:.1f} GB")
+    return "目前負荷：" + "・".join(parts)
 
 
 _PAIR_FAILURES = {
@@ -652,6 +747,96 @@ def prepare_models(
         driver.close()
     out("模型都準備好了。" if ok else "有些模型沒有準備好，請看上面的訊息。")
     return ok
+
+
+def _ask_yes(input_fn: InputFn, prompt: str) -> bool:
+    try:
+        return input_fn(prompt).strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def choose_model(
+    host: ComputeHost,
+    input_fn: InputFn,
+    out: OutFn,
+    driver_factory: Callable[[OutFn], Any] = _EngineDriver,
+) -> bool:
+    """列出每個辨識模型在這台跑不跑得動，換完整辨識模型（`asr.final_model`）；回傳是否有換。
+
+    即時辨識模型不變（它決定字幕出現的速度，由「準備模型」依硬體設定）。選了還沒下載的模型
+    先問要不要下載；選了超出負荷的再確認一次。
+    """
+    out("讀取這台電腦的顯示卡與模型…")
+    info = host.capacity.host_info()
+    gpu = info["gpu"]
+    if gpu is not None:
+        out(f"顯示卡：{gpu['name']}・{gpu['vram_total_mb'] / 1024:.0f} GB")
+    elif info["device"] == "cpu":
+        out("辨識在 CPU 上跑（沒有可用的 NVIDIA 顯示卡）。")
+    memory = "顯示卡記憶體" if info["device"] == "cuda" else "記憶體"
+    current = info["current"]
+    recommended = (info["recommended"] or {}).get("final")
+    out(f"即時辨識維持 {current['fast']}；這裡選的是完整辨識（定稿字幕）用的模型。")
+    models: list[dict[str, Any]] = info["models"]
+    for i, model in enumerate(models, 1):
+        tags = [
+            f"約 {model['need_mb'] / 1024:.1f} GB {memory}",
+            _FIT_LABELS.get(model["fit"], "不確定跑不跑得動"),
+            "已下載" if model["downloaded"] else "未下載",
+        ]
+        if model["id"] == recommended:
+            tags.append("建議")
+        if model["id"] == current["final"]:
+            tags.append("目前")
+        out(f"  {i}) {model['id']}  {'・'.join(tags)}")
+    try:
+        answer = input_fn("請輸入編號（空白取消）：").strip()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if not answer:
+        return False
+    if not (answer.isdigit() and 1 <= int(answer) <= len(models)):
+        out(f"無效的選項：{answer!r}")
+        return False
+    chosen = models[int(answer) - 1]
+    model_id = str(chosen["id"])
+    if chosen["fit"] == "over" and not _ask_yes(
+        input_fn,
+        f"{model_id} 可能超出這台電腦的負荷（字幕會跟不上），確定要用嗎？(y/N)：",
+    ):
+        out("沒有變更。")
+        return False
+    if not chosen["downloaded"]:
+        if not _ask_yes(input_fn, f"{model_id} 還沒下載，要現在下載嗎？(y/N)："):
+            out("沒有變更。")
+            return False
+        if not _download_model(model_id, out, driver_factory):
+            out("下載失敗，沒有變更。")
+            return False
+    try:
+        host.store.update({"asr": {"final_model": model_id}})
+    except (OSError, SettingsError) as exc:
+        logger.exception("cannot save the ASR model")
+        out(f"無法儲存：{exc}")
+        return False
+    out(f"已設定完整辨識模型：{model_id}（下一場字幕開始生效）。")
+    return True
+
+
+def _download_model(
+    model_id: str, out: OutFn, driver_factory: Callable[[OutFn], Any]
+) -> bool:
+    out(f"下載辨識模型 {model_id}…")
+    driver = driver_factory(out)
+    try:
+        return bool(driver.download("models.download", {"model": model_id}, model_id))
+    except RuntimeError as exc:
+        logger.exception("downloading %s failed", model_id)
+        out(f"下載失敗：{exc}")
+        return False
+    finally:
+        driver.close()
 
 
 def _offer_gpu_runtime(

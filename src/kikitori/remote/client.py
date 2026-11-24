@@ -18,6 +18,10 @@
   驗外形，字幕與 metrics 再逐欄驗證、只留認得的欄位，才交給引擎；B 不能觸發 A 的任何指令。
 - **停止**不依賴 B：送 `session.stop` → 最多等 `STOP_WAIT` 秒 B 回 idle → 關 socket → 等執行緒
   結束才返回，之後不會再冒出字幕（設計審查第 11 點）。
+- **查詢能力**（`probe_host_info`，docs/specs/compute-capacity.md「三」「四」）：同一套連線與驗證，
+  `hello` 帶 `intent: probe`，B 回 `welcome`（含 `host`）就關閉，不開始字幕、不佔 B 的 GPU。
+- **A 選的模型**（`compute.remote_*_model`）隨 `session.start` 送給 B；B 沒有那個模型時回
+  `remote_model_not_downloaded`（A 不能叫 B 下載）。
 """
 
 import logging
@@ -67,12 +71,17 @@ STOP_WAIT = 2.0
 FRAME_SAMPLES = rp.SAMPLE_RATE // 10
 SEND_QUEUE = 64
 """送出佇列上限（約 6 秒的音訊訊框）：滿了表示連線已經壞了。"""
+PROBE_TIMEOUT = 10.0
+"""查詢 B 的能力最多等多久（連線、TLS、hello／welcome 合計）。"""
 READ_TIMEOUT = 0.1
 MAX_BAD_EVENTS = 20
 """B 送來這麼多則不合格的字幕就中止（壞掉或惡意的主機）。"""
 MAX_TEXT_CHARS = 10_000
 MAX_LOG_CHARS = 2_000
 MAX_VOICE = 64
+MAX_RTF = 1000.0
+MAX_GPU_NAME_CHARS = 64
+MAX_VRAM_MB = 1_048_576
 _LANGUAGE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$")
 _LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
 _BACKOFF = (0.5, 1.0, 2.0, 4.0)
@@ -170,6 +179,8 @@ class RemoteClientSession:
         reconnect_secs: float = RECONNECT_SECS,
         buffer_secs: float = BUFFER_SECS,
         resend_speed: float = RESEND_SPEED,
+        fast_model: str = "",
+        final_model: str = "",
     ) -> None:
         """
         Args:
@@ -189,6 +200,8 @@ class RemoteClientSession:
             reconnect_secs: 斷線後多久內要接回來（從最後收到 B 的訊息起算）。
             buffer_secs: B 還沒確認的音訊最多留幾秒。
             resend_speed: 續接時補送音訊的速度（即時的幾倍）。
+            fast_model: 要 B 用的即時辨識模型（`compute.remote_fast_model`）；空字串＝照 B 的設定。
+            final_model: 要 B 用的完整辨識模型（`compute.remote_final_model`）；同上。
         """
         self._identity = identity
         self._servers = servers
@@ -206,6 +219,8 @@ class RemoteClientSession:
         self._reconnect_secs = reconnect_secs
         self._max_buffer = round(buffer_secs * rp.SAMPLE_RATE)
         self._resend_speed = resend_speed
+        self._fast_model = fast_model
+        self._final_model = final_model
 
         self._lock = threading.Lock()
         self._callback_lock = threading.Lock()
@@ -235,6 +250,7 @@ class RemoteClientSession:
         self._bad_events = 0
 
         self._models: dict[str, str] = {}
+        self._host_info: dict[str, Any] | None = None
         self._source: AudioSource | None = None
         self._cancelled = threading.Event()
         self._stopping = threading.Event()
@@ -249,6 +265,11 @@ class RemoteClientSession:
     def models(self) -> dict[str, str]:
         """B 會用的模型（`welcome.models`；顯示用）。"""
         return dict(self._models)
+
+    @property
+    def host_info(self) -> dict[str, Any] | None:
+        """B 的能力（`welcome.host`，已驗證）；B 沒送或不合格時 None。"""
+        return None if self._host_info is None else dict(self._host_info)
 
     @property
     def rtt_ms(self) -> float | None:
@@ -278,18 +299,35 @@ class RemoteClientSession:
         with self._lock:
             self._conn = conn
 
-    def _open(self) -> _Conn:
+    def _open(
+        self, intent: rp.Intent = "session", deadline: float | None = None
+    ) -> _Conn:
         """建立一條新連線並完成 hello／welcome。
+
+        Args:
+            intent: `probe` 只查 B 的能力（B 回完 welcome 就關閉）。
+            deadline: `time.monotonic()` 的期限；連線、TLS 與等 welcome 合計不超過它。
 
         Raises:
             RemoteError: 同 `connect()`。
         """
+
+        def budget(limit: float) -> float:
+            if deadline is None:
+                return limit
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise RemoteError(
+                    "remote_unreachable", "the compute host did not answer in time"
+                )
+            return min(limit, left)
+
         if not self._host:
             raise RemoteError("remote_not_configured", "no compute host is set")
         context = client_ssl_context(self._identity, self._servers)
         try:
             sock = socket.create_connection(
-                (self._host, self._port), timeout=self._connect_timeout
+                (self._host, self._port), timeout=budget(self._connect_timeout)
             )
         except OSError as exc:
             raise RemoteError(
@@ -301,6 +339,11 @@ class RemoteClientSession:
                 raise RemoteError("remote_unreachable", "cancelled")
             self._sock = sock
         try:
+            hello_timeout = budget(HELLO_TIMEOUT)
+        except RemoteError:
+            sock.close()
+            raise
+        try:
             connection = connect(
                 f"wss://{_uri_host(self._host)}:{self._port}{rp.PATH}",
                 sock=sock,
@@ -308,7 +351,7 @@ class RemoteClientSession:
                 # 一定直連：系統 proxy 會看到（而且可能記錄）連線的目的地
                 proxy=None,
                 compression=None,
-                open_timeout=HELLO_TIMEOUT,
+                open_timeout=hello_timeout,
                 ping_interval=None,
                 close_timeout=2.0,
                 max_size=rp.MAX_TEXT_BYTES,
@@ -348,8 +391,8 @@ class RemoteClientSession:
         link.start()
         conn = _Conn(connection, link)
         try:
-            link.send(rp.client_hello(self._app_version))
-            reply = self._recv_handshake(conn)
+            link.send(rp.client_hello(self._app_version, intent))
+            reply = self._recv_handshake(conn, budget(HELLO_TIMEOUT))
         except BaseException:
             link.abort("handshake failed")  # 不留下寫入執行緒與看門狗
             raise
@@ -370,6 +413,7 @@ class RemoteClientSession:
             raise RemoteError("remote_error", f"unexpected {kind} during the handshake")
         models = reply["models"]
         self._models = {str(k)[:32]: str(v)[:200] for k, v in list(models.items())[:8]}
+        self._host_info = reply.get("host")  # parse_server 已逐欄驗證（不合格為 None）
         return conn
 
     def _check_server_identity(self, connection: ClientConnection) -> None:
@@ -386,10 +430,12 @@ class RemoteClientSession:
                 "the compute host's key is not the one paired with this computer",
             )
 
-    def _recv_handshake(self, conn: _Conn) -> dict[str, Any]:
+    def _recv_handshake(
+        self, conn: _Conn, timeout: float = HELLO_TIMEOUT
+    ) -> dict[str, Any]:
         """握手階段收一則訊息（還沒有接收執行緒）。"""
         try:
-            message = conn.connection.recv(timeout=HELLO_TIMEOUT)
+            message = conn.connection.recv(timeout=timeout)
         except TimeoutError as exc:
             conn.link.abort("no reply")
             raise RemoteError(
@@ -402,6 +448,16 @@ class RemoteClientSession:
                 raise RemoteError(
                     "remote_not_paired",
                     "the compute host no longer trusts this computer",
+                ) from exc
+            if (
+                rcvd is not None
+                and rcvd.code == 1008
+                and rcvd.reason == "protocol violation"
+            ):
+                # 握手時就說我們的訊息不合格：B 是不認得新欄位（例如 hello 的 intent）的舊版
+                raise RemoteError(
+                    "remote_incompatible",
+                    "the compute host runs an older version of kikitori",
                 ) from exc
             raise RemoteError(
                 "remote_unreachable", "the compute host closed the connection"
@@ -458,7 +514,14 @@ class RemoteClientSession:
             raise
         self._source = source
         with self._lock:
-            conn.link.send(rp.client_session_start(self._mode, self._settings))
+            conn.link.send(
+                rp.client_session_start(
+                    self._mode,
+                    self._settings,
+                    fast_model=self._fast_model,
+                    final_model=self._final_model,
+                )
+            )
             self._live = True
         self._start_receiver(conn)
         for target, name in (
@@ -947,7 +1010,98 @@ class _Invalid(Exception):
     """B 送來的某個欄位不合格（整則事件丟掉）。"""
 
 
+def probe_host_info(
+    *,
+    identity: Identity,
+    servers: TrustStore,
+    host: str,
+    port: int,
+    app_version: str,
+    timeout: float = PROBE_TIMEOUT,
+) -> dict[str, Any] | None:
+    """查詢運算主機的能力（`HostInfo`，已驗證）；不開始字幕、不佔 B 的 GPU。
+
+    與字幕連線用同一套連線與驗證（mTLS、SPKI pin、不走 proxy），只是 `hello` 帶 `intent: probe`。
+
+    Returns:
+        B 的能力；B 沒送（舊版）或內容不合格時 None。
+
+    Raises:
+        RemoteError: `remote_not_configured`、`remote_unreachable`（含逾時）、`remote_not_paired`、
+            `remote_incompatible`、`remote_identity_error`、`remote_error`（B 的回應不合格）。
+    """
+    deadline = time.monotonic() + timeout
+    client = RemoteClientSession(
+        identity=identity,
+        servers=servers,
+        host=host,
+        port=port,
+        app_version=app_version,
+        # probe 不開始 session：模式與設定不會送出，回呼也不會被呼叫
+        mode="media",
+        settings=Settings(),
+        on_status=_ignore_status,
+        on_event=_ignore_event,
+        capture_code=lambda exc: "capture_error",
+        connect_timeout=min(CONNECT_TIMEOUT, timeout),
+    )
+    conn = client._open("probe", deadline)
+    # B 回完 welcome 就關閉；我們也正常關閉，不留下寫入執行緒與看門狗
+    conn.link.close(1000, "probe done")
+    if not conn.link.join(max(0.0, deadline - time.monotonic())):
+        conn.link.abort("probe done")
+    return client.host_info
+
+
+def _ignore_status(
+    state: str, detail: str | None, code: str | None, data: Mapping[str, Any] | None
+) -> None:
+    """probe 不開始 session，不會有狀態。"""
+
+
+def _ignore_event(name: str, data: dict[str, Any]) -> None:
+    """probe 不開始 session，不會有事件。"""
+
+
+def _optional(check: Callable[[object], Any], value: object) -> Any:
+    """負荷欄位：沒有或不合格時 None（只丟這一欄，音量等其他欄位照常顯示）。"""
+    if value is None:
+        return None
+    try:
+        return check(value)
+    except _Invalid:
+        return None
+
+
+def _number(value: object, low: float, high: float) -> int | float:
+    """範圍內的數字（整數維持整數）。"""
+    number = _float(value, low, high)
+    return value if isinstance(value, int) else number
+
+
+def _gpu(value: object) -> dict[str, Any]:
+    """`metrics.gpu`：`{name, vram_used_mb, vram_total_mb, util_pct}`；任一欄不合格整個不要。"""
+    if not isinstance(value, dict):
+        raise _Invalid("gpu must be an object")
+    name = value.get("name")
+    if (
+        not isinstance(name, str)
+        or not 0 < len(name) <= MAX_GPU_NAME_CHARS
+        or not name.isprintable()
+    ):
+        raise _Invalid("gpu.name must be a short printable string")
+    total = _number(value.get("vram_total_mb"), 0, MAX_VRAM_MB)
+    used = _number(value.get("vram_used_mb"), 0, total)
+    return {
+        "name": name,
+        "vram_used_mb": used,
+        "vram_total_mb": total,
+        "util_pct": _number(value.get("util_pct"), 0, 100),
+    }
+
+
 def _check_metrics(data: dict[str, Any]) -> dict[str, Any] | None:
+    """驗證 B 的 metrics：既有欄位不合格時整則丟掉；負荷欄位不合格時只把那一欄設成 null。"""
     out: dict[str, Any] = {}
     try:
         for key in (
@@ -964,6 +1118,10 @@ def _check_metrics(data: dict[str, Any]) -> dict[str, Any] | None:
         )
     except _Invalid:
         return None
+    # compute-capacity 一：舊版 B 沒有這些欄位（None）；新欄位壞了不連累音量與延遲的顯示
+    out["final_busy"] = _optional(lambda v: _float(v, 0.0, 1.0), data.get("final_busy"))
+    out["rtf"] = _optional(lambda v: _float(v, 0.0, MAX_RTF), data.get("rtf"))
+    out["gpu"] = _optional(_gpu, data.get("gpu"))
     return out
 
 

@@ -37,7 +37,8 @@ const SESSION_START: Duration = Duration::from_secs(30);
 const SESSION_STOP: Duration = Duration::from_secs(15);
 /// `remote.server_set`, `remote.pair_open` and `remote.pair` open listening or
 /// outgoing sockets (and may create the TLS identity on first use), which can
-/// take a few seconds beyond the usual quick answer.
+/// take a few seconds beyond the usual quick answer. `remote.host_info` gives
+/// up on the compute host after 10 s itself, so this leaves it room to answer.
 const REMOTE_SOCKETS: Duration = Duration::from_secs(20);
 
 const MAX_MODEL_ID_CHARS: usize = 100;
@@ -612,6 +613,144 @@ pub async fn remote_unpair(
 ) -> CmdResult<Value> {
     let params = remote_unpair_params(&spki, &role)?;
     bridge.request("remote.unpair", params, QUICK).await
+}
+
+// --- The compute host's capacity (docs/specs/compute-capacity.md 二) -------
+
+/// More models than the engine's registry will ever list.
+const MAX_HOST_MODELS: usize = 32;
+const MAX_HOST_GPU_NAME_CHARS: usize = 64;
+const MAX_HOST_COMPUTE_TYPE_CHARS: usize = 32;
+/// 1 TiB in MiB: no GPU or model needs more than this.
+const HOST_MB_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1_048_576.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostDevice {
+    Cuda,
+    Cpu,
+}
+
+/// Whether a model fits the compute host's memory next to its real-time model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelFit {
+    Ok,
+    Tight,
+    Over,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostGpu {
+    pub name: String,
+    pub vram_total_mb: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPair {
+    pub fast: String,
+    pub r#final: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostModel {
+    pub id: String,
+    pub downloaded: bool,
+    pub need_mb: f64,
+    /// `None` when the compute host could not measure its hardware.
+    pub fit: Option<ModelFit>,
+}
+
+/// `HostInfo`: what the compute host can run. It comes from another computer
+/// through the engine, so it is checked here like any engine output; fields
+/// this app does not know are dropped when it is serialized again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub gpu: Option<HostGpu>,
+    pub device: HostDevice,
+    pub compute_type: String,
+    pub current: ModelPair,
+    pub recommended: Option<ModelPair>,
+    pub models: Vec<HostModel>,
+    pub translation_model: Option<String>,
+}
+
+fn check_model_pair(pair: &ModelPair, field: &str) -> Result<(), String> {
+    for (name, id) in [("fast", &pair.fast), ("final", &pair.r#final)] {
+        validate_model_id(id).map_err(|e| format!("{field}.{name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The shape and ranges of a `HostInfo` (the same rules as the UI's `parseHostInfo`).
+pub fn check_host_info(value: Value) -> Result<HostInfo, String> {
+    let host: HostInfo = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if let Some(gpu) = &host.gpu {
+        if gpu.name.chars().count() > MAX_HOST_GPU_NAME_CHARS {
+            return Err(format!(
+                "gpu.name is longer than {MAX_HOST_GPU_NAME_CHARS} characters"
+            ));
+        }
+        if !HOST_MB_RANGE.contains(&gpu.vram_total_mb) {
+            return Err("gpu.vram_total_mb is out of range".into());
+        }
+    }
+    if host.compute_type.is_empty()
+        || host.compute_type.len() > MAX_HOST_COMPUTE_TYPE_CHARS
+        || !host
+            .compute_type
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err("compute_type is not a precision name".into());
+    }
+    check_model_pair(&host.current, "current")?;
+    if let Some(recommended) = &host.recommended {
+        check_model_pair(recommended, "recommended")?;
+    }
+    if host.models.len() > MAX_HOST_MODELS {
+        return Err(format!("more than {MAX_HOST_MODELS} models"));
+    }
+    for (i, model) in host.models.iter().enumerate() {
+        validate_model_id(&model.id).map_err(|e| format!("models[{i}].id: {e}"))?;
+        if !HOST_MB_RANGE.contains(&model.need_mb) {
+            return Err(format!("models[{i}].need_mb is out of range"));
+        }
+    }
+    if let Some(model) = &host.translation_model {
+        validate_translation_model(model).map_err(|e| format!("translation_model: {e}"))?;
+    }
+    Ok(host)
+}
+
+/// `remote.host_info` result as the UI receives it: `{host}` with a checked
+/// `HostInfo`, or `host: null` when the compute host sent none or a malformed
+/// one. A bad report only loses the capacity labels, so it is not an error.
+pub fn host_info_result(result: Value) -> Value {
+    let host = match result {
+        Value::Object(mut o) => o.remove("host").unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    if host.is_null() {
+        return json!({ "host": null });
+    }
+    match check_host_info(host) {
+        Ok(host) => json!({ "host": host }),
+        Err(e) => {
+            log::warn!("ignoring the compute host's capacity report: {e}");
+            json!({ "host": null })
+        }
+    }
+}
+
+/// What the configured compute host can run, asked with one probe connection
+/// that does not take its GPU (it answers while busy too).
+#[tauri::command]
+pub async fn remote_host_info(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    let result = bridge
+        .request("remote.host_info", json!({}), REMOTE_SOCKETS)
+        .await?;
+    Ok(host_info_result(result))
 }
 
 #[tauri::command]
@@ -1488,8 +1627,105 @@ mod tests {
         }
     }
 
-    const REMOTE_COMMANDS: [&str; 9] = [
+    fn host_info_example() -> Value {
+        json!({
+            "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+            "device": "cuda",
+            "compute_type": "int8",
+            "current": {"fast": "large-v3-turbo", "final": "large-v3"},
+            "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
+            "models": [
+                {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok"},
+                {"id": "kotoba-whisper-v2.0", "downloaded": false, "need_mb": 1600.5, "fit": "tight"}
+            ],
+            "translation_model": "qwen3.5:9b",
+            "newer_field": true
+        })
+    }
+
+    #[test]
+    fn host_info_result_keeps_a_valid_report() {
+        let out = host_info_result(json!({ "host": host_info_example() }));
+        let host = &out["host"];
+        assert_eq!(host["gpu"]["name"], json!("NVIDIA GeForce GTX 1080 Ti"));
+        assert_eq!(host["device"], json!("cuda"));
+        assert_eq!(host["current"]["final"], json!("large-v3"));
+        assert_eq!(host["models"][1]["fit"], json!("tight"));
+        assert_eq!(host["translation_model"], json!("qwen3.5:9b"));
+        // Fields this app does not know are not forwarded.
+        assert!(host.get("newer_field").is_none());
+
+        // No GPU, no recommendation, no translation model.
+        let mut cpu = host_info_example();
+        cpu["gpu"] = Value::Null;
+        cpu["device"] = json!("cpu");
+        cpu["recommended"] = Value::Null;
+        cpu["translation_model"] = Value::Null;
+        cpu["models"] = json!([]);
+        let out = host_info_result(json!({ "host": cpu }));
+        assert!(out["host"]["gpu"].is_null() && out["host"]["recommended"].is_null());
+        assert_eq!(out["host"]["device"], json!("cpu"));
+
+        // The compute host could not measure its hardware: fit is unknown, the report stays.
+        let mut unknown = host_info_example();
+        unknown["models"][0]["fit"] = Value::Null;
+        let out = host_info_result(json!({ "host": unknown }));
+        assert!(out["host"]["models"][0]["fit"].is_null());
+        assert_eq!(out["host"]["models"][1]["fit"], json!("tight"));
+
+        for none in [json!({"host": null}), json!({}), json!(null), json!("host")] {
+            assert_eq!(host_info_result(none), json!({"host": null}));
+        }
+    }
+
+    #[test]
+    fn host_info_result_drops_a_malformed_report_whole() {
+        let cases: Vec<(&str, Value)> = vec![
+            ("/gpu/name", json!("x".repeat(65))),
+            ("/gpu/vram_total_mb", json!(-1)),
+            ("/gpu/vram_total_mb", json!(2_000_000)),
+            ("/device", json!("rocm")),
+            ("/compute_type", json!("INT8; rm")),
+            ("/compute_type", json!("")),
+            ("/current/final", json!("../etc")),
+            ("/current/fast", json!(3)),
+            ("/recommended/final", json!("a b")),
+            ("/models/0/id", json!("")),
+            ("/models/0/downloaded", json!("yes")),
+            ("/models/0/need_mb", json!(-5)),
+            ("/models/0/fit", json!("maybe")),
+            ("/translation_model", json!("../x")),
+        ];
+        for (pointer, bad) in cases {
+            let mut host = host_info_example();
+            *host.pointer_mut(pointer).unwrap() = bad.clone();
+            assert_eq!(
+                host_info_result(json!({ "host": host })),
+                json!({"host": null}),
+                "{pointer} = {bad}"
+            );
+        }
+        let mut many = host_info_example();
+        many["models"] = Value::Array(
+            (0..=MAX_HOST_MODELS)
+                .map(|i| json!({"id": format!("m{i}"), "downloaded": true, "need_mb": 1, "fit": "ok"}))
+                .collect(),
+        );
+        assert_eq!(
+            host_info_result(json!({ "host": many })),
+            json!({"host": null})
+        );
+        let mut missing = host_info_example();
+        missing.as_object_mut().unwrap().remove("current");
+        assert_eq!(
+            host_info_result(json!({ "host": missing })),
+            json!({"host": null})
+        );
+    }
+
+    const REMOTE_COMMANDS: [&str; 10] = [
         "remote_status",
+        "remote_host_info",
         "remote_server_set",
         "remote_identity_reset",
         "remote_disconnect",

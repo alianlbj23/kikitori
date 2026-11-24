@@ -76,14 +76,16 @@ log-mel 特徵、解碼參數與 avg_logprob 計算移植自 [faster-whisper](ht
 @dataclass(frozen=True)
 class Transcript:
     text: str
-    language: str              # ISO 639-1，例如 "ja"
+    language: str  # ISO 639-1，例如 "ja"
     language_probability: float
     no_speech_probability: float
     avg_logprob: float
 
+
 class Transcriber(Protocol):
-    def transcribe(self, audio: np.ndarray, language: str | None = None,
-                   prompt: str | None = None) -> Transcript: ...
+    def transcribe(
+        self, audio: np.ndarray, language: str | None = None, prompt: str | None = None
+    ) -> Transcript: ...
 ```
 
 | 檔案 | 角色 | 主要名稱 |

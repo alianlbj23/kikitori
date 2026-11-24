@@ -10,14 +10,19 @@ from unittest import mock
 
 from kikitori.hardware.nvidia import (
     GPU_QUERY_FIELDS,
+    GPU_USAGE_FIELDS,
+    GPU_USAGE_TIMEOUT_SECS,
     LINUX_CUBLAS_FILES,
+    MAX_GPUS,
     WINDOWS_CUBLAS_FILES,
+    GpuUsage,
     NvidiaSmiError,
     cublas_platform_supported,
     find_cublas,
     find_nvidia_smi,
     parse_nvidia_smi_csv,
     query_nvidia_gpus,
+    sample_gpu_usage,
     system_library_dirs,
 )
 
@@ -151,6 +156,72 @@ class QueryNvidiaGpusTest(unittest.TestCase):
     def test_no_gpus(self) -> None:
         runner = FakeRunner((0, "", ""))
         self.assertEqual(query_nvidia_gpus(self.exe, run=runner), ([], []))
+
+
+class SampleGpuUsageTest(unittest.TestCase):
+    """compute-capacity 一：session 執行中的 VRAM 與使用率取樣。"""
+
+    exe = Path("nvidia-smi")
+
+    def sample(self, *results: object, index: int = 0) -> GpuUsage | None:
+        self.runner = FakeRunner(*results)
+        return sample_gpu_usage(index, executable=self.exe, run=self.runner)
+
+    def test_normal(self) -> None:
+        usage = self.sample((0, "NVIDIA GeForce GTX 1080 Ti, 6144, 11264, 37\n", ""))
+        self.assertEqual(
+            usage,
+            GpuUsage(
+                name="NVIDIA GeForce GTX 1080 Ti",
+                vram_used_mb=6144,
+                vram_total_mb=11264,
+                util_pct=37,
+            ),
+        )
+        args = self.runner.calls[0]
+        self.assertIn(f"--query-gpu={','.join(GPU_USAGE_FIELDS)}", args)
+        self.assertIn("--id=0", args)
+        self.assertEqual(self.runner.kwargs[0]["timeout"], GPU_USAGE_TIMEOUT_SECS)
+        self.assertEqual(GPU_USAGE_TIMEOUT_SECS, 2.0)
+        self.assertIs(self.runner.kwargs[0]["stdin"], subprocess.DEVNULL)
+
+    def test_index_selects_the_gpu(self) -> None:
+        self.sample((0, "GPU, 1, 8192, 0\n", ""), index=1)
+        self.assertIn("--id=1", self.runner.calls[0])
+
+    def test_name_with_comma(self) -> None:
+        usage = self.sample((0, "Weird, GPU, 100, 8192, 5\n", ""))
+        assert usage is not None
+        self.assertEqual(usage.name, "Weird, GPU")
+
+    def test_failures_return_none_and_log_debug(self) -> None:
+        cases: list[tuple[str, object]] = [
+            ("timeout", subprocess.TimeoutExpired(["nvidia-smi"], 2)),
+            ("missing binary", FileNotFoundError(2, "not found")),
+            ("driver failure", (9, "NVIDIA-SMI has failed", "")),
+            ("no output", (0, "", "")),
+            ("garbage", (0, "\x00 garbage\n", "")),
+            ("not a number", (0, "GPU, abc, 8192, 5\n", "")),
+            ("n/a utilization", (0, "GPU, 100, 8192, [N/A]\n", "")),
+            ("n/a memory", (0, "GPU, [N/A], 8192, 5\n", "")),
+            ("zero total", (0, "GPU, 0, 0, 5\n", "")),
+            ("utilization over 100", (0, "GPU, 100, 8192, 101\n", "")),
+            ("absurd vram", (0, "GPU, 100, 2000000, 5\n", "")),
+            ("two lines", (0, "GPU, 1, 8192, 5\nGPU, 1, 8192, 5\n", "")),
+            ("bad name", (0, "\x07, 1, 8192, 5\n", "")),
+        ]
+        for label, result in cases:
+            with (
+                self.subTest(label),
+                self.assertLogs("kikitori.hardware.nvidia", "DEBUG") as logs,
+            ):
+                self.assertIsNone(self.sample(result))
+            self.assertTrue(all(r.levelname == "DEBUG" for r in logs.records))
+
+    def test_invalid_index(self) -> None:
+        for index in (-1, MAX_GPUS, True, 1.0):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                sample_gpu_usage(index, executable=self.exe, run=FakeRunner())  # type: ignore[arg-type]
 
 
 class FindNvidiaSmiTest(unittest.TestCase):

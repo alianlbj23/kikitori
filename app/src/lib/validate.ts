@@ -22,6 +22,7 @@ import type {
   FuriganaDictionary,
   GpuInfo,
   GpuRuntime,
+  GpuUsage,
   HardwareInfo,
   HardwareReport,
   LogEvent,
@@ -246,7 +247,36 @@ export function parseMetrics(v: unknown): MetricsEvent {
     speech_level_dbfs: optLevel(o.speech_level_dbfs),
     background_level_dbfs: optLevel(o.background_level_dbfs),
     rtt_ms: parseRtt(o.rtt_ms),
+    // compute-capacity.md: load hints for the rail's 運算負荷; a bad value is "unknown", not a dropped event.
+    final_busy: optRange(o.final_busy, 0, 1),
+    rtf: optRange(o.rtf, 0, MAX_RTF),
+    gpu: parseGpuUsage(o.gpu),
   };
+}
+
+/** Bounds of the load hints (the same as the engine's `_check_metrics`). */
+const MAX_RTF = 1000;
+export const MAX_VRAM_MB = 1_048_576;
+const MAX_GPU_NAME_CHARS = 64;
+
+/** A finite number in [min, max], or null. */
+function optRange(v: unknown, min: number, max: number): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? v : null;
+}
+
+/** `metrics.gpu`: the whole sample or null, so the rail never mixes a valid total with a broken reading. */
+export function parseGpuUsage(v: unknown): GpuUsage | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const o = v as Obj;
+  const used = optRange(o.vram_used_mb, 0, MAX_VRAM_MB);
+  const total = optRange(o.vram_total_mb, 0, MAX_VRAM_MB);
+  const util = o.util_pct === null || o.util_pct === undefined ? null : optRange(o.util_pct, 0, 100);
+  // Characters (code points), as Rust and the engine count them.
+  if (typeof o.name !== "string" || [...o.name].length > MAX_GPU_NAME_CHARS || used === null || total === null) {
+    return null;
+  }
+  if (util === null && o.util_pct !== null && o.util_pct !== undefined) return null;
+  return { name: o.name, vram_used_mb: used, vram_total_mb: total, util_pct: util };
 }
 
 /** Remote compute's round trip (`metrics.rtt_ms`): a finite non-negative number below 10 minutes, else unknown. */

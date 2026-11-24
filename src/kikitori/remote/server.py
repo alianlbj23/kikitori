@@ -12,6 +12,9 @@
 - **一次只服務一台**，而且與 B 自己的字幕 session 共用同一個「GPU 使用權」（`acquire_gpu`）。
   同一台電腦（同一個 SPKI）的新連線取代舊連線：Wi-Fi 斷線通常沒有 FIN／RST，不取代的話
   A 重連時會被自己還沒逾時的舊連線擋成 `busy`（設計審查第 1 點）。
+- **先握手、後佔 GPU**（docs/specs/compute-capacity.md「三」）：`hello {intent: probe}` 只回
+  `welcome`（含這台的能力 `host`，見 `remote.capacity`）就關閉，不佔 GPU、忙碌時也回答；
+  A 在 `session.start` 指定的 ASR 模型只接受 registry 裡、這台已下載的。
 - **送出只經過 `Link`**（單一寫入執行緒、有上限的佇列、看門狗）：pipeline 的 worker 執行緒
   與 metrics 不直接碰網路，連線卡住時不會把 pipeline 一起卡死（設計審查第 2 點）。
 - **log 不記**音訊與字幕內容。
@@ -22,19 +25,22 @@ import ssl
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 from websockets.sync.server import Server, ServerConnection, serve
 
+from kikitori.asr.registry import MODELS
 from kikitori.config import Settings
-from kikitori.engine.events import MetricsReporter, subtitle_event
+from kikitori.engine.events import MetricsReporter, gpu_sampler_for, subtitle_event
 from kikitori.pipeline import Pipeline, PipelineState, SubtitleUpdate
 from kikitori.pipeline.factory import pipeline_config
+from kikitori.pipeline.metrics import PipelineMetrics
 from kikitori.pipeline.types import Mode, PipelineComponents, release_components
 from kikitori.remote import protocol as rp
+from kikitori.remote.capacity import HostCapacitySource, default_downloaded
 from kikitori.remote.identity import Identity, spki_sha256_der
 from kikitori.remote.link import Link
 from kikitori.remote.network import is_allowed_source
@@ -96,10 +102,18 @@ class _Session:
     續接時補送。
     """
 
-    def __init__(self, session_id: int, mode: Mode, owner: bytes) -> None:
+    def __init__(
+        self,
+        session_id: int,
+        mode: Mode,
+        owner: bytes,
+        models: tuple[str, str] | None = None,
+    ) -> None:
         self.id = session_id
         self.mode = mode
         self.owner = owner
+        self.models = models
+        """這一場的（即時, 完整）ASR 模型：A 可以指定，不一定是 B 設定裡的（給「使用中」判斷）。"""
         self.source = PushSource(MAX_PENDING_SAMPLES)
         self.cancelled = threading.Event()
         self.pipeline: Pipeline | None = None
@@ -208,6 +222,7 @@ class RemoteServer:
         metrics_interval: float = 1.0,
         retain_secs: float = RETAIN_SECS,
         on_change: Callable[[], None] | None = None,
+        capacity: HostCapacitySource | None = None,
     ) -> None:
         """
         Args:
@@ -224,7 +239,11 @@ class RemoteServer:
             retain_secs: 斷線後保留 session 多久（從最後收到訊息起算；測試用較短的值）。
             on_change: 連線中的電腦或它的狀態改變時呼叫（有電腦連上、斷線、等待續接、
                 離開）；給介面更新「目前連線中的電腦」。在連線執行緒上呼叫，不能阻塞。
+            capacity: B 的能力（`welcome.host`）與已下載的模型（檢查 A 指定的模型）；
+                通常是 `remote.capacity.HostCapacity`。None 時 `host` 為 null、已下載的模型
+                直接查這台電腦的模型快取。
         """
+        self._capacity = capacity
         self._identity = identity
         self._trust = trust
         self._settings = settings
@@ -334,6 +353,26 @@ class RemoteServer:
             if self._current is not None:
                 return "connected"
             return "waiting_resume" if self._session is not None else None
+
+    def session_models(self) -> tuple[str, ...]:
+        """目前這一場（含等待續接的）用的（即時, 完整）ASR 模型；沒有時空的。
+
+        A 可以指定 B 的模型，所以不一定是 B 設定裡的；B 的引擎據此判斷模型「使用中」。
+        """
+        with self._lock:
+            session = self._session
+        if session is None or session.models is None:
+            return ()
+        return session.models
+
+    def current_metrics(self) -> PipelineMetrics | None:
+        """目前這一場的負荷（唯讀快照；無介面主機的「目前負荷」用）；沒有執行中的 pipeline 時 None。"""
+        with self._lock:
+            session = self._session
+        pipeline = None if session is None else session.pipeline
+        if pipeline is None or pipeline.state != "running":
+            return None
+        return pipeline.metrics()
 
     def disconnect(self, spki: bytes | None = None) -> bool:
         """斷開正在使用的電腦（連線中或等待續接；`spki` 指定時只在是它的時候）。
@@ -445,6 +484,17 @@ class RemoteServer:
             return
         link = Link(connection, max_queue=SEND_QUEUE, name="remote-server")
         link.start()
+        # 先握手、後佔 GPU（compute-capacity 三）：probe 只查能力，B 忙碌時也要回答，而且不能
+        # 因為「同一台電腦的新連線」把它正在跑的字幕連線取代掉
+        hello = self._handshake(connection, link)
+        if hello is None:
+            link.join(5.0)
+            return
+        if hello.intent == "probe":
+            link.send(self._welcome(detect=True))
+            link.close(1000, "probe answered")
+            link.join(5.0)
+            return
         done = threading.Event()
         if not self._claim(spki, link, done):
             link.send(rp.busy("this computer is busy (another session is running)"))
@@ -454,8 +504,8 @@ class RemoteServer:
         session: _Session | None = None
         lost = False
         try:
-            if not self._handshake(connection, link):
-                return
+            # 開字幕時不重新偵測硬體（nvidia-smi、翻譯伺服器要數秒）：用快取，沒有就不帶
+            link.send(self._welcome(detect=False))
             while True:
                 message = connection.recv(timeout=IDLE_TIMEOUT)
                 if session is not None:
@@ -467,7 +517,9 @@ class RemoteServer:
                 if isinstance(parsed, rp.SessionStart):
                     if session is not None and not session.ended.is_set():
                         raise rp.ProtocolViolation("a session is already running")
-                    session = self._start_session(link, spki, parsed)
+                    # 被拒（A 指定的模型不能用）時留著原本的（已結束的）session：連線結束時
+                    # 照樣由 _leave 收拾，GPU 使用權才會歸還
+                    session = self._start_session(link, spki, parsed) or session
                 elif isinstance(parsed, rp.SessionResume):
                     if session is not None:
                         raise rp.ProtocolViolation("this connection has a session")
@@ -519,34 +571,104 @@ class RemoteServer:
         elif detached or not session.attached:
             self._end_session(session)
 
-    def _handshake(self, connection: ServerConnection, link: Link) -> bool:
-        hello = rp.parse_client(_text(connection.recv(timeout=HELLO_TIMEOUT)))
-        if not isinstance(hello, rp.Hello):
-            raise rp.ProtocolViolation("expected hello")
+    def _handshake(self, connection: ServerConnection, link: Link) -> rp.Hello | None:
+        """等 A 的 hello（還沒佔 GPU）；不合格、版本不同或斷線時關閉連線並回 None。"""
+        try:
+            hello = rp.parse_client(_text(connection.recv(timeout=HELLO_TIMEOUT)))
+            if not isinstance(hello, rp.Hello):
+                raise rp.ProtocolViolation("expected hello")
+        except TimeoutError:
+            logger.info("remote client sent no hello in %.0f s; closing", HELLO_TIMEOUT)
+            link.abort("no hello")
+            return None
+        except rp.ProtocolViolation as exc:
+            logger.warning("remote client sent an invalid hello: %s", exc)
+            link.close(1008, "protocol violation")
+            return None
+        except ConnectionClosed:
+            logger.info("remote client disconnected before the handshake")
+            link.close()
+            return None
         if hello.protocol_version != rp.PROTOCOL_VERSION:
             link.send(
                 rp.incompatible(f"this computer speaks protocol {rp.PROTOCOL_VERSION}")
             )
             link.close(1002, "incompatible")
-            return False
+            return None
+        return hello
+
+    def _welcome(self, *, detect: bool) -> str:
         asr = self._settings().asr
-        link.send(
-            rp.welcome(
-                self._app_version, {"fast": asr.fast_model, "final": asr.final_model}
-            )
+        return rp.welcome(
+            self._app_version,
+            {"fast": asr.fast_model, "final": asr.final_model},
+            self._host_info(detect=detect),
         )
-        return True
+
+    def _host_info(self, *, detect: bool) -> dict[str, Any] | None:
+        """這台的能力；查不到（程式錯誤）時 None——能力只是參考資訊，不能讓握手失敗。"""
+        if self._capacity is None:
+            return None
+        try:
+            return self._capacity.host_info(detect=detect)
+        except Exception:
+            logger.exception("cannot describe this computer's capabilities")
+            return None
+
+    def _model_problem(self, requested: Mapping[str, str]) -> tuple[str, str] | None:
+        """A 指定的 ASR 模型能不能用：`(code, detail)`，可以用時 None。
+
+        只接受 registry 裡、這台已下載的模型：A 不能叫 B 載入任意路徑，也不能叫 B 下載。
+        """
+        if not requested:
+            return None
+        unknown = [m for m in requested.values() if m not in MODELS]
+        if unknown:
+            return (
+                "unknown_model",
+                f"this computer does not know the model {unknown[0]}",
+            )
+        try:
+            downloaded = (
+                default_downloaded()
+                if self._capacity is None
+                else self._capacity.downloaded_models()
+            )
+        except Exception as exc:
+            # OSError 以外（模型目錄格式錯誤等）也回 status error：否則例外穿過 _handle，
+            # A 只看到連線中斷
+            logger.exception("cannot list the downloaded ASR models")
+            return "load_error", f"cannot list the downloaded models: {exc}"
+        missing = [m for m in dict.fromkeys(requested.values()) if m not in downloaded]
+        if missing:
+            return (
+                "model_not_downloaded",
+                f"{', '.join(missing)} is not downloaded on the compute host",
+            )
+        return None
 
     # --- session -----------------------------------------------------------
 
     def _start_session(
         self, link: Link, owner: bytes, start: rp.SessionStart
-    ) -> _Session:
+    ) -> _Session | None:
+        """開始一場；A 指定的模型不能用時送 `status error`（不開始）並回 None。"""
+        problem = self._model_problem(rp.requested_models(start))
+        if problem is not None:
+            code, detail = problem
+            logger.warning("refused a remote session: %s", detail)
+            link.send(rp.status("error", detail, code))
+            return None
         settings = rp.session_settings(self._settings(), start)
         # A 不續接、直接開新的一場：保留中的舊 session（同一台電腦的）先結束、釋放模型
         self._drop_retained()
         with self._lock:
-            session = _Session(self._next_session_id, start.mode, owner)
+            session = _Session(
+                self._next_session_id,
+                start.mode,
+                owner,
+                (settings.asr.fast_model, settings.asr.final_model),
+            )
             self._next_session_id += 1
             self._session = session
         session.attach(link)
@@ -662,11 +784,14 @@ class RemoteServer:
                 on_log=on_log,
             )
             session.pipeline = pipeline
+            # B 用 CUDA 時 metrics 帶 B 的 GPU 使用量，A 的負荷圖顯示的就是 B 的負荷
+            sampler = gpu_sampler_for(components)
             session.metrics = MetricsReporter(
                 session.id,
                 pipeline,
                 lambda name, data: session.send(rp.event(name, dict(data))),
                 self._metrics_interval,
+                gpu_usage=None if sampler is None else sampler.get,
             )
             session.metrics.start()
             try:

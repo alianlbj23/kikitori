@@ -1492,6 +1492,165 @@ textarea {
   font-weight: 600;
 }
 
+/* ---------- The compute host's capacity and the model asked of it (compute-capacity.md) ---------- */
+
+.host-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.host-info-rail {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(255 255 255 / 0.12);
+}
+
+.host-info p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.host-summary {
+  font-variant-numeric: tabular-nums;
+}
+
+.host-info-rail .host-summary {
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+}
+
+.host-info .host-label {
+  margin-top: 2px;
+}
+
+/* Model ids and labels can be long; the menu never pushes the rail wider. */
+.host-info select {
+  max-width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.host-info .link-button {
+  align-self: flex-start;
+}
+
+.host-info .link-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.content .host-info .link-button {
+  color: var(--ai-soft);
+}
+
+.host-error {
+  color: var(--beni);
+}
+
+/* The rail's confirmation sits on indigo: a dark rose panel instead of the content's light one. */
+.host-info-rail .host-confirm {
+  background: rgb(224 106 126 / 0.18);
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+}
+
+.host-info-rail .host-confirm .gpu-actions {
+  margin-top: 4px;
+  gap: 8px;
+}
+
+.host-info-rail .host-confirm .ghost {
+  color: var(--on-ai);
+  border-color: rgb(255 255 255 / 0.32);
+}
+
+/* ---------- Computing load while subtitles run (lib/load.ts) ---------- */
+
+/* The rail is indigo in both themes, so the three colours are chosen against indigo only. */
+.load {
+  --load-ok: #7fd6a2;
+  --load-tight: var(--kihada);
+  --load-over: #ff8a9c;
+  --load-color: var(--on-ai-dim);
+}
+
+.load[data-level="ok"] {
+  --load-color: var(--load-ok);
+}
+
+.load[data-level="tight"] {
+  --load-color: var(--load-tight);
+}
+
+.load[data-level="over"] {
+  --load-color: var(--load-over);
+}
+
+.load-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.14);
+  overflow: hidden;
+}
+
+/* Scaled, not resized (as .meter-fill): it changes once a second. */
+.load-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--load-color);
+  transition: transform 300ms linear;
+}
+
+.load-chart {
+  display: block;
+  width: 100%;
+  height: 40px;
+  border-radius: var(--radius-s);
+  background: rgb(0 0 0 / 0.16);
+  overflow: hidden;
+}
+
+.load-guide {
+  stroke: rgb(255 255 255 / 0.16);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.load-guide-over {
+  stroke: rgb(255 138 156 / 0.35);
+}
+
+.load-line {
+  fill: none;
+  stroke: var(--load-color);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.load-text {
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--load-color);
+  overflow-wrap: anywhere;
+}
+
+.load[data-level="unknown"] .load-text {
+  font-weight: 400;
+}
+
+.load-detail {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
 .serve-identity-actions {
   margin: 4px 0 8px;
 }

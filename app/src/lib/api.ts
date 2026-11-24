@@ -46,8 +46,10 @@ import type {
 } from "./types";
 import { parseLanguageList, parseLanguagePreview } from "./languages";
 import {
+  parseHostInfoResult,
   parseRemoteEvent,
   parseRemoteStatus,
+  type HostInfo,
   type RemoteEvent,
   type RemoteStatus,
   type UnpairRole,
@@ -329,6 +331,15 @@ export const api = {
   },
   async remotePairCancel(): Promise<void> {
     await invoke("remote_pair_cancel");
+  },
+  /**
+   * What the configured compute host can run (docs/specs/compute-capacity.md):
+   * one probe connection that does not take its GPU, so it also answers while
+   * the compute host is busy. null when the compute host sent no usable report
+   * (an older version, or a malformed one).
+   */
+  async remoteHostInfo(): Promise<HostInfo | null> {
+    return parseHostInfoResult(await invoke("remote_host_info"));
   },
   /** Removes a paired computer (`peer`) or compute host (`server`). */
   async remoteUnpair(spki: string, role: UnpairRole): Promise<RemoteStatus> {

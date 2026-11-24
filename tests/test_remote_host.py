@@ -1,6 +1,8 @@
-"""無介面的運算主機（`kikitori` 選單 →「運算主機」）：選監聽位址、配對、移除、提供運算、準備模型。
+"""無介面的運算主機（`kikitori` 選單 →「運算主機」）：選監聽位址、配對、移除、提供運算、準備模型、
+選擇模型、目前負荷。
 
-配對與提供運算用真的連線（127.0.0.1）；準備模型用假的引擎驅動（記錄送了哪些請求），不下載任何東西。
+配對與提供運算用真的連線（127.0.0.1）；準備模型與選擇模型用假的引擎驅動（記錄送了哪些請求）
+與假的能力（`HostInfo`），不下載任何東西、不跑 nvidia-smi。
 """
 
 import os
@@ -11,6 +13,7 @@ import threading
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -416,9 +419,176 @@ class EngineDriverTest(HostCase):
         self.assertTrue(settings["speakers"]["enabled"])
 
 
+class FakeCapacity:
+    """B 的能力：固定的模型清單（large-v3 未下載、medium 超出負荷）。"""
+
+    def __init__(self) -> None:
+        self.invalidated = 0
+        self.info: dict[str, Any] = {
+            "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+            "device": "cuda",
+            "compute_type": "int8_float16",
+            "current": {"fast": "base", "final": "small"},
+            "recommended": {"fast": "base", "final": "large-v3"},
+            "models": [
+                {"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"},
+                {"id": "small", "downloaded": True, "need_mb": 650, "fit": "ok"},
+                {"id": "medium", "downloaded": True, "need_mb": 9000, "fit": "over"},
+                {
+                    "id": "large-v3",
+                    "downloaded": False,
+                    "need_mb": 2140,
+                    "fit": "tight",
+                },
+            ],
+            "translation_model": "qwen3.5:4b",
+        }
+
+    def host_info(self, *, detect: bool = True) -> dict[str, Any]:
+        return self.info
+
+    def downloaded_models(self) -> frozenset[str]:
+        return frozenset(m["id"] for m in self.info["models"] if m["downloaded"])
+
+    def invalidate(self) -> None:
+        self.invalidated += 1
+
+
+class ChooseModelTest(HostCase):
+    """compute-capacity 六：選單「選擇模型」只換完整辨識模型（即時模型不變）。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.capacity = FakeCapacity()
+        self.host.capacity = self.capacity
+        self.driver = FakeDriver({})
+
+    def choose(self, *answers: str) -> bool:
+        return h.choose_model(self.host, Script(*answers), self.out, self.driver)
+
+    def asr(self) -> tuple[str, str]:
+        asr = self.store.get().asr
+        return asr.fast_model, asr.final_model
+
+    def test_the_list_shows_need_fit_download_recommended_and_current(self) -> None:
+        self.choose("")
+        listing = "\n".join(self.lines)
+        self.assertIn("GTX 1080 Ti", listing)
+        line = next(x for x in self.lines if "large-v3" in x and ")" in x)
+        for text in ("2.1 GB", "可能吃緊", "未下載", "建議"):
+            self.assertIn(text, line)
+        small = next(
+            x for x in self.lines if " small " in x or x.rstrip().endswith("small")
+        )
+        self.assertIn("目前", small)
+        self.assertIn("超出負荷", next(x for x in self.lines if "medium" in x))
+
+    def test_pick_a_downloaded_model(self) -> None:
+        before_fast = self.asr()[0]
+        self.assertTrue(self.choose("1"))
+        self.assertEqual(self.asr(), (before_fast, "base"))
+        self.assertEqual(self.driver.requests, [])  # 不必下載
+
+    def test_a_missing_model_is_downloaded_first_when_asked(self) -> None:
+        self.assertTrue(self.choose("4", "y"))
+        self.assertEqual(
+            self.driver.requests, [("models.download", {"model": "large-v3"})]
+        )
+        self.assertEqual(self.asr()[1], "large-v3")
+        self.assertTrue(self.driver.closed)
+
+    def test_declining_the_download_changes_nothing(self) -> None:
+        before = self.asr()
+        self.assertFalse(self.choose("4", "n"))
+        self.assertEqual(self.asr(), before)
+        self.assertEqual(self.driver.requests, [])
+
+    def test_a_failed_download_changes_nothing(self) -> None:
+        self.driver.download = mock.Mock(return_value=False)  # type: ignore[method-assign]
+        before = self.asr()
+        self.assertFalse(self.choose("4", "y"))
+        self.assertEqual(self.asr(), before)
+        self.assertTrue(self.said("下載失敗"))
+
+    def test_an_overloading_model_asks_again(self) -> None:
+        before = self.asr()
+        self.assertFalse(self.choose("3", "n"))
+        self.assertEqual(self.asr(), before)
+        self.assertTrue(self.choose("3", "y"))
+        self.assertEqual(self.asr()[1], "medium")
+
+    def test_bad_choices(self) -> None:
+        before = self.asr()
+        self.assertFalse(self.choose("99"))
+        self.assertTrue(self.said("無效的選項"))
+        self.assertFalse(self.choose(""))
+        self.assertFalse(self.choose("abc"))
+        self.assertEqual(self.asr(), before)
+
+    def test_unknown_capacity_still_lists_the_models(self) -> None:
+        # 偵測失敗：沒有顯示卡資訊、不知道跑不跑得動，但照樣能選
+        self.capacity.info.update(gpu=None, recommended=None, device="cpu")
+        for model in self.capacity.info["models"]:
+            model["fit"] = None
+        self.assertTrue(self.choose("2"))
+        self.assertTrue(self.said("不確定"))
+        self.assertEqual(self.asr()[1], "small")
+
+    def test_the_menu_entry_comes_after_prepare_models(self) -> None:
+        with mock.patch.object(h, "choose_model") as chosen:
+            self.assertEqual(
+                h.host_menu(Script("5", "8"), self.out, lambda: self.host), 0
+            )
+        self.assertTrue(chosen.called)
+        menu = h.MENU.splitlines()
+        prepare = next(i for i, line in enumerate(menu) if "準備模型" in line)
+        self.assertIn("5) 選擇模型", menu[prepare + 1])
+
+
+class LoadLineTest(HostCase):
+    """compute-capacity 六：提供運算中按 s 顯示目前負荷一行。"""
+
+    def server(self, metrics: Any, owner: bytes | None = b"x") -> SimpleNamespace:
+        return SimpleNamespace(
+            owner_spki=lambda: owner,
+            current_metrics=lambda: metrics,
+            stop=lambda: None,  # HostCase 收尾時呼叫 stop_server
+        )
+
+    def test_nobody_is_using_this_computer(self) -> None:
+        self.assertIn("目前沒有電腦在用這台", h.load_line(self.host))
+        self.host.server = self.server(None, owner=None)
+        self.assertIn("目前沒有電腦在用這台", h.load_line(self.host))
+
+    def test_still_loading(self) -> None:
+        self.host.server = self.server(None)
+        self.assertIn("載入", h.load_line(self.host))
+
+    def test_busy_and_vram(self) -> None:
+        self.host.server = self.server(SimpleNamespace(final_busy=0.45, backlog=1))
+        self.host.vram = lambda: (6246, 11264)
+        line = h.load_line(self.host)
+        self.assertIn("45%", line)
+        self.assertIn("待處理 1 句", line)
+        self.assertIn("6.1／11.0 GB", line)
+
+    def test_no_data_yet_and_no_gpu(self) -> None:
+        self.host.server = self.server(SimpleNamespace(final_busy=None, backlog=0))
+        self.host.vram = lambda: None
+        line = h.load_line(self.host)
+        self.assertIn("還沒有資料", line)
+        self.assertNotIn("GB", line)
+
+    def test_s_while_serving(self) -> None:
+        self.listen_on_loopback()
+        h.serve(self.host, Script("s", "q"), self.out)
+        self.assertTrue(self.said("目前沒有電腦在用這台"))
+        self.assertIn("s＝", h.SERVING_HELP)
+
+
 class MenuTest(HostCase):
     def test_menu_shows_the_fingerprint_and_returns(self) -> None:
-        code = h.host_menu(Script("7"), self.out, lambda: self.host)
+        code = h.host_menu(Script("8"), self.out, lambda: self.host)
         self.assertEqual(code, 0)
         self.assertTrue(self.said(h.fingerprint(self.identity.spki)))
 
@@ -438,7 +608,7 @@ class MenuTest(HostCase):
                 raise IdentityError("damaged key")
             return self.host
 
-        self.assertEqual(h.host_menu(Script("y", "7"), self.out, damaged_once), 0)
+        self.assertEqual(h.host_menu(Script("y", "8"), self.out, damaged_once), 0)
         self.assertEqual(len(tries), 2)
         self.assertTrue(self.said("重新配對"))
 
@@ -448,7 +618,7 @@ class MenuTest(HostCase):
         with mock.patch.object(
             TrustStore, "clear", side_effect=PermissionError("locked")
         ):
-            h.host_menu(Script("6", "y", "7"), self.out, lambda: self.host)
+            h.host_menu(Script("7", "y", "8"), self.out, lambda: self.host)
         self.assertEqual(self.host.identity.spki, before)
         self.assertEqual(
             load_or_create_identity(self.root / "b" / "compute").spki, before
@@ -460,10 +630,10 @@ class MenuTest(HostCase):
         self.trust.add(other.cert_path.read_bytes(), "Living room PC")
         before = self.host.identity.spki
         # 不確定就不重建
-        h.host_menu(Script("6", "n", "7"), self.out, lambda: self.host)
+        h.host_menu(Script("7", "n", "8"), self.out, lambda: self.host)
         self.assertEqual(self.host.identity.spki, before)
         self.assertEqual(len(self.trust.peers()), 1)
-        h.host_menu(Script("6", "y", "7"), self.out, lambda: self.host)
+        h.host_menu(Script("7", "y", "8"), self.out, lambda: self.host)
         self.assertNotEqual(self.host.identity.spki, before)
         self.assertEqual(self.trust.peers(), [])
         self.assertTrue(self.said(h.fingerprint(self.host.identity.spki)))
