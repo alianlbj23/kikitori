@@ -130,10 +130,22 @@ const STATUS_CODE: Readonly<Record<string, StringKey>> = {
   load_error: "status.code.load_error",
   translation_model_missing: "status.code.translation_model_missing",
   translation_server_auth_failed: "status.code.translation_server_auth_failed",
+  // Remote compute (remote-compute.md T13); remote_error with a detail is handled below.
+  remote_not_configured: "status.code.remote_not_configured",
+  remote_unreachable: "status.code.remote_unreachable",
+  remote_not_paired: "status.code.remote_not_paired",
+  remote_busy: "status.code.remote_busy",
+  remote_incompatible: "status.code.remote_incompatible",
+  remote_lost: "status.code.remote_lost",
+  remote_model_not_downloaded: "status.code.remote_model_not_downloaded",
+  remote_error: "status.code.remote_error",
+  remote_identity_error: "status.code.remote_identity_error",
 };
 
 /** Explanation for a `status: error` event, preferring our wording over raw detail. */
 export function describeStatusError(code: string | null, detail: string | null): string {
+  // The compute host's own error: its detail (≤ 500 characters, checked by the engine) is the only explanation there is.
+  if (code === "remote_error" && detail) return t("status.code.remote_error_detail", { detail });
   const known = code ? STATUS_CODE[code] : undefined;
   if (known) return t(known);
   return detail ? t("status.errorDetail", { detail }) : t("status.errorUnknown");

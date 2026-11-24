@@ -28,6 +28,11 @@ from kikitori.capture.types import AudioSource, DeviceKind
 from kikitori.config import Settings, SettingsError, check_interpret_languages
 from kikitori.engine import protocol as p
 from kikitori.engine.deferred import Deferred, DeferredRunner
+from kikitori.engine.events import (  # noqa: F401 - 測試從這裡取用
+    METRICS_JOIN_TIMEOUT,
+    subtitle_event,
+)
+from kikitori.engine.events import MetricsReporter as _MetricsReporter
 from kikitori.engine.furigana_service import (
     DefaultFuriganaProvider,
     DictionaryInUseError,
@@ -41,6 +46,7 @@ from kikitori.engine.io import (
     MessageWriter,
     read_lines,
 )
+from kikitori.engine.remote_service import RemoteService
 from kikitori.engine.services import (
     EngineServices,
     ProgressCallback,
@@ -63,6 +69,10 @@ from kikitori.pipeline.factory import (
     translation_needed,
 )
 from kikitori.pipeline.types import PipelineComponents, release_components
+from kikitori.remote.client import RemoteClientSession, RemoteError
+from kikitori.remote.identity import IdentityError, load_or_create_identity
+from kikitori.remote.pairing import TrustStore
+from kikitori.remote.paths import compute_dir, servers_path
 from kikitori.speakers.model import SPEAKER_MODEL_ID
 from kikitori.translate import redact_url
 from kikitori.translate.presets import normalize_model_name
@@ -78,7 +88,6 @@ MAX_DEVICE_ID_CHARS = 512
 MAX_MODEL_ID_CHARS = 100
 METRICS_INTERVAL = 1.0
 """`metrics` 事件的間隔（秒）：狀態列的音量表與延遲，每秒一次就夠，不會塞爆 stdout。"""
-METRICS_JOIN_TIMEOUT = 1.0
 TRANSLATION_UNLOAD_BUDGET = 1.5
 """引擎結束時卸載本機翻譯模型的總時限（秒）。app 送出 `engine.shutdown` 後只等 3 秒就
 強制結束引擎（`app/src-tauri/src/engine.rs` 的 `SHUTDOWN_TIMEOUT`），停止 session 也要
@@ -149,112 +158,6 @@ def _clear_tracebacks(exc: BaseException) -> None:
         current = current.__cause__ or current.__context__
 
 
-def subtitle_event(update: SubtitleUpdate, session_id: int) -> dict[str, Any]:
-    """`subtitle` 事件的 data：`SubtitleUpdate` 的欄位 + `session_id`。
-
-    即時字幕帶 `stable_chars` 與 `translation_stable_chars`（沒有 `latency_ms`）；完整字幕帶
-    `latency_ms`（可能是 null，沒有兩個穩定前綴）。只放有意義的那些，UI 不必猜 null 是「沒有」
-    還是「0」。
-    """
-    data = dataclasses.asdict(update)
-    if update.speaker is None:
-        data.pop("speaker")  # 影片翻譯：沒有「誰說的」
-    if update.voice is None:
-        data.pop("voice")  # 沒開說話者標籤、即時字幕或判斷不出來
-    if update.is_final:
-        data.pop("stable_chars")
-        data.pop("translation_stable_chars")
-    else:
-        data.pop("latency_ms")
-        for key in ("stable_chars", "translation_stable_chars"):
-            if data[key] is None:
-                data[key] = 0
-    data["session_id"] = session_id
-    return data
-
-
-class _MetricsReporter:
-    """session 執行中每隔 `interval` 秒送一則 `metrics` 事件（一條 daemon 執行緒）。
-
-    `stop()` 返回之後不會再送出（送出與停止共用一把鎖），所以 `status idle／error`
-    之後不會再看到這個 session 的 metrics。例外：送出卡住（例如 stdout 管線塞滿）超過
-    `METRICS_JOIN_TIMEOUT` 時 `stop()` 記 warning 後照樣返回——結束狀態比保證順序重要，
-    那則卡住的 metrics 之後才寫出的話會落在結束狀態之後。pipeline 已結束時自己停止，即使
-    有人忘了呼叫 `stop()` 也不會一直留著執行緒。
-    """
-
-    def __init__(
-        self,
-        session_id: int,
-        pipeline: Pipeline,
-        send: Callable[[str, Mapping[str, Any]], None],
-        interval: float,
-    ) -> None:
-        self._session_id = session_id
-        self._pipeline = pipeline
-        self._send = send
-        self._interval = interval
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-        self._thread = threading.Thread(
-            target=self._run, name=f"session-{session_id}-metrics", daemon=True
-        )
-
-    def start(self) -> None:
-        """開始回報（`stop()` 之後呼叫也只會讓執行緒立即結束）。"""
-        self._thread.start()
-
-    def stop(self) -> None:
-        """停止並等執行緒結束（合計最多約 `METRICS_JOIN_TIMEOUT` 秒；可重複呼叫）。"""
-        self._stop.set()
-        deadline = time.monotonic() + METRICS_JOIN_TIMEOUT
-        # 等進行中的送出完成：之後不會再有 metrics。不能無限等：送出可能卡在寫 stdout，
-        # 那時結束狀態也送不出去，整個 session 的結束流程跟著卡住。
-        if self._lock.acquire(timeout=METRICS_JOIN_TIMEOUT):
-            self._lock.release()
-        else:
-            logger.warning(
-                "%s is stuck sending; stopping without waiting for it",
-                self._thread.name,
-            )
-        if (
-            self._thread.ident is not None
-            and self._thread is not threading.current_thread()
-        ):
-            self._thread.join(max(0.0, deadline - time.monotonic()))
-            if self._thread.is_alive():
-                logger.warning("%s did not stop in time", self._thread.name)
-
-    def _run(self) -> None:
-        while not self._stop.wait(self._interval):
-            with self._lock:
-                if self._stop.is_set() or self._pipeline.wait(0):
-                    return
-                if self._pipeline.state != "running":
-                    continue
-                metrics = self._pipeline.metrics()
-                try:
-                    self._send(
-                        "metrics",
-                        {
-                            "session_id": self._session_id,
-                            "level_dbfs": metrics.level_dbfs,
-                            "backlog": metrics.backlog,
-                            "latency_ms_median": metrics.latency_ms_median,
-                            # v0.3 G8：句子進行中／之外的音量（沒有那一類時為 null）
-                            "speech_level_dbfs": metrics.speech_level_dbfs,
-                            "background_level_dbfs": metrics.background_level_dbfs,
-                        },
-                    )
-                except ChannelClosedError:
-                    logger.error("metrics: protocol output closed")
-                    return
-                except Exception:
-                    # 量測只是輔助顯示：程式錯誤記錄後停止回報，不影響 session
-                    logger.exception("metrics reporting failed; stopping it")
-                    return
-
-
 class _Session:
     """一次 session：背景載入 → 執行 → 結束。`lock` 保護 pipeline 的建立與停止。"""
 
@@ -277,6 +180,8 @@ class _Session:
         self.releasing = False
         """元件已取走、還在釋放中（`models.delete` 仍視為使用中）。"""
         self.metrics: _MetricsReporter | None = None
+        self.remote: RemoteClientSession | None = None
+        """遠端運算（`compute.mode == "remote"`）時取代 `pipeline`；受 `lock` 保護。"""
 
 
 class _Download:
@@ -375,7 +280,26 @@ class EngineServer:
             "session.set_translation": self._session_set_translation,
             "session.set_furigana": self._session_set_furigana,
             "engine.shutdown": self._engine_shutdown,
+            "remote.status": lambda params: self._remote_status(params),
+            "remote.server_set": self._remote_server_set,
+            "remote.disconnect": lambda params: self._remote.disconnect(params),
+            "remote.pair_open": lambda params: self._remote.pair_open(params),
+            "remote.pair": lambda params: self._remote.pair(params),
+            "remote.pair_confirm": lambda params: self._remote.pair_confirm(params),
+            "remote.pair_cancel": lambda params: self._remote.pair_cancel(params),
+            "remote.unpair": lambda params: self._remote.unpair(params),
+            "remote.identity_reset": self._remote_identity_reset,
         }
+        # 這台電腦替別台運算（B）：與本機 session 共用 GPU 使用權（見 `_acquire_gpu_for_remote`）
+        self._serving_peer = False
+        self._remote = RemoteService(
+            store=services.settings_store,
+            send_event=self._send_event,
+            build_components=services.build_components,
+            acquire_gpu=self._acquire_gpu_for_remote,
+            release_gpu=self._release_gpu_for_remote,
+            app_version=self._version,
+        )
 
     # --- 主迴圈 ---------------------------------------------------------------
 
@@ -391,6 +315,8 @@ class EngineServer:
         self._services.settings_store.load()
         try:
             self._send_status("idle", None, None, None)
+            # 設定裡開著「提供運算給其他電腦」：開始監聽（失敗只記在 remote.status）
+            self._remote.start_if_enabled()
             for line in read_lines(stdin):
                 if line is LINE_TOO_LONG:
                     self._send(
@@ -473,6 +399,8 @@ class EngineServer:
         """停止 session、卸載本機翻譯模型、放棄尚未開始的背景請求、取消下載、釋放模型
         （可重複呼叫）。"""
         self._stop_session()
+        # 先停遠端運算的伺服器：它的 session 也用這台電腦的模型
+        self._remote.close()
         # session 停了才卸載：之後不會再有翻譯請求把模型載回來（進行中的翻譯會先做完，
         # Ollama 之後才卸載，實測）。排在 ASR 釋放之前：app 等不及而強制結束引擎時，
         # 引擎行程內的 ASR 模型由作業系統收回，Ollama 行程裡的模型卻會一直佔著顯示記憶體。
@@ -1030,11 +958,15 @@ class EngineServer:
     def _model_users(self, model: str) -> list[str]:
         """正在使用這個 ASR 模型的 session 與下載（給錯誤訊息用）。"""
         users: list[str] = []
+        asr = self._services.settings_store.get().asr
         with self._session_lock:
             self._prune_live_sessions()
             users += [
                 f"session {s.id}" for s in self._live_sessions if model in s.asr_models
             ]
+            # 替別台電腦運算時用的是這台電腦目前設定的模型
+            if self._serving_peer and model in (asr.fast_model, asr.final_model):
+                users.append("a session for another computer")
         with self._downloads_lock:
             if ("asr", model) in self._downloads:
                 users.append("a download")
@@ -1184,19 +1116,31 @@ class EngineServer:
                     p.SESSION_ACTIVE,
                     f"session {self._session.id} is already running; stop it first",
                 )
+            if self._serving_peer:
+                raise p.ProtocolError(
+                    p.SESSION_ACTIVE,
+                    "this computer is running a session for another computer; "
+                    "disconnect it first",
+                )
             try:
                 source = self._services.open_source(device_id, KIND_FOR_MODE[mode])
             except CaptureError as exc:
                 raise p.ProtocolError(_capture_code(exc), str(exc)) from exc
             except ValueError as exc:
                 raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
-            # 翻譯關閉的 session 也記：執行中可以開啟翻譯；卸載沒載入的模型不會載入它。
-            # 在建立 session 之前：萬一出錯，不會留下一個永遠不啟動的 session。
-            self._note_translation_models(settings)
+            remote = settings.compute.mode == "remote"
+            if not remote:
+                # 翻譯關閉的 session 也記：執行中可以開啟翻譯；卸載沒載入的模型不會載入它。
+                # 在建立 session 之前：萬一出錯，不會留下一個永遠不啟動的 session。
+                # 遠端模式的翻譯在運算主機上，這台電腦的 Ollama 不會用到。
+                self._note_translation_models(settings)
             session = _Session(
                 self._next_session_id,
                 mode,
-                frozenset((settings.asr.fast_model, settings.asr.final_model)),
+                # 遠端模式不在這台電腦載入 ASR：models.delete 不必視為使用中
+                frozenset()
+                if remote
+                else frozenset((settings.asr.fast_model, settings.asr.final_model)),
             )
             self._next_session_id += 1
             self._session = session
@@ -1207,7 +1151,7 @@ class EngineServer:
             self._live_sessions.append(session)
             previous = self._last_loader
             session.loader = threading.Thread(
-                target=self._load_session,
+                target=self._load_remote_session if remote else self._load_session,
                 args=(session, settings, source, previous),
                 name=f"session-{session.id}",
                 daemon=True,
@@ -1336,6 +1280,110 @@ class EngineServer:
                     )
         except ChannelClosedError:
             logger.error("session %d: protocol output closed", session.id)
+
+    def _load_remote_session(
+        self,
+        session: _Session,
+        settings: Settings,
+        source: AudioSource,
+        previous: threading.Thread | None = None,
+    ) -> None:
+        """遠端運算的 session：連上運算主機 → 開始擷取並送出（docs/specs/remote-compute.md）。
+
+        這台電腦只擷取聲音、標振假名；VAD、辨識、翻譯、說話者標籤都在運算主機上，所以不呼叫
+        `build_components`、不檢查本機的翻譯模型、metrics 也來自運算主機。仍然等前一個
+        session 的載入執行緒結束（它可能是本機 session，正在釋放 GPU 上的模型）。
+        """
+        try:
+            self._session_status(session, "loading", None, None)
+            if not self._wait_for_loader(session, previous):
+                return
+            try:
+                client = self._remote_client(session, settings)
+            except RemoteError as exc:
+                self._session_failed(session, exc.code, str(exc))
+                return
+            with session.lock:
+                if session.cancelled.is_set():
+                    return
+                # 先放進 session：連線中按停止時 `_stop_session` 能中斷它
+                session.remote = client
+            try:
+                client.connect()
+            except RemoteError as exc:
+                if not session.cancelled.is_set():
+                    logger.warning("cannot use the compute host: %s", exc)
+                    self._session_failed(session, exc.code, str(exc))
+                return
+            with session.lock:
+                if session.cancelled.is_set():
+                    client.stop(STOP_TIMEOUT)
+                    return
+                if session.translation_override is not None:
+                    client.set_translation_enabled(session.translation_override)
+                try:
+                    client.start(source)
+                except CaptureError as exc:
+                    logger.error("cannot start audio capture: %s", exc)
+                    _clear_tracebacks(exc)
+                    self._session_failed(session, _capture_code(exc), str(exc))
+                except Exception as exc:
+                    logger.exception("starting remote session %d failed", session.id)
+                    _clear_tracebacks(exc)
+                    self._session_failed(
+                        session, "remote_error", f"{type(exc).__name__}: {exc}"
+                    )
+        except ChannelClosedError:
+            logger.error("session %d: protocol output closed", session.id)
+
+    def _remote_client(
+        self, session: _Session, settings: Settings
+    ) -> RemoteClientSession:
+        """建立連到 `compute.host` 的客戶端（本機憑證不存在時第一次建立）。
+
+        Raises:
+            RemoteError: 本機憑證讀不到（`remote_identity_error`：要使用者明確重設，不自動
+                重建——那會讓所有配對失效）。
+        """
+        try:
+            identity = load_or_create_identity(compute_dir())
+        except IdentityError as exc:
+            raise RemoteError("remote_identity_error", str(exc)) from exc
+        compute = settings.compute
+
+        def on_status(
+            state: str,
+            detail: str | None,
+            code: str | None,
+            data: Mapping[str, Any] | None,
+        ) -> None:
+            self._session_status(session, state, detail, code, data)
+
+        return RemoteClientSession(
+            identity=identity,
+            servers=TrustStore(servers_path()),
+            host=compute.host,
+            port=compute.port,
+            app_version=self._version,
+            mode=session.mode,
+            settings=settings,
+            on_status=on_status,
+            on_event=lambda name, data: self._on_remote_event(session, name, data),
+            capture_code=_capture_code,
+        )
+
+    def _on_remote_event(
+        self, session: _Session, name: str, data: dict[str, Any]
+    ) -> None:
+        """運算主機送回、客戶端已驗證過的事件：換成這台電腦的 session、標振假名後轉送。"""
+        data["session_id"] = session.id
+        if name == "subtitle":
+            ruby = self._furigana.annotate(
+                session.id, data["original"], data["source_language"]
+            )
+            if ruby is not None:
+                data["ruby"] = [[start, end, reading] for start, end, reading in ruby]
+        self._send_event(name, data)
 
     def _loading_progress(
         self, session: _Session, step: str, done: int, total: int
@@ -1472,8 +1520,11 @@ class EngineServer:
                 # 還在載入（pipeline 尚未建立）時記下來，建好時套用
                 session.translation_override = enabled
                 pipeline = session.pipeline
+                remote = session.remote
             if pipeline is not None:
                 pipeline.set_translation_enabled(enabled)
+            if remote is not None:
+                remote.set_translation_enabled(enabled)
             applied_to = session.id
         return {**self._settings_result(), "session_id": applied_to}
 
@@ -1562,6 +1613,7 @@ class EngineServer:
             # 執行緒參照，執行緒結束時以參照計數立即釋放。不取 session.lock：
             # `_load_session` 持有它時也可能走到這裡（啟動失敗）。
             session.pipeline = None
+            session.remote = None
         if reporter is not None:
             reporter.stop()
         self._release_components(session)
@@ -1613,12 +1665,75 @@ class EngineServer:
         if session is None:
             return
         session.cancelled.set()
+        remote = session.remote
+        if remote is not None:
+            # 還在連線的話先中斷它（不等 session.lock：載入執行緒可能正卡在連線）
+            remote.cancel_if_connecting()
         with session.lock:
             pipeline = session.pipeline
+            remote = session.remote
         if pipeline is not None:
             pipeline.stop(STOP_TIMEOUT)
+        if remote is not None:
+            # 有上限：請運算主機停 → 等它回 idle → 關連線 → 等執行緒結束（之後不再有字幕）
+            remote.stop(STOP_TIMEOUT)
         # 還在載入模型時 pipeline 尚未建立；載入完會看到 cancelled 而不啟動。
         self._session_status(session, "idle", None, None)
+
+    def _remote_status(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        p.reject_unknown_params(params)
+        return self._remote.status()
+
+    def _remote_identity_reset(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        """`remote.identity_reset`：字幕進行中、或有電腦正在用這台時不重建。
+
+        遠端 session 正用著這個身分連線；替別台運算時重建會把它斷掉，要先斷開或等它結束。
+        檢查後放掉鎖再重建（重建會停止伺服器，而伺服器歸還 GPU 時要拿同一把鎖）。
+        """
+        with self._session_lock:
+            if self._session is not None or self._serving_peer:
+                raise p.ProtocolError(
+                    p.SESSION_ACTIVE,
+                    "stop the subtitles, or disconnect the computer using this one, "
+                    "before resetting the identity",
+                )
+        return self._remote.identity_reset(params)
+
+    def _remote_server_set(self, params: dict[str, Any]) -> Mapping[str, Any]:
+        """`remote.server_set`：開始提供運算會把 `compute.mode` 改成 local，遠端字幕進行中不行。"""
+        if params.get("enabled") is True:
+            with self._session_lock:
+                remote_session = (
+                    self._session is not None
+                    and self._services.settings_store.get().compute.mode == "remote"
+                )
+            if remote_session:
+                raise p.ProtocolError(
+                    p.SESSION_ACTIVE,
+                    "stop the subtitles before letting other computers use this one",
+                )
+        return self._remote.server_set(params)
+
+    def _acquire_gpu_for_remote(self) -> bool:
+        """另一台電腦要用這台的 GPU：本機沒有 session、也沒有還在載入或釋放的才給。
+
+        與 `_session_start` 在同一把鎖內判斷：本機開始字幕與遠端連進來不會同時成功（同一張
+        GPU 不能載兩份模型，設計審查第 10 點）。被停止的本機 session 可能還在載入或釋放
+        模型，那時也不給。
+        """
+        with self._session_lock:
+            if self._session is not None or self._serving_peer:
+                return False
+            if self._last_loader is not None and self._last_loader.is_alive():
+                return False
+            if any(s.releasing for s in self._live_sessions):
+                return False
+            self._serving_peer = True
+            return True
+
+    def _release_gpu_for_remote(self) -> None:
+        with self._session_lock:
+            self._serving_peer = False
 
     def _engine_shutdown(self, params: dict[str, Any]) -> Mapping[str, Any]:
         p.reject_unknown_params(params)

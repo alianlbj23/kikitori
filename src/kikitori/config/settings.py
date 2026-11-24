@@ -7,6 +7,7 @@
 """
 
 import copy
+import ipaddress
 import json
 import math
 import re
@@ -244,6 +245,42 @@ class SpeakerSettings:
     count: int | None = None
 
 
+COMPUTE_MODES: tuple[str, ...] = ("local", "remote")
+COMPUTE_PORT_RANGE = (1024, 65535)
+# 監聽埠＋1 是配對埠，所以監聽埠最大 65534
+COMPUTE_LISTEN_PORT_RANGE = (1024, 65534)
+DEFAULT_COMPUTE_PORT = 47100
+MAX_COMPUTE_HOST_CHARS = 253
+# 主機名稱或 IP（IPv4、IPv6、Tailscale 的 MagicDNS 名稱）：只有英數字、點、連字號、冒號；
+# 不接受協定、路徑、空白或帳密——只用來連線，不能變成 URL 注入或讀到別的東西。
+_COMPUTE_HOST = re.compile(r"^[A-Za-z0-9.:-]+$")
+
+
+@dataclass(frozen=True)
+class ComputeSettings:
+    """遠端運算（`docs/specs/remote-compute.md`）：辨識與翻譯在哪台電腦跑。
+
+    Attributes:
+        mode: "local" 在這台電腦；"remote" 送到 `host:port` 的運算主機（要先配對）。
+        host: 運算主機的 IP 或主機名稱（例如 Tailscale 的 `gpu-box.tail1234.ts.net`）；
+            空字串表示還沒設定。
+        port: 要連的運算主機的埠（這台當 A 時用）。
+        server_enabled: 這台電腦是否接受其他電腦連線、替它們運算（預設關閉）。
+        listen_host: 當運算主機時監聽的位址（IP）；空字串表示還沒選。刻意不預設
+            `0.0.0.0`（威脅模型筆記：預設不綁所有介面），由使用者從這台電腦的私有網段或
+            Tailscale 位址選一個。
+        listen_port: 當運算主機時監聽的埠（配對用它＋1）。與 `port` 分開：這台既連別台、
+            也被別台連時兩者可以不同。
+    """
+
+    mode: Literal["local", "remote"] = "local"
+    host: str = ""
+    port: int = DEFAULT_COMPUTE_PORT
+    server_enabled: bool = False
+    listen_host: str = ""
+    listen_port: int = DEFAULT_COMPUTE_PORT
+
+
 def _default_media() -> ModeSettings:
     return ModeSettings(pause_secs=0.6, max_secs=10.0)
 
@@ -276,6 +313,7 @@ class Settings:
     pipeline: PipelineSettings = field(default_factory=PipelineSettings)
     furigana: FuriganaSettings = field(default_factory=FuriganaSettings)
     speakers: SpeakerSettings = field(default_factory=SpeakerSettings)
+    compute: ComputeSettings = field(default_factory=ComputeSettings)
     subtitle: dict[str, Any] = field(default_factory=dict)
     ui: dict[str, Any] = field(default_factory=dict)
 
@@ -342,6 +380,14 @@ class Settings:
             "speakers": {
                 "enabled": self.speakers.enabled,
                 "count": self.speakers.count,
+            },
+            "compute": {
+                "mode": self.compute.mode,
+                "host": self.compute.host,
+                "port": self.compute.port,
+                "server_enabled": self.compute.server_enabled,
+                "listen_host": self.compute.listen_host,
+                "listen_port": self.compute.listen_port,
             },
             "subtitle": copy.deepcopy(self.subtitle),
             "ui": copy.deepcopy(self.ui),
@@ -846,6 +892,75 @@ def _parse_speakers(data: Mapping[str, Any]) -> SpeakerSettings:
     )
 
 
+def _parse_compute(data: Mapping[str, Any]) -> ComputeSettings:
+    """`compute`：缺少時用預設值（本機、不接受連線）。新段落有預設值，不升 schema。"""
+    default = ComputeSettings()
+    section = _section(
+        data,
+        "compute",
+        ("mode", "host", "port", "server_enabled", "listen_host", "listen_port"),
+    )
+    host = section.get("host", default.host)
+    if not isinstance(host, str):
+        raise SettingsError(
+            f"compute.host: expected a string, got {type(host).__name__}"
+        )
+    host = host.strip()
+    if host and (len(host) > MAX_COMPUTE_HOST_CHARS or not _COMPUTE_HOST.match(host)):
+        raise SettingsError(
+            "compute.host: expected an IP address or host name "
+            "(letters, digits, '.', '-', ':'; no scheme, path or spaces)"
+        )
+    return ComputeSettings(
+        mode=cast(
+            Literal["local", "remote"],
+            _choice(section.get("mode", default.mode), "compute.mode", COMPUTE_MODES),
+        ),
+        host=host,
+        port=_integer(
+            section.get("port", default.port), "compute.port", *COMPUTE_PORT_RANGE
+        ),
+        server_enabled=_boolean(
+            section.get("server_enabled", default.server_enabled),
+            "compute.server_enabled",
+        ),
+        listen_host=_listen_host(section.get("listen_host", default.listen_host)),
+        listen_port=_integer(
+            section.get("listen_port", _legacy_listen_port(section, default)),
+            "compute.listen_port",
+            *COMPUTE_LISTEN_PORT_RANGE,
+        ),
+    )
+
+
+def _legacy_listen_port(section: Mapping[str, Any], default: ComputeSettings) -> int:
+    """沒有 `listen_port` 的舊設定檔：當時 A、B 共用 `port`，沿用它讓已在提供運算的主機不必重設。
+
+    舊 `port` 若是 65535（配對埠會超出範圍），用預設值，不讓整份設定因此讀不進來。
+    """
+    port = section.get("port", default.listen_port)
+    low, high = COMPUTE_LISTEN_PORT_RANGE
+    if isinstance(port, int) and not isinstance(port, bool) and low <= port <= high:
+        return port
+    return default.listen_port
+
+
+def _listen_host(value: object) -> str:
+    if not isinstance(value, str):
+        raise SettingsError(
+            f"compute.listen_host: expected a string, got {type(value).__name__}"
+        )
+    value = value.strip()
+    if not value:
+        return ""
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError as exc:
+        raise SettingsError(
+            f"compute.listen_host: expected an IP address of this computer, got {value!r}"
+        ) from exc
+
+
 def _check_json(value: object, path: str, depth: int) -> None:
     if depth > MAX_OPAQUE_DEPTH:
         raise SettingsError(f"{path}: nested deeper than {MAX_OPAQUE_DEPTH} levels")
@@ -956,6 +1071,7 @@ _TOP_LEVEL = (
     "pipeline",
     "furigana",
     "speakers",
+    "compute",
     "subtitle",
     "ui",
 )
@@ -977,6 +1093,7 @@ def _parse(data: Mapping[str, Any]) -> Settings:
         pipeline=_parse_pipeline(data),
         furigana=_parse_furigana(data),
         speakers=_parse_speakers(data),
+        compute=_parse_compute(data),
         subtitle=_parse_opaque(data, "subtitle"),
         ui=_parse_opaque(data, "ui"),
     )

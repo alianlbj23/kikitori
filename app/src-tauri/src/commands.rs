@@ -35,6 +35,10 @@ const BACKGROUND: Duration = Duration::from_secs(45);
 const SESSION_START: Duration = Duration::from_secs(30);
 /// The engine joins its worker threads with a 5 s timeout.
 const SESSION_STOP: Duration = Duration::from_secs(15);
+/// `remote.server_set`, `remote.pair_open` and `remote.pair` open listening or
+/// outgoing sockets (and may create the TLS identity on first use), which can
+/// take a few seconds beyond the usual quick answer.
+const REMOTE_SOCKETS: Duration = Duration::from_secs(20);
 
 const MAX_MODEL_ID_CHARS: usize = 100;
 /// Translation model names follow the engine's rule (`models.pull_translation`).
@@ -409,6 +413,205 @@ pub async fn session_set_furigana(
     bridge
         .request("session.set_furigana", json!({ "enabled": enabled }), QUICK)
         .await
+}
+
+// --- Remote compute (T13 contract, docs/specs/remote-compute.md) -------------
+//
+// The engine validates these again; checking here as well means a misbehaving
+// webview cannot even hand the engine a malformed host, port or confirmation.
+
+/// Ports below 1024 need administrator rights on Linux and belong to system
+/// services; the compute host never uses them.
+/// The main port + 1 is the pairing port, so the main port stops at 65534 (as in the engine).
+const REMOTE_PORTS: std::ops::RangeInclusive<u16> = 1024..=65534;
+/// Longest DNS name.
+const MAX_HOST_CHARS: usize = 253;
+const SPKI_HEX_CHARS: usize = 64;
+const PAIRING_DIGITS: usize = 6;
+
+fn validate_port(port: Option<u16>) -> Result<(), RequestError> {
+    match port {
+        Some(p) if !REMOTE_PORTS.contains(&p) => Err(invalid(format!(
+            "port must be {}–{}",
+            REMOTE_PORTS.start(),
+            REMOTE_PORTS.end()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// A compute host is an IP address (v4 or v6) or a host name: letters, digits,
+/// `.`, `:` and `-` only, so no URL, path, user info or whitespace gets through.
+pub fn validate_host(host: &str) -> Result<(), RequestError> {
+    if host.is_empty()
+        || host.len() > MAX_HOST_CHARS
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b':' | b'-'))
+    {
+        return Err(invalid(format!(
+            "host must be 1–{MAX_HOST_CHARS} letters, digits, '.', ':' or '-'"
+        )));
+    }
+    Ok(())
+}
+
+/// `remote.server_set` parameters. The listen address must be one IP address:
+/// the user picks one of this computer's addresses, never a host name that
+/// could resolve elsewhere.
+pub fn remote_server_set_params(
+    enabled: bool,
+    listen_host: Option<&str>,
+    port: Option<u16>,
+) -> Result<Value, RequestError> {
+    let mut params = Map::new();
+    params.insert("enabled".into(), json!(enabled));
+    if let Some(host) = listen_host {
+        if host.parse::<std::net::IpAddr>().is_err() {
+            return Err(invalid("listen host must be an IP address"));
+        }
+        params.insert("listen_host".into(), json!(host));
+    }
+    validate_port(port)?;
+    if let Some(port) = port {
+        params.insert("port".into(), json!(port));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `remote.pair` parameters: the compute host and its main port (the engine
+/// pairs on port + 1).
+pub fn remote_pair_params(host: &str, port: Option<u16>) -> Result<Value, RequestError> {
+    validate_host(host)?;
+    validate_port(port)?;
+    let mut params = Map::new();
+    params.insert("host".into(), json!(host));
+    if let Some(port) = port {
+        params.insert("port".into(), json!(port));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `remote.pair_confirm` parameters: the compute host sends the digits the
+/// user typed, the other computer sends whether both screens show success.
+/// Exactly one of the two, so a confirmation is never ambiguous.
+pub fn remote_pair_confirm_params(
+    digits: Option<&str>,
+    same: Option<bool>,
+) -> Result<Value, RequestError> {
+    match (digits, same) {
+        (Some(digits), None) => {
+            // The digits are shown as `123 456`; full-width digits are
+            // converted by the UI, anything else is refused.
+            let digits: String = digits.chars().filter(|c| !c.is_whitespace()).collect();
+            if digits.len() != PAIRING_DIGITS || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid("pairing code must be exactly 6 digits"));
+            }
+            Ok(json!({ "digits": digits }))
+        }
+        (None, Some(same)) => Ok(json!({ "same": same })),
+        _ => Err(invalid("give exactly one of digits or same")),
+    }
+}
+
+/// `remote.unpair` parameters: which trusted computer (its SPKI SHA-256) and
+/// in which list (`peer` = may connect here, `server` = a paired compute host).
+pub fn remote_unpair_params(spki: &str, role: &str) -> Result<Value, RequestError> {
+    if spki.len() != SPKI_HEX_CHARS
+        || !spki
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(invalid("spki must be 64 lowercase hex digits"));
+    }
+    if !matches!(role, "peer" | "server") {
+        return Err(invalid("role must be \"peer\" or \"server\""));
+    }
+    Ok(json!({ "spki": spki, "role": role }))
+}
+
+/// This computer's identity, compute-host server state, trusted computers and
+/// any pairing in progress (`RemoteStatus`).
+#[tauri::command]
+pub async fn remote_status(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("remote.status", json!({}), QUICK).await
+}
+
+/// Turns the compute-host server on or off (saved as `compute.server_enabled`).
+#[tauri::command]
+pub async fn remote_server_set(
+    bridge: State<'_, EngineBridge>,
+    enabled: bool,
+    listen_host: Option<String>,
+    port: Option<u16>,
+) -> CmdResult<Value> {
+    let params = remote_server_set_params(enabled, listen_host.as_deref(), port)?;
+    bridge
+        .request("remote.server_set", params, REMOTE_SOCKETS)
+        .await
+}
+
+/// Replaces this computer's identity (key and certificate) with a new one and
+/// clears both lists of paired computers, which no longer recognise it. The
+/// way out of a damaged identity (`identity_error`); refused with
+/// `session_active` while subtitles run on this computer or another computer
+/// is using it.
+#[tauri::command]
+pub async fn remote_identity_reset(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge
+        .request("remote.identity_reset", json!({}), REMOTE_SOCKETS)
+        .await
+}
+
+/// Drops the computer currently using this compute host.
+#[tauri::command]
+pub async fn remote_disconnect(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("remote.disconnect", json!({}), QUICK).await
+}
+
+/// Lets a new computer pair with this compute host; progress arrives as
+/// `engine://remote` events.
+#[tauri::command]
+pub async fn remote_pair_open(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge
+        .request("remote.pair_open", json!({}), REMOTE_SOCKETS)
+        .await
+}
+
+/// Starts pairing with a compute host; progress arrives as `engine://remote`.
+#[tauri::command]
+pub async fn remote_pair(
+    bridge: State<'_, EngineBridge>,
+    host: String,
+    port: Option<u16>,
+) -> CmdResult<Value> {
+    let params = remote_pair_params(&host, port)?;
+    bridge.request("remote.pair", params, REMOTE_SOCKETS).await
+}
+
+#[tauri::command]
+pub async fn remote_pair_confirm(
+    bridge: State<'_, EngineBridge>,
+    digits: Option<String>,
+    same: Option<bool>,
+) -> CmdResult<Value> {
+    let params = remote_pair_confirm_params(digits.as_deref(), same)?;
+    bridge.request("remote.pair_confirm", params, QUICK).await
+}
+
+#[tauri::command]
+pub async fn remote_pair_cancel(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("remote.pair_cancel", json!({}), QUICK).await
+}
+
+#[tauri::command]
+pub async fn remote_unpair(
+    bridge: State<'_, EngineBridge>,
+    spki: String,
+    role: String,
+) -> CmdResult<Value> {
+    let params = remote_unpair_params(&spki, &role)?;
+    bridge.request("remote.unpair", params, QUICK).await
 }
 
 #[tauri::command]
@@ -1132,6 +1335,198 @@ mod tests {
             json!({"mode": "interpret", "device_id": "mic-1"})
         );
         assert!(serde_json::from_value::<Mode>(json!("karaoke")).is_err());
+    }
+
+    fn is_invalid_input(result: Result<Value, RequestError>) -> bool {
+        matches!(result, Err(RequestError::InvalidInput { .. }))
+    }
+
+    #[test]
+    fn remote_server_set_params_send_snake_case_and_check_values() {
+        assert_eq!(
+            remote_server_set_params(false, None, None).unwrap(),
+            json!({"enabled": false})
+        );
+        assert_eq!(
+            remote_server_set_params(true, Some("192.168.8.236"), Some(47100)).unwrap(),
+            json!({"enabled": true, "listen_host": "192.168.8.236", "port": 47100})
+        );
+        for ok in ["100.88.94.10", "::1", "fe80::1", "0.0.0.0"] {
+            assert!(
+                remote_server_set_params(true, Some(ok), None).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "",
+            "localhost",
+            "alian_server",
+            "192.168.8.256",
+            " 192.168.8.236",
+            "192.168.8.236:47100",
+            "fe80::1%3",
+            "http://1.2.3.4",
+        ] {
+            assert!(
+                is_invalid_input(remote_server_set_params(true, Some(bad), None)),
+                "{bad:?}"
+            );
+        }
+        for port in [0, 80, 1023] {
+            assert!(is_invalid_input(remote_server_set_params(
+                true,
+                None,
+                Some(port)
+            )));
+        }
+        for port in [1024, 65534] {
+            assert!(remote_server_set_params(true, None, Some(port)).is_ok());
+        }
+        assert!(is_invalid_input(remote_server_set_params(
+            true,
+            None,
+            Some(65535)
+        )));
+    }
+
+    #[test]
+    fn remote_pair_params_check_host_and_port() {
+        assert_eq!(
+            remote_pair_params("192.168.8.236", None).unwrap(),
+            json!({"host": "192.168.8.236"})
+        );
+        assert_eq!(
+            remote_pair_params("alian-server.tailnet.ts.net", Some(47100)).unwrap(),
+            json!({"host": "alian-server.tailnet.ts.net", "port": 47100})
+        );
+        for ok in ["::1", "fe80::1", "a", "a".repeat(MAX_HOST_CHARS).as_str()] {
+            assert!(remote_pair_params(ok, None).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "a".repeat(MAX_HOST_CHARS + 1).as_str(),
+            "alian_server",
+            "host name",
+            "http://host",
+            "user@host",
+            "host/path",
+            "[::1]",
+            "host\n",
+            "ホスト",
+        ] {
+            assert!(is_invalid_input(remote_pair_params(bad, None)), "{bad:?}");
+        }
+        assert!(is_invalid_input(remote_pair_params("host", Some(1023))));
+        assert!(remote_pair_params("host", Some(65534)).is_ok());
+        assert!(is_invalid_input(remote_pair_params("host", Some(65535))));
+    }
+
+    #[test]
+    fn remote_pair_confirm_params_take_exactly_one_answer() {
+        assert_eq!(
+            remote_pair_confirm_params(Some("166425"), None).unwrap(),
+            json!({"digits": "166425"})
+        );
+        // Spaces as shown on screen are removed before sending.
+        assert_eq!(
+            remote_pair_confirm_params(Some(" 166 425 "), None).unwrap(),
+            json!({"digits": "166425"})
+        );
+        assert_eq!(
+            remote_pair_confirm_params(None, Some(true)).unwrap(),
+            json!({"same": true})
+        );
+        assert_eq!(
+            remote_pair_confirm_params(None, Some(false)).unwrap(),
+            json!({"same": false})
+        );
+        assert!(is_invalid_input(remote_pair_confirm_params(None, None)));
+        assert!(is_invalid_input(remote_pair_confirm_params(
+            Some("166425"),
+            Some(true)
+        )));
+        for bad in [
+            "",
+            "12345",
+            "1234567",
+            "12345a",
+            "１２３４５６",
+            "123-456",
+            "   ",
+        ] {
+            assert!(
+                is_invalid_input(remote_pair_confirm_params(Some(bad), None)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_unpair_params_check_spki_and_role() {
+        let spki = "05aa3f394a539a2362d9a1e4cd57cba2".repeat(2);
+        for role in ["peer", "server"] {
+            assert_eq!(
+                remote_unpair_params(&spki, role).unwrap(),
+                json!({"spki": spki, "role": role})
+            );
+        }
+        for bad_role in ["", "client", "Peer", "peers"] {
+            assert!(is_invalid_input(remote_unpair_params(&spki, bad_role)));
+        }
+        for bad in [
+            String::new(),
+            spki[..63].to_owned(),
+            format!("{spki}0"),
+            spki.to_uppercase(),
+            format!("{}g", &spki[..63]),
+            "05aa 3f39 4a53 9a23 62d9 a1e4 cd57 cba2".to_owned(),
+        ] {
+            assert!(
+                is_invalid_input(remote_unpair_params(&bad, "peer")),
+                "{bad:?}"
+            );
+        }
+    }
+
+    const REMOTE_COMMANDS: [&str; 9] = [
+        "remote_status",
+        "remote_server_set",
+        "remote_identity_reset",
+        "remote_disconnect",
+        "remote_pair_open",
+        "remote_pair",
+        "remote_pair_confirm",
+        "remote_pair_cancel",
+        "remote_unpair",
+    ];
+
+    fn granted(capability: &str) -> Vec<String> {
+        let v: Value = serde_json::from_str(capability).unwrap();
+        v["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str().or_else(|| p["identifier"].as_str()))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn remote_commands_are_granted_to_the_main_window_only() {
+        let main = granted(include_str!("../capabilities/main.json"));
+        let overlay = granted(include_str!("../capabilities/overlay.json"));
+        let build = include_str!("../build.rs");
+        for command in REMOTE_COMMANDS {
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert!(main.contains(&permission), "main.json lacks {permission}");
+            assert!(
+                build.contains(&format!("\"{command}\"")),
+                "build.rs does not declare {command}"
+            );
+        }
+        // The overlay can be captured on stream and has no engine control.
+        let remote: Vec<_> = overlay.iter().filter(|p| p.contains("remote")).collect();
+        assert!(remote.is_empty(), "overlay.json grants {remote:?}");
     }
 
     #[test]

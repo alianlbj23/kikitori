@@ -36,6 +36,24 @@
           <p class="rail-hint" id="device-hint"></p>
         </section>
 
+        <!-- Remote compute (docs/specs/remote-compute.md): this computer's role (lib/remote.ts computeRole): only itself,
+             another computer does the work, or it does the work for other computers. Read when a session starts.
+             Not class="mode": main.ts treats every .mode as a media/interpret button. -->
+        <section class="rail-block" aria-labelledby="compute-heading">
+          <h2 id="compute-heading" class="rail-heading" data-i18n="rail.compute"></h2>
+          <div class="compute-choices" role="radiogroup" aria-labelledby="compute-heading">
+            <button type="button" class="compute-choice" role="radio" data-compute="local" aria-checked="true" data-i18n="compute.local"></button>
+            <button type="button" class="compute-choice" role="radio" data-compute="remote" aria-checked="false" data-i18n="compute.remote"></button>
+            <button type="button" class="compute-choice" role="radio" data-compute="serve" aria-checked="false" data-i18n="compute.serve"></button>
+          </div>
+          <!-- Serving with several addresses and none chosen: which network the other computers come from. -->
+          <div class="compute-addresses" id="compute-addresses" hidden></div>
+          <p class="rail-hint" id="compute-hint" aria-live="polite"></p>
+          <p class="rail-hint compute-rtt" id="compute-rtt" hidden></p>
+          <button type="button" class="link-button" id="compute-settings" data-i18n="compute.goSettings" hidden></button>
+          <button type="button" class="link-button" id="compute-pair" data-i18n="compute.pairNew" hidden></button>
+        </section>
+
         <!-- Speaker labels (docs/specs/speaker-labels.md): media mode only, chosen before 開始 (read when a session
              starts). Saved at once with settings.set; the first time it downloads the speaker model (lib/speaker-model.ts). -->
         <section class="rail-block" id="speakers-block">
@@ -138,6 +156,8 @@
               <button type="button" class="ghost" id="models-refresh" data-i18n="models.refresh"></button>
             </div>
           </header>
+          <!-- Remote compute: the compute host has the models; nothing here has to be downloaded. -->
+          <p class="guide" id="models-remote" role="status" data-i18n="models.remote" hidden></p>
 
           <section class="block" aria-labelledby="hw-heading">
             <h2 id="hw-heading" data-i18n="hw.title"></h2>
@@ -583,6 +603,70 @@
             </fieldset>
           </form>
 
+          <!-- Remote compute, this computer sending its audio (lib/remote.ts): its own form, saved on its own. -->
+          <form id="remote-form" class="remote-section" novalidate>
+            <fieldset class="block" id="remote-block">
+              <legend data-i18n="remote.legend"></legend>
+              <p class="block-lede" data-i18n="remote.lede"></p>
+              <div class="field-row">
+                <div class="field">
+                  <label for="f-remote-host" data-i18n="remote.host"></label>
+                  <input id="f-remote-host" name="host" maxlength="253" autocomplete="off" spellcheck="false" />
+                  <p class="field-help" data-i18n="remote.hostHelp"></p>
+                  <p class="field-error" data-error-for="host"></p>
+                </div>
+                <div class="field">
+                  <label for="f-remote-port" data-i18n="remote.port"></label>
+                  <input id="f-remote-port" name="port" inputmode="numeric" maxlength="5" autocomplete="off" />
+                  <p class="field-error" data-error-for="port"></p>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary" id="remote-save" data-i18n="remote.save"></button>
+                <button type="button" class="ghost" id="remote-pair" data-i18n="remote.pair"></button>
+                <span class="form-status" id="remote-status" role="status"></span>
+              </div>
+              <h3 class="remote-subhead" data-i18n="remote.servers"></h3>
+              <ul class="remote-list" id="remote-servers"></ul>
+            </fieldset>
+          </form>
+
+          <!-- Remote compute, this computer as the compute host: applied at once (remote_server_set), no save button. -->
+          <fieldset class="block remote-section" id="serve-block">
+            <legend data-i18n="serve.legend"></legend>
+            <p class="block-lede" data-i18n="serve.lede"></p>
+            <p class="field-help remote-fingerprint" id="serve-identity"></p>
+            <!-- 重建這台電腦的身分 (remote_identity_reset) and its in-place confirmation. -->
+            <div class="serve-identity-actions" id="serve-identity-actions"></div>
+            <div class="field-row">
+              <div class="field">
+                <label for="f-serve-host" data-i18n="serve.listenHost"></label>
+                <select id="f-serve-host"></select>
+                <p class="field-help" data-i18n="serve.listenHostHelp"></p>
+              </div>
+              <div class="field">
+                <label for="f-serve-port" data-i18n="remote.port"></label>
+                <input id="f-serve-port" inputmode="numeric" maxlength="5" autocomplete="off" />
+                <p class="field-error" id="serve-port-error"></p>
+              </div>
+            </div>
+            <div class="field">
+              <label class="switch" for="f-serve-enabled">
+                <input id="f-serve-enabled" type="checkbox" />
+                <span data-i18n="serve.enable"></span>
+              </label>
+              <p class="field-help" id="serve-state" role="status" aria-live="polite"></p>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="ghost" id="serve-pair-open" data-i18n="serve.pairOpen"></button>
+              <span class="field-help" data-i18n="serve.pairOpenHelp"></span>
+            </div>
+            <h3 class="remote-subhead" data-i18n="serve.current"></h3>
+            <div id="serve-current"></div>
+            <h3 class="remote-subhead" data-i18n="serve.peers"></h3>
+            <ul class="remote-list" id="serve-peers"></ul>
+          </fieldset>
+
           <section class="block" aria-labelledby="about-heading">
             <h2 id="about-heading" data-i18n="about.title"></h2>
             <p id="about-version"></p>
@@ -607,5 +691,18 @@
         </section>
       </main>
     </div>
+
+    <!-- Pairing (both roles): driven by engine://remote pairing events (lib/remote.ts pairDialogView). -->
+    <dialog class="pair-dialog" id="pair-dialog" aria-labelledby="pair-title" aria-describedby="pair-text">
+      <h2 id="pair-title"></h2>
+      <p id="pair-text" role="status" aria-live="polite"></p>
+      <p class="pair-digits" id="pair-digits" hidden></p>
+      <form id="pair-digits-form" novalidate hidden>
+        <label for="pair-digits-input" data-i18n="pair.digitsLabel"></label>
+        <input id="pair-digits-input" inputmode="numeric" autocomplete="off" maxlength="16" spellcheck="false" />
+        <p class="field-error" id="pair-digits-error" role="alert"></p>
+      </form>
+      <div class="form-actions" id="pair-actions"></div>
+    </dialog>
   </body>
 </html>

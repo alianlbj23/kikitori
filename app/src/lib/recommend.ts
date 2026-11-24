@@ -179,12 +179,17 @@ export async function runFirstRun(deps: FirstRunDeps, settings: Settings): Promi
 
 // ---------------------------------------------------------------- the offer
 
-/** Show the offer when applying would change something and this one was not dismissed. */
+/**
+ * Show the offer when applying would change something and this one was not
+ * dismissed. Only while recognising on this computer: with another computer
+ * doing the work (`remote` true), this computer's hardware does not matter.
+ */
 export function shouldOfferRecommendation(
   preview: RecommendationPreview | null,
   dismissed: readonly string[],
+  remote = false,
 ): boolean {
-  return preview !== null && preview.differs && !dismissed.includes(preview.fingerprint);
+  return !remote && preview !== null && preview.differs && !dismissed.includes(preview.fingerprint);
 }
 
 /**

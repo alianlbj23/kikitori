@@ -1435,3 +1435,181 @@ textarea {
   resize: vertical;
   color-scheme: dark;
 }
+
+/* ---------- Remote compute (docs/specs/remote-compute.md) ---------- */
+
+/* The rail's 運算位置: two small radio buttons, quieter than the mode choice above. */
+/* Three roles in plain words: one per row, so the longer labels never wrap mid-grid. */
+.compute-choices {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.compute-choice {
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.compute-choice:hover {
+  background: rgb(255 255 255 / 0.05);
+}
+
+.compute-choice[aria-checked="true"] {
+  background: var(--ai-deep);
+  border-color: rgb(255 255 255 / 0.32);
+  font-weight: 700;
+}
+
+.compute-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.compute-rtt {
+  font-variant-numeric: tabular-nums;
+}
+
+.compute-addresses {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.compute-addresses .rail-hint {
+  margin: 0;
+}
+
+/* The rail is indigo in both themes, so a light rose reads as a problem there. */
+.compute-hint-error {
+  color: #f4b6c1;
+  font-weight: 600;
+}
+
+.serve-identity-actions {
+  margin: 4px 0 8px;
+}
+
+/* Both sections follow another form, where `.block + .block` draws no rule line. */
+.remote-section > .block,
+fieldset.remote-section {
+  border-top: 1px solid var(--rule);
+  margin-top: 22px;
+}
+
+.remote-subhead {
+  margin: 18px 0 6px;
+  font-size: var(--t-md);
+}
+
+.remote-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-width: 70ch;
+}
+
+.remote-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+}
+
+.remote-list > li.remote-empty {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--nezumi);
+}
+
+.remote-entry {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.remote-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.remote-meta {
+  font-size: var(--t-xs);
+  color: var(--nezumi);
+}
+
+/* Fingerprints are compared character by character between two screens. */
+.remote-fingerprint {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.remote-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.remote-current p {
+  margin: 0;
+}
+
+.pair-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 22px 24px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  background: var(--paper);
+  color: var(--sumi);
+}
+
+.pair-dialog::backdrop {
+  background: rgb(10 14 30 / 0.55);
+}
+
+.pair-dialog h2 {
+  margin: 0 0 10px;
+  font-size: var(--t-lg);
+}
+
+.pair-dialog[data-tone="bad"] #pair-text {
+  color: var(--beni);
+}
+
+/* The digits the user compares: large, monospaced, two groups ("123 456"). */
+.pair-digits {
+  margin: 14px 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--t-2xl);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+#pair-digits-input {
+  width: 100%;
+  font-size: var(--t-xl);
+  letter-spacing: 0.2em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pair-dialog .form-actions {
+  justify-content: flex-end;
+  padding-top: 14px;
+}

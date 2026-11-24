@@ -13,7 +13,9 @@
  * report (`lib/export.ts`, `lib/translation-guide.ts`, `lib/diagnostics.ts`),
  * the glossary editor, the status-bar metrics, model deletion and the
  * end-of-session auto-save wait (`lib/glossary.ts`, `lib/metrics.ts`,
- * `lib/model-delete.ts`, `lib/session-end.ts`).
+ * `lib/model-delete.ts`, `lib/session-end.ts`). Remote compute (the rail's
+ * "運算位置", both settings sections and the pairing dialog) keeps its rules in
+ * `lib/remote.ts`.
  */
 
 import { getVersion } from "@tauri-apps/api/app";
@@ -128,6 +130,49 @@ import {
   isFuriganaDownload,
   type StatusLine,
 } from "../lib/furigana";
+import {
+  LISTEN_PORT_RANGE,
+  addressLabel,
+  applyPairingEvent,
+  computeModePatch,
+  computeRailView,
+  computeRole,
+  digitsInputError,
+  formatHostPort,
+  isPairDialogFinished,
+  listenHostOptions,
+  needsLocalModels,
+  normalizeDigits,
+  openPairDialog,
+  pairAnswering,
+  pairCommandDone,
+  pairCommandFailed,
+  pairDialogView,
+  pairedDate,
+  parseListenPort,
+  parsePort,
+  reconnectNotice,
+  remoteErrorActions,
+  remoteFieldForEnginePath,
+  remoteFormDiffers,
+  remoteFormFromSettings,
+  remoteFormPatch,
+  roleChange,
+  serverPeerText,
+  serverStateText,
+  validateRemoteForm,
+  withServerEvent,
+  type ComputeRole,
+  type ComputeSettings,
+  type PairAction,
+  type PairDialog,
+  type RemoteEvent,
+  type RemoteForm,
+  type RemoteFormErrors,
+  type RemoteStatus,
+  type TrustedEntry,
+  type UnpairRole,
+} from "../lib/remote";
 import { rubyKey, segmentNodes } from "../lib/ruby";
 import {
   FirstRunGate,
@@ -312,6 +357,31 @@ interface State {
   speakerConfirmDelete: boolean;
   /** Names the user gave the speaker labels this session; index i names voice i + 1. */
   speakerNames: string[];
+  /** Remote compute (lib/remote.ts): last `remote.status`; null until the engine answered. */
+  remote: RemoteStatus | null;
+  /** Why `remote.status` could not be read (shown in both settings sections). */
+  remoteLoadError: string | null;
+  /** The compute host form differs from the saved settings; reloads keep the edits. */
+  remoteDirty: boolean;
+  /** A save of the compute host form (or the pairing it starts) is in flight. */
+  remoteSaving: boolean;
+  /** A role change from the rail (`compute.mode` and/or serving) is in flight. */
+  computeBusy: boolean;
+  /**
+   * The rail's address question while choosing "讓別台電腦用這台處理": the
+   * addresses to pick from (empty = none, which says so); null when not asked.
+   */
+  addressChoice: string[] | null;
+  /** "提供運算給其他電腦" or 中斷連線 is being applied. */
+  serveBusy: boolean;
+  /** The pairing dialog (either role); null when closed. */
+  pairDialog: PairDialog | null;
+  /** The paired entry whose removal is being confirmed (`role:spki`). */
+  confirmUnpair: string | null;
+  /** 重建這台電腦的身分: false, asking to confirm, or the reset in flight. */
+  identityReset: "idle" | "confirm" | "busy";
+  /** Round trip to the compute host from the latest `metrics` of a remote session. */
+  rttMs: number | null;
 }
 
 /** One table row; `id` keeps the row's elements when others are added or removed. */
@@ -399,6 +469,17 @@ const state: State = {
   speakerDeleting: false,
   speakerConfirmDelete: false,
   speakerNames: [],
+  remote: null,
+  remoteLoadError: null,
+  remoteDirty: false,
+  remoteSaving: false,
+  computeBusy: false,
+  addressChoice: null,
+  serveBusy: false,
+  pairDialog: null,
+  confirmUnpair: null,
+  identityReset: "idle",
+  rttMs: null,
 };
 
 /** Last engine messages for "複製診斷資訊". */
@@ -545,6 +626,40 @@ const el = {
   correctionsInput: byId<HTMLTextAreaElement>("f-corrections"),
   correctionsError: byId("corrections-error"),
   addToGlossary: byId<HTMLButtonElement>("add-to-glossary"),
+  computeChoices: Array.from(document.querySelectorAll<HTMLButtonElement>(".compute-choice")),
+  computeHint: byId("compute-hint"),
+  computeRtt: byId("compute-rtt"),
+  computeSettings: byId<HTMLButtonElement>("compute-settings"),
+  computePair: byId<HTMLButtonElement>("compute-pair"),
+  computeAddresses: byId("compute-addresses"),
+  modelsRemote: byId("models-remote"),
+  remoteForm: byId<HTMLFormElement>("remote-form"),
+  remoteBlock: byId("remote-block"),
+  remoteHost: byId<HTMLInputElement>("f-remote-host"),
+  remotePort: byId<HTMLInputElement>("f-remote-port"),
+  remoteSave: byId<HTMLButtonElement>("remote-save"),
+  remotePair: byId<HTMLButtonElement>("remote-pair"),
+  remoteStatus: byId("remote-status"),
+  remoteServers: byId("remote-servers"),
+  serveBlock: byId("serve-block"),
+  serveIdentity: byId("serve-identity"),
+  serveIdentityActions: byId("serve-identity-actions"),
+  serveHost: byId<HTMLSelectElement>("f-serve-host"),
+  servePort: byId<HTMLInputElement>("f-serve-port"),
+  servePortError: byId("serve-port-error"),
+  serveEnabled: byId<HTMLInputElement>("f-serve-enabled"),
+  serveState: byId("serve-state"),
+  servePairOpen: byId<HTMLButtonElement>("serve-pair-open"),
+  serveCurrent: byId("serve-current"),
+  servePeers: byId("serve-peers"),
+  pairDialog: byId<HTMLDialogElement>("pair-dialog"),
+  pairTitle: byId("pair-title"),
+  pairText: byId("pair-text"),
+  pairDigits: byId("pair-digits"),
+  pairDigitsForm: byId<HTMLFormElement>("pair-digits-form"),
+  pairDigitsInput: byId<HTMLInputElement>("pair-digits-input"),
+  pairDigitsError: byId("pair-digits-error"),
+  pairActions: byId("pair-actions"),
 };
 
 // ---------------------------------------------------------------- settings answers
@@ -673,6 +788,11 @@ function setSessionState(next: EngineState, fromEngine: boolean): void {
   state.sessionState = next;
   if (wasActive && !sessionActive()) sessionEnd.ended(fromEngine);
   else if (fromEngine && !sessionActive()) sessionEnd.engineIdle();
+  if (!sessionActive()) {
+    // A remote session that ended cannot be reconnecting any more, and its round trip is history.
+    noticeFor(RECONNECT_NOTICE)?.remove();
+    state.rttMs = null;
+  }
   state.metrics = metricsSessionState(state.metrics, next, state.sessionId);
   renderMetrics();
 }
@@ -699,6 +819,7 @@ function renderStatus(): void {
     button.disabled = sessionActive() || state.busy;
   }
   el.device.disabled = sessionActive() || state.busy || !ready;
+  renderComputeRail();
 
   const info = state.bridge?.info;
   el.aboutEngine.textContent = info
@@ -727,6 +848,10 @@ let noAudioTimer: number | undefined;
 
 function onMetrics(ev: MetricsEvent): void {
   state.metrics = applyMetrics(state.metrics, ev, Date.now());
+  if (ev.session_id === null || ev.session_id === state.sessionId) {
+    state.rttMs = ev.rtt_ms ?? null;
+    renderComputeRail();
+  }
   renderMetrics();
 }
 
@@ -873,11 +998,24 @@ async function toggleSession(): Promise<void> {
       await startSession();
     }
   } catch (e) {
-    reportError(sessionActive() ? "error.stop" : "error.start", e);
+    if (sessionActive()) reportError("error.stop", e);
+    else reportStartError(e);
   } finally {
     state.busy = false;
     renderStatus();
   }
+}
+
+/**
+ * A failed `session.start`. `session_active` while this computer serves another
+ * one (remote compute) is not "already running here": say who holds it.
+ */
+function reportStartError(e: unknown): void {
+  if (engineCode(e) === "session_active" && state.remote?.server.peer) {
+    notify(t("remote.busyServing"), "bad", [{ label: t("compute.openSettings"), run: () => void openServeSettings() }]);
+    return;
+  }
+  reportError("error.start", e);
 }
 
 // ---------------------------------------------------------------- stream info (G5)
@@ -942,7 +1080,8 @@ async function startSession(): Promise<void> {
 
 /** The chosen ASR models the latest model list says are not downloaded. */
 function asrStartItems(): StartItemRequest[] {
-  if (!state.settings || !state.models) return [];
+  // Remote compute: the compute host has (or downloads) its own models; nothing is fetched here.
+  if (!state.settings || !state.models || !needsLocalModels(state.settings.compute)) return [];
   return missingModels(state.settings.asr, state.models.asr).map((m) => ({
     kind: "asr",
     model: m.id,
@@ -960,7 +1099,7 @@ const startFlow = new StartDownloads({
     try {
       await startSession();
     } catch (e) {
-      reportError("error.start", e);
+      reportStartError(e);
     }
     renderStatus();
   },
@@ -1686,6 +1825,7 @@ function renderSpeakerSelect(): void {
     pending: state.speakersPending,
     busy: state.speakersBusy,
     engineReady: engineReady(),
+    remote: !needsLocalModels(computeSettings()),
   });
   el.speakersSelect.value = view.value;
   el.speakersSelect.disabled = view.disabled;
@@ -1781,7 +1921,8 @@ async function saveSpeakers(choice: SpeakerChoice): Promise<void> {
 
 /** The settings select: choosing labels downloads the model first when it is missing. */
 async function changeSpeakers(choice: SpeakerChoice): Promise<void> {
-  const action = speakerChoiceAction(choice, state.models?.speaker_model ?? null);
+  // A compute host makes the labels with its own model: nothing to download here.
+  const action = speakerChoiceAction(choice, state.models?.speaker_model ?? null, !needsLocalModels(computeSettings()));
   if (action === "save") {
     state.speakersPending = null;
     await saveSpeakers(choice);
@@ -2127,6 +2268,7 @@ async function checkRecommendation(): Promise<void> {
 function renderGpuReminder(): void {
   const runtime = state.models?.gpu_runtime ?? null;
   const show = showGpuReminder({
+    remote: !needsLocalModels(computeSettings()),
     runtimeMissing:
       state.preview?.recommendation.gpu_runtime_missing ?? state.hardware?.recommendation.gpu_runtime_missing ?? null,
     runtime,
@@ -2180,7 +2322,8 @@ function renderOffer(): void {
   renderGpuReminder();
   const preview = state.preview;
   const dismissed = state.settings?.ui.dismissed_recommendations ?? [];
-  if (!preview || !shouldOfferRecommendation(preview, dismissed) || state.closedOffers.has(preview.fingerprint)) {
+  const remote = !needsLocalModels(computeSettings());
+  if (!preview || !shouldOfferRecommendation(preview, dismissed, remote) || state.closedOffers.has(preview.fingerprint)) {
     noticeFor(OFFER_NOTICE)?.remove();
     return;
   }
@@ -2218,6 +2361,11 @@ async function dismissOffer(fingerprint: string): Promise<void> {
  */
 async function offerMissingModels(): Promise<boolean> {
   if (!state.settings || !engineReady()) return false;
+  if (!needsLocalModels(state.settings.compute)) {
+    // Remote compute: the models are on the compute host, so none is missing here.
+    forgetMissingModels();
+    return false;
+  }
   try {
     state.models = await api.modelsList();
   } catch (e) {
@@ -2545,6 +2693,7 @@ function memoryCell(cpu: number | null, gpu: number | null): string {
 function renderModels(): void {
   const m = state.models;
   const s = state.settings;
+  renderModelsRemote();
   renderGpuRuntime();
   renderGpuReminder();
   renderFurigana();
@@ -2632,6 +2781,8 @@ function renderModels(): void {
 
 /** The guide that applies now (lib/translation-guide.ts), or null. */
 function currentGuide(): GuideView | null {
+  // Remote compute translates on the compute host; this computer's translation server does not matter.
+  if (!needsLocalModels(state.settings?.compute)) return null;
   const server = state.models?.translation.server ?? state.hardware?.hardware.translation_server ?? null;
   return translationGuide(
     {
@@ -3653,6 +3804,726 @@ async function submitLanguages(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- remote compute (lib/remote.ts)
+
+/** "與運算主機的連線中斷，重新連線中" while a remote session reconnects. */
+const RECONNECT_NOTICE = "remote-reconnecting";
+/** Answers of `remote.status`; one that arrives after a newer answer is dropped. */
+const remoteReads = new Latest();
+
+function computeSettings(): ComputeSettings {
+  return state.settings?.compute ?? DEFAULT_SETTINGS.compute;
+}
+
+function forgetMissingModels(): void {
+  state.missing = null;
+  noticeFor(MISSING_NOTICE)?.remove();
+}
+
+/** The rail's 運算位置: the choice, the compute host and its round trip. */
+function renderComputeRail(): void {
+  const c = computeSettings();
+  const role = computeRole(c);
+  const locked =
+    !engineReady() ||
+    !state.settings ||
+    sessionActive() ||
+    state.busy ||
+    state.computeBusy ||
+    state.serveBusy ||
+    startFlow.active;
+  // While the "which network" question is open, the choice being set up is the one shown, and the
+  // previous role's hint and buttons are hidden so they cannot be read as the new role's state.
+  const choosing = state.addressChoice !== null;
+  for (const button of el.computeChoices) {
+    button.setAttribute("aria-checked", String(button.dataset.compute === (choosing ? "serve" : role)));
+    button.disabled = locked;
+  }
+  const view = computeRailView(c, state.rttMs, state.remote);
+  setIfChanged(el.computeHint, "textContent", view.hint);
+  el.computeHint.hidden = choosing;
+  el.computeHint.classList.toggle("compute-hint-error", view.error);
+  el.computeRtt.hidden = choosing || view.rtt === null;
+  setIfChanged(el.computeRtt, "textContent", view.rtt ?? "");
+  el.computeSettings.hidden = choosing || view.action !== "settings";
+  el.computePair.hidden = choosing || view.action !== "pair";
+  el.computePair.disabled = !engineReady() || state.pairDialog !== null;
+  renderAddressChoice(locked);
+}
+
+/** The rail's "which network" question (several addresses), or why serving cannot start (none). */
+function renderAddressChoice(locked: boolean): void {
+  const addresses = state.addressChoice;
+  el.computeAddresses.hidden = addresses === null;
+  if (addresses === null) {
+    replace(el.computeAddresses);
+    return;
+  }
+  const cancel = h("button", { type: "button", class: "link-button" }, t("compute.addressCancel"));
+  cancel.addEventListener("click", () => {
+    state.addressChoice = null;
+    renderComputeRail();
+  });
+  if (!addresses.length) {
+    replace(el.computeAddresses, h("p", { class: "rail-hint compute-hint-error" }, t("compute.noAddress")), cancel);
+    return;
+  }
+  const options = addresses.map((address) => {
+    const button = h("button", { type: "button", class: "compute-choice" }, addressLabel(address));
+    button.disabled = locked;
+    button.addEventListener("click", () => void setComputeRole("serve", address));
+    return button;
+  });
+  replace(el.computeAddresses, h("p", { class: "rail-hint" }, t("compute.chooseAddress")), ...options, cancel);
+}
+
+function renderModelsRemote(): void {
+  el.modelsRemote.hidden = needsLocalModels(computeSettings());
+}
+
+/**
+ * Switches this computer's role (lib/remote.ts roleChange): `compute.mode` is
+ * read by the next session; serving starts or stops at once. `listenHost` is
+ * the address the user just picked from the rail's question.
+ */
+async function setComputeRole(role: ComputeRole, listenHost?: string): Promise<void> {
+  if (!state.settings || sessionActive() || state.computeBusy || state.serveBusy) return;
+  state.computeBusy = true;
+  renderComputeRail();
+  let wroteServing = false;
+  try {
+    // Serving needs this computer's addresses.
+    if (role === "serve" && !listenHost && state.remote === null) await refreshRemote();
+    const change = listenHost ? { kind: "serve" as const, listenHost } : roleChange(role, computeSettings(), state.remote);
+    state.addressChoice = null;
+    switch (change.kind) {
+      case "none":
+        return;
+      case "choose_address":
+        state.addressChoice = change.addresses;
+        return;
+      case "no_address":
+        state.addressChoice = [];
+        return;
+      case "serve":
+        wroteServing = true;
+        adoptRemote(await api.remoteServerSet(true, change.listenHost, null));
+        return;
+      case "set_mode": {
+        if (change.stopServing) {
+          wroteServing = true;
+          adoptRemote(await api.remoteServerSet(false, null, null));
+        }
+        const { settings, revision } = await api.settingsSet(computeModePatch(change.mode));
+        adoptSettings(settings, revision);
+        return;
+      }
+    }
+  } catch (e) {
+    reportError(role === "serve" ? "error.serveSet" : "error.saveCompute", e);
+  } finally {
+    state.computeBusy = false;
+    // The engine wrote `compute.server_enabled` (and `mode` when serving starts): keep state.settings in step,
+    // and re-read the server state too, since a failed start (port in use) answers with an error, not a status.
+    if (wroteServing) {
+      await syncComputeSettings();
+      await refreshRemote();
+    }
+    afterComputeChange();
+  }
+}
+
+/** Re-reads the settings after the engine changed `compute` itself (`remote_server_set`). */
+async function syncComputeSettings(): Promise<void> {
+  try {
+    const { settings, revision } = await api.settingsGet();
+    adoptSettings(settings, revision);
+  } catch (e) {
+    reportError("error.readSettings", e);
+  }
+}
+
+/** Everything that depends on where recognition runs. */
+function afterComputeChange(): void {
+  renderRemote();
+  // Missing local models, this computer's translation server and its hardware offers only matter when computing here.
+  if (!needsLocalModels(computeSettings())) forgetMissingModels();
+  renderTranslationGuide();
+  renderOffer();
+  renderSpeakers();
+}
+
+/** The "重新連線中" notice follows `status running {reconnecting}` (lib/remote.ts reconnectNotice). */
+function onReconnectStatus(next: EngineState, reconnecting: boolean | null): void {
+  const action = reconnectNotice(next, reconnecting);
+  if (action === "clear") noticeFor(RECONNECT_NOTICE)?.remove();
+  else if (action === "show" && !noticeFor(RECONNECT_NOTICE)) {
+    notify(t("remote.reconnecting"), "info", [], { key: RECONNECT_NOTICE });
+  }
+}
+
+/** A session error, with "改用這台電腦處理" / "設定運算主機" when the compute host is the problem. */
+function notifyStatusError(code: string | null, detail: string | null): void {
+  let notice: HTMLElement | null = null;
+  const actions: NoticeAction[] = remoteErrorActions(code).map((action) =>
+    action === "use_local"
+      ? {
+          label: t("remote.useLocal"),
+          run: () => {
+            notice?.remove();
+            void setComputeRole("local");
+          },
+        }
+      : { label: t("compute.openSettings"), run: () => void openRemoteSettings() },
+  );
+  notice = notify(describeStatusError(code, detail), "bad", actions);
+}
+
+async function openRemoteSettings(): Promise<void> {
+  await showPage("settings");
+  el.remoteBlock.scrollIntoView({ block: "start" });
+  el.remoteHost.focus();
+}
+
+async function openServeSettings(): Promise<void> {
+  await showPage("settings");
+  el.serveBlock.scrollIntoView({ block: "start" });
+}
+
+/** Reads `remote.status` (identity, server, paired lists). */
+async function refreshRemote(): Promise<void> {
+  if (!engineReady()) return;
+  const token = remoteReads.next();
+  try {
+    const status = await api.remoteStatus();
+    if (remoteReads.isCurrent(token)) adoptRemote(status);
+  } catch (e) {
+    if (!remoteReads.isCurrent(token)) return;
+    console.error("remote.status failed:", e);
+    state.remoteLoadError = describeError(e);
+    renderRemote();
+  }
+}
+
+/** A `RemoteStatus` from any command; reads still in flight are older, so they are dropped. */
+function adoptRemote(status: RemoteStatus): void {
+  remoteReads.invalidate();
+  state.remote = status;
+  state.remoteLoadError = null;
+  renderRemote();
+}
+
+function onRemoteEvent(ev: RemoteEvent): void {
+  if (ev.kind === "pairing") {
+    setPairDialog(applyPairingEvent(state.pairDialog, ev.pairing));
+    // A finished pairing added an entry to one of the paired lists.
+    if (ev.pairing.state === "done") void refreshRemote();
+    return;
+  }
+  if (state.remote) {
+    state.remote = withServerEvent(state.remote, ev);
+    renderRemote();
+  }
+  void refreshRemote();
+}
+
+function renderRemote(): void {
+  renderComputeRail();
+  renderModelsRemote();
+  renderRemoteSection();
+  renderServeSection();
+}
+
+/** The paired compute hosts (A) or computers (B), each with 移除 and an in-place confirmation. */
+function renderTrustedList(
+  list: HTMLElement,
+  entries: readonly TrustedEntry[] | null,
+  role: UnpairRole,
+  empty: StringKey,
+): void {
+  if (entries === null) {
+    const text = state.remoteLoadError ? t("remote.loadFailed", { reason: state.remoteLoadError }) : t("common.loading");
+    replace(list, h("li", { class: "remote-empty" }, text));
+    return;
+  }
+  if (!entries.length) {
+    replace(list, h("li", { class: "remote-empty" }, t(empty)));
+    return;
+  }
+  replace(list, ...entries.map((entry) => trustedRow(entry, role)));
+}
+
+function trustedRow(entry: TrustedEntry, role: UnpairRole): HTMLLIElement {
+  const key = `${role}:${entry.spki}`;
+  const name = entry.name.trim() === "" ? t("pair.unknownPeer") : entry.name;
+  const info = h(
+    "div",
+    { class: "remote-entry" },
+    h("span", { class: "remote-name" }, name),
+    h("span", { class: "remote-meta remote-fingerprint" }, t("remote.fingerprint", { fingerprint: entry.fingerprint })),
+    h("span", { class: "remote-meta" }, t("remote.pairedAt", { date: pairedDate(entry.paired_at, getLocale()) })),
+  );
+  if (state.confirmUnpair === key) {
+    const yes = h("button", { type: "button", class: "danger" }, t("remote.removeYes"));
+    yes.disabled = !engineReady();
+    yes.addEventListener("click", () => void unpair(entry.spki, role));
+    const no = h("button", { type: "button", class: "ghost" }, t("remote.removeNo"));
+    no.addEventListener("click", () => {
+      state.confirmUnpair = null;
+      renderRemote();
+    });
+    return h(
+      "li",
+      {},
+      info,
+      h(
+        "div",
+        { class: "delete-confirm", role: "group" },
+        h("p", {}, t("remote.removeConfirm", { name })),
+        h("div", { class: "gpu-actions" }, yes, no),
+      ),
+    );
+  }
+  const remove = h("button", { type: "button", class: "ghost" }, t("remote.remove"));
+  remove.disabled = !engineReady();
+  remove.addEventListener("click", () => {
+    state.confirmUnpair = key;
+    renderRemote();
+    document.querySelector<HTMLButtonElement>(".remote-list .delete-confirm .ghost")?.focus();
+  });
+  return h("li", {}, info, remove);
+}
+
+async function unpair(spki: string, role: UnpairRole): Promise<void> {
+  state.confirmUnpair = null;
+  try {
+    adoptRemote(await api.remoteUnpair(spki, role));
+  } catch (e) {
+    reportError("error.unpair", e);
+    renderRemote();
+  }
+}
+
+// ----- A: the compute host form
+
+function readRemoteForm(): RemoteForm {
+  return { host: el.remoteHost.value, port: el.remotePort.value };
+}
+
+function showRemoteErrors(errors: RemoteFormErrors): void {
+  showFieldErrors(el.remoteForm, ["host", "port"] as const, errors);
+}
+
+/** Shows the saved compute host, unless the user is editing the form. */
+function fillRemoteForm(settings: Settings, force = false): void {
+  if (state.remoteDirty && !force) return;
+  const form = remoteFormFromSettings(settings.compute);
+  el.remoteHost.value = form.host;
+  el.remotePort.value = form.port;
+  state.remoteDirty = false;
+  showRemoteErrors({});
+}
+
+/** Validates and saves the form when it changed; false when it is invalid or could not be saved. */
+async function saveRemoteForm(form: RemoteForm, requireHost: boolean): Promise<boolean> {
+  const errors = validateRemoteForm(form, requireHost);
+  showRemoteErrors(errors);
+  if (Object.keys(errors).length) return false;
+  if (!state.settings || !remoteFormDiffers(form, state.settings.compute)) {
+    state.remoteDirty = false;
+    return true;
+  }
+  try {
+    const { settings, revision } = await api.settingsSet(remoteFormPatch(form));
+    adoptSettings(settings, revision);
+    // Typed more while saving: keep the newer text (it is still unsaved).
+    if (el.remoteHost.value === form.host && el.remotePort.value === form.port) state.remoteDirty = false;
+    renderComputeRail();
+    return true;
+  } catch (e) {
+    const ce = asCommandError(e);
+    const field = ce?.kind === "engine" && ce.code === "invalid_settings" ? remoteFieldForEnginePath(ce.message) : null;
+    if (field && ce?.kind === "engine") showRemoteErrors({ [field]: ce.message });
+    else reportError("error.saveRemote", e);
+    return false;
+  }
+}
+
+async function submitRemoteForm(): Promise<void> {
+  if (state.remoteSaving) return;
+  state.remoteSaving = true;
+  el.remoteStatus.textContent = t("common.saving");
+  renderRemoteSection();
+  try {
+    const saved = await saveRemoteForm(readRemoteForm(), false);
+    el.remoteStatus.textContent = saved ? t("remote.saved") : "";
+  } finally {
+    state.remoteSaving = false;
+    renderRemoteSection();
+  }
+}
+
+/** 配對: saves the address (later sessions connect there), then asks the engine to pair. */
+async function startClientPairing(): Promise<void> {
+  if (state.remoteSaving || state.pairDialog) return;
+  const form = readRemoteForm();
+  state.remoteSaving = true;
+  el.remoteStatus.textContent = "";
+  renderRemoteSection();
+  let saved = false;
+  try {
+    saved = await saveRemoteForm(form, true);
+  } finally {
+    state.remoteSaving = false;
+    renderRemoteSection();
+  }
+  if (!saved) return;
+  const host = form.host.trim();
+  const port = parsePort(form.port) ?? computeSettings().port;
+  setPairDialog(openPairDialog("client", formatHostPort(host, port)));
+  try {
+    await api.remotePair(host, port);
+    setPairDialog(pairCommandDone(state.pairDialog));
+  } catch (e) {
+    console.error("remote_pair failed:", e);
+    setPairDialog(pairCommandFailed(state.pairDialog, describeError(e)));
+  }
+}
+
+function renderRemoteSection(): void {
+  const ready = engineReady();
+  el.remoteSave.disabled = !ready || state.remoteSaving;
+  el.remotePair.disabled = !ready || state.remoteSaving || state.pairDialog !== null;
+  renderTrustedList(el.remoteServers, state.remote?.servers ?? null, "server", "remote.serversEmpty");
+}
+
+// ----- B: providing compute to other computers
+
+/** The listen address the menu should show: the user's unsaved pick, else the engine's. */
+function wantedListenHost(): string {
+  if (el.serveHost.dataset.touched) return el.serveHost.value;
+  return state.remote?.server.listen_host || computeSettings().listen_host;
+}
+
+function renderServeSection(): void {
+  const r = state.remote;
+  const ready = engineReady() && r !== null;
+  const identity =
+    r === null
+      ? state.remoteLoadError
+        ? t("remote.loadFailed", { reason: state.remoteLoadError })
+        : t("common.loading")
+      : r.identity
+        ? t("serve.identity", { fingerprint: r.identity.fingerprint })
+        : t("serve.identityError", { error: r.identity_error ?? t("common.unknown") });
+  setIfChanged(el.serveIdentity, "textContent", identity);
+  el.serveIdentity.classList.toggle("field-error", r === null ? state.remoteLoadError !== null : r.identity === null);
+  renderIdentityReset(r, ready);
+
+  const wanted = wantedListenHost();
+  replace(
+    el.serveHost,
+    h("option", { value: "" }, t("serve.listenHostChoose")),
+    ...listenHostOptions(r, computeSettings().listen_host).map((address) => h("option", { value: address }, address)),
+  );
+  el.serveHost.value = wanted;
+  el.serveHost.disabled = !ready || state.serveBusy;
+  if (!el.servePort.dataset.touched) el.servePort.value = String(r?.server.port ?? computeSettings().listen_port);
+  el.servePort.disabled = !ready || state.serveBusy;
+
+  el.serveEnabled.checked = r?.server.enabled ?? computeSettings().server_enabled;
+  el.serveEnabled.disabled = !ready || state.serveBusy;
+  setIfChanged(el.serveState, "textContent", r ? serverStateText(r.server) : "");
+  el.serveState.classList.toggle("field-error", Boolean(r?.server.error));
+  el.servePairOpen.disabled = !ready || state.pairDialog !== null;
+
+  const peer = r?.server.peer ?? null;
+  const current = h("p", { class: "field-help" }, serverPeerText(peer));
+  if (peer) {
+    const disconnect = h("button", { type: "button", class: "ghost" }, t("serve.disconnect"));
+    disconnect.disabled = !ready || state.serveBusy;
+    disconnect.addEventListener("click", () => void disconnectPeer());
+    replace(el.serveCurrent, h("div", { class: "remote-current" }, current, disconnect));
+  } else {
+    replace(el.serveCurrent, current);
+  }
+  renderTrustedList(el.servePeers, r?.peers ?? null, "peer", "serve.peersEmpty");
+}
+
+/** `remote_server_set` with the chosen address and port (the engine saves them in `compute`). */
+async function applyServe(enabled: boolean): Promise<void> {
+  if (state.serveBusy) return;
+  const port = parseListenPort(el.servePort.value);
+  if (port === null) {
+    el.servePortError.textContent = t("validation.remotePort", { min: LISTEN_PORT_RANGE[0], max: LISTEN_PORT_RANGE[1] });
+    renderServeSection();
+    return;
+  }
+  el.servePortError.textContent = "";
+  state.serveBusy = true;
+  renderServeSection();
+  let applied = false;
+  try {
+    adoptRemote(await api.remoteServerSet(enabled, el.serveHost.value || null, port));
+    delete el.serveHost.dataset.touched;
+    delete el.servePort.dataset.touched;
+    applied = true;
+  } catch (e) {
+    reportError("error.serveSet", e);
+  } finally {
+    state.serveBusy = false;
+    renderServeSection();
+  }
+  if (!applied) return;
+  // The engine wrote `compute.server_enabled` / `listen_host` / `listen_port` (and `mode` when turned on).
+  await syncComputeSettings();
+  afterComputeChange();
+}
+
+/**
+ * 重建這台電腦的身分: always offered (a damaged identity is the main reason,
+ * and then it is the only way out), with an in-place confirmation that says
+ * every paired computer has to pair again.
+ */
+function renderIdentityReset(r: RemoteStatus | null, ready: boolean): void {
+  const broken = r !== null && r.identity === null;
+  const busy = state.identityReset === "busy";
+  if (state.identityReset === "confirm") {
+    const yes = h("button", { type: "button", class: "danger" }, t("serve.identityResetYes"));
+    yes.disabled = !ready;
+    yes.addEventListener("click", () => void resetIdentity());
+    const no = h("button", { type: "button", class: "ghost" }, t("serve.identityResetNo"));
+    no.addEventListener("click", () => {
+      state.identityReset = "idle";
+      renderServeSection();
+    });
+    replace(
+      el.serveIdentityActions,
+      h(
+        "div",
+        { class: "delete-confirm", role: "group" },
+        h("p", {}, t("serve.identityResetConfirm")),
+        h("div", { class: "gpu-actions" }, yes, no),
+      ),
+    );
+    return;
+  }
+  const button = h("button", { type: "button", class: broken ? "primary" : "ghost" }, t("serve.identityReset"));
+  button.disabled = !ready || busy || state.pairDialog !== null || state.serveBusy;
+  button.addEventListener("click", () => {
+    state.identityReset = "confirm";
+    renderServeSection();
+    el.serveIdentityActions.querySelector<HTMLButtonElement>(".ghost")?.focus();
+  });
+  replace(
+    el.serveIdentityActions,
+    broken ? h("p", { class: "field-help" }, t("serve.identityErrorFix")) : null,
+    button,
+  );
+}
+
+async function resetIdentity(): Promise<void> {
+  if (state.identityReset === "busy") return;
+  state.identityReset = "busy";
+  renderServeSection();
+  try {
+    adoptRemote(await api.remoteIdentityReset());
+    notify(t("serve.identityResetDone"), "info", [], { autoDismiss: true });
+  } catch (e) {
+    if (engineCode(e) === "session_active") notify(t("serve.identityResetBusy"), "bad");
+    else reportError("error.identityReset", e);
+  } finally {
+    state.identityReset = "idle";
+    renderServeSection();
+  }
+}
+
+async function disconnectPeer(): Promise<void> {
+  if (state.serveBusy) return;
+  state.serveBusy = true;
+  renderServeSection();
+  try {
+    await api.remoteDisconnect();
+  } catch (e) {
+    reportError("error.disconnect", e);
+  } finally {
+    state.serveBusy = false;
+    void refreshRemote();
+    renderServeSection();
+  }
+}
+
+/** 允許新的電腦配對: opens the 5-minute window; the dialog follows the `pairing` events. */
+async function openServerPairing(): Promise<void> {
+  if (state.pairDialog) return;
+  setPairDialog(openPairDialog("server"));
+  try {
+    adoptRemote(await api.remotePairOpen());
+    setPairDialog(pairCommandDone(state.pairDialog));
+  } catch (e) {
+    console.error("remote_pair_open failed:", e);
+    setPairDialog(pairCommandFailed(state.pairDialog, describeError(e)));
+  }
+}
+
+// ----- the pairing dialog (both roles)
+
+const PAIR_ACTION_TEXT: Readonly<Record<PairAction, StringKey>> = {
+  yes: "pair.yes",
+  no: "pair.no",
+  submit: "pair.submit",
+  cancel: "pair.cancel",
+  close: "pair.close",
+};
+
+function setPairDialog(next: PairDialog | null): void {
+  const enteringDigits = next?.phase === "enter_digits" && state.pairDialog?.phase !== "enter_digits";
+  state.pairDialog = next;
+  if (enteringDigits) {
+    el.pairDigitsInput.value = "";
+    el.pairDigitsError.textContent = "";
+  }
+  renderPairDialog();
+  if (enteringDigits) el.pairDigitsInput.focus();
+  renderRemoteSection();
+  renderServeSection();
+}
+
+function renderPairDialog(): void {
+  const d = state.pairDialog;
+  if (!d) {
+    if (el.pairDialog.open) el.pairDialog.close();
+    return;
+  }
+  const view = pairDialogView(d);
+  el.pairDialog.dataset.tone = view.tone;
+  setIfChanged(el.pairTitle, "textContent", view.title);
+  setIfChanged(el.pairText, "textContent", view.text);
+  el.pairDigits.hidden = view.digits === null;
+  setIfChanged(el.pairDigits, "textContent", view.digits ?? "");
+  el.pairDigitsForm.hidden = !view.digitsInput;
+  el.pairDigitsInput.disabled = view.busy;
+  replace(
+    el.pairActions,
+    ...view.actions.map((action) => {
+      const primary = action === "yes" || action === "submit" || action === "close";
+      const button = h("button", { type: "button", class: primary ? "primary" : "ghost" }, t(PAIR_ACTION_TEXT[action]));
+      // Cancel stays available while a step is in flight: the user can always back out.
+      button.disabled = view.busy && action !== "cancel";
+      button.addEventListener("click", () => void onPairAction(action));
+      return button;
+    }),
+  );
+  if (!el.pairDialog.open) el.pairDialog.showModal();
+}
+
+async function onPairAction(action: PairAction): Promise<void> {
+  const d = state.pairDialog;
+  if (!d) return;
+  switch (action) {
+    case "close":
+      setPairDialog(null);
+      void refreshRemote();
+      return;
+    case "cancel":
+      setPairDialog(null);
+      try {
+        await api.remotePairCancel();
+      } catch (e) {
+        reportError("error.pairCancel", e);
+      }
+      void refreshRemote();
+      return;
+    case "yes":
+    case "no":
+      setPairDialog(pairAnswering(d));
+      try {
+        await api.remotePairConfirmSame(action === "yes");
+      } catch (e) {
+        console.error("remote_pair_confirm failed:", e);
+        setPairDialog(pairCommandFailed(state.pairDialog, describeError(e)));
+      }
+      return;
+    case "submit":
+      await submitPairDigits();
+      return;
+  }
+}
+
+async function submitPairDigits(): Promise<void> {
+  const d = state.pairDialog;
+  if (!d || d.phase !== "enter_digits" || d.busy) return;
+  const raw = el.pairDigitsInput.value;
+  const error = digitsInputError(raw);
+  el.pairDigitsError.textContent = error ?? "";
+  el.pairDigitsInput.setAttribute("aria-invalid", String(error !== null));
+  if (error) {
+    el.pairDigitsInput.focus();
+    return;
+  }
+  setPairDialog(pairAnswering(d));
+  try {
+    await api.remotePairConfirmDigits(normalizeDigits(raw));
+  } catch (e) {
+    console.error("remote_pair_confirm failed:", e);
+    setPairDialog(pairCommandFailed(state.pairDialog, describeError(e)));
+  }
+}
+
+/** Remote compute controls (rail, both settings sections, the dialog). */
+function wireRemote(): void {
+  for (const button of el.computeChoices) {
+    button.addEventListener("click", () => {
+      const role = button.dataset.compute;
+      if (role === "local" || role === "remote" || role === "serve") void setComputeRole(role);
+    });
+  }
+  el.computeSettings.addEventListener("click", () => void openRemoteSettings());
+  el.computePair.addEventListener("click", () => void openServerPairing());
+  el.remoteForm.addEventListener("input", () => {
+    state.remoteDirty = true;
+    el.remoteStatus.textContent = "";
+  });
+  el.remoteForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void submitRemoteForm();
+  });
+  el.remotePair.addEventListener("click", () => void startClientPairing());
+  el.serveEnabled.addEventListener("change", () => void applyServe(el.serveEnabled.checked));
+  el.serveHost.addEventListener("change", () => {
+    el.serveHost.dataset.touched = "1";
+    // While serving, a new address or port takes effect at once; otherwise with the switch.
+    if (state.remote?.server.enabled) void applyServe(true);
+  });
+  el.servePort.addEventListener("input", () => {
+    el.servePort.dataset.touched = "1";
+    el.servePortError.textContent = "";
+  });
+  el.servePort.addEventListener("change", () => {
+    if (state.remote?.server.enabled) void applyServe(true);
+  });
+  el.servePairOpen.addEventListener("click", () => void openServerPairing());
+  // Esc: a finished dialog just closes; an open pairing is cancelled, never left running unseen.
+  el.pairDialog.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    const d = state.pairDialog;
+    void onPairAction(d && isPairDialogFinished(d) ? "close" : "cancel");
+  });
+  // The browser may close a modal dialog itself (a repeated Esc); the pairing must not keep running unseen.
+  el.pairDialog.addEventListener("close", () => {
+    const d = state.pairDialog;
+    if (d) void onPairAction(isPairDialogFinished(d) ? "close" : "cancel");
+  });
+  el.pairDigitsForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void submitPairDigits();
+  });
+  el.pairDigitsInput.addEventListener("input", () => {
+    el.pairDigitsError.textContent = "";
+    el.pairDigitsInput.removeAttribute("aria-invalid");
+  });
+}
+
 // ---------------------------------------------------------------- about
 
 function renderAbout(): void {
@@ -3831,6 +4702,8 @@ function onLocaleChanged(): void {
   renderTranslationGuide();
   renderGlossary();
   renderMetrics();
+  renderRemote();
+  renderPairDialog();
   void pushOverlayLocale();
 }
 
@@ -3846,6 +4719,8 @@ function showPage(page: Page): Promise<void> {
   }
   // The diagnostics report and the guide use the hardware summary; detect it once.
   if (page === "settings" && !state.hardware && engineReady()) void detectHardwareQuietly();
+  // The remote sections show who is connected and paired; that changes behind our back.
+  if (page === "settings" && engineReady()) void refreshRemote();
   return page === "models" ? loadModels().then(checkRecommendation) : Promise.resolve();
 }
 
@@ -3896,6 +4771,7 @@ async function loadEngineData(): Promise<void> {
     fillLanguageForm(settings);
     fillGlossary(settings);
     fillSessionInfo(settings);
+    fillRemoteForm(settings);
     renderSettingsPath();
     renderTranslationSwitches();
     renderFuriganaSwitch();
@@ -3916,6 +4792,7 @@ async function loadEngineData(): Promise<void> {
   renderDevices();
   renderStatus();
   if (state.page === "models") void loadModels();
+  void refreshRemote();
   // Runs on every engine (re)start, e.g. after the GPU runtime install restarts it.
   if (firstRunGate.claim({ isNew, userChoseModels: state.userChoseModels })) void firstRunFlow();
   else void checkRecommendation();
@@ -3933,8 +4810,13 @@ function onBridge(status: BridgeStatus): void {
     state.furiganaPendingEnable = false;
     if (state.speakerDownload?.state === "downloading") state.speakerDownload = null;
     state.speakersPending = null;
+    // The engine's pairing ended with it; the server state is read again once it is back.
+    state.pairDialog = null;
+    state.serveBusy = false;
   }
   renderStatus();
+  renderRemote();
+  renderPairDialog();
   renderCheck();
   renderTranslationSwitches();
   renderFurigana();
@@ -4059,6 +4941,7 @@ function keepContentBelowNotices(): void {
 
 function wire(): void {
   keepContentBelowNotices();
+  wireRemote();
   for (const button of el.modes) {
     button.addEventListener("click", () => void setMode(button.dataset.mode as Mode));
   }
@@ -4217,6 +5100,7 @@ async function subscribe(): Promise<void> {
       if (s.session_id !== null) state.sessionId = s.session_id;
       setSessionState(s.state, true);
       if (s.state === "error") recentLog.push("status", `${s.code ?? "error"}: ${s.detail ?? ""}`);
+      onReconnectStatus(s.state, s.reconnecting);
       if (s.state === "error" && s.code === "translation_model_missing" && s.missing_translation_models.length) {
         // Pull them on the user's Ollama, then start again (lib/start-downloads.ts).
         startFlow.begin(
@@ -4228,7 +5112,7 @@ async function subscribe(): Promise<void> {
           if (!found) notify(describeStatusError(s.code, s.detail), "bad");
         });
       } else if (s.state === "error") {
-        notify(describeStatusError(s.code, s.detail), "bad");
+        notifyStatusError(s.code, s.detail);
       }
       renderStatus();
     }),
@@ -4298,6 +5182,7 @@ async function subscribe(): Promise<void> {
       renderOverlay();
     }),
     events.shortcut(onShortcut),
+    events.remote(onRemoteEvent),
   ]);
 }
 

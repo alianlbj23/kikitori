@@ -22,6 +22,7 @@ from kikitori.asr.types import Transcript
 from kikitori.capture import AudioSource, DeviceKind
 from kikitori.capture.errors import DeviceNotFoundError
 from kikitori.config import Settings
+from kikitori.engine import events as events_module
 from kikitori.engine import server as server_module
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer, _MetricsReporter, subtitle_event
@@ -460,8 +461,8 @@ class MetricsReporterStopTest(unittest.TestCase):
         reporter.start()
         self.assertTrue(entered.wait(WAIT))
         with (
-            mock.patch.object(server_module, "METRICS_JOIN_TIMEOUT", 0.05),
-            self.assertLogs("kikitori.engine.server", "WARNING"),
+            mock.patch.object(events_module, "METRICS_JOIN_TIMEOUT", 0.05),
+            self.assertLogs("kikitori.engine.events", "WARNING"),
         ):
             started = time.monotonic()
             reporter.stop()

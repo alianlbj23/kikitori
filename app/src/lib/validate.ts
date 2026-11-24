@@ -205,6 +205,8 @@ export function parseStatus(v: unknown): StatusEvent {
     session_id: optUint(o, "session_id", p),
     code,
     missing_translation_models: [...new Set(missing)],
+    // A hint of remote sessions: anything but a boolean on `running` means "not said".
+    reconnecting: o.state === "running" && typeof data.reconnecting === "boolean" ? data.reconnecting : null,
   };
 }
 
@@ -243,7 +245,13 @@ export function parseMetrics(v: unknown): MetricsEvent {
     // G8 hints: anything but a level in range is "unknown", not a broken event.
     speech_level_dbfs: optLevel(o.speech_level_dbfs),
     background_level_dbfs: optLevel(o.background_level_dbfs),
+    rtt_ms: parseRtt(o.rtt_ms),
   };
+}
+
+/** Remote compute's round trip (`metrics.rtt_ms`): a finite non-negative number below 10 minutes, else unknown. */
+function parseRtt(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v < 600_000 ? v : null;
 }
 
 /** A dBFS level in [-120, 0], or null. */

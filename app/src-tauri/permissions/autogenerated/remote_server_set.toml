@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-server-set"
+description = "Enables the remote_server_set command without any pre-configured scope."
+commands.allow = ["remote_server_set"]
+
+[[permission]]
+identifier = "deny-remote-server-set"
+description = "Denies the remote_server_set command without any pre-configured scope."
+commands.deny = ["remote_server_set"]

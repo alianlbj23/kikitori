@@ -58,6 +58,7 @@ pub enum EngineEvent {
     DownloadProgress(DownloadProgressPayload),
     Log(LogPayload),
     Metrics(MetricsPayload),
+    Remote(RemotePayload),
     Unknown { name: String },
 }
 
@@ -138,10 +139,18 @@ pub struct MetricsPayload {
     /// v0.3 G8: level of the audio between sentences (music, game sounds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_level_dbfs: Option<f64>,
+    /// T13 remote compute: round trip to the compute host in milliseconds;
+    /// `null` or absent on a local session. Only shown next to the host name,
+    /// so an out-of-range value is dropped (a hint), not the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
 }
 
 /// Bounds of `metrics.level_dbfs` (the engine floors silence at −120 dBFS).
 const LEVEL_DBFS_RANGE: std::ops::RangeInclusive<f64> = -120.0..=0.0;
+/// A round trip longer than a minute is a broken clock, not a measurement
+/// (the client already declares the link lost after 10 s of silence).
+const RTT_MS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=60_000.0;
 /// Anything above this is a broken clock or counter, not a measurement.
 const MAX_LATENCY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_BACKLOG: u64 = 1_000_000;
@@ -203,6 +212,87 @@ pub struct DownloadProgressPayload {
 }
 
 const MAX_KIND_CHARS: usize = 32;
+
+/// `remote` event (T13 contract in docs/specs/remote-compute.md): pairing
+/// progress or the compute-host server's state. Only the main window gets it.
+/// The names, digits and fingerprints partly come from another computer on the
+/// network (through the engine), so every field is checked by [`validate_remote`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum RemotePayload {
+    Pairing(RemotePairing),
+    Server(RemoteServer),
+}
+
+/// Which side of a pairing this computer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PairingRole {
+    /// The compute host (B): the user types the digits shown on the other computer.
+    Server,
+    /// The computer asking for compute (A): it shows the digits.
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingStep {
+    Waiting,
+    EnterDigits,
+    ShowDigits,
+    Confirm,
+    Done,
+    Failed,
+}
+
+/// `PairingState` of the contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePairing {
+    pub role: PairingRole,
+    pub state: PairingStep,
+    /// The 6-digit comparison code (`show_digits` on the client).
+    #[serde(default)]
+    pub digits: Option<String>,
+    /// The other computer's name, once known.
+    #[serde(default)]
+    pub peer_name: Option<String>,
+    /// Why it failed (`mismatch`, `timeout`, …); only on `failed`.
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// `server.peer.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemotePeerState {
+    Connected,
+    /// The link dropped; the session is kept for a resume.
+    WaitingResume,
+}
+
+/// The computer currently using this compute host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePeer {
+    pub name: String,
+    pub fingerprint: String,
+    pub state: RemotePeerState,
+}
+
+/// Compute-host server state (`kind: "server"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteServer {
+    pub listening: bool,
+    #[serde(default)]
+    pub peer: Option<RemotePeer>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Computer names (the contract's `TrustedEntry.name` limit).
+const MAX_PEER_NAME_CHARS: usize = 64;
+/// 16 bytes as 8 groups of 4 hex digits is 39 characters; leave room, no more.
+const MAX_FINGERPRINT_CHARS: usize = 64;
+const PAIRING_DIGITS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -385,9 +475,65 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             check_len("log.message", &p.message, MAX_TEXT_CHARS)?;
             EngineEvent::Log(p)
         }
+        "remote" => {
+            // An unknown or missing `kind`, role or state fails here.
+            let p: RemotePayload = serde_json::from_value(data).map_err(ctx)?;
+            validate_remote(&p)?;
+            EngineEvent::Remote(p)
+        }
         _ => EngineEvent::Unknown { name },
     };
     Ok(event)
+}
+
+/// Checks a `remote` event. Unlike subtitle hints nothing is repaired: these
+/// values drive the pairing dialog (the user compares the digits and trusts
+/// the named computer), so a wrong one must not be shown at all.
+fn validate_remote(p: &RemotePayload) -> Result<(), ParseError> {
+    match p {
+        RemotePayload::Pairing(pairing) => {
+            if let Some(digits) = &pairing.digits
+                && (digits.len() != PAIRING_DIGITS || !digits.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return Err(shape("remote.digits must be exactly 6 ASCII digits"));
+            }
+            if let Some(name) = &pairing.peer_name {
+                check_len("remote.peer_name", name, MAX_PEER_NAME_CHARS)?;
+            }
+            if let Some(code) = &pairing.code
+                && (code.is_empty()
+                    || code.len() > MAX_CODE_CHARS
+                    || !code
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+            {
+                return Err(shape(format!("remote.code is not an identifier: {code:?}")));
+            }
+        }
+        RemotePayload::Server(server) => {
+            if let Some(peer) = &server.peer {
+                check_len("remote.peer.name", &peer.name, MAX_PEER_NAME_CHARS)?;
+                check_non_empty_len(
+                    "remote.peer.fingerprint",
+                    &peer.fingerprint,
+                    MAX_FINGERPRINT_CHARS,
+                )?;
+                if !peer
+                    .fingerprint
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() || b == b' ')
+                {
+                    return Err(shape(
+                        "remote.peer.fingerprint may only contain hex digits and spaces",
+                    ));
+                }
+            }
+            if let Some(error) = &server.error {
+                check_len("remote.error", error, MAX_TEXT_CHARS)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Checks a subtitle. Out-of-range F2/F4 hints are repaired instead of
@@ -471,6 +617,11 @@ fn validate_metrics(p: &mut MetricsPayload) -> Result<(), ParseError> {
         if level.is_some_and(|db| !LEVEL_DBFS_RANGE.contains(&db)) {
             *level = None;
         }
+    }
+    // NaN and infinities cannot arrive through JSON, but the range check
+    // rejects them anyway.
+    if p.rtt_ms.is_some_and(|ms| !RTT_MS_RANGE.contains(&ms)) {
+        p.rtt_ms = None;
     }
     if !LEVEL_DBFS_RANGE.contains(&p.level_dbfs) {
         return Err(shape(format!(
@@ -952,6 +1103,243 @@ mod tests {
             parse(&huge.to_string()),
             Err(ParseError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn status_event_forwards_remote_reconnecting() {
+        // T13: a remote session reports the link state in `data`.
+        for reconnecting in [true, false] {
+            let line = json!({"event": "status", "data": {
+                "state": "running", "session_id": 5, "data": {"reconnecting": reconnecting}
+            }});
+            let Some(Incoming::Event(EngineEvent::Status(s))) = parse(&line.to_string()).unwrap()
+            else {
+                panic!("expected status");
+            };
+            assert_eq!(s.state, EngineState::Running);
+            assert_eq!(
+                serde_json::to_value(&s).unwrap(),
+                json!({"state": "running", "detail": null, "session_id": 5, "code": null,
+                       "data": {"reconnecting": reconnecting}})
+            );
+        }
+        let lost =
+            r#"{"event":"status","data":{"state":"error","code":"remote_lost","detail":"x"}}"#;
+        let Some(Incoming::Event(EngineEvent::Status(s))) = parse(lost).unwrap() else {
+            panic!("expected status");
+        };
+        assert_eq!(s.code.as_deref(), Some("remote_lost"));
+    }
+
+    fn parse_metrics(v: &Value) -> MetricsPayload {
+        match parse(&json!({"event": "metrics", "data": v}).to_string()) {
+            Ok(Some(Incoming::Event(EngineEvent::Metrics(m)))) => m,
+            other => panic!("expected metrics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metrics_rtt_ms() {
+        for rtt in [json!(1.9), json!(0), json!(60000)] {
+            let m = parse_metrics(&json!({"level_dbfs": -20, "backlog": 0, "rtt_ms": rtt}));
+            assert_eq!(m.rtt_ms, rtt.as_f64());
+            assert_eq!(
+                serde_json::to_value(&m).unwrap()["rtt_ms"],
+                json!(rtt.as_f64())
+            );
+        }
+        // Null, absent or out of range: no RTT shown, the event is kept.
+        for no_rtt in [json!(null), json!(-1), json!(60000.5), json!(1e300)] {
+            let m = parse_metrics(&json!({"level_dbfs": -20, "backlog": 0, "rtt_ms": no_rtt}));
+            assert!(m.rtt_ms.is_none(), "{no_rtt}");
+            assert!(serde_json::to_value(&m).unwrap().get("rtt_ms").is_none());
+        }
+        let local = parse_metrics(&json!({"level_dbfs": -20, "backlog": 0}));
+        assert!(local.rtt_ms.is_none());
+        // A wrong type is a broken engine: rejected like any field.
+        let bad =
+            json!({"event": "metrics", "data": {"level_dbfs": -20, "backlog": 0, "rtt_ms": "2"}});
+        assert!(matches!(parse(&bad.to_string()), Err(ParseError::Shape(_))));
+    }
+
+    fn remote_line(data: Value) -> String {
+        json!({"event": "remote", "data": data}).to_string()
+    }
+
+    fn parse_remote(data: Value) -> RemotePayload {
+        match parse(&remote_line(data)) {
+            Ok(Some(Incoming::Event(EngineEvent::Remote(r)))) => r,
+            other => panic!("expected remote, got {other:?}"),
+        }
+    }
+
+    fn pairing_json() -> Value {
+        json!({"kind": "pairing", "role": "client", "state": "show_digits",
+               "digits": "166425", "peer_name": "alian_server", "code": null})
+    }
+
+    fn server_json() -> Value {
+        json!({"kind": "server", "listening": true, "error": null, "peer": {
+            "name": "DESKTOP-A", "fingerprint": "05aa 3f39 4a53 9a23 62d9 a1e4 cd57 cba2",
+            "state": "connected"
+        }})
+    }
+
+    #[test]
+    fn remote_pairing_event() {
+        let p = parse_remote(pairing_json());
+        let RemotePayload::Pairing(pairing) = &p else {
+            panic!("expected pairing, got {p:?}");
+        };
+        assert_eq!(pairing.role, PairingRole::Client);
+        assert_eq!(pairing.state, PairingStep::ShowDigits);
+        assert_eq!(pairing.digits.as_deref(), Some("166425"));
+        // Forwarded in the engine's shape, `kind` included.
+        assert_eq!(serde_json::to_value(&p).unwrap(), pairing_json());
+
+        for state in [
+            "waiting",
+            "enter_digits",
+            "show_digits",
+            "confirm",
+            "done",
+            "failed",
+        ] {
+            for role in ["server", "client"] {
+                let mut v = pairing_json();
+                v["state"] = json!(state);
+                v["role"] = json!(role);
+                assert_eq!(serde_json::to_value(parse_remote(v.clone())).unwrap(), v);
+            }
+        }
+        // Missing optional fields are forwarded as null.
+        let minimal =
+            parse_remote(json!({"kind": "pairing", "role": "server", "state": "waiting"}));
+        assert_eq!(
+            serde_json::to_value(&minimal).unwrap(),
+            json!({"kind": "pairing", "role": "server", "state": "waiting",
+                   "digits": null, "peer_name": null, "code": null})
+        );
+        let mut failed = pairing_json();
+        failed["state"] = json!("failed");
+        failed["digits"] = json!(null);
+        for code in ["mismatch", "bad_commitment", "trust_store_error", "e2"] {
+            failed["code"] = json!(code);
+            parse_remote(failed.clone());
+        }
+        let mut long_name = pairing_json();
+        long_name["peer_name"] = json!("名".repeat(MAX_PEER_NAME_CHARS));
+        parse_remote(long_name);
+    }
+
+    #[test]
+    fn remote_server_event() {
+        let p = parse_remote(server_json());
+        let RemotePayload::Server(server) = &p else {
+            panic!("expected server, got {p:?}");
+        };
+        assert!(server.listening);
+        assert_eq!(
+            server.peer.as_ref().unwrap().state,
+            RemotePeerState::Connected
+        );
+        assert_eq!(serde_json::to_value(&p).unwrap(), server_json());
+
+        let mut waiting = server_json();
+        waiting["peer"]["state"] = json!("waiting_resume");
+        assert_eq!(
+            serde_json::to_value(parse_remote(waiting.clone())).unwrap(),
+            waiting
+        );
+        let off = json!({"kind": "server", "listening": false, "peer": null,
+                         "error": "port 47100 is in use"});
+        assert_eq!(
+            serde_json::to_value(parse_remote(off.clone())).unwrap(),
+            off
+        );
+        // Unknown fields are not forwarded.
+        let mut extra = server_json();
+        extra["secret"] = json!("x");
+        assert_eq!(
+            serde_json::to_value(parse_remote(extra)).unwrap(),
+            server_json()
+        );
+    }
+
+    #[test]
+    fn remote_event_rejections() {
+        let mut cases: Vec<Value> = vec![
+            json!({"role": "client", "state": "waiting"}),
+            json!({"kind": "telemetry"}),
+            json!({"kind": "Pairing", "role": "client", "state": "waiting"}),
+            json!({"kind": 1}),
+        ];
+        let pairing_bad: Vec<(&str, Value)> = vec![
+            ("role", json!("admin")),
+            ("role", json!(null)),
+            ("state", json!("paired")),
+            ("state", json!("SHOW_DIGITS")),
+            ("digits", json!("12345")),
+            ("digits", json!("1234567")),
+            ("digits", json!("123 456")),
+            ("digits", json!("12345a")),
+            ("digits", json!("１２３４５６")),
+            ("digits", json!(166425)),
+            ("peer_name", json!("x".repeat(MAX_PEER_NAME_CHARS + 1))),
+            ("peer_name", json!(7)),
+            ("code", json!("")),
+            ("code", json!("Mismatch")),
+            ("code", json!("bad code")),
+            ("code", json!("<b>")),
+            ("code", json!("x".repeat(MAX_CODE_CHARS + 1))),
+        ];
+        for (field, value) in pairing_bad {
+            let mut v = pairing_json();
+            v[field] = value;
+            cases.push(v);
+        }
+        let mut no_state = pairing_json();
+        no_state.as_object_mut().unwrap().remove("state");
+        cases.push(no_state);
+
+        let server_bad: Vec<(&str, Value)> = vec![
+            ("listening", json!("yes")),
+            ("listening", json!(null)),
+            ("error", json!("e".repeat(MAX_TEXT_CHARS + 1))),
+            ("error", json!(1)),
+            ("peer", json!("DESKTOP-A")),
+        ];
+        for (field, value) in server_bad {
+            let mut v = server_json();
+            v[field] = value;
+            cases.push(v);
+        }
+        let peer_bad: Vec<(&str, Value)> = vec![
+            ("name", json!("x".repeat(MAX_PEER_NAME_CHARS + 1))),
+            ("name", json!(null)),
+            ("fingerprint", json!("")),
+            ("fingerprint", json!("05aa-3f39")),
+            ("fingerprint", json!("zzzz")),
+            ("fingerprint", json!("<img src=x>")),
+            ("fingerprint", json!("a".repeat(MAX_FINGERPRINT_CHARS + 1))),
+            ("state", json!("idle")),
+            ("state", json!(null)),
+        ];
+        for (field, value) in peer_bad {
+            let mut v = server_json();
+            v["peer"][field] = value;
+            cases.push(v);
+        }
+        let mut no_listening = server_json();
+        no_listening.as_object_mut().unwrap().remove("listening");
+        cases.push(no_listening);
+
+        for data in cases {
+            assert!(
+                matches!(parse(&remote_line(data.clone())), Err(ParseError::Shape(_))),
+                "{data}"
+            );
+        }
     }
 
     #[test]

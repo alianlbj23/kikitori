@@ -9,6 +9,7 @@
 
 import type { UiLocalePreference } from "./i18n";
 import type { EngineMessage } from "./messages";
+import type { ComputeSettings } from "./remote";
 import type { RubySpan } from "./ruby";
 
 export type Mode = "media" | "interpret";
@@ -72,6 +73,8 @@ export interface MetricsEvent {
   speech_level_dbfs?: number | null;
   /** v0.3 G8: level between sentences (music, game sounds) over the same window. */
   background_level_dbfs?: number | null;
+  /** Remote compute: round trip to the compute host in ms; null/absent when local or unknown. */
+  rtt_ms?: number | null;
 }
 
 export type EngineState = "idle" | "loading" | "running" | "error";
@@ -86,6 +89,11 @@ export interface StatusEvent {
    * (`code: "translation_model_missing"`, `data.models`); empty otherwise.
    */
   missing_translation_models: string[];
+  /**
+   * Remote compute, `running` only: true while the link to the compute host is
+   * being re-established, false once it is back (`data.reconnecting`); null otherwise.
+   */
+  reconnecting: boolean | null;
 }
 
 export type DownloadState = "downloading" | "done" | "error";
@@ -483,6 +491,8 @@ export interface Settings {
   subtitle: OverlayStyle;
   /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
   obs_output: ObsContent;
+  /** Where recognition and translation run (docs/specs/remote-compute.md; lib/remote.ts). */
+  compute: ComputeSettings;
   /** The UI's own state in the engine's opaque `ui` object (the engine never reads it). */
   ui: UiState;
 }

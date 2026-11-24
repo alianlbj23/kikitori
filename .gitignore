@@ -18,3 +18,6 @@ experiments/silero_reset/data/
 /app/src-tauri/binaries/
 # app 的第三方授權聲明（packaging/app/licenses.py 在發布建置時產生，隨安裝檔散布）
 /app/src-tauri/licenses/
+
+# 遠端運算 GUI 驗收的截圖與 WebView2 設定資料夾（experiments/remote_compute/gui_cdp.mjs），不進 repo
+experiments/remote_compute/results/

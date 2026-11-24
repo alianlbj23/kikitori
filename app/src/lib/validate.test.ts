@@ -72,8 +72,18 @@ describe("other events", () => {
       session_id: null,
       code: null,
       missing_translation_models: [],
+      reconnecting: null,
     });
     expect(() => parseStatus({ state: "napping" })).toThrow(ValidationError);
+  });
+
+  it("reads data.reconnecting of a remote session's running status (remote-compute.md T13)", () => {
+    expect(parseStatus({ state: "running", data: { reconnecting: true } }).reconnecting).toBe(true);
+    expect(parseStatus({ state: "running", data: { reconnecting: false } }).reconnecting).toBe(false);
+    // Only on running, and only a boolean: anything else is "not said", not a broken event.
+    expect(parseStatus({ state: "loading", data: { reconnecting: true } }).reconnecting).toBeNull();
+    expect(parseStatus({ state: "running", data: { reconnecting: "yes" } }).reconnecting).toBeNull();
+    expect(parseStatus({ state: "running", data: [true] }).reconnecting).toBeNull();
   });
 
   it("reads the missing translation models of translation_model_missing (real engine capture)", () => {
@@ -588,6 +598,7 @@ describe("competitive features: subtitle hints, metrics, model deletion", () => 
       latency_ms_median: 800,
       speech_level_dbfs: null,
       background_level_dbfs: null,
+      rtt_ms: null,
     });
     // G8 split levels: kept when in range, otherwise unknown (the event itself is fine).
     const split = parseMetrics({ level_dbfs: -20, backlog: 0, speech_level_dbfs: -18, background_level_dbfs: 3 });
@@ -599,8 +610,14 @@ describe("competitive features: subtitle hints, metrics, model deletion", () => 
       latency_ms_median: null,
       speech_level_dbfs: null,
       background_level_dbfs: null,
+      rtt_ms: null,
     });
     expect(parseMetrics({ level_dbfs: 4, backlog: 0 }).level_dbfs).toBe(0);
+    // Remote compute's round trip: a hint, so a bad value is "unknown", not a dropped event.
+    expect(parseMetrics({ level_dbfs: -3, backlog: 0, rtt_ms: 12.5 }).rtt_ms).toBe(12.5);
+    for (const rtt of [-1, "12", Number.NaN, Infinity, 600_000]) {
+      expect(parseMetrics({ level_dbfs: -3, backlog: 0, rtt_ms: rtt }).rtt_ms).toBeNull();
+    }
     for (const bad of [
       { backlog: 0 },
       { level_dbfs: "-3", backlog: 0 },

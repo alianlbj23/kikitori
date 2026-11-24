@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-disconnect"
+description = "Enables the remote_disconnect command without any pre-configured scope."
+commands.allow = ["remote_disconnect"]
+
+[[permission]]
+identifier = "deny-remote-disconnect"
+description = "Denies the remote_disconnect command without any pre-configured scope."
+commands.deny = ["remote_disconnect"]

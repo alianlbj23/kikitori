@@ -93,6 +93,17 @@ describe("speakerSelectView", () => {
     expect(speakerSelectView(input({ busy: true })).disabled).toBe(true);
     expect(speakerSelectView(input({ engineReady: false })).disabled).toBe(true);
   });
+
+  it("with another computer doing the work, shows the saved choice and says where the model has to be", () => {
+    expect(speakerSelectView(input({ model: MISSING, remote: true }))).toEqual({
+      value: "3",
+      disabled: false,
+      percent: null,
+      status: { key: "speakers.remoteHelp", params: {}, error: false },
+    });
+    expect(speakerSelectView(input({ model: MISSING, remote: true, speakers: { enabled: false, count: 3 } })).status).toBeNull();
+    expect(speakerSelectView(input({ model: MISSING, remote: true, download: progress("error") })).status?.error).toBe(true);
+  });
 });
 
 describe("actions and downloads", () => {
@@ -100,6 +111,9 @@ describe("actions and downloads", () => {
     expect(speakerChoiceAction("auto", MODEL)).toBe("save");
     expect(speakerChoiceAction("3", MISSING)).toBe("download");
     expect(speakerChoiceAction("off", MISSING)).toBe("save");
+    // The compute host makes the labels: nothing is downloaded on this computer.
+    expect(speakerChoiceAction("3", MISSING, true)).toBe("save");
+    expect(speakerChoiceAction("auto", null, true)).toBe("unsupported");
     expect(speakerChoiceAction("2", null)).toBe("unsupported");
   });
 
