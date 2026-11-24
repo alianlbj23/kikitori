@@ -376,8 +376,6 @@ class ValidationTest(unittest.TestCase):
                 "server_enabled": False,
                 "listen_host": "",
                 "listen_port": 47100,
-                "remote_fast_model": "",
-                "remote_final_model": "",
             },
         )
         data = s.to_dict()
@@ -427,33 +425,18 @@ class ValidationTest(unittest.TestCase):
                     Settings.from_dict(_with("compute", {"listen_port": value}))
                 self.assertIn("compute.listen_port", str(ctx.exception))
 
-    def test_compute_remote_models(self) -> None:
-        # compute-capacity 四：在運算主機上用哪個模型；空字串＝照運算主機的設定（舊檔沒有這兩欄）
-        old = Settings().to_dict()
-        for key in ("remote_fast_model", "remote_final_model"):
-            del old["compute"][key]
-        loaded = Settings.from_dict(old).compute
-        self.assertEqual(
-            (loaded.remote_fast_model, loaded.remote_final_model), ("", "")
-        )
+    def test_retired_remote_model_keys_are_ignored(self) -> None:
+        # compute-capacity 七取代「四」：A 不再指定這場的模型。開發中版本寫過的這兩欄讀得進來、
+        # 不保留（下次存檔就消失），整份設定不會因為未知欄位而用預設值
         s = Settings.from_dict(
             _with(
                 "compute",
                 {"remote_fast_model": "base", "remote_final_model": "large-v3"},
             )
         )
-        self.assertEqual(
-            (s.compute.remote_fast_model, s.compute.remote_final_model),
-            ("base", "large-v3"),
-        )
-        self.assertEqual(s.to_dict()["compute"]["remote_final_model"], "large-v3")
-        self.assertEqual(Settings.from_dict(s.to_dict()), s)
-        # 只驗證格式：是否在運算主機上下載好由運算主機判斷
-        for value in ("../evil", "large v3", "large-v3\n", "x" * 101, 5, None):
-            with self.subTest(value=value):
-                with self.assertRaises(SettingsError) as ctx:
-                    Settings.from_dict(_with("compute", {"remote_final_model": value}))
-                self.assertIn("compute.remote_final_model", str(ctx.exception))
+        self.assertEqual(s, Settings())
+        self.assertNotIn("remote_final_model", s.to_dict()["compute"])
+        self.assertFalse(hasattr(s.compute, "remote_final_model"))
 
     def test_compute_validation(self) -> None:
         for value, path in (
@@ -1090,6 +1073,24 @@ class StoreTest(unittest.TestCase):
         with self.assertLogs("kikitori.config.store", "WARNING"):
             store.load()
         self.assertFalse(store.is_new)
+
+    def test_file_invalid_tells_whether_defaults_stand_in_for_a_broken_file(
+        self,
+    ) -> None:
+        # 遠端改模型（compute-capacity 七）要先問：壞掉的設定檔不能被「預設值＋patch」蓋掉
+        store = SettingsStore(self.path)
+        self.assertFalse(store.file_invalid)
+        store.load()
+        self.assertFalse(store.file_invalid)  # 檔案不存在不算壞掉
+        self.path.write_text("{broken", encoding="utf-8")
+        with self.assertLogs("kikitori.config.store", "WARNING"):
+            store.load()
+        self.assertTrue(store.file_invalid)
+        with self.assertLogs("kikitori.config.store", "WARNING"):
+            store.update({"mode": "interpret"})  # 使用者自己存：原檔改名保留
+        self.assertFalse(store.file_invalid)
+        self.assertIsNone(store.load())
+        self.assertFalse(store.file_invalid)
 
     def test_failed_update_changes_nothing(self) -> None:
         store = SettingsStore(self.path)

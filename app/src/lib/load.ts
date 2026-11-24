@@ -30,6 +30,12 @@ const BACKLOG_FULL = 4;
 /** The part of a `metrics` event the load is computed from. */
 export type LoadInput = Pick<MetricsEvent, "backlog" | "final_busy" | "gpu">;
 
+/**
+ * One reading as the view needs it: a `metrics` event, or the compute host's
+ * own load from a `serving` event (compute-capacity.md 八), which has the same fields.
+ */
+export type LoadReading = LoadInput & Pick<MetricsEvent, "rtf">;
+
 /** Share of the GPU's memory in use (0–1), or null without a usable sample. */
 export function vramShare(gpu: GpuUsage | null | undefined): number | null {
   if (!gpu || !(gpu.vram_total_mb > 0)) return null;
@@ -128,12 +134,17 @@ export function loadDetail(m: Pick<MetricsEvent, "gpu" | "rtf"> | null): string 
 export interface LoadState {
   readonly sessionId: number | null;
   /** The latest reading of the session; null before its first `metrics`. */
-  readonly last: MetricsEvent | null;
+  readonly last: LoadReading | null;
   readonly history: readonly (number | null)[];
 }
 
 export function emptyLoad(sessionId: number | null = null): LoadState {
   return { sessionId, last: null, history: [] };
+}
+
+/** Adds one reading of the current session (a `serving` load has no session id). */
+export function pushReading(state: LoadState, reading: LoadReading): LoadState {
+  return { sessionId: state.sessionId, last: reading, history: pushLoad(state.history, loadFraction(reading)) };
 }
 
 /** Applies one `metrics` event; a reading of an earlier session is ignored. */

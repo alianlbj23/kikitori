@@ -10,6 +10,7 @@ import ssl
 import tempfile
 import threading
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -25,6 +26,7 @@ from kikitori.hardware.nvidia import GpuUsage
 from kikitori.pipeline import Pipeline
 from kikitori.remote import protocol as rp
 from kikitori.remote.identity import Identity, load_or_create_identity
+from kikitori.remote.manage import HostManageError, ProgressFn
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.server import PATH, RemoteServer, is_allowed_source
 from kikitori.remote.sockets import SafeClientConnection
@@ -64,13 +66,37 @@ HOST_INFO: dict[str, Any] = {
     "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
     "device": "cuda",
     "compute_type": "int8_float16",
-    "current": {"fast": "base", "final": "small"},
+    "current": {
+        "fast": "base",
+        "final": "small",
+        "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:4b"},
+    },
     "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
     "models": [
-        {"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"},
-        {"id": "large-v3", "downloaded": False, "need_mb": 2140, "fit": "ok"},
+        {
+            "id": "base",
+            "downloaded": True,
+            "need_mb": 450,
+            "fit": "ok",
+            "fit_as_fast": "ok",
+        },
+        {
+            "id": "small",
+            "downloaded": True,
+            "need_mb": 650,
+            "fit": "over",
+            "fit_as_fast": "tight",
+        },
+        {
+            "id": "large-v3",
+            "downloaded": False,
+            "need_mb": 2140,
+            "fit": "ok",
+            "fit_as_fast": "over",
+        },
     ],
     "translation_model": "qwen3.5:4b",
+    "translation_models": ["qwen3.5:4b", "qwen3.5:9b"],
 }
 
 
@@ -80,13 +106,50 @@ class FakeCapacity:
     def __init__(self, downloaded: set[str]) -> None:
         self.downloaded = downloaded
         self.calls = 0
+        self.info: dict[str, Any] = HOST_INFO
+        self.after_invalidate: dict[str, Any] | None = None
+        self.invalidated = 0
+        self.detects: list[bool] = []
+        """每次 `host_info` 的 `detect`（True＝快取過期時會重新偵測）。"""
+        self.list_error: Exception | None = None
 
     def host_info(self, *, detect: bool = True) -> dict[str, Any]:
         self.calls += 1
-        return HOST_INFO
+        self.detects.append(detect)
+        return self.info
 
     def downloaded_models(self) -> frozenset[str]:
+        if self.list_error is not None:
+            raise self.list_error
         return frozenset(self.downloaded)
+
+    def invalidate(self) -> None:
+        self.invalidated += 1
+        if self.after_invalidate is not None:
+            self.info = self.after_invalidate
+
+
+class FakeManager:
+    """B 的宿主（`remote.manage.HostManager`）：記下要求；下載的進度由測試自己回報。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str], dict[str, str]]] = []
+        self.downloads: list[tuple[str, str]] = []
+        self.progress: dict[str, ProgressFn] = {}
+        self.fail: Exception | None = None
+
+    def set_models(
+        self, by: str, asr: Mapping[str, str], translation: Mapping[str, str]
+    ) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append((by, dict(asr), dict(translation)))
+
+    def start_download(self, by: str, model: str, progress: ProgressFn) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.downloads.append((by, model))
+        self.progress[model] = progress
 
 
 class RemoteServerCase(unittest.TestCase):
@@ -107,6 +170,7 @@ class RemoteServerCase(unittest.TestCase):
         self.trust.add(self.other.cert_path.read_bytes(), "C")
         self.gate = Gate()
         self.capacity = FakeCapacity({"base", "small"})
+        self.manager = FakeManager()
         self.server = RemoteServer(
             identity=self.server_id,
             trust=self.trust,
@@ -119,6 +183,8 @@ class RemoteServerCase(unittest.TestCase):
             app_version="0.3.1",
             metrics_interval=0.2,
             capacity=self.capacity,
+            manager=self.manager,
+            progress_interval=0.1,
         )
         self.server.start()
         self.addCleanup(self.server.stop)
@@ -564,53 +630,268 @@ class ProbeTest(RemoteServerCase):
         self.assertFalse(self.gate.held)
 
 
-class AsrModelTest(RemoteServerCase):
-    """compute-capacity 三：A 在 `session.start` 指定 B 的 ASR 模型（只能是 B 已下載的）。"""
+class ManageCase(RemoteServerCase):
+    """compute-capacity 七：`hello intent manage` → 一則 `host.set_models`／`host.download`。"""
 
-    def start_with(self, asr: dict[str, Any]) -> list[dict[str, Any]]:
-        """送 session.start，收到第一則 status error／running 為止。"""
-        messages: list[dict[str, Any]] = []
+    def manage(
+        self, request: str, who: Identity | None = None
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """送一則管理請求，收到 B 關閉為止；回傳 B 的回覆（不含 welcome）與關閉碼。"""
+        replies: list[dict[str, Any]] = []
+        with self.connect(who) as ws:
+            ws.send(rp.client_hello("0.3.1", "manage"))
+            self.assertEqual(rp.parse_server(ws.recv(timeout=WAIT))["type"], "welcome")
+            ws.send(request)
+            try:
+                while True:
+                    replies.append(rp.parse_server(ws.recv(timeout=WAIT)))
+            except ConnectionClosed as exc:
+                code = None if exc.rcvd is None else exc.rcvd.code
+        return replies, code
+
+
+class SetModelsTest(ManageCase):
+    def test_set_models_applies_and_answers_the_new_host_info(self) -> None:
+        replies, code = self.manage(
+            rp.client_set_models(
+                {"final_model": "small"}, {"final_model": "qwen3.5:9b"}
+            )
+        )
+        self.assertEqual(code, 1000)
+        self.assertEqual([r["type"] for r in replies], ["host.updated"])
+        self.assertEqual(replies[0]["host"], HOST_INFO)
+        self.assertEqual(
+            self.manager.calls,
+            [("A", {"final_model": "small"}, {"final_model": "qwen3.5:9b"})],
+        )
+        # 管理不佔 GPU
+        self.assertFalse(self.gate.held)
+        self.assertIsNone(self.server.owner_spki())
+
+    def test_a_model_that_may_overload_this_computer_is_still_applied(self) -> None:
+        # 使用者補充：超出負荷由 A 的介面警告，執意要選時 B 不能拒絕（fit 不是 B 的檢查項目）
+        over = next(m for m in HOST_INFO["models"] if m["fit"] == "over")
+        replies, _ = self.manage(
+            rp.client_set_models(
+                {"fast_model": over["id"], "final_model": over["id"]}, {}
+            )
+        )
+        self.assertEqual(replies[0]["type"], "host.updated")
+        self.assertEqual(
+            self.manager.calls,
+            [("A", {"fast_model": over["id"], "final_model": over["id"]}, {})],
+        )
+
+    def test_works_while_this_computer_is_busy(self) -> None:
+        self.assertTrue(self.gate.acquire())  # 自己在跑字幕，或別台正在用
+        replies, _ = self.manage(rp.client_set_models({"final_model": "base"}, {}))
+        self.assertEqual(replies[0]["type"], "host.updated")
+        self.assertTrue(self.gate.held)  # 沒有被管理連線放掉
+
+    def test_errors(self) -> None:
+        for asr, translation, code in (
+            ({"final_model": "huge-v9"}, {}, "unknown_model"),
+            ({"fast_model": "large-v3"}, {}, "model_not_downloaded"),
+            ({}, {"final_model": "llama3:70b"}, "translation_model_missing"),
+        ):
+            with self.subTest(code=code):
+                replies, close = self.manage(rp.client_set_models(asr, translation))
+                self.assertEqual(
+                    [(r["type"], r.get("code")) for r in replies],
+                    [("host.error", code)],
+                )
+                self.assertEqual(close, 1000)
+        self.assertEqual(self.manager.calls, [])  # 驗證不過就不套用
+
+    def test_a_missing_translation_model_is_rechecked_once(self) -> None:
+        # 使用者剛在 B 拉了翻譯模型：快取的清單還沒有它時重新偵測一次再判斷
+        self.capacity.info = dict(HOST_INFO, translation_models=["qwen3.5:4b"])
+        fresh = dict(HOST_INFO, translation_models=["qwen3.5:4b", "gemma3:12b"])
+        self.capacity.after_invalidate = fresh
+        replies, _ = self.manage(rp.client_set_models({}, {"fast_model": "gemma3:12b"}))
+        self.assertEqual(replies[0]["type"], "host.updated")
+        self.assertEqual(self.capacity.invalidated, 1)
+        # 整個請求最多偵測一次：welcome 與第一次比對只用快取，重新偵測一次，
+        # 套用後的 host.updated 用剛偵測的快取（不再偵測）
+        self.assertEqual(self.capacity.detects, [False, False, True, False])
+
+    def test_a_cached_translation_model_needs_no_detection(self) -> None:
+        replies, _ = self.manage(
+            rp.client_set_models({}, {"final_model": "qwen3.5:9b"})
+        )
+        self.assertEqual(replies[0]["type"], "host.updated")
+        self.assertEqual(self.capacity.invalidated, 0)
+        self.assertEqual(self.capacity.detects, [False, False, False])
+
+    def test_a_cold_cache_is_detected_once(self) -> None:
+        # 快取過期（detect=False 拿不到翻譯伺服器的清單）：偵測一次，不是兩次
+        self.capacity.info = dict(HOST_INFO, translation_models=None)
+        self.capacity.after_invalidate = HOST_INFO
+        replies, _ = self.manage(
+            rp.client_set_models({}, {"final_model": "qwen3.5:9b"})
+        )
+        self.assertEqual(replies[0]["type"], "host.updated")
+        self.assertEqual(self.capacity.invalidated, 1)
+        self.assertEqual(self.capacity.detects.count(True), 1)
+
+    def test_only_asr_changes_detect_at_most_once(self) -> None:
+        # 沒有翻譯模型要比對：套用前不偵測，套用後的 fit 才用一次 detect（快取有效時不會真的偵測）
+        replies, _ = self.manage(rp.client_set_models({"final_model": "base"}, {}))
+        self.assertEqual(replies[0]["type"], "host.updated")
+        self.assertEqual(self.capacity.detects.count(True), 1)
+        self.assertEqual(self.capacity.invalidated, 0)
+
+    def test_an_unreachable_translation_server_is_translation_model_missing(
+        self,
+    ) -> None:
+        self.capacity.info = dict(HOST_INFO, translation_models=None)
+        replies, _ = self.manage(
+            rp.client_set_models({}, {"final_model": "qwen3.5:9b"})
+        )
+        self.assertEqual(replies[0]["code"], "translation_model_missing")
+
+    def test_settings_that_cannot_be_saved(self) -> None:
+        self.manager.fail = HostManageError("settings_error", "disk full")
+        replies, _ = self.manage(rp.client_set_models({"final_model": "base"}, {}))
+        self.assertEqual(
+            (replies[0]["type"], replies[0]["code"], replies[0]["detail"]),
+            ("host.error", "settings_error", "disk full"),
+        )
+
+    def test_unexpected_errors_do_not_reveal_this_computers_details(self) -> None:
+        # 例外原文可能含這台的檔案路徑：只寫 log，A 收到通用字句
+        secret = r"C:\Users\bob\AppData\kikitori\settings.json"
+        self.manager.fail = RuntimeError(f"cannot write {secret}")
+        with self.assertLogs("kikitori.remote.server", "ERROR") as logs:
+            replies, _ = self.manage(rp.client_set_models({"final_model": "base"}, {}))
+        self.assertEqual(replies[0]["code"], "settings_error")
+        self.assertNotIn("bob", replies[0]["detail"])
+        self.assertNotIn("RuntimeError", replies[0]["detail"])
+        self.assertTrue(any("bob" in line for line in logs.output))
+        # 列不出已下載的模型
+        self.manager.fail = None
+        self.capacity.list_error = PermissionError(f"denied: {secret}")
+        with self.assertLogs("kikitori.remote.server", "ERROR"):
+            replies, _ = self.manage(rp.client_set_models({"final_model": "base"}, {}))
+        self.assertEqual(replies[0]["code"], "model_not_downloaded")
+        self.assertNotIn("bob", replies[0]["detail"])
+        # 開始下載時的程式錯誤
+        self.capacity.list_error = None
+        self.manager.fail = RuntimeError(f"cannot start: {secret}")
+        with self.assertLogs("kikitori.remote.server", "ERROR"):
+            replies, _ = self.manage(rp.client_download("large-v3"))
+        self.assertEqual(replies[0]["type"], "host.error")
+        self.assertNotIn("bob", replies[0]["detail"])
+        self.assertNotIn("RuntimeError", replies[0]["detail"])
+
+    def test_anything_but_one_manage_request_is_a_protocol_violation(self) -> None:
+        for request in (
+            rp.client_session_start("media", Settings()),
+            rp.client_ping(1),
+            rp.client_hello("0.3.1"),
+        ):
+            with self.subTest(request=request[:30]):
+                replies, code = self.manage(request)
+                self.assertEqual((replies, code), ([], 1008))
+        self.assertFalse(self.gate.held)
+
+
+class HostDownloadTest(ManageCase):
+    def test_progress_is_relayed_until_done(self) -> None:
+        with self.connect() as ws:
+            ws.send(rp.client_hello("0.3.1", "manage"))
+            rp.parse_server(ws.recv(timeout=WAIT))
+            ws.send(rp.client_download("large-v3"))
+            started = rp.parse_server(ws.recv(timeout=WAIT))
+            self.assertEqual(
+                started, {"type": "host.download_started", "model": "large-v3"}
+            )
+            self.assertEqual(self.manager.downloads, [("A", "large-v3")])
+            report = self.manager.progress["large-v3"]
+            report(10, 100, "downloading", None)
+            while (m := rp.parse_server(ws.recv(timeout=WAIT)))[
+                "downloaded_bytes"
+            ] != 10:
+                self.assertEqual(m["state"], "downloading")
+            report(100, 100, "done", None)
+            while (m := rp.parse_server(ws.recv(timeout=WAIT)))[
+                "state"
+            ] == "downloading":
+                pass
+            self.assertEqual(
+                (m["type"], m["model"], m["downloaded_bytes"], m["state"], m["error"]),
+                ("host.download_progress", "large-v3", 100, "done", None),
+            )
+            with self.assertRaises(ConnectionClosed) as ctx:
+                ws.recv(timeout=WAIT)
+        assert ctx.exception.rcvd is not None
+        self.assertEqual(ctx.exception.rcvd.code, 1000)
+        self.assertFalse(self.gate.held)
+
+    def test_a_failed_download_is_reported(self) -> None:
+        with self.connect() as ws:
+            ws.send(rp.client_hello("0.3.1", "manage"))
+            rp.parse_server(ws.recv(timeout=WAIT))
+            ws.send(rp.client_download("medium"))
+            rp.parse_server(ws.recv(timeout=WAIT))
+            self.manager.progress["medium"](0, 100, "error", "OSError: disk full")
+            while (m := rp.parse_server(ws.recv(timeout=WAIT)))[
+                "state"
+            ] == "downloading":
+                pass
+        self.assertEqual((m["state"], m["error"]), ("error", "OSError: disk full"))
+
+    def test_errors(self) -> None:
+        replies, _ = self.manage(rp.client_download("huge-v9"))
+        self.assertEqual([r.get("code") for r in replies], ["unknown_model"])
+        self.assertEqual(self.manager.downloads, [])
+        self.manager.fail = HostManageError("download_in_progress", "already")
+        replies, _ = self.manage(rp.client_download("large-v3"))
+        self.assertEqual([r.get("code") for r in replies], ["download_in_progress"])
+
+    def test_the_download_goes_on_after_the_asker_leaves(self) -> None:
+        # A 斷線不中斷 B 的下載：B 只是不再轉送進度，下載本身在 B 的宿主手上
+        with self.connect() as ws:
+            ws.send(rp.client_hello("0.3.1", "manage"))
+            rp.parse_server(ws.recv(timeout=WAIT))
+            ws.send(rp.client_download("large-v3"))
+            rp.parse_server(ws.recv(timeout=WAIT))
+        report = self.manager.progress["large-v3"]
+        report(50, 100, "downloading", None)
+        report(100, 100, "done", None)
+        # B 照常回答下一個請求（轉送迴圈已經結束，沒有卡住）
+        replies, _ = self.manage(rp.client_set_models({"final_model": "base"}, {}))
+        self.assertEqual(replies[0]["type"], "host.updated")
+
+
+class OwnModelsTest(RemoteServerCase):
+    """compute-capacity 七：A 不能再指定這一場的模型，B 用自己的設定。"""
+
+    def test_session_start_with_asr_is_a_protocol_violation(self) -> None:
         with self.connect() as ws:
             self.hello(ws)
             ws.send(
                 json.dumps(
-                    {"type": "session.start", "mode": "media", "settings": {"asr": asr}}
+                    {
+                        "type": "session.start",
+                        "mode": "media",
+                        "settings": {"asr": {"final_model": "base"}},
+                    }
                 )
             )
-            while True:
-                m = rp.parse_server(ws.recv(timeout=WAIT))
-                messages.append(m)
-                if m["type"] == "status" and m["state"] in ("running", "error"):
-                    break
-            ws.send(json.dumps({"type": "session.stop"}))
-        return messages
-
-    def test_an_unknown_model_is_refused(self) -> None:
-        last = self.start_with({"final_model": "huge-v9"})[-1]
-        self.assertEqual((last["state"], last["code"]), ("error", "unknown_model"))
+            with self.assertRaises(ConnectionClosed) as ctx:
+                while True:
+                    ws.recv(timeout=WAIT)
+        assert ctx.exception.rcvd is not None
+        self.assertEqual(ctx.exception.rcvd.code, 1008)
         self.assertTrue(self.wait_gpu_released())
 
-    def test_a_model_this_computer_has_not_downloaded_is_refused(self) -> None:
-        # A 不能叫 B 下載：B 的主人自己決定要放哪些模型
-        last = self.start_with({"final_model": "large-v3"})[-1]
-        self.assertEqual(
-            (last["state"], last["code"]), ("error", "model_not_downloaded")
-        )
-        self.assertIn("large-v3", last["detail"])
-
-    def test_a_downloaded_model_is_used_for_this_session_only(self) -> None:
-        loaded: list[Settings] = []
-        real = fake_services().build_components
-
-        def record(settings: Settings, *args: Any, **kwargs: Any) -> Any:
-            loaded.append(settings)
-            return real(settings, *args, **kwargs)
-
-        self.server._build_components = record
+    def test_a_session_uses_and_remembers_this_computers_models(self) -> None:
+        own = Settings().asr
         seen: list[tuple[str, ...]] = []
         with self.connect() as ws:
             self.hello(ws)
-            ws.send(rp.client_session_start("media", Settings(), final_model="base"))
+            ws.send(rp.client_session_start("media", Settings()))
             while True:
                 m = rp.parse_server(ws.recv(timeout=WAIT))
                 if m["type"] == "status" and m["state"] == "running":
@@ -618,12 +899,66 @@ class AsrModelTest(RemoteServerCase):
                     break
                 self.assertNotEqual(m.get("state"), "error", m)
             ws.send(json.dumps({"type": "session.stop"}))
-        self.assertEqual(loaded[0].asr.final_model, "base")
-        # 裝置與精度仍是 B 的；B 的設定本身不變
-        self.assertEqual(loaded[0].asr.device, Settings().asr.device)
-        self.assertEqual(seen, [(Settings().asr.fast_model, "base")])
+        self.assertEqual(seen, [(own.fast_model, own.final_model)])
         self.assertTrue(self.wait_gpu_released())
         self.assertEqual(self.server.session_models(), ())
+
+
+class ServingInfoTest(RemoteServerCase):
+    """compute-capacity 八：B 的畫面顯示「正在替誰處理・幾句・負荷」，不含字幕內容。"""
+
+    def test_session_info_counts_the_final_subtitles(self) -> None:
+        self.assertIsNone(self.server.session_info())
+        audio = _speech_track()
+        infos: list[dict[str, Any] | None] = []
+        finals = 0
+        with self.connect() as ws:
+            self.hello(ws)
+            ws.send(rp.client_session_start("interpret", Settings()))
+            chunk = 1600
+            for seq, start in enumerate(range(0, len(audio), chunk)):
+                ws.send(rp.encode_audio(seq, start, audio[start : start + chunk]))
+            ws.send(rp.client_end_audio())
+            while True:
+                m = rp.parse_server(ws.recv(timeout=WAIT))
+                if (
+                    m["type"] == "event"
+                    and m["name"] == "subtitle"
+                    and m["data"]["is_final"]
+                    and (m["data"]["original"] or m["data"]["translation"])
+                ):
+                    finals += 1
+                    infos.append(self.server.session_info())
+                if m["type"] == "status" and m["state"] in ("idle", "error"):
+                    break
+        self.assertGreater(finals, 0)
+        last = infos[-1]
+        assert last is not None
+        self.assertEqual(last["sentences"], finals)
+        self.assertEqual(last["mode"], "interpret")
+        self.assertIsInstance(last["started_at_ms"], int)
+        self.assertEqual(set(last), {"started_at_ms", "sentences", "mode"})
+        self.assertTrue(self.wait_gpu_released())
+        self.assertIsNone(self.server.session_info())
+
+    def test_current_load_while_running(self) -> None:
+        self.assertIsNone(self.server.current_load())
+        with self.connect() as ws:
+            self.hello(ws)
+            ws.send(rp.client_session_start("media", Settings()))
+            ws.send(rp.encode_audio(0, 0, np.zeros(1600, dtype=np.int16)))
+            while True:
+                m = rp.parse_server(ws.recv(timeout=WAIT))
+                if m["type"] == "event" and m["name"] == "metrics":
+                    load = self.server.current_load()
+                    ws.send(json.dumps({"type": "session.stop"}))
+                    break
+        assert load is not None
+        self.assertEqual(set(load), {"final_busy", "rtf", "backlog", "gpu"})
+        self.assertEqual(load["backlog"], m["data"]["backlog"])
+        self.assertIsNone(load["gpu"])  # 假元件不是 CUDA
+        self.assertTrue(self.wait_gpu_released())
+        self.assertIsNone(self.server.current_load())
 
 
 class SourceAddressTest(unittest.TestCase):

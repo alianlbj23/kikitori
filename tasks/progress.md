@@ -128,3 +128,22 @@
 
 **下一步**
 - commit／push 後在 alian_server `git pull`、重開 app，實機看主機資訊與負荷圖。
+
+## 2026-11-24 — 用戶端管理運算主機的模型、運算主機畫面、三種模式的模式列
+
+**完成**（規格 `docs/specs/compute-capacity.md` 第七～九節）
+- 用戶端（A）直接改運算主機（B）的辨識與翻譯模型（持久，寫進 B 的設定，下一場生效），也可以在 A 上要求 B 下載辨識模型並看進度。hello `intent: manage`（不佔 GPU）、`host.set_models`／`host.download`；A 端 `remote.host_set_models`／`remote.host_download`。超出負荷照樣可選：介面跳確認、白話說明後果，套用後持續顯示警示；B 不因負荷拒絕。`models[].fit_as_fast` 由 B 回報（即時模型的負荷）。移除先前的「A 只改這一場」設定（`compute.remote_*_model`，舊檔讀到時忽略）。
+- B 的畫面：`remote` 事件 `serving`（每秒；不含字幕內容）、`host_changed` 通知；字幕頁「運算主機」面板（狀態、這台的負荷、模型、配對與停止按鈕）；有電腦連著時「開始」停用並說明。
+- 三種模式的模式列（顏色＋圖示＋文字）：本機靛藍「這台電腦處理」、用戶端天藍「使用運算主機：…」＋連線狀態、運算主機紫「運算主機模式：…」；模式色也用在邊框、選中的角色與開始按鈕外框。
+- code-reviewer 修正：模式列跟著 serving 更新、翻譯名稱規則三方一致且逐欄容錯、即時模型負荷改由 B 回報、偵測最多一次、下載執行緒啟動失敗撤銷登記、headless 改設定的 lost update、設定檔損毀時拒絕遠端改設定、回給 A 的錯誤不含 B 的路徑（含下載失敗）、命名。
+
+**指令與結果**
+- `uv run python -m unittest discover -s tests` → 2081 個 OK（skipped=1）；`ruff check`／`ruff format --check` → 通過。
+- `npx tsc --noEmit`、`npx vitest run`（43 檔 1567 個）、`npm run build` → 通過；`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`（116 個）→ 通過。
+- 正式版建置後以 CDP 截圖確認三種模式的模式列、運算主機面板、遠端模式的模型頁。
+
+**未完成 / 卡住**
+- 尚未 commit／push；alian_server 上的 GUI 還是 `d8aa339`。「在用戶端改運算主機的模型／下載」與「運算主機面板的連線中狀態」尚未實機驗證（截圖用的是沒配對的設定資料夾）。
+
+**下一步**
+- push 後在 alian_server `git pull` 並重開 app，用這台當用戶端實測。

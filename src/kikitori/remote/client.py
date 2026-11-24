@@ -20,8 +20,9 @@
   結束才返回，之後不會再冒出字幕（設計審查第 11 點）。
 - **查詢能力**（`probe_host_info`，docs/specs/compute-capacity.md「三」「四」）：同一套連線與驗證，
   `hello` 帶 `intent: probe`，B 回 `welcome`（含 `host`）就關閉，不開始字幕、不佔 B 的 GPU。
-- **A 選的模型**（`compute.remote_*_model`）隨 `session.start` 送給 B；B 沒有那個模型時回
-  `remote_model_not_downloaded`（A 不能叫 B 下載）。
+- **管理 B 的模型**（`set_host_models`、`HostDownload`，compute-capacity「七」）：同一套連線，
+  `hello` 帶 `intent: manage`，送一則請求；B 的回覆逐欄驗證，`host.error` 換成
+  `remote_unknown_model` 等錯誤碼。一場字幕用的一律是 B 設定裡的模型。
 """
 
 import logging
@@ -73,6 +74,18 @@ SEND_QUEUE = 64
 """送出佇列上限（約 6 秒的音訊訊框）：滿了表示連線已經壞了。"""
 PROBE_TIMEOUT = 10.0
 """查詢 B 的能力最多等多久（連線、TLS、hello／welcome 合計）。"""
+MANAGE_TIMEOUT = 15.0
+"""改 B 的模型、請 B 開始下載最多等多久（連線、握手與 B 的回覆合計；B 回覆前可能重新偵測一次硬體）。"""
+DOWNLOAD_SILENCE_SECS = 60.0
+"""B 開始下載後，這麼久沒有任何進度訊息就當作斷線（B 約每秒送一則，進度沒變也送）。"""
+_HOST_TO_LOCAL_ERROR = {
+    "unknown_model": "remote_unknown_model",
+    "model_not_downloaded": "remote_model_not_downloaded",
+    "translation_model_missing": "remote_translation_model_missing",
+    "download_in_progress": "remote_download_in_progress",
+    "settings_error": "remote_error",
+}
+"""B 的 `host.error.code` → A 的錯誤碼（`settings_error` 是 B 那邊的問題，A 的使用者無從處理）。"""
 READ_TIMEOUT = 0.1
 MAX_BAD_EVENTS = 20
 """B 送來這麼多則不合格的字幕就中止（壞掉或惡意的主機）。"""
@@ -97,7 +110,9 @@ _FATAL_CONNECT_CODES = frozenset(
 
 RemoteCode = str
 """A 端的錯誤碼：`remote_not_configured`、`remote_unreachable`、`remote_not_paired`、
-`remote_busy`、`remote_incompatible`、`remote_lost`、`remote_model_not_downloaded`、`remote_error`。"""
+`remote_busy`、`remote_incompatible`、`remote_lost`、`remote_model_not_downloaded`、`remote_error`；
+管理 B 的模型時另有 `remote_unknown_model`、`remote_translation_model_missing`、
+`remote_download_in_progress`。"""
 
 StatusSink = Callable[[str, str | None, str | None, Mapping[str, Any] | None], None]
 """`(state, detail, code, data)`：B 的 loading（含進度）／running、斷線中的 running
@@ -179,8 +194,6 @@ class RemoteClientSession:
         reconnect_secs: float = RECONNECT_SECS,
         buffer_secs: float = BUFFER_SECS,
         resend_speed: float = RESEND_SPEED,
-        fast_model: str = "",
-        final_model: str = "",
     ) -> None:
         """
         Args:
@@ -200,8 +213,6 @@ class RemoteClientSession:
             reconnect_secs: 斷線後多久內要接回來（從最後收到 B 的訊息起算）。
             buffer_secs: B 還沒確認的音訊最多留幾秒。
             resend_speed: 續接時補送音訊的速度（即時的幾倍）。
-            fast_model: 要 B 用的即時辨識模型（`compute.remote_fast_model`）；空字串＝照 B 的設定。
-            final_model: 要 B 用的完整辨識模型（`compute.remote_final_model`）；同上。
         """
         self._identity = identity
         self._servers = servers
@@ -219,8 +230,6 @@ class RemoteClientSession:
         self._reconnect_secs = reconnect_secs
         self._max_buffer = round(buffer_secs * rp.SAMPLE_RATE)
         self._resend_speed = resend_speed
-        self._fast_model = fast_model
-        self._final_model = final_model
 
         self._lock = threading.Lock()
         self._callback_lock = threading.Lock()
@@ -305,7 +314,8 @@ class RemoteClientSession:
         """建立一條新連線並完成 hello／welcome。
 
         Args:
-            intent: `probe` 只查 B 的能力（B 回完 welcome 就關閉）。
+            intent: `probe` 只查 B 的能力（B 回完 welcome 就關閉）；`manage` 之後送一則
+                管理請求。
             deadline: `time.monotonic()` 的期限；連線、TLS 與等 welcome 合計不超過它。
 
         Raises:
@@ -514,14 +524,7 @@ class RemoteClientSession:
             raise
         self._source = source
         with self._lock:
-            conn.link.send(
-                rp.client_session_start(
-                    self._mode,
-                    self._settings,
-                    fast_model=self._fast_model,
-                    final_model=self._final_model,
-                )
-            )
+            conn.link.send(rp.client_session_start(self._mode, self._settings))
             self._live = True
         self._start_receiver(conn)
         for target, name in (
@@ -1031,19 +1034,13 @@ def probe_host_info(
             `remote_incompatible`、`remote_identity_error`、`remote_error`（B 的回應不合格）。
     """
     deadline = time.monotonic() + timeout
-    client = RemoteClientSession(
+    client = _connection_only(
         identity=identity,
         servers=servers,
         host=host,
         port=port,
         app_version=app_version,
-        # probe 不開始 session：模式與設定不會送出，回呼也不會被呼叫
-        mode="media",
-        settings=Settings(),
-        on_status=_ignore_status,
-        on_event=_ignore_event,
-        capture_code=lambda exc: "capture_error",
-        connect_timeout=min(CONNECT_TIMEOUT, timeout),
+        timeout=timeout,
     )
     conn = client._open("probe", deadline)
     # B 回完 welcome 就關閉；我們也正常關閉，不留下寫入執行緒與看門狗
@@ -1056,11 +1053,243 @@ def probe_host_info(
 def _ignore_status(
     state: str, detail: str | None, code: str | None, data: Mapping[str, Any] | None
 ) -> None:
-    """probe 不開始 session，不會有狀態。"""
+    """probe／manage 不開始 session，不會有狀態。"""
 
 
 def _ignore_event(name: str, data: dict[str, Any]) -> None:
-    """probe 不開始 session，不會有事件。"""
+    """probe／manage 不開始 session，不會有事件。"""
+
+
+def _connection_only(
+    *,
+    identity: Identity,
+    servers: TrustStore,
+    host: str,
+    port: int,
+    app_version: str,
+    timeout: float,
+) -> RemoteClientSession:
+    """只用來連線與握手的客戶端（probe、manage）：模式與設定不會送出，回呼不會被呼叫。"""
+    return RemoteClientSession(
+        identity=identity,
+        servers=servers,
+        host=host,
+        port=port,
+        app_version=app_version,
+        mode="media",
+        settings=Settings(),
+        on_status=_ignore_status,
+        on_event=_ignore_event,
+        capture_code=lambda exc: "capture_error",
+        connect_timeout=min(CONNECT_TIMEOUT, timeout),
+    )
+
+
+def _left(deadline: float) -> float:
+    """離期限還有幾秒；已經過了時 `remote_unreachable`。"""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise RemoteError(
+            "remote_unreachable", "the compute host did not answer in time"
+        )
+    return left
+
+
+def _close(conn: _Conn, timeout: float) -> None:
+    """正常關閉（不留下寫入執行緒與看門狗）；關不掉就直接中斷。"""
+    conn.link.close(1000, "done")
+    if not conn.link.join(max(0.0, timeout)):
+        conn.link.abort("closing took too long")
+
+
+def _host_error(reply: Mapping[str, Any]) -> RemoteError:
+    """B 的 `host.error`（已驗證 code）→ A 的錯誤碼。"""
+    return RemoteError(
+        _HOST_TO_LOCAL_ERROR[str(reply["code"])],
+        f"the compute host refused: {reply['detail']}",
+    )
+
+
+def set_host_models(
+    *,
+    identity: Identity,
+    servers: TrustStore,
+    host: str,
+    port: int,
+    app_version: str,
+    asr: Mapping[str, str],
+    translation: Mapping[str, str],
+    timeout: float = MANAGE_TIMEOUT,
+) -> dict[str, Any] | None:
+    """改運算主機設定檔裡的模型（下一場生效）；不開始字幕、不佔 B 的 GPU。
+
+    Args:
+        asr: 要改的 `fast_model`／`final_model`（B 已下載的 ASR 模型）；可以是空的。
+        translation: 要改的翻譯模型（B 的翻譯伺服器已安裝的）；可以是空的。
+        timeout: 連線、握手與等 B 回覆合計的上限（秒）。
+
+    Returns:
+        B 套用後的能力（`HostInfo`，已驗證；fit 依新的組合重算）；B 送的不合格時 None。
+
+    Raises:
+        RemoteError: 連線錯誤（同 `probe_host_info`）、`remote_unknown_model`、
+            `remote_model_not_downloaded`、`remote_translation_model_missing`、
+            `remote_error`（B 存不了設定或回應不合格）。
+    """
+    deadline = time.monotonic() + timeout
+    client = _connection_only(
+        identity=identity,
+        servers=servers,
+        host=host,
+        port=port,
+        app_version=app_version,
+        timeout=timeout,
+    )
+    conn = client._open("manage", deadline)
+    try:
+        conn.link.send(rp.client_set_models(asr, translation))
+        reply = client._recv_handshake(conn, _left(deadline))
+    finally:
+        _close(conn, deadline - time.monotonic())
+    if reply["type"] == "host.error":
+        raise _host_error(reply)
+    if reply["type"] != "host.updated":
+        raise RemoteError("remote_error", f"unexpected {reply['type']} from the host")
+    host_info: dict[str, Any] | None = reply["host"]
+    return host_info
+
+
+ProgressSink = Callable[[dict[str, Any]], None]
+"""`{model, downloaded_bytes, total_bytes, state, error}`（已驗證）。"""
+
+
+class HostDownload:
+    """請運算主機下載一個 ASR 模型並追蹤進度（compute-capacity 七）。
+
+    `start()` 連線並等 B 回「開始下載」（錯誤以 `RemoteError` 回報），`follow()` 在呼叫端的
+    背景執行緒上讀進度直到結束。中途斷線不影響 B 的下載（那是 B 自己的），只是 A 看不到進度。
+    """
+
+    def __init__(
+        self,
+        *,
+        identity: Identity,
+        servers: TrustStore,
+        host: str,
+        port: int,
+        app_version: str,
+        model: str,
+        timeout: float = MANAGE_TIMEOUT,
+        silence: float | None = None,
+    ) -> None:
+        """
+        Args:
+            model: registry 裡的 ASR 模型 id（是否認得由 B 判斷）。
+            timeout: `start()` 的上限（連線、握手、等 B 回覆）。
+            silence: `follow()` 時多久沒收到任何訊息就當作斷線；None 用 `DOWNLOAD_SILENCE_SECS`。
+        """
+        self.model = model
+        self._client = _connection_only(
+            identity=identity,
+            servers=servers,
+            host=host,
+            port=port,
+            app_version=app_version,
+            timeout=timeout,
+        )
+        self._timeout = timeout
+        self._silence = DOWNLOAD_SILENCE_SECS if silence is None else silence
+        self._conn: _Conn | None = None
+        self._cancelled = threading.Event()
+
+    def start(self) -> None:
+        """連上 B、請它下載，等到 `host.download_started`。
+
+        Raises:
+            RemoteError: 連線錯誤、`remote_unknown_model`、`remote_download_in_progress`、
+                `remote_error`。
+        """
+        deadline = time.monotonic() + self._timeout
+        conn = self._client._open("manage", deadline)
+        self._conn = conn
+        try:
+            conn.link.send(rp.client_download(self.model))
+            reply = self._client._recv_handshake(conn, _left(deadline))
+            if reply["type"] == "host.error":
+                raise _host_error(reply)
+            if reply["type"] != "host.download_started" or reply["model"] != self.model:
+                raise RemoteError(
+                    "remote_error", f"unexpected {reply['type']} from the host"
+                )
+        except BaseException:
+            _close(conn, deadline - time.monotonic())
+            raise
+
+    def follow(self, on_progress: ProgressSink) -> None:
+        """讀 B 的進度直到 done／error（阻塞）；最後一定送出一則結束狀態（`cancel()` 之後除外）。
+
+        沒收到任何訊息超過 `silence` 秒、連線中斷、或 B 送來不合格的訊息時，送一則
+        `state: "error"`（B 那邊的下載可能還在進行）。
+        """
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("start() first")
+        last = {"downloaded_bytes": 0, "total_bytes": 0}
+        try:
+            while True:
+                try:
+                    reply = self._client._recv_handshake(conn, self._silence)
+                except RemoteError as exc:
+                    self._lost(on_progress, last, f"lost contact with the host: {exc}")
+                    return
+                if (
+                    reply["type"] != "host.download_progress"
+                    or reply["model"] != self.model
+                ):
+                    conn.link.abort("unexpected reply")
+                    self._lost(on_progress, last, f"unexpected {reply['type']}")
+                    return
+                progress = {
+                    key: reply[key]
+                    for key in (
+                        "model",
+                        "downloaded_bytes",
+                        "total_bytes",
+                        "state",
+                        "error",
+                    )
+                }
+                last = progress
+                if self._cancelled.is_set():
+                    return
+                on_progress(progress)
+                if progress["state"] != "downloading":
+                    return
+        finally:
+            _close(conn, 2.0)
+
+    def _lost(
+        self, on_progress: ProgressSink, last: Mapping[str, Any], error: str
+    ) -> None:
+        if self._cancelled.is_set():
+            return
+        on_progress(
+            {
+                "model": self.model,
+                "downloaded_bytes": last["downloaded_bytes"],
+                "total_bytes": last["total_bytes"],
+                "state": "error",
+                "error": error[: rp.MAX_DETAIL_CHARS],
+            }
+        )
+
+    def cancel(self) -> None:
+        """不再追蹤（引擎結束、回應沒送出）：中斷連線，`follow()` 不再回報。B 的下載照常。"""
+        self._cancelled.set()
+        self._client.cancel()
+        conn = self._conn
+        if conn is not None:
+            conn.link.abort("no longer following")
 
 
 def _optional(check: Callable[[object], Any], value: object) -> Any:

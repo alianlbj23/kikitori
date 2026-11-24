@@ -14,6 +14,7 @@ import queue
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -21,13 +22,25 @@ from unittest import mock
 
 from kikitori.asr.registry import MODELS
 from kikitori.capture import ArraySource
-from kikitori.config import Settings
+from kikitori.config import Settings, SettingsStore
+from kikitori.engine import remote_service
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
 from kikitori.engine.testing import ENDLESS_DEVICE, _speech_track, fake_services
 from kikitori.remote import pair_net as pn
-from kikitori.remote.client import RemoteClientSession, probe_host_info
+from kikitori.remote.client import (
+    HostDownload,
+    RemoteClientSession,
+    RemoteError,
+    probe_host_info,
+    set_host_models,
+)
 from kikitori.remote.identity import load_or_create_identity
+from kikitori.remote.manage import (
+    SETTINGS_INVALID_DETAIL,
+    SETTINGS_SAVE_DETAIL,
+    HostManageError,
+)
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.paths import compute_dir, servers_path
 
@@ -420,10 +433,21 @@ class ComputeHostTest(EngineCase):
             app_version="0.3.1",
         )
         assert host is not None
-        asr = self.services.settings_store.get().asr
+        settings = self.services.settings_store.get()
+        asr, translation = settings.asr, settings.translation
         self.assertEqual(
-            host["current"], {"fast": asr.fast_model, "final": asr.final_model}
+            host["current"],
+            {
+                "fast": asr.fast_model,
+                "final": asr.final_model,
+                "translation": {
+                    "fast": translation.fast_model,
+                    "final": translation.final_model,
+                },
+            },
         )
+        # compute-capacity 七：這台的翻譯伺服器已安裝的模型（假伺服器）
+        self.assertEqual(host["translation_models"], ["qwen3.5:4b"])
         models = {m["id"]: m for m in host["models"]}
         self.assertEqual(set(models), set(MODELS))
         # 假的模型清單：base、small、large-v3-turbo 已下載
@@ -436,6 +460,336 @@ class ComputeHostTest(EngineCase):
         self.assertEqual(
             self.error("remote.host_info"), "remote_not_configured"
         )  # 這台自己沒有設定要連的運算主機
+
+
+class ManagedHostTest(EngineCase):
+    """這台是運算主機（B），另一台（A）改這台的模型、請這台下載（compute-capacity 七）。"""
+
+    start_server = ComputeHostTest.start_server
+    pair_a = ComputeHostTest.pair_a
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.port = self.start_server()
+        self.a_id, self.a_servers = self.pair_a(self.port)
+
+    def a_options(self) -> dict[str, Any]:
+        return {
+            "identity": self.a_id,
+            "servers": self.a_servers,
+            "host": "127.0.0.1",
+            "port": self.port,
+            "app_version": "0.3.1",
+        }
+
+    def test_another_computer_changes_this_computers_models(self) -> None:
+        host = set_host_models(
+            asr={"final_model": "large-v3-turbo"},
+            translation={"final_model": "qwen3.5:4b"},
+            **self.a_options(),
+        )
+        settings = self.services.settings_store.get()
+        self.assertEqual(settings.asr.final_model, "large-v3-turbo")
+        changed = self.sink.remote_event(kind="host_changed")
+        self.assertEqual(
+            changed,
+            {
+                "kind": "host_changed",
+                "by": "Living room PC",
+                "asr": {"fast": settings.asr.fast_model, "final": "large-v3-turbo"},
+                "translation": {
+                    "fast": settings.translation.fast_model,
+                    "final": "qwen3.5:4b",
+                },
+            },
+        )
+        # 回覆的能力是套用後的（介面據此顯示目前組合會不會超出負荷）
+        assert host is not None
+        self.assertEqual(host["current"]["final"], "large-v3-turbo")
+        self.assertEqual(host["translation_models"], ["qwen3.5:4b"])
+        self.assertTrue(all(m["fit"] is not None for m in host["models"]))
+        # 寫進設定檔（持久），不是只改記憶體裡的
+        saved = json.loads(
+            self.services.settings_store.path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["asr"]["final_model"], "large-v3-turbo")
+
+    def test_refused_changes_leave_the_settings_alone(self) -> None:
+        before = self.services.settings_store.get()
+        for asr, translation, code in (
+            ({"final_model": "medium"}, {}, "remote_model_not_downloaded"),
+            ({}, {"final_model": "qwen3.5:9b"}, "remote_translation_model_missing"),
+        ):
+            with self.subTest(code=code), self.assertRaises(RemoteError) as ctx:
+                set_host_models(asr=asr, translation=translation, **self.a_options())
+            self.assertEqual(ctx.exception.code, code)
+        self.assertEqual(self.services.settings_store.get(), before)
+        self.assertFalse(
+            any(
+                m.get("event") == "remote" and m["data"]["kind"] == "host_changed"
+                for m in self.sink.messages
+            )
+        )
+
+    def slow_downloads(self) -> threading.Event:
+        """讓這台的下載停在一半，直到回傳的事件被設定。"""
+        release = threading.Event()
+        catalog = self.services.models
+        real = catalog.download
+
+        def slow(model: str, progress: Any, cancel: threading.Event) -> None:
+            progress(1, 4)
+            release.wait(WAIT)
+            real(model, progress, cancel)
+
+        patcher = mock.patch.object(catalog, "download", side_effect=slow)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(release.set)
+        catalog._downloaded["medium"] = False  # type: ignore[attr-defined]
+        return release
+
+    def test_the_download_shows_here_and_reaches_the_other_computer(self) -> None:
+        release = self.slow_downloads()
+        download = HostDownload(model="medium", **self.a_options())
+        self.addCleanup(download.cancel)
+        download.start()
+        seen: list[dict[str, Any]] = []
+        follower = threading.Thread(target=download.follow, args=(seen.append,))
+        follower.start()
+        # 同一個模型已在下載：第二個請求被拒
+        with self.assertRaises(RemoteError) as ctx:
+            HostDownload(model="medium", **self.a_options()).start()
+        self.assertEqual(ctx.exception.code, "remote_download_in_progress")
+        release.set()
+        follower.join(WAIT)
+        self.assertEqual(seen[-1]["state"], "done", seen)
+        # 這台的介面也收到同一個下載的進度（走 models.download 的機制）
+        done = self.sink.wait(
+            lambda m: (
+                m.get("event") == "download_progress"
+                and m["data"]["model"] == "medium"
+                and m["data"]["state"] == "done"
+            )
+        )
+        self.assertEqual(done["data"]["kind"], "asr")
+        self.assertTrue(
+            any(
+                m.id == "medium" and m.downloaded
+                for m in self.services.models.asr_models()
+            )
+        )
+
+    def test_the_download_goes_on_after_the_other_computer_leaves(self) -> None:
+        release = self.slow_downloads()
+        download = HostDownload(model="medium", **self.a_options())
+        download.start()
+        download.cancel()  # A 關掉視窗或斷線
+        release.set()
+        self.sink.wait(
+            lambda m: (
+                m.get("event") == "download_progress"
+                and m["data"]["model"] == "medium"
+                and m["data"]["state"] == "done"
+            )
+        )
+        # 管理連線沒有佔 GPU：這台照樣能自己開始字幕
+        self.ok("session.start", {"mode": "media", "device_id": ENDLESS_DEVICE})
+        self.ok("session.stop")
+
+
+class EngineHostManagerTest(unittest.TestCase):
+    """GUI 引擎套用別台要改的模型（`_EngineHostManager`）：設定檔的錯誤路徑。"""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "settings.json"
+        self.store = SettingsStore(self.path)
+        self.events: list[tuple[str, Any]] = []
+        self.manager = remote_service._EngineHostManager(
+            self.store,
+            lambda name, data: self.events.append((name, data)),
+            lambda model, progress: None,
+        )
+
+    def test_a_damaged_settings_file_is_not_overwritten(self) -> None:
+        self.path.write_text('{"schema_version": 1, "mode": "karaoke"}', "utf-8")
+        with self.assertLogs("kikitori.config.store", "WARNING"):
+            self.store.load()  # 引擎啟動時讀到壞掉的檔案，以預設值運作
+        with self.assertRaises(HostManageError) as ctx:
+            self.manager.set_models("A", {"final_model": "base"}, {})
+        self.assertEqual(ctx.exception.code, "settings_error")
+        self.assertEqual(ctx.exception.detail, SETTINGS_INVALID_DETAIL)
+        self.assertIn("karaoke", self.path.read_text(encoding="utf-8"))
+        self.assertFalse(self.path.with_name("settings.json.invalid").exists())
+        self.assertEqual(self.events, [])
+
+    def test_a_save_failure_does_not_reveal_paths(self) -> None:
+        self.store.load()
+        secret = str(self.path)
+        with (
+            mock.patch.object(
+                self.store,
+                "update",
+                side_effect=PermissionError(13, "Access is denied", secret),
+            ),
+            self.assertLogs("kikitori.engine.remote_service", "ERROR") as logs,
+            self.assertRaises(HostManageError) as ctx,
+        ):
+            self.manager.set_models("A", {"final_model": "base"}, {})
+        self.assertEqual(ctx.exception.code, "settings_error")
+        self.assertEqual(ctx.exception.detail, SETTINGS_SAVE_DETAIL)
+        # 完整的例外（含路徑）留在這台的 log
+        self.assertTrue(any("Access is denied" in line for line in logs.output))
+        self.assertEqual(self.events, [])
+
+
+class PeerDownloadTest(EngineCase):
+    """別台請這台下載（`_download_for_peer`）：下載執行緒開不起來時撤銷登記。"""
+
+    def test_a_thread_that_cannot_start_is_unregistered(self) -> None:
+        self.services.models._downloaded["medium"] = False  # type: ignore[attr-defined]
+        real = self.engine._register_download
+
+        def unstartable(*args: Any, **kwargs: Any) -> threading.Thread:
+            thread = real(*args, **kwargs)
+            thread.start = mock.Mock(  # type: ignore[method-assign]
+                side_effect=RuntimeError("can't start new thread")
+            )
+            return thread
+
+        with (
+            mock.patch.object(self.engine, "_register_download", unstartable),
+            self.assertLogs("kikitori.engine.server", "ERROR"),
+            self.assertRaises(HostManageError) as ctx,
+        ):
+            self.engine._download_for_peer("medium", lambda *report: None)
+        self.assertEqual(ctx.exception.code, "settings_error")
+        self.assertNotIn("thread", ctx.exception.detail)
+        # 登記已撤銷：再要求一次照常下載（不是 download_in_progress）
+        done = threading.Event()
+
+        def listener(downloaded: int, total: int, state: str, error: Any) -> None:
+            if state != "downloading":
+                done.set()
+
+        self.engine._download_for_peer("medium", listener)
+        self.assertTrue(done.wait(WAIT))
+
+
+class ServingEventTest(EngineCase):
+    """這台是運算主機時的 `remote` 事件 `serving`（compute-capacity 八）。"""
+
+    start_server = ComputeHostTest.start_server
+    pair_a = ComputeHostTest.pair_a
+
+    def serving(self) -> list[dict[str, Any]]:
+        with self.sink.cond:
+            return [
+                m["data"]
+                for m in self.sink.messages
+                if m.get("event") == "remote" and m["data"]["kind"] == "serving"
+            ]
+
+    def test_idle_events_every_few_seconds(self) -> None:
+        with mock.patch.object(remote_service, "SERVING_IDLE_SECS", 0.3):
+            began = time.monotonic()
+            self.start_server()
+            self.sink.wait(lambda m: len(self.serving()) >= 4)
+            elapsed = time.monotonic() - began
+        events = self.serving()
+        self.assertGreaterEqual(elapsed, 0.8)  # 不是一直送
+        self.assertEqual(
+            events[0],
+            {"kind": "serving", "peer": None, "session": None, "metrics": None},
+        )
+        self.ok("remote.server_set", {"enabled": False})
+        count = len(self.serving())
+        threading.Event().wait(0.7)
+        self.assertLessEqual(len(self.serving()), count + 1)  # 停止提供運算後不再送
+
+    def test_events_follow_a_session_without_its_subtitles(self) -> None:
+        # 沒有連線時 30 秒一次：下面看到的事件只可能來自「狀態改變立即送」與「有 session 每秒」
+        idle = mock.patch.object(remote_service, "SERVING_IDLE_SECS", 30.0)
+        busy = mock.patch.object(remote_service, "SERVING_SECS", 0.1)
+        idle.start()
+        busy.start()
+        self.addCleanup(idle.stop)
+        self.addCleanup(busy.stop)
+        port = self.start_server()
+        a_id, a_servers = self.pair_a(port)
+        texts: list[str] = []
+        ended = threading.Event()
+
+        def on_event(name: str, data: dict[str, Any]) -> None:
+            if name == "subtitle" and data["original"]:
+                texts.extend([data["original"], data["translation"]])
+
+        session = RemoteClientSession(
+            identity=a_id,
+            servers=a_servers,
+            host="127.0.0.1",
+            port=port,
+            app_version="0.3.1",
+            mode="media",
+            settings=Settings(),
+            on_status=lambda state, *_: (
+                ended.set() if state in ("idle", "error") else None
+            ),
+            on_event=on_event,
+            capture_code=str,
+        )
+        self.addCleanup(session.stop, 5.0)
+        session.connect()
+        # 連上就立刻送（不等 30 秒）
+        connected = self.sink.wait(
+            lambda m: (
+                m.get("event") == "remote"
+                and m["data"]["kind"] == "serving"
+                and (m["data"]["peer"] or {}).get("state") == "connected"
+            )
+        )["data"]
+        self.assertEqual(connected["peer"]["name"], "Living room PC")
+        session.start(ArraySource(_speech_track(), chunk_samples=800, realtime=True))
+        counted = self.sink.wait(
+            lambda m: (
+                m.get("event") == "remote"
+                and m["data"]["kind"] == "serving"
+                and (m["data"]["session"] or {}).get("sentences", 0) >= 1
+                and m["data"]["metrics"] is not None
+            )
+        )["data"]
+        self.assertEqual(
+            set(counted["session"]), {"started_at_ms", "sentences", "mode"}
+        )
+        self.assertEqual(counted["session"]["mode"], "media")
+        self.assertEqual(
+            set(counted["metrics"]), {"final_busy", "rtf", "backlog", "gpu"}
+        )
+        self.assertTrue(ended.wait(WAIT))
+        session.stop(5.0)
+        # 結束後立刻送一次「沒有 session」
+        self.sink.wait(
+            lambda m: (
+                m.get("event") == "remote"
+                and m["data"]["kind"] == "serving"
+                and m["data"]["peer"] is None
+                and m["data"]["session"] is None
+            )
+        )
+        events = self.serving()
+        self.assertGreaterEqual(
+            sum(1 for e in events if e["session"] is not None), 5
+        )  # 有 session 時每（測試用的 0.1）秒一次
+        self.assertTrue(texts, "the session produced no subtitles")
+        dumped = json.dumps(events, ensure_ascii=False)
+        for text in texts:
+            if text:
+                self.assertNotIn(text, dumped)  # 不把 A 的字幕內容給這台的畫面
+        self.assertTrue(
+            all(set(e) == {"kind", "peer", "session", "metrics"} for e in events)
+        )
 
 
 class ClientSideTest(EngineCase):

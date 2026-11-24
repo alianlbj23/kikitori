@@ -16,6 +16,7 @@ import {
   loadTextKey,
   loadView,
   pushLoad,
+  pushReading,
   vramShare,
   type LoadInput,
 } from "./load";
@@ -168,5 +169,17 @@ describe("load state", () => {
   it("shows nothing measured before the first reading", () => {
     const view = loadView(emptyLoad());
     expect(view).toEqual({ level: "unknown", percent: null, text: "等第一句辨識完成後顯示", detail: null, path: "" });
+  });
+});
+
+describe("readings without a session id (the compute host's own load)", () => {
+  it("adds a serving reading to the chart and the small print", () => {
+    let s = pushReading(emptyLoad(), { backlog: 0, final_busy: 0.4, gpu: null, rtf: 0.3 });
+    s = pushReading(s, { backlog: 3, final_busy: 0.2, gpu: null, rtf: null });
+    expect(s.history).toEqual([0.4, 0.75]);
+    expect(loadView(s).level).toBe("over");
+    expect(loadView(pushReading(emptyLoad(), { backlog: 0, final_busy: 0.4, gpu: null, rtf: 0.3 })).detail).toBe(
+      "辨識速度 0.3 倍時間",
+    );
   });
 });

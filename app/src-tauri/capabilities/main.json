@@ -32,6 +32,8 @@
     "allow-session-set-furigana",
     "allow-remote-status",
     "allow-remote-host-info",
+    "allow-remote-host-set-models",
+    "allow-remote-host-download",
     "allow-remote-server-set",
     "allow-remote-identity-reset",
     "allow-remote-disconnect",

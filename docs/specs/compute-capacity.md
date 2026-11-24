@@ -41,18 +41,24 @@ B 端組出（`remote/capacity.py`，純函式＋注入硬體偵測，結果快�
   "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264} ,
   "device": "cuda",
   "compute_type": "int8",
-  "current": {"fast": "large-v3-turbo", "final": "large-v3"},
+  "current": {
+    "fast": "large-v3-turbo", "final": "large-v3",
+    "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:9b"}
+  },
   "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
   "models": [
-    {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok"}
+    {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok", "fit_as_fast": "tight"}
   ],
-  "translation_model": "qwen3.5:9b"
+  "translation_model": "qwen3.5:9b",
+  "translation_models": ["qwen3.5:4b", "qwen3.5:9b"]
 }
 ```
 
 - `gpu`：沒有 NVIDIA 時 null，`device` 為 `"cpu"`。`recommended`：硬體建議（`hardware.recommend`），偵測失敗時 null。
 - `models`：registry 的全部 ASR 模型。`need_mb` 依 B 的裝置與精度估算：CUDA 用 `approx_gpu_vram_int8_mb` 或 `approx_gpu_vram_mb`，CPU 用 `approx_cpu_ram_mb`。
 - `fit`：以「這個模型當完整辨識，搭配 B 目前的即時辨識模型」的合計需求（同一個模型只算一次，沿用 `asr_vram_need_mb`／`asr_ram_need_mb`）對照可用量：CUDA 用 `vram_total_mb − 1024`（留給桌面與 CUDA 以外的程式）再扣掉同一台電腦上的翻譯模型（翻譯伺服器在 localhost 時，即時與完整翻譯模型的權重大小，同一個只算一次；不看 B 自己的翻譯開關，因為 A 開翻譯時用的是 B 的翻譯模型），CPU 用系統記憶體的 70%。合計 ≤ 80% → `ok`；≤ 100% → `tight`；更多 → `over`。偵測失敗、不知道可用量時 `fit` 為 null（介面顯示「無法判斷負荷」）。開字幕的握手只用快取的偵測結果，不重新偵測（probe 才偵測）。
+- `fit_as_fast`（七追加）：同一套公式，改成「這個模型當即時辨識，搭配 B 目前的完整辨識模型」（同一個模型只算一次、扣同一台的翻譯模型、精度用即時路徑的設定）；A 的即時模型選單用它標「跑得動／可能吃緊／超出負荷」。不知道可用量時 null。
+- 翻譯欄位（七追加：`current.translation`、`translation_model`、`translation_models`）只放 A 收得下的名稱：英數開頭、其餘英數或 `._:/-`、不含 `..`、≤ 200 字元（與 A 的 Rust／TS 同一條規則，B 的 `remote.protocol.is_portable_model_name`）。`current.translation` 任一個不符合（空字串＝沒設，可以）時整組 null，`translation_model` 不符合時 null，`translation_models` 略過不符合的。A 驗證時這三欄不合格只丟該欄，不丟整個 host。
 - 介面另外標「建議」（= `recommended.final`）與「目前」（= `current.final`）。
 
 ## 三、協定（A ↔ B，`remote/protocol.py`）
@@ -94,3 +100,51 @@ B 端組出（`remote/capacity.py`，純函式＋注入硬體偵測，結果快�
 - 負荷以「完整辨識忙碌度」為主：即時倍率在說話稀疏時看不出壓力，待處理句數只在已經跟不上時才變大；忙碌度能提早顯示「接近上限」。
 - A 選的模型只影響 A 的 session，不改 B 的設定檔：B 的主人仍決定 B 自己的預設，且 A 不能叫 B 下載東西。
 - probe 不佔 GPU：查詢能力不該打斷 B 正在進行的字幕。
+
+## 七、從用戶端管理運算主機的模型（2026-11-24 追加）
+
+> 使用者：「更換模型我想要在 client 端設定，然後變動到 server 端」。取代第四節「A 指定這場用的模型」：`compute.remote_fast_model`／`remote_final_model` 與 `session.start` 的 `asr` 覆寫移除，改成 A 直接改 B 的設定（持久）；B 的畫面會收到通知。
+
+**協定（A ↔ B）**：`hello.intent` 新增 `"manage"`。B 握手後不佔 GPU，處理一個請求就關閉（1000）。
+
+| A → B | B → A |
+|---|---|
+| `host.set_models {asr?: {fast_model?, final_model?}, translation?: {fast_model?, final_model?}}` | `host.updated {host: HostInfo}` 或 `host.error {code, detail}` |
+| `host.download {model}` | `host.download_started {model}`，接著 `host.download_progress {model, downloaded_bytes, total_bytes, state: "downloading"|"done"|"error", error}` 直到 done／error（約每秒一則），然後關閉 |
+
+- B 驗證：ASR id 必須在 registry 且已下載（`set_models`）；`download` 只接受 registry 的 ASR id；翻譯模型必須在 B 的翻譯伺服器已安裝清單裡。`host.error.code`：`unknown_model`、`model_not_downloaded`、`translation_model_missing`、`download_in_progress`、`settings_error`。A 斷線不中斷 B 的下載（B 自己的下載）。
+- `HostInfo` 新增：`current.translation: {fast, final}`、`translation_models: [string] | null`（B 的翻譯伺服器已安裝的模型，≤ 64 筆；連不上時 null）。
+- B 套用：寫進 B 的設定檔（`asr.fast_model`／`asr.final_model`、`translation.fast_model`／`final_model`），下一場生效（進行中的那場不變）。GUI 引擎送 `remote` 事件 `{kind: "host_changed", by: <A 的名稱>, asr: {fast, final}, translation: {fast, final}}`，B 的介面重讀設定並顯示「〇〇 把辨識模型改成 large-v3」。ASR 下載在 GUI 引擎走既有的 `models.download`（B 的介面也看得到進度）；無介面主機直接下載並在終端機印進度。
+
+**A 端引擎方法**（錯誤碼：既有 `remote_*`，另加 `remote_unknown_model`、`remote_model_not_downloaded`、`remote_translation_model_missing`、`remote_download_in_progress`、`remote_error`）：
+
+- `remote.host_set_models {asr?: {...}, translation?: {...}}` → `{host: HostInfo}`。
+- `remote.host_download {model}` → `{started: true}`；進度以 `remote` 事件 `{kind: "host_download", model, downloaded_bytes, total_bytes, state, error}` 送出。
+- Tauri：`remote_host_set_models`、`remote_host_download`（只進 `main.json`）。
+
+**A 的介面**：模型頁在遠端模式改成「運算主機的模型」：主機摘要、即時與完整辨識模型選單（只列 B 已下載的，附「建議／跑得動／可能吃緊／超出負荷」）、B 還沒下載的模型列在下面並附「在運算主機下載」按鈕與進度條、翻譯模型選單（B 已安裝的）。選了就套用到運算主機（「超出負荷」要再確認）。左側欄的模型選單也改成這個行為（改 B 的完整辨識模型）。
+
+## 八、當運算主機時的畫面（2026-11-24 追加）
+
+> 使用者：「變成 server 端時畫面 UI 應該要有什麼變化，不然沒感覺」。
+
+- **引擎**：B 在提供運算時，每秒送一次 `remote` 事件 `{kind: "serving", peer: {name, fingerprint, state} | null, session: {started_at_ms, sentences, mode} | null, metrics: {final_busy, rtf, backlog, gpu} | null}`（狀態改變時立即送一次；沒有連線時每 5 秒）。`sentences` 是這一場送出的完整字幕句數。
+- **介面**（角色是「讓別台電腦用這台處理」時）：
+  - 視窗頂端常駐標示「運算主機模式」（顏色與一般模式不同）。
+  - 字幕頁上方的「運算主機」面板取代空白提示：狀態圓點與大字（「等別台電腦連進來」／「正在替〇〇處理・已處理 N 句・12:34」）、這台的運算負荷（與第五節同一個元件：色條、折線、白話）、目前用的辨識與翻譯模型、按鈕「配對新電腦」「停止提供運算」。
+  - 有電腦連著時「開始」按鈕停用並說明「別台電腦正在使用這台的顯示卡」。
+  - 收到 `host_changed` 時顯示通知。
+- 不顯示 A 的字幕內容（只顯示句數），避免運算主機的人看到別人的對話。
+
+**超出負荷時（2026-11-24 使用者補充）**：「client 端選的模型必須是 server 端可以負荷的；超出負荷要說，使用者執意要選還是可以選」。B 不因 `fit` 拒絕 `set_models`／`download`（只檢查 registry、已下載、已安裝）。介面：選項都列出、標示醒目；選「超出負荷」時跳確認，白話說明後果（字幕可能變慢、跟不上或無法開始），按「仍要使用」才套用；「可能吃緊」不確認、在選單下方提醒；目前組合超出負荷時模型區塊持續顯示警示。
+
+## 九、三種模式的辨識度（2026-11-24 使用者追加）
+
+> 使用者：「變成 client 端時 UI 也改變一下，讓使用者有自覺目前是本地端、client 端、server 端」。
+
+- 視窗頂端常駐**模式列**，顏色＋圖示＋文字三者一起（不只靠顏色，色弱也分得出來）：
+  - 本機：低調，圖示（單台電腦）＋「這台電腦處理」；主色維持原本的靛藍。
+  - 用戶端：天藍；圖示（兩台電腦與箭頭）＋「使用運算主機：GTX 1080 Ti・延遲 3 ms」與連線圓點（連著／重連中／未連線）。
+  - 運算主機：紫；圖示（伺服器）＋「運算主機模式：等別台電腦連進來」或「正在替〇〇處理・已處理 N 句」。
+- 模式主色同時用在視窗邊緣的細框、左側欄選中的角色、「開始」按鈕。模式色刻意避開負荷圖的綠、黃、紅。
+- 深淺色主題都要符合對比（文字 4.5:1）；切換模式時顏色以短轉場變化（尊重 `prefers-reduced-motion`）。

@@ -257,6 +257,8 @@ pub fn run() {
             commands::session_set_furigana,
             commands::remote_status,
             commands::remote_host_info,
+            commands::remote_host_set_models,
+            commands::remote_host_download,
             commands::remote_server_set,
             commands::remote_identity_reset,
             commands::remote_disconnect,

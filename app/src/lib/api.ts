@@ -341,6 +341,20 @@ export const api = {
   async remoteHostInfo(): Promise<HostInfo | null> {
     return parseHostInfoResult(await invoke("remote_host_info"));
   },
+  /**
+   * Changes the compute host's own models (compute-capacity.md 七): saved on
+   * the compute host, used from its next session. `args` is built by
+   * lib/host-models.ts `setModelArgs` (`{asr?: {fast_model?, final_model?},
+   * translation?: {…}}`). Resolves to its updated report (null when it sent no usable one).
+   */
+  async remoteHostSetModels(args: Record<string, unknown>): Promise<HostInfo | null> {
+    return parseHostInfoResult(await invoke("remote_host_set_models", args));
+  },
+  /** Starts downloading a speech model on the compute host; progress arrives as `host_download` events. */
+  async remoteHostDownload(model: string): Promise<boolean> {
+    const result = (await invoke("remote_host_download", { model })) as Record<string, unknown> | null;
+    return result?.started === true;
+  },
   /** Removes a paired computer (`peer`) or compute host (`server`). */
   async remoteUnpair(spki: string, role: UnpairRole): Promise<RemoteStatus> {
     return parseRemoteStatus(await invoke("remote_unpair", { spki, role }));

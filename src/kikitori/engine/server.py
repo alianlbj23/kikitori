@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from importlib import metadata
-from typing import Any, BinaryIO, Literal
+from typing import Any, BinaryIO, Literal, cast
 from urllib.parse import urlsplit
 
 from kikitori.capture.errors import (
@@ -70,8 +70,15 @@ from kikitori.pipeline.factory import (
     translation_needed,
 )
 from kikitori.pipeline.types import PipelineComponents, release_components
-from kikitori.remote.client import RemoteClientSession, RemoteError
+from kikitori.remote.client import HostDownload, RemoteClientSession, RemoteError
 from kikitori.remote.identity import IdentityError, load_or_create_identity
+from kikitori.remote.manage import (
+    DOWNLOAD_FAILED_DETAIL,
+    DOWNLOAD_START_DETAIL,
+    DownloadState,
+    HostManageError,
+    ProgressFn,
+)
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.paths import compute_dir, servers_path
 from kikitori.speakers.model import SPEAKER_MODEL_ID
@@ -291,6 +298,8 @@ class EngineServer:
             "remote.unpair": lambda params: self._remote.unpair(params),
             "remote.identity_reset": self._remote_identity_reset,
             "remote.host_info": self._remote_host_info,
+            "remote.host_set_models": self._remote_host_set_models,
+            "remote.host_download": self._remote_host_download,
         }
         # 這台電腦替別台運算（B）：與本機 session 共用 GPU 使用權（見 `_acquire_gpu_for_remote`）
         self._serving_peer = False
@@ -306,6 +315,8 @@ class EngineServer:
             downloaded_models=lambda: [
                 m.id for m in services.models.asr_models() if m.downloaded
             ],
+            # 別台請這台下載：走同一套下載機制，這台的介面也看得到進度（compute-capacity 七）
+            start_download=self._download_for_peer,
         )
 
     # --- 主迴圈 ---------------------------------------------------------------
@@ -734,6 +745,47 @@ class EngineServer:
         self._unsent_response.append(lambda: self._unregister_download("asr", model))
         return {"model": model, "started": True}
 
+    def _download_for_peer(self, model: str, listener: ProgressFn) -> None:
+        """另一台電腦請這台下載 ASR 模型：與 `models.download` 同一套登記與進度事件，
+        另外把進度交給 `listener`（轉給那台）。立刻啟動（沒有 stdio 回應要先送）。
+
+        Raises:
+            HostManageError: `unknown_model`、`download_in_progress`、`settings_error`
+                （下載執行緒開不起來；登記已撤銷，之後可以再要求）。
+        """
+        known = {m.id: m for m in self._services.models.asr_models()}
+        if model not in known:
+            raise HostManageError("unknown_model", f"unknown ASR model {model!r}")
+        catalog = self._services.models
+
+        def download(progress: ProgressCallback, cancel: threading.Event) -> None:
+            catalog.download(model, progress, cancel)
+
+        def to_peer(
+            downloaded: int, total: int, state: DownloadState, error: str | None
+        ) -> None:
+            # 例外原文可能含這台的檔案路徑：那台只拿到通用字句（這台的介面與 log 仍有原文）
+            listener(
+                downloaded,
+                total,
+                state,
+                DOWNLOAD_FAILED_DETAIL if state == "error" else None,
+            )
+
+        try:
+            thread = self._register_download(
+                "asr", model, known[model].size_bytes, download, to_peer
+            )
+        except p.ProtocolError as exc:
+            raise HostManageError("download_in_progress", exc.message) from exc
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            # 開不了執行緒（資源耗盡）：不撤銷登記的話，這個模型永遠顯示「下載中」
+            logger.error("cannot start downloading %s for a peer: %s", model, exc)
+            self._unregister_download("asr", model)
+            raise HostManageError("settings_error", DOWNLOAD_START_DETAIL) from exc
+
     def _download_gpu_runtime(self, params: dict[str, Any]) -> Mapping[str, Any]:
         """NVIDIA cuBLAS：使用者必須明確同意 NVIDIA EULA（`accept_license: true`）。"""
         accepted = params.get("accept_license", False)
@@ -968,8 +1020,9 @@ class EngineServer:
         """正在使用這個 ASR 模型的 session 與下載（給錯誤訊息用）。"""
         users: list[str] = []
         asr = self._services.settings_store.get().asr
-        # 替別台電腦運算時用的是這台設定的模型，或那台指定的模型（compute-capacity 三）。
-        # 在 _session_lock 外查：RemoteServer 拿著自己的鎖時會呼叫 acquire_gpu（要 _session_lock）
+        # 替別台電腦運算時用的是這台設定的模型；那一場開始後設定可能被那台改過（compute-capacity
+        # 七，下一場才生效），所以也算進那場實際載入的。在 _session_lock 外查：RemoteServer
+        # 拿著自己的鎖時會呼叫 acquire_gpu（要 _session_lock）
         serving = {asr.fast_model, asr.final_model, *self._remote.session_models()}
         with self._session_lock:
             self._prune_live_sessions()
@@ -995,9 +1048,17 @@ class EngineServer:
         ]
 
     def _register_download(
-        self, kind: DownloadKind, model: str, expected_total: int, job: DownloadJob
+        self,
+        kind: DownloadKind,
+        model: str,
+        expected_total: int,
+        job: DownloadJob,
+        listener: ProgressFn | None = None,
     ) -> threading.Thread:
         """登記一個下載並建立（尚未啟動的）執行緒；呼叫端在回應寫出後才啟動它。
+
+        `listener` 另外收到同樣（節流過）的進度，最後一定是 done 或 error——即使 stdout
+        已經關了（另一台電腦請這台下載時，進度要轉給它）。
 
         Raises:
             ProtocolError: `download_in_progress`（同一個模型已在下載）。
@@ -1011,14 +1072,14 @@ class EngineServer:
             self._downloads[(kind, model)] = download
         download.thread = threading.Thread(
             target=self._run_download,
-            args=(download, expected_total, job),
+            args=(download, expected_total, job, listener),
             name=f"download-{kind}-{model}",
             daemon=True,
         )
         return download.thread
 
     def _unregister_download(self, kind: DownloadKind, model: str) -> None:
-        """撤銷尚未啟動的下載（回應沒寫出去時）；已啟動的不動，由執行緒結束時自行移除。"""
+        """撤銷尚未啟動的下載（回應沒寫出去、或執行緒開不起來時）；已啟動的不動，由執行緒結束時自行移除。"""
         with self._downloads_lock:
             download = self._downloads.get((kind, model))
             if download is None:
@@ -1027,16 +1088,30 @@ class EngineServer:
             if thread is not None and thread.ident is not None:
                 return
             del self._downloads[(kind, model)]
-        logger.info("download of %s was not started: the response was not sent", model)
+        logger.info("download of %s was not started; unregistered it", model)
 
     def _run_download(
-        self, download: _Download, expected_total: int, job: DownloadJob
+        self,
+        download: _Download,
+        expected_total: int,
+        job: DownloadJob,
+        listener: ProgressFn | None = None,
     ) -> None:
         last_sent = 0.0
         last_fraction = -1.0
         total = expected_total
 
+        def tell(downloaded: int, size: int, state: str, error: str | None) -> None:
+            if listener is None:
+                return
+            try:
+                listener(downloaded, size, cast(DownloadState, state), error)
+            except Exception:
+                # 轉給另一台電腦的進度：失敗不能中斷這台的下載
+                logger.exception("cannot relay the progress of %s", download.model)
+
         def send(downloaded: int, size: int, state: str, error: str | None) -> None:
+            tell(downloaded, size, state, error)
             self._send_event(
                 "download_progress",
                 {
@@ -1070,6 +1145,7 @@ class EngineServer:
             logger.info("%s downloaded", download.model)
         except ChannelClosedError:
             logger.error("download of %s: protocol output closed", download.model)
+            tell(0, total, "error", "the engine's output was closed")
         except Exception as exc:
             logger.exception("download of %s failed", download.model)
             final = ("error", f"{type(exc).__name__}: {exc}")
@@ -1387,9 +1463,6 @@ class EngineServer:
             on_status=on_status,
             on_event=lambda name, data: self._on_remote_event(session, name, data),
             capture_code=_capture_code,
-            # 使用者為遠端選的模型（空字串＝照運算主機的設定；compute-capacity 四）
-            fast_model=compute.remote_fast_model,
-            final_model=compute.remote_final_model,
         )
 
     def _on_remote_event(
@@ -1708,6 +1781,30 @@ class EngineServer:
         """`remote.host_info`：連上運算主機查它的能力（最多約 10 秒，在背景工作執行緒上）。"""
         p.reject_unknown_params(params)
         return Deferred(self._remote.host_info)
+
+    def _remote_host_set_models(self, params: dict[str, Any]) -> Deferred:
+        """`remote.host_set_models`：改運算主機的模型（連線最多約 15 秒，在背景工作執行緒上）。"""
+        request = self._remote.check_host_set_models(params)
+        return Deferred(lambda: self._remote.host_set_models(request))
+
+    def _remote_host_download(self, params: dict[str, Any]) -> Deferred:
+        """`remote.host_download`：請運算主機下載，等它開始後回 `{started: true}`；之後的進度
+        在回應寫出後才開始轉送（介面一定先拿到回應）。"""
+        model = self._remote.check_host_download(params)
+        started: list[HostDownload] = []
+
+        def job() -> Mapping[str, Any]:
+            started.append(self._remote.start_host_download(model))
+            return {"model": model, "started": True}
+
+        def follow() -> None:
+            self._remote.follow_host_download(started[0])
+
+        def unsent() -> None:
+            if started:
+                self._remote.drop_host_download(started[0])
+
+        return Deferred(job, after=follow, unsent=unsent)
 
     def _remote_identity_reset(self, params: dict[str, Any]) -> Mapping[str, Any]:
         """`remote.identity_reset`：字幕進行中、或有電腦正在用這台時不重建。

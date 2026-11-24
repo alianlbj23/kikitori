@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -20,12 +21,15 @@ from kikitori.config import Settings
 from kikitori.engine.testing import EndlessSource, _speech_track, fake_services
 from kikitori.remote import protocol as rp
 from kikitori.remote.client import (
+    HostDownload,
     RemoteClientSession,
     RemoteError,
     _check_metrics,
     probe_host_info,
+    set_host_models,
 )
 from kikitori.remote.identity import Identity, load_or_create_identity
+from kikitori.remote.manage import HostManageError, ProgressFn
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.server import RemoteServer
 
@@ -440,10 +444,23 @@ HOST_INFO: dict[str, Any] = {
     "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
     "device": "cuda",
     "compute_type": "int8_float16",
-    "current": {"fast": "base", "final": "small"},
+    "current": {
+        "fast": "base",
+        "final": "small",
+        "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:4b"},
+    },
     "recommended": None,
-    "models": [{"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"}],
+    "models": [
+        {
+            "id": "base",
+            "downloaded": True,
+            "need_mb": 450,
+            "fit": "ok",
+            "fit_as_fast": "tight",
+        }
+    ],
     "translation_model": "qwen3.5:4b",
+    "translation_models": ["qwen3.5:4b"],
 }
 
 
@@ -458,6 +475,9 @@ class FakeCapacity:
 
     def downloaded_models(self) -> frozenset[str]:
         return frozenset({"base", "small"})
+
+    def invalidate(self) -> None:
+        pass
 
 
 class ProbeTest(RemoteClientCase):
@@ -540,36 +560,184 @@ class ProbeTest(RemoteClientCase):
         self.assertEqual(ctx.exception.code, "remote_incompatible")
 
 
-class RemoteModelTest(RemoteClientCase):
-    """compute-capacity 四：A 選的模型隨 `session.start` 送給 B。"""
+class FakeManager:
+    """B 的宿主（`remote.manage.HostManager`）：記下要求；下載進度由測試回報。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str], dict[str, str]]] = []
+        self.progress: dict[str, ProgressFn] = {}
+        self.fail: HostManageError | None = None
+
+    def set_models(
+        self, by: str, asr: Mapping[str, str], translation: Mapping[str, str]
+    ) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append((by, dict(asr), dict(translation)))
+
+    def start_download(self, by: str, model: str, progress: ProgressFn) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.progress[model] = progress
+
+
+class ManageHostTest(RemoteClientCase):
+    """compute-capacity 七：A 改 B 的模型、請 B 下載（錯誤碼對應、逾時、斷線）。"""
 
     def setUp(self) -> None:
         super().setUp()
+        self.manager = FakeManager()
         self.server.stop()
-        self.server = self.start_server(capacity=FakeCapacity())
-
-    def test_a_downloaded_model_is_used(self) -> None:
-        rec = Recorder()
-        session = self.client(rec, final_model="base")
-        session.connect()
-        session.start(EndlessSource())
-        self.assertTrue(
-            rec.wait_for(lambda: any(s[0] == "running" for s in rec.statuses))
+        self.server = self.start_server(
+            capacity=FakeCapacity(), manager=self.manager, progress_interval=0.1
         )
+
+    def options(self, **kwargs: Any) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "identity": self.client_id,
+            "servers": self.servers,
+            "host": "127.0.0.1",
+            "port": self.server.port,
+            "app_version": "0.3.1",
+        }
+        options.update(kwargs)
+        return options
+
+    def set_models(
+        self, asr: dict[str, str], translation: dict[str, str], **kwargs: Any
+    ) -> dict[str, Any] | None:
+        return set_host_models(
+            asr=asr, translation=translation, **self.options(**kwargs)
+        )
+
+    def test_set_models_returns_the_new_host_info(self) -> None:
+        host = self.set_models({"final_model": "small"}, {"final_model": "qwen3.5:4b"})
+        self.assertEqual(host, HOST_INFO)
         self.assertEqual(
-            self.server.session_models(), (Settings().asr.fast_model, "base")
+            self.manager.calls,
+            [("A", {"final_model": "small"}, {"final_model": "qwen3.5:4b"})],
         )
+        self.assertFalse(self.gate.held)
 
-    def test_a_model_missing_on_the_host_is_remote_model_not_downloaded(self) -> None:
-        rec = Recorder()
-        session = self.client(rec, final_model="large-v3")
-        session.connect()
-        session.start(EndlessSource())
-        self.assertTrue(rec.ended.wait(WAIT))
-        self.assertEqual(rec.statuses[-1][0], "error")
-        self.assertEqual(rec.statuses[-1][2], "remote_model_not_downloaded")
-        self.assertIn("large-v3", rec.statuses[-1][1] or "")
-        self.assertTrue(self.wait_gpu_released())
+    def test_set_models_error_codes(self) -> None:
+        for asr, translation, code in (
+            ({"final_model": "huge-v9"}, {}, "remote_unknown_model"),
+            ({"final_model": "large-v3"}, {}, "remote_model_not_downloaded"),
+            ({}, {"final_model": "llama3:70b"}, "remote_translation_model_missing"),
+        ):
+            with self.subTest(code=code), self.assertRaises(RemoteError) as ctx:
+                self.set_models(asr, translation)
+            self.assertEqual(ctx.exception.code, code)
+        self.manager.fail = HostManageError("settings_error", "disk full")
+        with self.assertRaises(RemoteError) as ctx:
+            self.set_models({"final_model": "base"}, {})
+        self.assertEqual(ctx.exception.code, "remote_error")
+        self.assertIn("disk full", str(ctx.exception))
+        with self.assertRaises(RemoteError) as ctx:
+            self.set_models({"final_model": "base"}, {}, host="")
+        self.assertEqual(ctx.exception.code, "remote_not_configured")
+
+    def test_an_old_host_that_rejects_manage_is_incompatible(self) -> None:
+        real = rp.parse_client
+
+        def old(text: str) -> Any:
+            if '"manage"' in text:
+                raise rp.ProtocolViolation("intent must be one of ['session', 'probe']")
+            return real(text)
+
+        with (
+            mock.patch.object(rp, "parse_client", old),
+            self.assertRaises(RemoteError) as ctx,
+        ):
+            self.set_models({"final_model": "base"}, {})
+        self.assertEqual(ctx.exception.code, "remote_incompatible")
+
+    def test_set_models_is_bounded_by_its_timeout(self) -> None:
+        with socket.socket() as silent:
+            silent.bind(("127.0.0.1", 0))
+            silent.listen()
+            began = time.monotonic()
+            with self.assertRaises(RemoteError):
+                self.set_models(
+                    {"final_model": "base"},
+                    {},
+                    port=silent.getsockname()[1],
+                    timeout=1.0,
+                )
+            self.assertLess(time.monotonic() - began, 4.0)
+
+    def download(self, model: str = "large-v3", **kwargs: Any) -> HostDownload:
+        download = HostDownload(model=model, **self.options(**kwargs))
+        self.addCleanup(download.cancel)
+        return download
+
+    def test_download_progress_until_done(self) -> None:
+        download = self.download()
+        download.start()
+        seen: list[dict[str, Any]] = []
+        follower = threading.Thread(target=download.follow, args=(seen.append,))
+        follower.start()
+        self.assertTrue(
+            RecorderLike.wait_for(lambda: "large-v3" in self.manager.progress)
+        )
+        report = self.manager.progress["large-v3"]
+        report(30, 100, "downloading", None)
+        self.assertTrue(
+            RecorderLike.wait_for(
+                lambda: any(p["downloaded_bytes"] == 30 for p in list(seen))
+            )
+        )
+        report(100, 100, "done", None)
+        follower.join(WAIT)
+        self.assertFalse(follower.is_alive())
+        self.assertEqual(
+            seen[-1],
+            {
+                "model": "large-v3",
+                "downloaded_bytes": 100,
+                "total_bytes": 100,
+                "state": "done",
+                "error": None,
+            },
+        )
+        self.assertTrue(all(p["state"] == "downloading" for p in seen[:-1]))
+
+    def test_download_errors(self) -> None:
+        with self.assertRaises(RemoteError) as ctx:
+            self.download("huge-v9").start()
+        self.assertEqual(ctx.exception.code, "remote_unknown_model")
+        self.manager.fail = HostManageError("download_in_progress", "already")
+        with self.assertRaises(RemoteError) as ctx:
+            self.download().start()
+        self.assertEqual(ctx.exception.code, "remote_download_in_progress")
+
+    def test_a_silent_host_ends_the_download_with_an_error(self) -> None:
+        # B 每秒送一則；這裡讓它很久才送（間隔大於 A 的容忍時間）
+        self.server.stop()
+        self.server = self.start_server(
+            capacity=FakeCapacity(), manager=self.manager, progress_interval=30.0
+        )
+        download = self.download(silence=0.5)
+        download.start()
+        seen: list[dict[str, Any]] = []
+        download.follow(seen.append)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual((seen[0]["state"], seen[0]["model"]), ("error", "large-v3"))
+        self.assertIn("lost contact", seen[0]["error"])
+        # A 放棄不影響 B 的下載：B 的宿主照樣能回報到結束
+        self.manager.progress["large-v3"](100, 100, "done", None)
+
+
+class RecorderLike:
+    """沒有 Recorder 的測試也要「等到條件成立」。"""
+
+    @staticmethod
+    def wait_for(condition: Any) -> bool:
+        for _ in range(int(WAIT / 0.02)):
+            if condition():
+                return True
+            threading.Event().wait(0.02)
+        return False
 
 
 if __name__ == "__main__":

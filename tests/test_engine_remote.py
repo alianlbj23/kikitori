@@ -11,6 +11,7 @@ import os
 import tempfile
 import threading
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -20,6 +21,7 @@ from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer
 from kikitori.engine.testing import ENDLESS_DEVICE, SPEECH_DEVICE, fake_services
 from kikitori.remote.identity import IdentityError, load_or_create_identity
+from kikitori.remote.manage import HostManageError, ProgressFn
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.paths import compute_dir, servers_path
 from kikitori.remote.server import RemoteServer
@@ -90,13 +92,37 @@ HOST_INFO: dict[str, Any] = {
     "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
     "device": "cuda",
     "compute_type": "int8_float16",
-    "current": {"fast": "base", "final": "small"},
+    "current": {
+        "fast": "base",
+        "final": "small",
+        "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:4b"},
+    },
     "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
     "models": [
-        {"id": "base", "downloaded": True, "need_mb": 450, "fit": "ok"},
-        {"id": "large-v3", "downloaded": False, "need_mb": 2140, "fit": "tight"},
+        {
+            "id": "base",
+            "downloaded": True,
+            "need_mb": 450,
+            "fit": "ok",
+            "fit_as_fast": "ok",
+        },
+        {
+            "id": "small",
+            "downloaded": True,
+            "need_mb": 650,
+            "fit": "over",
+            "fit_as_fast": "over",
+        },
+        {
+            "id": "large-v3",
+            "downloaded": False,
+            "need_mb": 2140,
+            "fit": "tight",
+            "fit_as_fast": None,
+        },
     ],
     "translation_model": "qwen3.5:4b",
+    "translation_models": ["qwen3.5:4b", "qwen3.5:9b"],
 }
 
 
@@ -108,6 +134,30 @@ class FakeCapacity:
 
     def downloaded_models(self) -> frozenset[str]:
         return frozenset({"base", "small"})
+
+    def invalidate(self) -> None:
+        pass
+
+
+class FakeManager:
+    """B 的宿主（`remote.manage.HostManager`）：記下要求；下載進度由測試回報。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str], dict[str, str]]] = []
+        self.progress: dict[str, ProgressFn] = {}
+        self.fail: HostManageError | None = None
+
+    def set_models(
+        self, by: str, asr: Mapping[str, str], translation: Mapping[str, str]
+    ) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append((by, dict(asr), dict(translation)))
+
+    def start_download(self, by: str, model: str, progress: ProgressFn) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.progress[model] = progress
 
 
 class EngineRemoteCase(unittest.TestCase):
@@ -125,6 +175,7 @@ class EngineRemoteCase(unittest.TestCase):
         self.b_trust.add(a_id.cert_path.read_bytes(), "A")
         TrustStore(servers_path()).add(b_id.cert_path.read_bytes(), "127.0.0.1")
         self.gate = Gate()
+        self.manager = FakeManager()
         self.remote = RemoteServer(
             identity=b_id,
             trust=self.b_trust,
@@ -137,6 +188,8 @@ class EngineRemoteCase(unittest.TestCase):
             app_version="0.3.1",
             metrics_interval=0.2,
             capacity=FakeCapacity(),
+            manager=self.manager,
+            progress_interval=0.1,
         )
         self.remote.start()
         self.addCleanup(self.remote.stop)
@@ -321,34 +374,164 @@ class HostInfoTest(EngineRemoteCase):
         self.assertEqual(code, "remote_identity_error")
 
 
-class RemoteModelTest(EngineRemoteCase):
-    """compute-capacity 四：`compute.remote_*_model` 隨遠端 session 送給運算主機。"""
+class OwnModelsTest(EngineRemoteCase):
+    """compute-capacity 七：遠端 session 用的一律是運算主機設定裡的模型。"""
 
-    def test_the_chosen_model_runs_on_the_compute_host(self) -> None:
-        self.services.settings_store.update({"compute": {"remote_final_model": "base"}})
+    def test_the_session_runs_the_compute_hosts_own_models(self) -> None:
         self.request("session.start", {"mode": "media", "device_id": ENDLESS_DEVICE})
         self.sink.wait_status(1, "running")
+        own = Settings().asr  # B 的設定（這裡的 RemoteServer 用預設值）
         self.assertEqual(
-            self.remote.session_models(), (Settings().asr.fast_model, "base")
-        )
-        # 只影響這一場：這台與 B 的 asr 設定都不變
-        self.assertEqual(
-            self.services.settings_store.get().asr.final_model,
-            Settings().asr.final_model,
+            self.remote.session_models(), (own.fast_model, own.final_model)
         )
         self.request("session.stop")
         self.sink.wait_status(1, "idle")
 
-    def test_a_model_the_compute_host_lacks_is_remote_model_not_downloaded(
-        self,
-    ) -> None:
-        self.services.settings_store.update(
-            {"compute": {"remote_final_model": "large-v3"}}
+
+class HostSetModelsTest(EngineRemoteCase):
+    """compute-capacity 七：`remote.host_set_models` 改運算主機的模型（持久、下一場生效）。"""
+
+    def test_set_models_answers_the_new_host_info(self) -> None:
+        reply = self.call(
+            "remote.host_set_models",
+            {
+                "asr": {"final_model": "base"},
+                "translation": {"fast_model": "qwen3.5:9b"},
+            },
         )
-        self.request("session.start", {"mode": "media", "device_id": ENDLESS_DEVICE})
-        status = self.sink.wait_status(1, "error", "idle")
-        self.assertEqual(status["code"], "remote_model_not_downloaded")
-        self.assertTrue(self.wait_gpu_released())
+        self.assertEqual(reply.get("result"), {"host": HOST_INFO}, reply)
+        self.assertEqual(
+            self.manager.calls,
+            [("A", {"final_model": "base"}, {"fast_model": "qwen3.5:9b"})],
+        )
+        self.assertFalse(self.gate.held)  # 不佔運算主機的 GPU
+
+    def test_an_over_budget_model_can_still_be_chosen(self) -> None:
+        # 使用者補充：超出負荷要警告（A 的介面），但執意要選時仍然可以
+        self.assertEqual(
+            next(m["fit"] for m in HOST_INFO["models"] if m["id"] == "small"), "over"
+        )
+        reply = self.call("remote.host_set_models", {"asr": {"final_model": "small"}})
+        self.assertIn("result", reply, reply)
+        self.assertEqual(self.manager.calls, [("A", {"final_model": "small"}, {})])
+
+    def test_works_while_the_compute_host_is_busy(self) -> None:
+        self.assertTrue(self.gate.acquire())
+        reply = self.call("remote.host_set_models", {"asr": {"final_model": "base"}})
+        self.assertIn("result", reply, reply)
+
+    def test_errors(self) -> None:
+        cases: list[tuple[dict[str, Any], str]] = [
+            ({}, "invalid_params"),
+            ({"asr": {}}, "invalid_params"),
+            ({"asr": {"device": "cuda"}}, "invalid_params"),
+            ({"asr": {"final_model": "../x"}}, "invalid_params"),
+            ({"translation": {"final_model": " q"}}, "invalid_params"),
+            ({"asr": {"final_model": "base"}, "x": 1}, "invalid_params"),
+            ({"asr": {"final_model": "huge-v9"}}, "remote_unknown_model"),
+            ({"asr": {"final_model": "large-v3"}}, "remote_model_not_downloaded"),
+            (
+                {"translation": {"final_model": "llama3:70b"}},
+                "remote_translation_model_missing",
+            ),
+        ]
+        for params, code in cases:
+            with self.subTest(params=params):
+                self.assertEqual(
+                    self.error_code("remote.host_set_models", params), code
+                )
+        good = {"asr": {"final_model": "base"}}
+        self.manager.fail = HostManageError("settings_error", "disk full")
+        self.assertEqual(
+            self.error_code("remote.host_set_models", good), "remote_error"
+        )
+        self.assertEqual(self.manager.calls, [])
+        port = self.remote.port
+        self.remote.stop()
+        self.services.settings_store.update({"compute": {"port": port}})
+        self.assertEqual(
+            self.error_code("remote.host_set_models", good), "remote_unreachable"
+        )
+        self.services.settings_store.update({"compute": {"host": ""}})
+        self.assertEqual(
+            self.error_code("remote.host_set_models", good), "remote_not_configured"
+        )
+
+
+class HostDownloadTest(EngineRemoteCase):
+    """compute-capacity 七：`remote.host_download` 與 `remote` 事件 `host_download`。"""
+
+    def host_downloads(self) -> list[dict[str, Any]]:
+        return [d for d in self.sink.events("remote") if d["kind"] == "host_download"]
+
+    def wait_for(self, condition: Any) -> None:
+        with self.sink.cond:
+            if not self.sink.cond.wait_for(condition, WAIT):
+                raise AssertionError("condition not met")
+
+    def test_progress_events_until_done(self) -> None:
+        reply = self.call("remote.host_download", {"model": "large-v3"})
+        self.assertEqual(
+            reply.get("result"), {"model": "large-v3", "started": True}, reply
+        )
+        report = self.manager.progress["large-v3"]
+        report(40, 100, "downloading", None)
+        self.wait_for(
+            lambda: any(d["downloaded_bytes"] == 40 for d in self.host_downloads())
+        )
+        report(100, 100, "done", None)
+        self.wait_for(lambda: any(d["state"] == "done" for d in self.host_downloads()))
+        self.assertEqual(
+            self.host_downloads()[-1],
+            {
+                "kind": "host_download",
+                "model": "large-v3",
+                "downloaded_bytes": 100,
+                "total_bytes": 100,
+                "state": "done",
+                "error": None,
+            },
+        )
+        # 介面一定先拿到回應，之後才是進度
+        first = next(
+            m
+            for m in self.sink.messages
+            if m.get("id") == self.next_id
+            or (m.get("event") == "remote" and m["data"]["kind"] == "host_download")
+        )
+        self.assertEqual(first.get("id"), self.next_id)
+
+    def test_errors(self) -> None:
+        cases: list[tuple[dict[str, Any], str]] = [
+            ({}, "invalid_params"),
+            ({"model": "../x"}, "invalid_params"),
+            ({"model": "base", "url": "x"}, "invalid_params"),
+            ({"model": "huge-v9"}, "remote_unknown_model"),
+        ]
+        for params, code in cases:
+            with self.subTest(params=params):
+                self.assertEqual(self.error_code("remote.host_download", params), code)
+        self.manager.fail = HostManageError("download_in_progress", "already")
+        self.assertEqual(
+            self.error_code("remote.host_download", {"model": "large-v3"}),
+            "remote_download_in_progress",
+        )
+        self.services.settings_store.update({"compute": {"host": ""}})
+        self.assertEqual(
+            self.error_code("remote.host_download", {"model": "large-v3"}),
+            "remote_not_configured",
+        )
+
+    def test_a_silent_compute_host_ends_with_an_error_event(self) -> None:
+        # B 很久才送一則進度：超過 A 的容忍時間就以 error 結束（B 的下載不受影響）
+        self.remote._progress_interval = 30.0
+        with mock.patch("kikitori.remote.client.DOWNLOAD_SILENCE_SECS", 0.5):
+            self.call("remote.host_download", {"model": "large-v3"})
+            self.wait_for(
+                lambda: any(d["state"] == "error" for d in self.host_downloads())
+            )
+        self.assertIn("lost contact", self.host_downloads()[-1]["error"])
+        self.manager.progress["large-v3"](100, 100, "done", None)  # 讓 B 的轉送結束
 
 
 if __name__ == "__main__":

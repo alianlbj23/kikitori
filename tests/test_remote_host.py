@@ -18,9 +18,16 @@ from typing import Any
 from unittest import mock
 
 from kikitori.config import SettingsStore, default_settings_path
+from kikitori.config import store as settings_store
 from kikitori.remote import host as h
 from kikitori.remote import pair_net as pn
+from kikitori.remote.client import set_host_models
 from kikitori.remote.identity import IdentityError, load_or_create_identity
+from kikitori.remote.manage import (
+    DOWNLOAD_FAILED_DETAIL,
+    SETTINGS_INVALID_DETAIL,
+    HostManageError,
+)
 from kikitori.remote.pairing import TrustStore
 
 WAIT = 20.0
@@ -543,6 +550,258 @@ class ChooseModelTest(HostCase):
         menu = h.MENU.splitlines()
         prepare = next(i for i, line in enumerate(menu) if "準備模型" in line)
         self.assertIn("5) 選擇模型", menu[prepare + 1])
+
+
+class FakeAsrDownload:
+    """無介面主機的 ASR 下載（`download_asr`）：測試控制何時回報、何時結束。"""
+
+    def __init__(self) -> None:
+        self.started: queue.Queue[str] = queue.Queue()
+        self.release = threading.Event()
+        self.fail: Exception | None = None
+        self.cancelled = threading.Event()
+
+    def __call__(
+        self, model: str, on_bytes: Callable[[int, int], None], cancel: threading.Event
+    ) -> None:
+        self.started.put(model)
+        on_bytes(50, 100)
+        self.release.wait(WAIT)
+        if cancel.is_set():
+            self.cancelled.set()
+            raise RuntimeError("download cancelled")
+        if self.fail is not None:
+            raise self.fail
+        on_bytes(100, 100)
+
+
+class Progress:
+    """`ProgressFn`：記下回報，等結束。"""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[int, int, str, str | None]] = []
+        self.done = threading.Event()
+
+    def __call__(
+        self, downloaded: int, total: int, state: str, error: str | None
+    ) -> None:
+        self.reports.append((downloaded, total, state, error))
+        if state != "downloading":
+            self.done.set()
+
+
+class HeadlessManagerTest(HostCase):
+    """compute-capacity 七：別台改無介面主機的模型、請它下載（終端機印出來）。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.download_asr = FakeAsrDownload()
+        self.addCleanup(self.download_asr.release.set)
+        self.host = h.ComputeHost(
+            self.store,
+            self.identity,
+            self.trust,
+            "0.3.1",
+            capacity=FakeCapacity(),
+            download_asr=self.download_asr,
+        )
+        self.addCleanup(self.host.stop_server)
+        self.manager = self.host.manager(self.out)
+
+    def test_set_models_saves_and_tells_the_terminal(self) -> None:
+        self.manager.set_models(
+            "Living room PC", {"final_model": "large-v3"}, {"fast_model": "qwen3.5:9b"}
+        )
+        saved = SettingsStore(default_settings_path())
+        saved.load()
+        self.assertEqual(saved.get().asr.final_model, "large-v3")
+        self.assertEqual(saved.get().translation.fast_model, "qwen3.5:9b")
+        self.assertTrue(self.said("「Living room PC」把辨識模型改成"))
+        self.assertTrue(self.said("完整 large-v3"))
+        self.assertTrue(self.said("翻譯模型改成"))
+
+    def test_set_models_keeps_what_the_gui_saved_meanwhile(self) -> None:
+        # GUI 與無介面主機共用設定檔：套用前先重讀，不能用舊內容蓋掉 GUI 剛改的
+        other = SettingsStore(default_settings_path())
+        other.load()
+        other.update({"target_language": "en"})
+        self.manager.set_models("A", {"final_model": "base"}, {})
+        self.store.load()
+        self.assertEqual(self.store.get().target_language, "en")
+
+    def test_invalid_settings_are_a_settings_error(self) -> None:
+        with self.assertRaises(HostManageError) as ctx:
+            self.manager.set_models("A", {"final_model": "x" * 300}, {})
+        self.assertEqual(ctx.exception.code, "settings_error")
+
+    def test_a_damaged_settings_file_is_not_overwritten(self) -> None:
+        # 設定檔壞掉時 store 以預設值運作：把「預設值＋A 的修改」寫回去等於丟掉使用者的設定
+        path = default_settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"schema_version": 1, "mode": "karaoke"}', encoding="utf-8")
+        with (
+            self.assertLogs("kikitori.remote.host", "WARNING"),
+            self.assertRaises(HostManageError) as ctx,
+        ):
+            self.manager.set_models("A", {"final_model": "base"}, {})
+        self.assertEqual(ctx.exception.code, "settings_error")
+        self.assertEqual(ctx.exception.detail, SETTINGS_INVALID_DETAIL)
+        self.assertIn("karaoke", path.read_text(encoding="utf-8"))
+        self.assertFalse(path.with_name(path.name + ".invalid").exists())
+        self.assertFalse(self.said("把辨識模型改成"))
+
+    def test_a_save_failure_does_not_reveal_paths(self) -> None:
+        secret = str(self.root / "b" / "settings.json")
+        with (
+            mock.patch.object(
+                self.store,
+                "update",
+                side_effect=PermissionError(13, "Access is denied", secret),
+            ),
+            self.assertLogs("kikitori.remote.host", "ERROR") as logs,
+            self.assertRaises(HostManageError) as ctx,
+        ):
+            self.manager.set_models("A", {"final_model": "base"}, {})
+        self.assertEqual(ctx.exception.code, "settings_error")
+        self.assertNotIn(str(self.root), ctx.exception.detail)
+        self.assertNotIn("denied", ctx.exception.detail)
+        # 完整的例外（含路徑）留在這台的 log
+        self.assertTrue(any("Access is denied" in line for line in logs.output))
+
+    def test_two_computers_changing_models_at_once_lose_nothing(self) -> None:
+        # 「重讀設定＋寫入」要原子：否則一台重讀到一半、另一台寫入，前者會用舊內容蓋掉後者
+        real = settings_store.load_settings
+        first_read = threading.Event()
+        let_go = threading.Event()
+
+        def slow_load(path: Path) -> Any:
+            loaded = real(path)
+            if threading.current_thread().name == "slow-asker":
+                first_read.set()
+                let_go.wait(0.5)
+            return loaded
+
+        with mock.patch.object(settings_store, "load_settings", side_effect=slow_load):
+            slow = threading.Thread(
+                target=self.manager.set_models,
+                args=("A", {"final_model": "base"}, {}),
+                name="slow-asker",
+            )
+            slow.start()
+            self.assertTrue(first_read.wait(WAIT))
+            quick = threading.Thread(
+                target=self.manager.set_models,
+                args=("C", {"fast_model": "tiny"}, {}),
+            )
+            quick.start()
+            quick.join(0.3)  # 沒有鎖時它在這段時間內寫完，接著被 slow 的舊內容蓋掉
+            let_go.set()
+            slow.join(WAIT)
+            quick.join(WAIT)
+        saved = SettingsStore(default_settings_path())
+        saved.load()
+        self.assertEqual(
+            (saved.get().asr.fast_model, saved.get().asr.final_model), ("tiny", "base")
+        )
+
+    def test_a_download_thread_that_cannot_start_is_unregistered(self) -> None:
+        with (
+            mock.patch.object(
+                threading.Thread,
+                "start",
+                side_effect=RuntimeError("can't start new thread"),
+            ),
+            self.assertLogs("kikitori.remote.host", "ERROR"),
+            self.assertRaises(HostManageError) as ctx,
+        ):
+            self.manager.start_download("A", "medium", Progress())
+        self.assertEqual(ctx.exception.code, "settings_error")
+        self.assertNotIn("thread", ctx.exception.detail)
+        # 登記已撤銷：再要求一次照常開始（不是 download_in_progress）
+        progress = Progress()
+        self.manager.start_download("A", "medium", progress)
+        self.download_asr.release.set()
+        self.assertTrue(progress.done.wait(WAIT))
+        self.assertEqual(progress.reports[-1][2], "done")
+
+    def test_download_prints_progress_and_reports_to_the_asker(self) -> None:
+        progress = Progress()
+        self.manager.start_download("Living room PC", "large-v3", progress)
+        self.assertEqual(self.download_asr.started.get(timeout=WAIT), "large-v3")
+        # 同一個模型已在下載
+        with self.assertRaises(HostManageError) as ctx:
+            self.manager.start_download("A", "large-v3", Progress())
+        self.assertEqual(ctx.exception.code, "download_in_progress")
+        self.download_asr.release.set()
+        self.assertTrue(progress.done.wait(WAIT))
+        self.assertEqual(progress.reports[-1], (100, 100, "done", None))
+        self.assertTrue(self.said("「Living room PC」要這台下載辨識模型 large-v3"))
+        self.assertTrue(self.said("large-v3：50%"))
+        self.assertTrue(self.said("large-v3：完成"))
+        # 結束後可以再下載
+        self.manager.start_download("A", "large-v3", Progress())
+
+    def test_a_failed_download(self) -> None:
+        self.download_asr.fail = OSError(r"disk full: C:\Users\b\.cache\kikitori")
+        progress = Progress()
+        with self.assertLogs("kikitori.remote.host", "ERROR"):
+            self.manager.start_download("A", "medium", progress)
+            self.download_asr.release.set()
+            self.assertTrue(progress.done.wait(WAIT))
+        state, error = progress.reports[-1][2:]
+        self.assertEqual(state, "error")
+        # 回給那台的只有通用字句：例外原文可能含這台的檔案路徑
+        self.assertEqual(error, DOWNLOAD_FAILED_DETAIL)
+        self.assertTrue(self.said("medium：下載失敗"))
+
+    def test_the_error_reaches_the_asker_even_if_the_terminal_fails(self) -> None:
+        def out(line: str) -> None:
+            if "下載失敗" in line:
+                raise OSError("the terminal is gone")
+            self.out(line)
+
+        self.download_asr.fail = OSError("disk full")
+        manager = self.host.manager(out)
+        progress = Progress()
+        with self.assertLogs("kikitori.remote.host", "ERROR"):
+            manager.start_download("A", "medium", progress)
+            self.download_asr.release.set()
+            self.assertTrue(progress.done.wait(WAIT))
+        self.assertEqual(progress.reports[-1][2], "error")
+        # 結束後登記已清掉
+        manager.start_download("A", "medium", Progress())
+
+    def test_stopping_the_host_cancels_its_downloads(self) -> None:
+        progress = Progress()
+        self.manager.start_download("A", "medium", progress)
+        self.download_asr.started.get(timeout=WAIT)
+        self.host.stop_server()
+        self.download_asr.release.set()
+        self.assertTrue(progress.done.wait(WAIT))
+        self.assertTrue(self.download_asr.cancelled.is_set())
+        self.assertEqual(progress.reports[-1][2], "error")
+
+    def test_a_paired_computer_changes_the_model_while_serving(self) -> None:
+        # 端到端：真的連線，A 用 set_host_models 改無介面主機的完整辨識模型
+        port = self.listen_on_loopback()
+        a_id = load_or_create_identity(self.root / "a")
+        self.trust.add(a_id.cert_path.read_bytes(), "Living room PC")
+        servers = TrustStore(self.root / "a" / "servers.json")
+        servers.add(self.identity.cert_path.read_bytes(), "127.0.0.1")
+        self.host.start_server(self.out)
+        host_info = set_host_models(
+            identity=a_id,
+            servers=servers,
+            host="127.0.0.1",
+            port=port,
+            app_version="0.3.1",
+            asr={"final_model": "medium"},  # FakeCapacity 說它超出負荷：照樣套用
+            translation={},
+        )
+        self.assertIsNotNone(host_info)
+        self.store.load()
+        self.assertEqual(self.store.get().asr.final_model, "medium")
+        self.assertTrue(self.said("「Living room PC」把辨識模型改成"))
 
 
 class LoadLineTest(HostCase):

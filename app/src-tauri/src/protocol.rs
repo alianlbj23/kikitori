@@ -267,14 +267,86 @@ pub struct DownloadProgressPayload {
 const MAX_KIND_CHARS: usize = 32;
 
 /// `remote` event (T13 contract in docs/specs/remote-compute.md): pairing
-/// progress or the compute-host server's state. Only the main window gets it.
+/// progress or the compute-host server's state; compute-capacity.md 七、八 add
+/// a download on the compute host, a model change made from another computer,
+/// and what this compute host is doing. Only the main window gets it.
 /// The names, digits and fingerprints partly come from another computer on the
 /// network (through the engine), so every field is checked by [`validate_remote`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemotePayload {
     Pairing(RemotePairing),
     Server(RemoteServer),
+    HostDownload(RemoteHostDownload),
+    HostChanged(RemoteHostChanged),
+    Serving(ServingPayload),
+}
+
+/// The `remote` kinds added by compute-capacity.md 七、八. A malformed one only
+/// loses a progress bar or a status line, so it is dropped with a warning
+/// ([`ParseError::Dropped`]) rather than reported as a broken engine.
+const REMOTE_STATUS_KINDS: [&str; 3] = ["host_download", "host_changed", "serving"];
+
+/// `kind: "host_download"` (A): progress of a model download this computer
+/// asked the compute host for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteHostDownload {
+    pub model: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub state: DownloadState,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// A real-time / final model pair as `host_changed` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteModelPair {
+    pub fast: String,
+    pub r#final: String,
+}
+
+/// `kind: "host_changed"` (B): a paired computer changed this compute host's models.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteHostChanged {
+    /// The other computer's name.
+    pub by: String,
+    pub asr: RemoteModelPair,
+    pub translation: RemoteModelPair,
+}
+
+/// `serving.session`: the other computer's subtitles running here. Only the
+/// sentence count is reported, never the text (compute-capacity.md 八).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServingSession {
+    /// Unix time in milliseconds.
+    pub started_at_ms: u64,
+    pub sentences: u64,
+    pub mode: String,
+}
+
+/// `serving.metrics`: this compute host's load, the same hints as `metrics`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServingMetrics {
+    #[serde(default)]
+    pub final_busy: Option<f64>,
+    #[serde(default)]
+    pub rtf: Option<f64>,
+    pub backlog: u64,
+    #[serde(default)]
+    pub gpu: Option<GpuUsage>,
+}
+
+/// `kind: "serving"` (B): once a second while serving, every 5 s while nobody
+/// is connected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServingPayload {
+    #[serde(default)]
+    pub peer: Option<RemotePeer>,
+    #[serde(default)]
+    pub session: Option<ServingSession>,
+    #[serde(default)]
+    pub metrics: Option<ServingMetrics>,
 }
 
 /// Which side of a pairing this computer is.
@@ -343,6 +415,12 @@ pub struct RemoteServer {
 
 /// Computer names (the contract's `TrustedEntry.name` limit).
 const MAX_PEER_NAME_CHARS: usize = 64;
+/// Year 2286 in Unix milliseconds: later is a broken clock (and it stays far
+/// below 2^53, so JavaScript reads it exactly).
+const MAX_EPOCH_MS: u64 = 10_000_000_000_000;
+/// More finished sentences than one session can produce.
+const MAX_SENTENCES: u64 = 100_000_000;
+const MAX_SESSION_MODE_CHARS: usize = 32;
 /// 16 bytes as 8 groups of 4 hex digits is 39 characters; leave room, no more.
 const MAX_FINGERPRINT_CHARS: usize = 64;
 const PAIRING_DIGITS: usize = 6;
@@ -371,6 +449,9 @@ pub enum ParseError {
     NotObject,
     /// Valid JSON object that does not match the protocol.
     Shape(String),
+    /// A status-only event that failed its checks: dropped and logged as a
+    /// warning, since losing it costs a progress bar or a status line, not a session.
+    Dropped(String),
 }
 
 impl fmt::Display for ParseError {
@@ -380,6 +461,7 @@ impl fmt::Display for ParseError {
             ParseError::InvalidJson(e) => write!(f, "line is not valid JSON: {e}"),
             ParseError::NotObject => write!(f, "line is not a JSON object"),
             ParseError::Shape(e) => write!(f, "message does not match the protocol: {e}"),
+            ParseError::Dropped(e) => write!(f, "dropped an invalid status event: {e}"),
         }
     }
 }
@@ -529,10 +611,19 @@ fn parse_event(mut obj: Map<String, Value>) -> Result<EngineEvent, ParseError> {
             EngineEvent::Log(p)
         }
         "remote" => {
+            let status_kind = data
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| REMOTE_STATUS_KINDS.contains(&k));
             // An unknown or missing `kind`, role or state fails here.
-            let p: RemotePayload = serde_json::from_value(data).map_err(ctx)?;
-            validate_remote(&p)?;
-            EngineEvent::Remote(p)
+            let checked = serde_json::from_value::<RemotePayload>(data)
+                .map_err(ctx)
+                .and_then(|p| validate_remote(&p).map(|()| p));
+            match checked {
+                Ok(p) => EngineEvent::Remote(p),
+                Err(ParseError::Shape(e)) if status_kind => return Err(ParseError::Dropped(e)),
+                Err(e) => return Err(e),
+            }
         }
         _ => EngineEvent::Unknown { name },
     };
@@ -565,26 +656,87 @@ fn validate_remote(p: &RemotePayload) -> Result<(), ParseError> {
         }
         RemotePayload::Server(server) => {
             if let Some(peer) = &server.peer {
-                check_len("remote.peer.name", &peer.name, MAX_PEER_NAME_CHARS)?;
-                check_non_empty_len(
-                    "remote.peer.fingerprint",
-                    &peer.fingerprint,
-                    MAX_FINGERPRINT_CHARS,
-                )?;
-                if !peer
-                    .fingerprint
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() || b == b' ')
-                {
-                    return Err(shape(
-                        "remote.peer.fingerprint may only contain hex digits and spaces",
-                    ));
-                }
+                check_peer(peer)?;
             }
             if let Some(error) = &server.error {
                 check_len("remote.error", error, MAX_TEXT_CHARS)?;
             }
         }
+        RemotePayload::HostDownload(download) => {
+            check_model_id("remote.model", &download.model)?;
+            if let Some(error) = &download.error {
+                check_len("remote.error", error, MAX_TEXT_CHARS)?;
+            }
+        }
+        RemotePayload::HostChanged(changed) => {
+            check_len("remote.by", &changed.by, MAX_PEER_NAME_CHARS)?;
+            check_model_id("remote.asr.fast", &changed.asr.fast)?;
+            check_model_id("remote.asr.final", &changed.asr.r#final)?;
+            check_translation_model("remote.translation.fast", &changed.translation.fast)?;
+            check_translation_model("remote.translation.final", &changed.translation.r#final)?;
+        }
+        RemotePayload::Serving(serving) => {
+            if let Some(peer) = &serving.peer {
+                check_peer(peer)?;
+            }
+            if let Some(session) = &serving.session {
+                if session.started_at_ms > MAX_EPOCH_MS {
+                    return Err(shape("remote.session.started_at_ms is out of range"));
+                }
+                if session.sentences > MAX_SENTENCES {
+                    return Err(shape("remote.session.sentences is out of range"));
+                }
+                check_identifier("remote.session.mode", &session.mode, MAX_SESSION_MODE_CHARS)?;
+            }
+            if let Some(m) = &serving.metrics
+                && (m.final_busy.is_some_and(|b| !FINAL_BUSY_RANGE.contains(&b))
+                    || m.rtf.is_some_and(|r| !RTF_RANGE.contains(&r))
+                    || m.backlog > MAX_BACKLOG
+                    || m.gpu.as_ref().is_some_and(|g| !valid_gpu_usage(g)))
+            {
+                // Unlike `metrics`, nothing is repaired: the panel shows these numbers together.
+                return Err(shape("remote.metrics is out of range"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_peer(peer: &RemotePeer) -> Result<(), ParseError> {
+    check_len("remote.peer.name", &peer.name, MAX_PEER_NAME_CHARS)?;
+    check_non_empty_len(
+        "remote.peer.fingerprint",
+        &peer.fingerprint,
+        MAX_FINGERPRINT_CHARS,
+    )?;
+    if !peer
+        .fingerprint
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() || b == b' ')
+    {
+        return Err(shape(
+            "remote.peer.fingerprint may only contain hex digits and spaces",
+        ));
+    }
+    Ok(())
+}
+
+/// An ASR model id, by the same rule as the commands' arguments.
+fn check_model_id(field: &str, id: &str) -> Result<(), ParseError> {
+    crate::commands::validate_model_id(id).map_err(|e| shape(format!("{field}: {e}")))
+}
+
+/// A translation model name, or "" when the compute host has none set.
+fn check_translation_model(field: &str, name: &str) -> Result<(), ParseError> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    crate::commands::validate_translation_model(name).map_err(|e| shape(format!("{field}: {e}")))
+}
+
+fn check_identifier(field: &str, s: &str, max: usize) -> Result<(), ParseError> {
+    if s.is_empty() || s.len() > max || !s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+        return Err(shape(format!("{field} is not an identifier: {s:?}")));
     }
     Ok(())
 }
@@ -1493,6 +1645,125 @@ mod tests {
                 "{data}"
             );
         }
+    }
+
+    fn host_download_json() -> Value {
+        json!({"kind": "host_download", "model": "large-v3", "downloaded_bytes": 1024,
+               "total_bytes": 3_000_000_000_u64, "state": "downloading", "error": null})
+    }
+
+    fn host_changed_json() -> Value {
+        json!({"kind": "host_changed", "by": "DESKTOP-A",
+               "asr": {"fast": "large-v3-turbo", "final": "large-v3"},
+               "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:9b"}})
+    }
+
+    fn serving_json() -> Value {
+        json!({"kind": "serving",
+               "peer": {"name": "DESKTOP-A", "fingerprint": "05aa 3f39", "state": "connected"},
+               "session": {"started_at_ms": 1_795_000_000_000_u64, "sentences": 42, "mode": "media"},
+               "metrics": {"final_busy": 0.4, "rtf": 0.3, "backlog": 0,
+                           "gpu": {"name": "GTX 1080 Ti", "vram_used_mb": 6000.0,
+                                   "vram_total_mb": 11264.0, "util_pct": 40.0}}})
+    }
+
+    #[test]
+    fn remote_status_events_are_forwarded_in_shape() {
+        for v in [host_download_json(), host_changed_json(), serving_json()] {
+            assert_eq!(serde_json::to_value(parse_remote(v.clone())).unwrap(), v);
+        }
+        let mut done = host_download_json();
+        done["state"] = json!("error");
+        done["error"] = json!("disk full");
+        assert_eq!(
+            serde_json::to_value(parse_remote(done.clone())).unwrap(),
+            done
+        );
+        // Nobody connected: everything but the kind is null.
+        let idle = json!({"kind": "serving", "peer": null, "session": null, "metrics": null});
+        assert_eq!(
+            serde_json::to_value(parse_remote(idle.clone())).unwrap(),
+            idle
+        );
+        // A compute host without a translation model set reports "".
+        let mut unset = host_changed_json();
+        unset["translation"] = json!({"fast": "", "final": ""});
+        parse_remote(unset);
+        // Unknown load fields are null, not missing.
+        let mut sparse = serving_json();
+        sparse["metrics"] = json!({"backlog": 1});
+        let RemotePayload::Serving(s) = parse_remote(sparse) else {
+            panic!("expected serving");
+        };
+        let m = s.metrics.unwrap();
+        assert_eq!((m.final_busy, m.rtf, m.gpu), (None, None, None));
+    }
+
+    #[test]
+    fn remote_status_events_that_fail_are_dropped_not_fatal() {
+        let mut cases: Vec<Value> = Vec::new();
+        type Edit = (fn() -> Value, &'static str, Value);
+        let edits: Vec<Edit> = vec![
+            (host_download_json, "/model", json!("../x")),
+            (host_download_json, "/model", json!("")),
+            (host_download_json, "/state", json!("paused")),
+            (host_download_json, "/downloaded_bytes", json!(-1)),
+            (
+                host_download_json,
+                "/error",
+                json!("e".repeat(MAX_TEXT_CHARS + 1)),
+            ),
+            (
+                host_changed_json,
+                "/by",
+                json!("x".repeat(MAX_PEER_NAME_CHARS + 1)),
+            ),
+            (host_changed_json, "/asr/final", json!("a b")),
+            (host_changed_json, "/asr/fast", json!(null)),
+            (host_changed_json, "/translation/final", json!("../x")),
+            (serving_json, "/peer/fingerprint", json!("<img>")),
+            (serving_json, "/peer/state", json!("idle")),
+            (
+                serving_json,
+                "/session/started_at_ms",
+                json!(MAX_EPOCH_MS + 1),
+            ),
+            (serving_json, "/session/sentences", json!(MAX_SENTENCES + 1)),
+            (serving_json, "/session/sentences", json!(-1)),
+            (serving_json, "/session/mode", json!("Media")),
+            (serving_json, "/session/mode", json!("")),
+            (serving_json, "/metrics/final_busy", json!(1.5)),
+            (serving_json, "/metrics/rtf", json!(5000.0)),
+            (serving_json, "/metrics/backlog", json!(MAX_BACKLOG + 1)),
+            (serving_json, "/metrics/gpu/util_pct", json!(120.0)),
+            (
+                serving_json,
+                "/metrics/gpu/name",
+                json!("x".repeat(MAX_GPU_NAME_CHARS + 1)),
+            ),
+        ];
+        for (base, pointer, bad) in edits {
+            let mut v = base();
+            *v.pointer_mut(pointer).unwrap() = bad;
+            cases.push(v);
+        }
+        let mut no_asr = host_changed_json();
+        no_asr.as_object_mut().unwrap().remove("asr");
+        cases.push(no_asr);
+        for data in cases {
+            assert!(
+                matches!(
+                    parse(&remote_line(data.clone())),
+                    Err(ParseError::Dropped(_))
+                ),
+                "{data}"
+            );
+        }
+        // The older kinds stay protocol errors.
+        assert!(matches!(
+            parse(&remote_line(json!({"kind": "server", "listening": "yes"}))),
+            Err(ParseError::Shape(_))
+        ));
     }
 
     #[test]

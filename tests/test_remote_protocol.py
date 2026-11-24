@@ -61,6 +61,10 @@ class ClientMessageTest(unittest.TestCase):
         )
         assert isinstance(session, rp.Hello)
         self.assertEqual(session.intent, "session")
+        # compute-capacity 七：manage 改運算主機的模型（也不佔 GPU）
+        manage = rp.parse_client(rp.client_hello("0.3.1", "manage"))
+        assert isinstance(manage, rp.Hello)
+        self.assertEqual(manage.intent, "manage")
         for intent in ("admin", 1, None, ["probe"]):
             with self.subTest(intent=intent), self.assertRaises(rp.ProtocolViolation):
                 rp.parse_client(
@@ -107,46 +111,15 @@ class ClientMessageTest(unittest.TestCase):
             with self.subTest(patch=patch), self.assertRaises(rp.ProtocolViolation):
                 rp.parse_client(msg(type="session.start", mode="media", settings=patch))
 
-    def test_session_start_may_pick_the_asr_models(self) -> None:
-        # compute-capacity 三：A 可以指定模型（只有 id；裝置、精度仍用 B 的），是否已下載由 B 判斷
-        m = rp.parse_client(
-            msg(
-                type="session.start",
-                mode="media",
-                settings={"asr": {"final_model": "large-v3"}},
-            )
-        )
-        assert isinstance(m, rp.SessionStart)
-        self.assertEqual(rp.requested_models(m), {"final_model": "large-v3"})
-        merged = rp.session_settings(Settings(), m)
-        self.assertEqual(merged.asr.final_model, "large-v3")
-        self.assertEqual(merged.asr.fast_model, Settings().asr.fast_model)
-        self.assertEqual(merged.asr.device, Settings().asr.device)
-        plain = rp.parse_client(rp.client_session_start("media", Settings()))
-        assert isinstance(plain, rp.SessionStart)
-        self.assertEqual(rp.requested_models(plain), {})
-        for bad in ({"final_model": 5}, {"fast_model": ""}, {"final_model": "x" * 101}):
-            with self.subTest(bad=bad), self.assertRaises(rp.ProtocolViolation):
+    def test_session_start_can_no_longer_pick_the_asr_models(self) -> None:
+        # compute-capacity 七：A 不再指定這一場的模型（改成 host.set_models 直接改 B 的設定）
+        for asr in ({"final_model": "large-v3"}, {"fast_model": "base"}, {}):
+            with self.subTest(asr=asr), self.assertRaises(rp.ProtocolViolation):
                 rp.parse_client(
-                    msg(type="session.start", mode="media", settings={"asr": bad})
+                    msg(type="session.start", mode="media", settings={"asr": asr})
                 )
-
-    def test_client_session_start_sends_only_the_chosen_models(self) -> None:
-        # 空字串＝照運算主機的設定：不送 asr（舊版 B 不認得這個欄位）
         plain = json.loads(rp.client_session_start("media", Settings()))
         self.assertNotIn("asr", plain["settings"])
-        one = json.loads(
-            rp.client_session_start("media", Settings(), final_model="large-v3")
-        )
-        self.assertEqual(one["settings"]["asr"], {"final_model": "large-v3"})
-        both = json.loads(
-            rp.client_session_start(
-                "media", Settings(), fast_model="base", final_model="large-v3"
-            )
-        )
-        self.assertEqual(
-            both["settings"]["asr"], {"fast_model": "base", "final_model": "large-v3"}
-        )
 
     def test_session_start_settings_are_validated_like_local_ones(self) -> None:
         m = rp.parse_client(
@@ -184,6 +157,113 @@ class ClientMessageTest(unittest.TestCase):
         ):
             with self.subTest(raw=raw[:60]), self.assertRaises(rp.ProtocolViolation):
                 rp.parse_client(raw)
+
+
+class ManageMessageTest(unittest.TestCase):
+    """compute-capacity 七：A 改運算主機的模型、請它下載（`hello intent manage` 之後的一則請求）。"""
+
+    def test_set_models_round_trip(self) -> None:
+        text = rp.client_set_models(
+            {"final_model": "large-v3"}, {"fast_model": "qwen3.5:4b"}
+        )
+        m = rp.parse_client(text)
+        assert isinstance(m, rp.HostSetModels)
+        self.assertEqual(m.asr, {"final_model": "large-v3"})
+        self.assertEqual(m.translation, {"fast_model": "qwen3.5:4b"})
+        only_asr = rp.parse_client(rp.client_set_models({"fast_model": "base"}, {}))
+        assert isinstance(only_asr, rp.HostSetModels)
+        self.assertEqual(
+            (only_asr.asr, only_asr.translation), ({"fast_model": "base"}, {})
+        )
+        self.assertNotIn(
+            "translation", json.loads(rp.client_set_models({"fast_model": "base"}, {}))
+        )
+
+    def test_set_models_rejects_bad_requests(self) -> None:
+        for fields in (
+            {},  # 什麼都沒改
+            {"asr": {}},
+            {"asr": {"device": "cuda"}},  # 只能改模型
+            {"asr": {"final_model": "../evil"}},
+            {"asr": {"final_model": "x" * 101}},
+            {"asr": {"final_model": 5}},
+            {"asr": "large-v3"},
+            {"translation": {"base_url": "http://169.254.169.254/"}},
+            {"translation": {"final_model": ""}},
+            {"translation": {"final_model": " qwen"}},
+            {"translation": {"final_model": "qwen\n"}},
+            {"translation": {"final_model": "q" * 201}},
+            {"translation": {"final_model": None}},
+            # 與 A 的 Rust／TS 同一條規則（is_portable_model_name）：B 存進設定的名稱 A 一定收得下
+            {"translation": {"final_model": "qwen..x"}},
+            {"translation": {"final_model": "-qwen"}},
+            {"translation": {"final_model": "qwen 9b"}},
+            {"translation": {"final_model": "通訳モデル"}},
+            {"asr": {"final_model": "base"}, "compute": {"server_enabled": True}},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(rp.ProtocolViolation):
+                rp.parse_client(msg(type="host.set_models", **fields))
+
+    def test_set_models_accepts_ollama_style_names(self) -> None:
+        for name in ("qwen3.5:9b", "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"):
+            with self.subTest(name=name):
+                m = rp.parse_client(
+                    msg(type="host.set_models", translation={"final_model": name})
+                )
+                assert isinstance(m, rp.HostSetModels)
+                self.assertEqual(m.translation, {"final_model": name})
+
+    def test_download_request(self) -> None:
+        m = rp.parse_client(rp.client_download("large-v3"))
+        assert isinstance(m, rp.HostDownload)
+        self.assertEqual(m.model, "large-v3")
+        for fields in ({}, {"model": "../x"}, {"model": 1}, {"model": "a", "url": "x"}):
+            with self.subTest(fields=fields), self.assertRaises(rp.ProtocolViolation):
+                rp.parse_client(msg(type="host.download", **fields))
+
+    def test_replies_round_trip(self) -> None:
+        updated = rp.parse_server(rp.host_updated(HOST))
+        self.assertEqual(updated["host"], HOST)
+        # 不合格的 HostInfo 當 null（與 welcome 相同），回覆本身照收
+        with self.assertLogs("kikitori.remote.protocol", "WARNING"):
+            self.assertIsNone(rp.parse_server(rp.host_updated({"device": 1}))["host"])
+        for code in rp.HOST_ERROR_CODES:
+            with self.subTest(code=code):
+                m = rp.parse_server(rp.host_error(code, "why"))
+                self.assertEqual((m["code"], m["detail"]), (code, "why"))
+        self.assertEqual(
+            rp.parse_server(rp.host_download_started("base"))["model"], "base"
+        )
+        progress = rp.parse_server(
+            rp.host_download_progress("base", 10, 100, "downloading", None)
+        )
+        self.assertEqual(
+            (progress["downloaded_bytes"], progress["total_bytes"], progress["state"]),
+            (10, 100, "downloading"),
+        )
+        failed = rp.parse_server(
+            rp.host_download_progress("base", 0, 100, "error", "e" * 5000)
+        )
+        self.assertEqual(len(failed["error"]), rp.MAX_DETAIL_CHARS)
+
+    def test_bad_replies_are_violations(self) -> None:
+        good = json.loads(rp.host_download_progress("base", 1, 2, "downloading", None))
+        for raw in (
+            msg(type="host.error", code="rm_rf", detail="x"),
+            msg(type="host.error", code="unknown_model", detail=1),
+            msg(type="host.error", code="unknown_model", detail="x" * 501),
+            msg(type="host.download_started", model="../x"),
+            msg(type="host.download_started", model="base", extra=1),
+            json.dumps(dict(good, state="paused")),
+            json.dumps(dict(good, downloaded_bytes=-1)),
+            json.dumps(dict(good, total_bytes=True)),
+            json.dumps(dict(good, error=5)),
+            json.dumps(dict(good, model="../x")),
+            json.dumps(dict(good, extra=1)),
+            msg(type="host.updated"),
+        ):
+            with self.subTest(raw=raw[:60]), self.assertRaises(rp.ProtocolViolation):
+                rp.parse_server(raw)
 
 
 class ServerMessageTest(unittest.TestCase):
@@ -296,17 +376,76 @@ class ServerMessageTest(unittest.TestCase):
         self.assertEqual(len(rp.parse_server(text)["detail"]), rp.MAX_DETAIL_CHARS)
 
 
+class PortableModelNameTest(unittest.TestCase):
+    """翻譯模型名稱的共同規則（A 的 Rust `validate_translation_model`、TS `isTranslationModelName`）。"""
+
+    def test_accepted(self) -> None:
+        for name in (
+            "a",
+            "qwen3.5:9b",
+            "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+            "gemma3_12b-it.q4",
+            "9" + "x" * 199,
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(rp.is_portable_model_name(name))
+
+    def test_rejected(self) -> None:
+        for name in (
+            "",
+            "x" * 201,
+            " qwen",
+            "qwen ",
+            "qwen 9b",
+            "-qwen",
+            ".qwen",
+            "/qwen",
+            ":qwen",
+            "qwen..9b",
+            "hf.co/../etc",
+            "qwen\n",
+            "qwen\x00",
+            "qwen@latest",
+            "C:\\models\\qwen",
+            "通訳",
+            "ｑwen",
+            "qwen" + chr(0x202E),
+            None,
+            5,
+            ["qwen"],
+        ):
+            with self.subTest(name=repr(name)[:40]):
+                self.assertFalse(rp.is_portable_model_name(name))
+
+
 HOST: dict[str, Any] = {
     "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
     "device": "cuda",
     "compute_type": "int8_float16",
-    "current": {"fast": "large-v3-turbo", "final": "large-v3"},
+    "current": {
+        "fast": "large-v3-turbo",
+        "final": "large-v3",
+        "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:9b"},
+    },
     "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
     "models": [
-        {"id": "large-v3", "downloaded": True, "need_mb": 2140, "fit": "ok"},
-        {"id": "small", "downloaded": False, "need_mb": 650, "fit": None},
+        {
+            "id": "large-v3",
+            "downloaded": True,
+            "need_mb": 2140,
+            "fit": "ok",
+            "fit_as_fast": "tight",
+        },
+        {
+            "id": "small",
+            "downloaded": False,
+            "need_mb": 650,
+            "fit": None,
+            "fit_as_fast": None,
+        },
     ],
     "translation_model": "qwen3.5:9b",
+    "translation_models": ["qwen3.5:4b", "qwen3.5:9b", "hf.co/x/y:Q4_K_M"],
 }
 
 
@@ -331,6 +470,79 @@ class HostInfoTest(unittest.TestCase):
         self.assertEqual(self.parse(cpu), cpu)
         # 舊版 B 沒有 host：null
         self.assertIsNone(rp.parse_server(rp.welcome("0.3.1", {}))["host"])
+        # compute-capacity 七之前的 B：沒有翻譯模型的欄位，補成 null
+        old = copy.deepcopy(HOST)
+        del old["translation_models"]
+        del old["current"]["translation"]
+        parsed = self.parse(old)
+        assert isinstance(parsed, dict)
+        self.assertIsNone(parsed["translation_models"])
+        self.assertIsNone(parsed["current"]["translation"])
+        # 翻譯伺服器連不上：清單是 null
+        unreachable = with_host(translation_models=None)
+        self.assertEqual(self.parse(unreachable), unreachable)
+        # 還沒有 fit_as_fast 的 B：每個模型的 fit_as_fast 補成 null
+        no_fast = copy.deepcopy(HOST)
+        for model in no_fast["models"]:
+            del model["fit_as_fast"]
+        parsed = self.parse(no_fast)
+        assert isinstance(parsed, dict)
+        self.assertEqual([m["fit_as_fast"] for m in parsed["models"]], [None, None])
+        self.assertEqual(parsed["models"][0]["fit"], "ok")
+
+    def test_bad_translation_fields_are_dropped_alone(self) -> None:
+        # 翻譯欄位不標示任何辨識模型：只丟那一欄，辨識的部分照常顯示（與 A 的 TS 相同）
+        for changes, field in (
+            ({"translation_model": "x" * 201}, "translation_model"),
+            ({"translation_model": "qwen\x00"}, "translation_model"),
+            ({"translation_model": "qwen..9b"}, "translation_model"),
+            ({"translation_model": "通訳モデル"}, "translation_model"),
+            ({"translation_model": ""}, "translation_model"),
+            ({"translation_model": 5}, "translation_model"),
+            ({"translation_models": "qwen3.5:9b"}, "translation_models"),
+            (
+                {"translation_models": ["q"] * (rp.MAX_HOST_TRANSLATION_MODELS + 1)},
+                "translation_models",
+            ),
+        ):
+            with (
+                self.subTest(changes=str(changes)[:60]),
+                self.assertLogs("kikitori.remote.protocol", "WARNING"),
+            ):
+                parsed = self.parse(with_host(**changes))
+                assert isinstance(parsed, dict)
+                self.assertIsNone(parsed[field])
+                self.assertEqual(parsed["models"], HOST["models"])
+                self.assertEqual(parsed["gpu"], HOST["gpu"])
+        for translation in (
+            "q",
+            {"fast": "q\n", "final": "q"},
+            {"fast": "q"},
+            {"fast": "qwen..9b", "final": "qwen3.5:9b"},
+            {"fast": "qwen3.5:9b", "final": " qwen"},
+            {"fast": 5, "final": "q"},
+        ):
+            current = dict(HOST["current"], translation=translation)
+            with (
+                self.subTest(translation=translation),
+                self.assertLogs("kikitori.remote.protocol", "WARNING"),
+            ):
+                parsed = self.parse(with_host(current=current))
+                assert isinstance(parsed, dict)
+                self.assertIsNone(parsed["current"]["translation"])
+                self.assertEqual(parsed["current"]["final"], "large-v3")
+        # B 沒設翻譯模型（空字串）照收
+        empty = dict(HOST["current"], translation={"fast": "", "final": ""})
+        parsed = self.parse(with_host(current=empty))
+        assert isinstance(parsed, dict)
+        self.assertEqual(parsed["current"]["translation"], {"fast": "", "final": ""})
+
+    def test_odd_installed_translation_models_are_skipped(self) -> None:
+        listed = ["qwen3.5:4b", "", 5, "q" * 201, "qwen" + chr(0x202E), "a..b", "ok:1"]
+        with self.assertLogs("kikitori.remote.protocol", "WARNING"):
+            parsed = self.parse(with_host(translation_models=listed))
+        assert isinstance(parsed, dict)
+        self.assertEqual(parsed["translation_models"], ["qwen3.5:4b", "ok:1"])
 
     def test_unknown_fields_are_dropped(self) -> None:
         extra = with_host(script="<img onerror=x>")
@@ -369,13 +581,13 @@ class HostInfoTest(unittest.TestCase):
             with_host(models=[dict(model, id="large-v3\n")]),
             with_host(compute_type="int8\n"),
             with_host(models=[dict(model, fit="great")]),
+            with_host(models=[dict(model, fit_as_fast="great")]),
+            with_host(models=[dict(model, fit_as_fast=1)]),
             with_host(models=[dict(model, need_mb=True)]),
             with_host(models=[dict(model, need_mb=-5)]),
             with_host(models=[dict(model, downloaded="yes")]),
             with_host(models=[model, model]),  # 重複的 id
             with_host(models=["large-v3"]),
-            with_host(translation_model="x" * 201),
-            with_host(translation_model="qwen\x00"),
             {k: v for k, v in HOST.items() if k != "device"},
         )
         for host in bad:

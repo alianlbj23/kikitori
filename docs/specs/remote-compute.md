@@ -310,6 +310,8 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 | `remote.unpair` | `{spki: str, role: "peer"|"server"}`（`peer`＝允許連進來的電腦，`server`＝配對過的運算主機） | `RemoteStatus` | `invalid_params`、`remote_not_found` |
 | `remote.identity_reset` | `{}`：停止配對與監聽、刪掉並重建本機憑證、清空兩份配對清單，原本開著就用新身分繼續監聽（失敗寫進 `server.error`） | `RemoteStatus` | `invalid_params`、`session_active`（字幕進行中）、`settings_io_error` |
 | `remote.host_info` | `{}`：用 `compute.host`／`compute.port` 以 `intent: "probe"` 連一次（不開始字幕、不佔 B 的 GPU、B 忙碌時也回答），逾時 10 秒；在背景工作執行緒上處理（2026-11-24，compute-capacity） | `{host: HostInfo \| null}`（B 沒送或內容不合格時 null） | `invalid_params`、`remote_not_configured`、`remote_unreachable`（含逾時）、`remote_not_paired`、`remote_incompatible`（B 是不認得 probe 的舊版）、`remote_identity_error`、`remote_error`（B 的回應不合格） |
+| `remote.host_set_models` | `{asr?: {fast_model?, final_model?}, translation?: {fast_model?, final_model?}}`（至少一個模型；ASR 是 `[A-Za-z0-9._-]{1,100}`，翻譯模型是「可攜的模型名稱」（見下方 `HostInfo`）；其他欄位一律 `invalid_params`）：以 `intent: "manage"` 連一次，改 **B 的設定檔**（持久、下一場生效），逾時 15 秒；背景工作執行緒（2026-11-24，compute-capacity 七）。B 只檢查 registry、已下載、已安裝，**不因 `fit` 拒絕** | `{host: HostInfo \| null}`（B 套用後的能力，`fit` 依新組合重算） | `invalid_params`、`remote_not_configured`、`remote_unreachable`、`remote_not_paired`、`remote_incompatible`（B 不認得 manage）、`remote_identity_error`、`remote_unknown_model`、`remote_model_not_downloaded`、`remote_translation_model_missing`、`remote_error`（B 存不了設定，或回應不合格） |
+| `remote.host_download` | `{model}`（ASR 模型 id）：以 `intent: "manage"` 請 B 下載，等到 B 回「開始」（逾時 15 秒）；之後的進度在回應寫出後以 `remote` 事件 `host_download` 送出。B 的下載是 B 自己的，A 斷線不中斷 | `{model, started: true}` | `invalid_params`、連線錯誤（同上）、`remote_unknown_model`、`remote_download_in_progress`、`remote_error` |
 
 `RemoteStatus`：
 
@@ -335,7 +337,10 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 **事件 `remote`**（引擎 → Rust → 只送主視窗，Tauri 事件名 `engine://remote`）
 
 - `{kind: "pairing", ...PairingState}`：配對狀態每一步。
-- `{kind: "server", listening: bool, peer: {name, fingerprint, state} | null, error: str | null}`：伺服器開關、有電腦連上／斷線／等待續接時。
+- `{kind: "server", listening: bool, peer: {name, fingerprint, state} | null, error: str | null}`：伺服器開關、有電腦連上／斷線／等待續接、一場開始或結束時。
+- `{kind: "host_changed", by: str, asr: {fast, final}, translation: {fast, final}}`（B；compute-capacity 七）：配對過的電腦（`by` 是配對時的名稱）改了這台設定檔裡的模型；值是套用後的設定。介面重讀設定並通知使用者。
+- `{kind: "host_download", model, downloaded_bytes, total_bytes, state: "downloading"|"done"|"error", error: str | null}`（A；compute-capacity 七）：`remote.host_download` 的進度，約每秒一則，最後一則一定是 done 或 error。B 超過 60 秒沒有任何訊息、連線中斷或送來不合格的訊息時 `state: "error"`、`error` 以 `lost contact with the host` 或 `unexpected` 開頭（B 那邊的下載可能還在進行）。
+- `{kind: "serving", peer: {name, fingerprint, state} | null, session: {started_at_ms, sentences, mode} | null, metrics: {final_busy, rtf, backlog, gpu} | null}`（B；compute-capacity 八）：提供運算時，有電腦連著（或它的 session 等待續接）每 1 秒、沒有時每 5 秒，狀態改變（連上、斷線、一場開始或結束、開始提供運算）時立即送一次；停止提供運算後不再送。`started_at_ms` 是 Unix 毫秒；`sentences` 是這一場送出的完整字幕句數（不含「清掉即時字幕」的空結果）；`mode` 是 `media`／`interpret`；`metrics` 只在 pipeline 執行中才有，`final_busy`／`rtf`／`gpu` 與 `metrics` 事件同範圍（`gpu` 是最近一次取樣，用 CPU 時 null）。**不含字幕內容**。
 
 **遠端 session 在既有事件上的差別**
 
@@ -344,21 +349,25 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 - `metrics` 多一個 `rtt_ms`（數字或 null）。
 - 這台電腦在替別台運算時，`session.start` 回 `session_active`。
 
-**運算主機的能力與 A 選的模型**（2026-11-24，`docs/specs/compute-capacity.md`「二～四」）
+**運算主機的能力與管理運算主機的模型**（2026-11-24，`docs/specs/compute-capacity.md`「二～四」「七」「八」）
 
-- `HostInfo`（B 的 `remote/capacity.py` 組出，A 在 `remote/protocol.py` 的 `parse_host_info` 逐欄驗證，只留下列欄位；任一欄不合格整個當 null，不中斷連線）：
+- `HostInfo`（B 的 `remote/capacity.py` 組出，A 在 `remote/protocol.py` 的 `parse_host_info` 逐欄驗證，只留下列欄位，不中斷連線）。辨識的欄位（`gpu`、`device`、`compute_type`、`current.fast`／`final`、`recommended`、`models`）任一欄不合格整個當 null；翻譯的欄位（`current.translation`、`translation_model`、`translation_models`）不合格時**只丟那一欄**（`translation_models` 逐筆略過不合格的名稱，不是清單或超過 64 筆時整欄 null）：
 
   ```json
   {
     "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
     "device": "cuda",
     "compute_type": "int8_float16",
-    "current": {"fast": "large-v3-turbo", "final": "large-v3"},
+    "current": {
+      "fast": "large-v3-turbo", "final": "large-v3",
+      "translation": {"fast": "qwen3.5:4b", "final": "qwen3.5:9b"}
+    },
     "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
     "models": [
-      {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok"}
+      {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok", "fit_as_fast": "tight"}
     ],
-    "translation_model": "qwen3.5:9b"
+    "translation_model": "qwen3.5:9b",
+    "translation_models": ["qwen3.5:4b", "qwen3.5:9b"]
   }
   ```
 
@@ -366,11 +375,22 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
   - `device`：`"cuda"`／`"cpu"`（B 設定的裝置；`auto` 依硬體建議，偵測失敗時 `cpu`）。`compute_type`：完整辨識的精度（`[a-z0-9_]{1,32}`）。
   - `current`／`recommended`：`{fast, final}` 兩個模型 id（`[A-Za-z0-9._-]{1,100}`）；`recommended` 在偵測失敗時 null，`current` 必有。
   - `models`：registry 的全部 ASR 模型（≤ 32 筆、id 不重複）；`need_mb` 是單一模型的需求（CUDA 為 VRAM、CPU 為 RAM，0–1,048,576 整數）；`fit` 是「這個模型當完整辨識＋B 目前的即時模型」對照可用量：`"ok"`／`"tight"`／`"over"`，**偵測失敗、不知道可用量時 null**。
-  - `translation_model`：B 的完整路徑翻譯模型（≤ 200 個可列印字元）或 null。
-- `hello` 新增可選的 `intent: "session" | "probe"`（省略＝`session`；A 只在 probe 時送，舊版 B 照樣接受 session 的 hello）。B 先握手、後佔 GPU：`probe` 送 `welcome`（含 `host`）後以 1000 關閉，不呼叫 `_claim`；舊版 B 不認得 `intent`，以 1008 `protocol violation` 關閉，A 回 `remote_incompatible`。
+  - `fit_as_fast`（compute-capacity 七）：同一個模型改當**即時**辨識、搭 B 目前的**完整**模型時的負荷，公式與 `fit` 相同（同一個模型同精度只算一次；CUDA 也扣掉同一台的翻譯模型；精度用 B 即時路徑的設定）；值同 `fit`。A 的即時模型選單用它。沒有這欄的舊版 B 當 null；值不合格時整個 `HostInfo` 當 null（與 `fit` 相同）。
+  - **可攜的模型名稱**（翻譯模型；B 的 `is_portable_model_name`、A 的 Rust `validate_translation_model`、TS `isTranslationModelName` 同一條規則）：英數開頭、其餘只有英數與 `._:/-`、不含 `..`、1–200 字元（`^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$`）。Ollama 的名稱都符合；其他名稱（含空白、`@`、非 ASCII）B 不列給 A，只能在 B 本機設定。
+  - `translation_model`：B 的完整路徑翻譯模型；B 沒設（空字串）或不是可攜名稱時 null。
+  - `current.translation`：B 設定的 `{fast, final}` 翻譯模型，各是可攜名稱或空字串（沒設）；任一個不是時整組 null（不送半組）。compute-capacity 七之前的 B 沒有時也是 null。
+  - `translation_models`：B 的翻譯伺服器已安裝的模型中的可攜名稱（≤ 64 筆）；連不上翻譯伺服器、偵測失敗或舊版 B 時 null。
+- `hello` 新增可選的 `intent: "session" | "probe" | "manage"`（省略＝`session`；A 只在 probe／manage 時送，舊版 B 照樣接受 session 的 hello）。B 先握手、後佔 GPU：`probe` 送 `welcome`（含 `host`）後以 1000 關閉，不呼叫 `_claim`；`manage` 送 `welcome`（不重新偵測）後讀**一則**請求、回覆、以 1000 關閉，同樣不佔 GPU、B 忙碌時也處理；manage 連線上送其他訊息以 1008 關閉。舊版 B 不認得 `intent`，以 1008 `protocol violation` 關閉，A 回 `remote_incompatible`。
 - `welcome` 新增 `host: HostInfo | null`（session 與 probe 都送；B 偵測失敗時照送，`gpu`／`recommended` 為 null）。
-- `session.start` 的 `settings` 新增可選的 `asr: {fast_model?, final_model?}`（只有模型 id；裝置、精度仍用 B 的設定）。A 只送設定 `compute.remote_fast_model`／`compute.remote_final_model` 中非空的（都空時整個不送）。B 只接受 registry 裡且已下載的：不認得回 `status error` `unknown_model`、沒下載回 `model_not_downloaded`（不開始這一場）；A 都轉成 `remote_model_not_downloaded`。
-- 設定 `compute.remote_fast_model`、`compute.remote_final_model`：空字串（預設，＝照運算主機的設定）或模型 id 的格式；是否下載由 B 判斷。`settings.get`／`set` 的 `compute` 多這兩欄。
+- manage 的請求與回覆（compute-capacity 七；A 逐欄驗證，不合格的回覆是協定錯誤，`host.updated.host` 不合格時當 null）：
+
+  | A → B | B → A |
+  |---|---|
+  | `host.set_models {asr?: {fast_model?, final_model?}, translation?: {fast_model?, final_model?}}`（格式同 `remote.host_set_models`） | `host.updated {host: HostInfo \| null}` 或 `host.error {code, detail}` |
+  | `host.download {model}` | `host.download_started {model}`，接著 `host.download_progress {model, downloaded_bytes, total_bytes, state, error}`（每秒一則，進度沒變也送；0–2⁵³ 的整數、`error` ≤ 500 字）直到 done／error，然後 1000 關閉；或 `host.error` |
+
+  `host.error.code`：`unknown_model`、`model_not_downloaded`、`translation_model_missing`、`download_in_progress`、`settings_error`（`detail` ≤ 500 字）。A 的錯誤碼：前四個加 `remote_` 前綴，`settings_error` → `remote_error`。`settings_error` 包括：B 的設定檔壞掉（B 以預設值運作，**不寫入**，免得「預設值＋A 的修改」蓋掉 B 的設定；要在 B 上修好）、存檔失敗、下載執行緒開不起來（登記已撤銷，可以再要求）。`detail` 是固定的英文字句，**不含 B 的檔案路徑或例外原文**（完整內容只寫在 B 的 log）。B 的翻譯模型清單先看偵測快取（30 秒，不偵測）；要求的模型不在清單裡、或沒有快取時重新偵測一次再判斷——一個請求最多偵測一次，套用後的 `host.updated` 用同一份快取（只改 ASR 時，套用後才可能偵測那一次）。B 不因 `fit` 拒絕（超出負荷由 A 的介面警告）。
+- **已移除**（2026-11-24，被上一項取代）：`session.start` 的 `settings.asr`（現在帶了是協定錯誤，B 以 1008 關閉）與設定 `compute.remote_fast_model`／`compute.remote_final_model`（`settings.get` 不再有；開發版寫過的設定檔讀得進來、這兩欄被忽略，`settings.set` 帶了也只是忽略）。遠端 session 一律用 B 設定裡的模型。
 
 **Tauri 指令**（只進 `capabilities/main.json`；Rust 端再驗一次格式才轉給引擎）
 
@@ -386,6 +406,8 @@ Python 引擎、Rust 橋接與介面三邊照這份實作；改動要三邊一�
 | `remote_unpair` | `spki: string, role: "peer" \| "server"` | `remote.unpair` |
 | `remote_identity_reset` | — | `remote.identity_reset` |
 | `remote_host_info` | — | `remote.host_info`（結果再驗證一次 `HostInfo`，規則同上） |
+| `remote_host_set_models` | `asr?: {fastModel?, finalModel?}, translation?: {fastModel?, finalModel?}` | `remote.host_set_models`（結果再驗證 `HostInfo`） |
+| `remote_host_download` | `model: string` | `remote.host_download` |
 
 Rust 端驗證：`host` 1–253 字、只有 `[A-Za-z0-9.:-]`；`listenHost` 是 IP 位址；`port` 1024–65535；`digits` 去掉空白後 6 個 ASCII 數字（全形由介面先轉）；`spki` 64 個小寫十六進位；`role` 列舉。`remote` 事件：`kind`／`role`／`state`／`code` 列舉或識別字、`digits` 只能是 6 位數字、名稱 ≤ 64 字、`fingerprint` 只有十六進位與空白。
 

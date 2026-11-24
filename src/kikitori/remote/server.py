@@ -13,8 +13,14 @@
   同一台電腦（同一個 SPKI）的新連線取代舊連線：Wi-Fi 斷線通常沒有 FIN／RST，不取代的話
   A 重連時會被自己還沒逾時的舊連線擋成 `busy`（設計審查第 1 點）。
 - **先握手、後佔 GPU**（docs/specs/compute-capacity.md「三」）：`hello {intent: probe}` 只回
-  `welcome`（含這台的能力 `host`，見 `remote.capacity`）就關閉，不佔 GPU、忙碌時也回答；
-  A 在 `session.start` 指定的 ASR 模型只接受 registry 裡、這台已下載的。
+  `welcome`（含這台的能力 `host`，見 `remote.capacity`）就關閉，不佔 GPU、忙碌時也回答。
+- **A 管理這台的模型**（compute-capacity「七」）：`hello {intent: manage}` 之後只處理一則
+  `host.set_models`／`host.download` 就關閉，同樣不佔 GPU。這裡只檢查 registry、已下載、
+  翻譯模型已安裝（不看 `fit`：超出負荷由 A 的介面警告，使用者執意要選仍然可以），實際寫設定
+  與下載交給宿主（`remote.manage.HostManager`）；下載是這台自己的，A 斷線不中斷。
+- 每場用的一律是這台設定裡的模型；`session_models()` 記下這場實際載入的（場中被 A 改了設定
+  也一樣），`session_info()`／`current_load()` 給這台的畫面顯示「正在替誰處理」與負荷
+  （compute-capacity「八」，只有句數、不含字幕內容）。
 - **送出只經過 `Link`**（單一寫入執行緒、有上限的佇列、看門狗）：pipeline 的 worker 執行緒
   與 metrics 不直接碰網路，連線卡住時不會把 pipeline 一起卡死（設計審查第 2 點）。
 - **log 不記**音訊與字幕內容。
@@ -25,7 +31,7 @@ import ssl
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
@@ -34,7 +40,12 @@ from websockets.sync.server import Server, ServerConnection, serve
 
 from kikitori.asr.registry import MODELS
 from kikitori.config import Settings
-from kikitori.engine.events import MetricsReporter, gpu_sampler_for, subtitle_event
+from kikitori.engine.events import (
+    MetricsReporter,
+    gpu_sampler_for,
+    metrics_event,
+    subtitle_event,
+)
 from kikitori.pipeline import Pipeline, PipelineState, SubtitleUpdate
 from kikitori.pipeline.factory import pipeline_config
 from kikitori.pipeline.metrics import PipelineMetrics
@@ -43,10 +54,19 @@ from kikitori.remote import protocol as rp
 from kikitori.remote.capacity import HostCapacitySource, default_downloaded
 from kikitori.remote.identity import Identity, spki_sha256_der
 from kikitori.remote.link import Link
+from kikitori.remote.manage import (
+    DOWNLOAD_START_DETAIL,
+    LIST_MODELS_DETAIL,
+    SETTINGS_SAVE_DETAIL,
+    HostManageError,
+    HostManager,
+    ProgressRelay,
+)
 from kikitori.remote.network import is_allowed_source
 from kikitori.remote.pairing import TrustStore
 from kikitori.remote.sockets import SafeServerConnection
 from kikitori.remote.source import PushSource, PushSourceOverflow
+from kikitori.translate.presets import normalize_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +89,8 @@ RETAIN_SECS = 45.0
 """斷線後保留 session 多久（從最後收到訊息起算）：必須比 A 放棄重連的 30 秒長（規格「斷線重連」）。"""
 MAX_REPLAY = 64
 """續接時最多補送幾則完整字幕。"""
+PROGRESS_SECS = 1.0
+"""`host.download_progress` 的間隔：進度沒變也送，A 才分得出「還在下載」與「斷線」。"""
 
 ComponentBuilder = Callable[..., PipelineComponents]
 """`(settings, mode, *, progress, cancelled)` → 元件（`pipeline.factory.build_session_components`）。"""
@@ -113,7 +135,14 @@ class _Session:
         self.mode = mode
         self.owner = owner
         self.models = models
-        """這一場的（即時, 完整）ASR 模型：A 可以指定，不一定是 B 設定裡的（給「使用中」判斷）。"""
+        """這一場載入的（即時, 完整）ASR 模型（給「使用中」判斷）：場中 A 可能改了 B 的設定，
+        但這場仍用開始時的模型。"""
+        self.started_at_ms = int(time.time() * 1000)
+        """開始的時間（Unix 毫秒；B 的畫面顯示處理了多久）。"""
+        self.sentences = 0
+        """這場送出的完整字幕句數（只計數，B 的畫面不顯示 A 的字幕內容）；受 `_out_lock` 保護。"""
+        self.gpu: dict[str, Any] | None = None
+        """最近一則 metrics 的 GPU 使用量（B 的畫面用，不另外跑 nvidia-smi）。"""
         self.source = PushSource(MAX_PENDING_SAMPLES)
         self.cancelled = threading.Event()
         self.pipeline: Pipeline | None = None
@@ -182,9 +211,27 @@ class _Session:
         with self._out_lock:
             if update.is_final:
                 self._finals.append((update.utterance_id, text))
+                # 原文與譯文都是空的完整結果是「清掉即時字幕」，不是一句
+                if update.original or update.translation:
+                    self.sentences += 1
             out = self._out
         if out is not None:
             out.send(text)
+
+    def info(self) -> dict[str, Any]:
+        """`{started_at_ms, sentences, mode}`（compute-capacity 八的 `serving.session`）。"""
+        with self._out_lock:
+            sentences = self.sentences
+        return {
+            "started_at_ms": self.started_at_ms,
+            "sentences": sentences,
+            "mode": self.mode,
+        }
+
+    def send_metrics(self, name: str, data: Mapping[str, Any]) -> None:
+        """metrics（即時訊息）；順便記下 GPU 使用量給這台的畫面。"""
+        self.gpu = data.get("gpu")
+        self.send(rp.event(name, dict(data)))
 
     def send_status(
         self,
@@ -223,6 +270,8 @@ class RemoteServer:
         retain_secs: float = RETAIN_SECS,
         on_change: Callable[[], None] | None = None,
         capacity: HostCapacitySource | None = None,
+        manager: HostManager | None = None,
+        progress_interval: float = PROGRESS_SECS,
     ) -> None:
         """
         Args:
@@ -238,12 +287,18 @@ class RemoteServer:
             metrics_interval: metrics 的間隔（秒）。
             retain_secs: 斷線後保留 session 多久（從最後收到訊息起算；測試用較短的值）。
             on_change: 連線中的電腦或它的狀態改變時呼叫（有電腦連上、斷線、等待續接、
-                離開）；給介面更新「目前連線中的電腦」。在連線執行緒上呼叫，不能阻塞。
-            capacity: B 的能力（`welcome.host`）與已下載的模型（檢查 A 指定的模型）；
-                通常是 `remote.capacity.HostCapacity`。None 時 `host` 為 null、已下載的模型
-                直接查這台電腦的模型快取。
+                離開、一場開始或結束）；給介面更新「目前連線中的電腦」。在連線執行緒上呼叫，
+                不能阻塞。
+            capacity: B 的能力（`welcome.host`）、已下載的模型與已安裝的翻譯模型（檢查 A 要改的
+                模型）；通常是 `remote.capacity.HostCapacity`。None 時 `host` 為 null、已下載的
+                模型直接查這台電腦的模型快取、翻譯模型一律當作沒安裝。
+            manager: 套用 A 要改的模型、開始下載（`hello intent manage`）；None 時這類請求一律
+                回 `settings_error`。
+            progress_interval: 轉送下載進度的間隔（秒；測試用較短的值）。
         """
         self._capacity = capacity
+        self._manager = manager
+        self._progress_interval = progress_interval
         self._identity = identity
         self._trust = trust
         self._settings = settings
@@ -355,15 +410,22 @@ class RemoteServer:
             return "waiting_resume" if self._session is not None else None
 
     def session_models(self) -> tuple[str, ...]:
-        """目前這一場（含等待續接的）用的（即時, 完整）ASR 模型；沒有時空的。
+        """目前這一場（含等待續接的）載入的（即時, 完整）ASR 模型；沒有時空的。
 
-        A 可以指定 B 的模型，所以不一定是 B 設定裡的；B 的引擎據此判斷模型「使用中」。
+        是這場開始時這台設定裡的模型：場中 A 可以改這台的設定（下一場才生效），所以不一定
+        等於現在的設定；B 的引擎據此判斷模型「使用中」。
         """
         with self._lock:
             session = self._session
         if session is None or session.models is None:
             return ()
         return session.models
+
+    def session_info(self) -> dict[str, Any] | None:
+        """目前這一場（含等待續接的）的 `{started_at_ms, sentences, mode}`；沒有時 None。"""
+        with self._lock:
+            session = self._session
+        return None if session is None else session.info()
 
     def current_metrics(self) -> PipelineMetrics | None:
         """目前這一場的負荷（唯讀快照；無介面主機的「目前負荷」用）；沒有執行中的 pipeline 時 None。"""
@@ -373,6 +435,24 @@ class RemoteServer:
         if pipeline is None or pipeline.state != "running":
             return None
         return pipeline.metrics()
+
+    def current_load(self) -> dict[str, Any] | None:
+        """這台畫面上的負荷 `{final_busy, rtf, backlog, gpu}`；沒有執行中的 pipeline 時 None。
+
+        `final_busy`／`rtf` 與 metrics 事件一樣收斂範圍；`gpu` 用最近一則 metrics 取樣的。
+        """
+        metrics = self.current_metrics()
+        if metrics is None:
+            return None
+        with self._lock:
+            session = self._session
+        event = metrics_event(metrics, 0, None)
+        return {
+            "final_busy": event["final_busy"],
+            "rtf": event["rtf"],
+            "backlog": event["backlog"],
+            "gpu": None if session is None else session.gpu,
+        }
 
     def disconnect(self, spki: bytes | None = None) -> bool:
         """斷開正在使用的電腦（連線中或等待續接；`spki` 指定時只在是它的時候）。
@@ -495,6 +575,13 @@ class RemoteServer:
             link.close(1000, "probe answered")
             link.join(5.0)
             return
+        if hello.intent == "manage":
+            try:
+                self._manage(connection, link, spki)
+            finally:
+                link.close(1000, "request handled")
+                link.join(5.0)
+            return
         done = threading.Event()
         if not self._claim(spki, link, done):
             link.send(rp.busy("this computer is busy (another session is running)"))
@@ -517,9 +604,7 @@ class RemoteServer:
                 if isinstance(parsed, rp.SessionStart):
                     if session is not None and not session.ended.is_set():
                         raise rp.ProtocolViolation("a session is already running")
-                    # 被拒（A 指定的模型不能用）時留著原本的（已結束的）session：連線結束時
-                    # 照樣由 _leave 收拾，GPU 使用權才會歸還
-                    session = self._start_session(link, spki, parsed) or session
+                    session = self._start_session(link, spki, parsed)
                 elif isinstance(parsed, rp.SessionResume):
                     if session is not None:
                         raise rp.ProtocolViolation("this connection has a session")
@@ -538,8 +623,8 @@ class RemoteServer:
                         session.pipeline.set_translation_enabled(parsed.enabled)
                 elif isinstance(parsed, rp.Ping):
                     link.send(rp.pong(parsed.nonce))
-                else:  # 第二次 hello
-                    raise rp.ProtocolViolation("unexpected hello")
+                else:  # 第二次 hello、session 連線上的管理請求
+                    raise rp.ProtocolViolation(f"unexpected {type(parsed).__name__}")
         except TimeoutError:
             logger.info("remote client idle for %.0f s; closing", IDLE_TIMEOUT)
             lost = True
@@ -615,14 +700,79 @@ class RemoteServer:
             logger.exception("cannot describe this computer's capabilities")
             return None
 
-    def _model_problem(self, requested: Mapping[str, str]) -> tuple[str, str] | None:
-        """A 指定的 ASR 模型能不能用：`(code, detail)`，可以用時 None。
+    def _peer_name(self, spki: bytes) -> str:
+        """配對時記下的名稱（給「〇〇 把辨識模型改成…」）；找不到時 `?`。"""
+        return next((p.name for p in self._trust.peers() if p.spki == spki), "?")
 
-        只接受 registry 裡、這台已下載的模型：A 不能叫 B 載入任意路徑，也不能叫 B 下載。
+    # --- 管理（compute-capacity 七） ------------------------------------------------
+
+    def _manage(self, connection: ServerConnection, link: Link, spki: bytes) -> None:
+        """`hello intent manage` 之後：讀一則請求、處理、回覆（呼叫端關閉連線）。不佔 GPU。"""
+        link.send(self._welcome(detect=False))
+        try:
+            request = rp.parse_client(_text(connection.recv(timeout=IDLE_TIMEOUT)))
+        except TimeoutError:
+            logger.info("remote client sent no manage request in %.0f s", IDLE_TIMEOUT)
+            return
+        except rp.ProtocolViolation as exc:
+            logger.warning("remote client sent an invalid manage request: %s", exc)
+            link.close(1008, "protocol violation")
+            return
+        except ConnectionClosed:
+            logger.info("remote client left before its manage request")
+            return
+        by = self._peer_name(spki)
+        if isinstance(request, rp.HostSetModels):
+            link.send(self._set_models(by, request))
+        elif isinstance(request, rp.HostDownload):
+            self._download(link, by, request.model)
+        else:
+            logger.warning(
+                "remote client sent %s on a manage connection", type(request).__name__
+            )
+            link.close(1008, "protocol violation")
+
+    def _set_models(self, by: str, request: rp.HostSetModels) -> str:
+        """檢查後交給宿主套用；回 `host.updated`（新的能力，fit 依新組合重算）或 `host.error`。"""
+        problem = self._asr_problem(request.asr.values()) if request.asr else None
+        if problem is None and request.translation:
+            problem = self._translation_problem(request.translation.values())
+        if problem is not None:
+            code, detail = problem
+            logger.warning("refused to change this computer's models: %s", detail)
+            return rp.host_error(code, detail)
+        if self._manager is None:
+            return rp.host_error(
+                "settings_error", "this computer cannot change its models remotely"
+            )
+        try:
+            self._manager.set_models(by, dict(request.asr), dict(request.translation))
+        except HostManageError as exc:
+            logger.warning("cannot change this computer's models: %s", exc.detail)
+            return rp.host_error(exc.code, exc.detail)
+        except Exception:
+            # 宿主的程式錯誤也要回答 A（否則 A 只看到連線中斷）；例外原文可能含這台的
+            # 檔案路徑，只留在 log
+            logger.exception("changing this computer's models failed")
+            return rp.host_error("settings_error", SETTINGS_SAVE_DETAIL)
+        logger.info(
+            "%s changed this computer's models: asr %s, translation %s",
+            by,
+            request.asr,
+            request.translation,
+        )
+        # fit 依新的組合重算，A 的介面才能顯示目前組合會不會超出負荷。檢查翻譯模型時快取已經
+        # 是新的（用了快取或剛重新偵測），不再偵測；只改 ASR 時這是這個請求唯一一次可能的
+        # 偵測（快取有效時也不會真的偵測），不讓過期的快取把 fit 變成「無法判斷」
+        return rp.host_updated(self._host_info(detect=not request.translation))
+
+    def _asr_problem(self, models: Iterable[str]) -> tuple[str, str] | None:
+        """ASR 模型能不能設成這台的模型：`(code, detail)`，可以時 None。
+
+        只接受 registry 裡、這台已下載的：A 不能叫 B 載入任意路徑。不看 `fit`。
         """
-        if not requested:
-            return None
-        unknown = [m for m in requested.values() if m not in MODELS]
+        wanted = list(dict.fromkeys(models))
+        unknown = [m for m in wanted if m not in MODELS]
         if unknown:
             return (
                 "unknown_model",
@@ -634,12 +784,12 @@ class RemoteServer:
                 if self._capacity is None
                 else self._capacity.downloaded_models()
             )
-        except Exception as exc:
-            # OSError 以外（模型目錄格式錯誤等）也回 status error：否則例外穿過 _handle，
-            # A 只看到連線中斷
+        except Exception:
+            # 判斷不了是否已下載時保守地當作沒有：設成沒下載的模型，下一場會載入失敗。
+            # 例外原文（可能含模型資料夾的路徑）只留在 log
             logger.exception("cannot list the downloaded ASR models")
-            return "load_error", f"cannot list the downloaded models: {exc}"
-        missing = [m for m in dict.fromkeys(requested.values()) if m not in downloaded]
+            return "model_not_downloaded", LIST_MODELS_DETAIL
+        missing = [m for m in wanted if m not in downloaded]
         if missing:
             return (
                 "model_not_downloaded",
@@ -647,18 +797,99 @@ class RemoteServer:
             )
         return None
 
+    def _translation_problem(self, names: Iterable[str]) -> tuple[str, str] | None:
+        """翻譯模型是否已安裝在這台的翻譯伺服器：`(code, detail)`，可以時 None。
+
+        已安裝的清單先看快取（不偵測）；不在清單裡、或沒有快取時才重新偵測一次再判斷：使用者
+        剛在這台拉完的模型不會被誤判成沒安裝，一個請求也最多偵測一次（每次數秒，A 在等）。
+        """
+        wanted = list(dict.fromkeys(names))
+        missing = self._missing_translation_models(wanted, detect=False)
+        if missing != [] and self._capacity is not None:
+            self._capacity.invalidate()
+            missing = self._missing_translation_models(wanted, detect=True)
+        if missing is None:
+            return (
+                "translation_model_missing",
+                "cannot reach the translation server on the compute host",
+            )
+        if missing:
+            return (
+                "translation_model_missing",
+                f"{', '.join(missing)} is not installed on the compute host",
+            )
+        return None
+
+    def _missing_translation_models(
+        self, wanted: list[str], *, detect: bool
+    ) -> list[str] | None:
+        """`wanted` 裡沒安裝的；不知道已安裝哪些（沒有快取、連不上翻譯伺服器）時 None。"""
+        info = self._host_info(detect=detect)
+        installed = None if info is None else info.get("translation_models")
+        if installed is None:
+            return None
+        have = {normalize_model_name(str(name)) for name in installed}
+        return [m for m in wanted if normalize_model_name(m) not in have]
+
+    def _download(self, link: Link, by: str, model: str) -> None:
+        """請宿主下載 `model`，把進度轉給 A 直到結束；A 離開就不再轉送（下載照常）。"""
+        if model not in MODELS:
+            link.send(
+                rp.host_error(
+                    "unknown_model", f"this computer does not know the model {model}"
+                )
+            )
+            return
+        if self._manager is None:
+            link.send(
+                rp.host_error(
+                    "settings_error", "this computer cannot download models remotely"
+                )
+            )
+            return
+        relay = ProgressRelay()
+        try:
+            self._manager.start_download(by, model, relay.update)
+        except HostManageError as exc:
+            logger.warning("cannot download %s for %s: %s", model, by, exc.detail)
+            link.send(rp.host_error(exc.code, exc.detail))
+            return
+        except Exception:
+            # 例外原文可能含這台的檔案路徑：只留在 log
+            logger.exception("starting the download of %s failed", model)
+            link.send(rp.host_error("settings_error", DOWNLOAD_START_DETAIL))
+            return
+        logger.info("%s asked this computer to download %s", by, model)
+        link.send(rp.host_download_started(model))
+        while True:
+            snapshot = relay.wait(self._progress_interval)
+            with self._lock:
+                closing = self._closing
+            if link.closed or closing:
+                logger.info("stopped reporting the download of %s; it goes on", model)
+                return
+            if snapshot is None:
+                # 宿主還沒回報：照樣送一則，A 才知道 B 還在（A 沒收到任何訊息 60 秒就放棄）
+                link.send(rp.host_download_progress(model, 0, 0, "downloading", None))
+                continue
+            link.send(
+                rp.host_download_progress(
+                    model,
+                    snapshot.downloaded,
+                    snapshot.total,
+                    snapshot.state,
+                    snapshot.error,
+                )
+            )
+            if snapshot.state != "downloading":
+                return
+
     # --- session -----------------------------------------------------------
 
     def _start_session(
         self, link: Link, owner: bytes, start: rp.SessionStart
-    ) -> _Session | None:
-        """開始一場；A 指定的模型不能用時送 `status error`（不開始）並回 None。"""
-        problem = self._model_problem(rp.requested_models(start))
-        if problem is not None:
-            code, detail = problem
-            logger.warning("refused a remote session: %s", detail)
-            link.send(rp.status("error", detail, code))
-            return None
+    ) -> _Session:
+        """開始一場（模型用這台的設定；A 只帶白名單內的設定）。"""
         settings = rp.session_settings(self._settings(), start)
         # A 不續接、直接開新的一場：保留中的舊 session（同一台電腦的）先結束、釋放模型
         self._drop_retained()
@@ -679,6 +910,7 @@ class RemoteServer:
             name=f"remote-session-{session.id}",
             daemon=True,
         ).start()
+        self._changed()  # 這台的畫面立刻顯示「正在替〇〇處理」
         return session
 
     def _resume(
@@ -789,7 +1021,7 @@ class RemoteServer:
             session.metrics = MetricsReporter(
                 session.id,
                 pipeline,
-                lambda name, data: session.send(rp.event(name, dict(data))),
+                session.send_metrics,
                 self._metrics_interval,
                 gpu_usage=None if sampler is None else sampler.get,
             )
@@ -830,8 +1062,11 @@ class RemoteServer:
             if session.retain is not None:
                 session.retain.cancel()
                 session.retain = None
-            if self._session is session:
+            current = self._session is session
+            if current:
                 self._session = None
+        if current:
+            self._changed()
         session.cancelled.set()
         with session.lock:  # 等進行中的 pipeline.start() 完成（見 `_load`）
             pipeline = session.pipeline

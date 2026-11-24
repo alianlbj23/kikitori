@@ -271,10 +271,9 @@ class ComputeSettings:
             Tailscale 位址選一個。
         listen_port: 當運算主機時監聽的埠（配對用它＋1）。與 `port` 分開：這台既連別台、
             也被別台連時兩者可以不同。
-        remote_fast_model: 遠端運算時要運算主機用的即時辨識模型（asr registry 的 id）；
-            空字串＝照運算主機的設定。只影響這台送去的 session，不改運算主機的設定檔；
-            是否已下載由運算主機判斷（docs/specs/compute-capacity.md「四」）。
-        remote_final_model: 同上，完整辨識模型。
+
+    遠端運算用的模型一律是運算主機自己設定裡的；要換就從這台改運算主機的設定
+    （`remote.host_set_models`，docs/specs/compute-capacity.md「七」）。
     """
 
     mode: Literal["local", "remote"] = "local"
@@ -283,8 +282,6 @@ class ComputeSettings:
     server_enabled: bool = False
     listen_host: str = ""
     listen_port: int = DEFAULT_COMPUTE_PORT
-    remote_fast_model: str = ""
-    remote_final_model: str = ""
 
 
 def _default_media() -> ModeSettings:
@@ -394,8 +391,6 @@ class Settings:
                 "server_enabled": self.compute.server_enabled,
                 "listen_host": self.compute.listen_host,
                 "listen_port": self.compute.listen_port,
-                "remote_fast_model": self.compute.remote_fast_model,
-                "remote_final_model": self.compute.remote_final_model,
             },
             "subtitle": copy.deepcopy(self.subtitle),
             "ui": copy.deepcopy(self.ui),
@@ -913,8 +908,7 @@ def _parse_compute(data: Mapping[str, Any]) -> ComputeSettings:
             "server_enabled",
             "listen_host",
             "listen_port",
-            "remote_fast_model",
-            "remote_final_model",
+            *_RETIRED_COMPUTE_KEYS,
         ),
     )
     host = section.get("host", default.host)
@@ -947,29 +941,14 @@ def _parse_compute(data: Mapping[str, Any]) -> ComputeSettings:
             "compute.listen_port",
             *COMPUTE_LISTEN_PORT_RANGE,
         ),
-        remote_fast_model=_remote_model(section, "remote_fast_model", default),
-        remote_final_model=_remote_model(section, "remote_final_model", default),
     )
 
 
-def _remote_model(
-    section: Mapping[str, Any], name: str, default: ComputeSettings
-) -> str:
-    """`compute.remote_*_model`：空字串或 ASR 模型 id 的格式（與 `asr.*_model` 相同）。
+_RETIRED_COMPUTE_KEYS = ("remote_fast_model", "remote_final_model")
+"""已移除的 `compute` 欄位（compute-capacity「四」的「A 指定這場的模型」，被「七」取代）。
 
-    不檢查是否在 registry 裡：模型在運算主機上，是否認得、是否已下載由它判斷；這裡擋的是
-    不像 id 的值（路徑、空白、過長），讓設定檔照樣讀得進來。
-    """
-    value = section.get(name, getattr(default, name))
-    if not isinstance(value, str) or (
-        value
-        and (len(value) > MAX_ASR_MODEL_CHARS or not _ASR_MODEL_ID.fullmatch(value))
-    ):
-        raise SettingsError(
-            f"compute.{name}: expected an empty string or a model id (letters, digits, "
-            f"'.', '_', '-'; at most {MAX_ASR_MODEL_CHARS} characters), got {value!r}"
-        )
-    return value
+開發中的版本寫過這兩欄：讀到時忽略、下次存檔就消失，不讓整份設定因為「未知欄位」讀不進來。
+"""
 
 
 def _legacy_listen_port(section: Mapping[str, Any], default: ComputeSettings) -> int:

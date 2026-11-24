@@ -8,6 +8,12 @@
   同精度只算一份權重），建議組合沿用 `hardware.recommend()`，不另寫一份規則。
 - `HostCapacity` 把偵測（nvidia-smi、連翻譯伺服器，數秒）快取 30 秒：A 連線時才問，不必每次
   重跑；「哪些模型已下載」每次重查（只看檔案，毫秒等級），A 指定模型時才判斷得準。
+- `fit_as_fast`：同一個模型改當即時辨識（搭 B 目前的完整模型）時的負荷，A 的即時模型選單用；
+  與 `fit` 同一套公式（`combined_need_mb`）。
+- `current.translation`／`translation_models`（compute-capacity「七」）：B 設定的翻譯模型與翻譯
+  伺服器已安裝的模型（偵測時 `GET /models` 的結果），給 A 的翻譯模型選單與 B 檢查 A 要改的模型。
+  只放 A 收得下的名稱（`remote.protocol.is_portable_model_name`）：A 選了 B 列出的名稱，
+  卻被 A 自己的驗證擋下，使用者會無從理解。
 - 本模組不匯入 engine：remote.host 在 engine 載入的途中就會被匯入，反過來匯入會循環。
 """
 
@@ -30,6 +36,7 @@ from kikitori.hardware.recommend import (
 )
 from kikitori.hardware.translation_server import is_loopback_host
 from kikitori.hardware.types import AsrChoice, HardwareInfo, LanguageSelection
+from kikitori.remote.protocol import is_portable_model_name
 from kikitori.translate.presets import normalize_model_name, preset_for_model
 
 logger = logging.getLogger(__name__)
@@ -41,7 +48,8 @@ CPU_RAM_FRACTION = 0.7
 OK_RATIO = 0.8
 """合計需求 ≤ 可用量的 80% 才算「跑得動」；80–100% 是「可能吃緊」（其他程式一多就不夠）。"""
 MAX_GPU_NAME_CHARS = 64
-MAX_TRANSLATION_MODEL_CHARS = 200
+MAX_TRANSLATION_MODELS = 64
+"""`translation_models` 最多幾筆（與 A 端驗證的上限相同；Ollama 很少裝這麼多）。"""
 
 Device = Literal["cuda", "cpu"]
 Fit = Literal["ok", "tight", "over"]
@@ -85,15 +93,31 @@ def model_need_mb(model: str, device: Device, compute_type: str) -> int:
     return asr_ram_need_mb([choice])
 
 
-def combined_need_mb(settings: Settings, device: Device, final_model: str) -> int:
-    """`final_model` 當完整辨識、搭配 B 目前的即時辨識模型時的合計需求（MiB）。
+def combined_need_mb(
+    settings: Settings,
+    device: Device,
+    *,
+    fast: str | None = None,
+    final: str | None = None,
+) -> int:
+    """即時與完整辨識模型一起載入時的合計需求（MiB）。
 
-    同一個模型、同精度只算一份權重（`asr_vram_need_mb` 的規則，與 pipeline 實際載入一致）。
+    `fast`／`final` 是候選模型，取代 B 設定裡的那一路（None＝用 B 目前的）；精度仍是 B 設定的
+    那一路的精度。`fit` 換完整、`fit_as_fast` 換即時，用的是同一個公式。同一個模型、同精度只算
+    一份權重（`asr_vram_need_mb` 的規則，與 pipeline 實際載入一致）。
     """
     asr = settings.asr
     choices = [
-        AsrChoice(asr.fast_model, device, _compute_type(asr.fast_compute_type, device)),
-        AsrChoice(final_model, device, _compute_type(asr.final_compute_type, device)),
+        AsrChoice(
+            asr.fast_model if fast is None else fast,
+            device,
+            _compute_type(asr.fast_compute_type, device),
+        ),
+        AsrChoice(
+            asr.final_model if final is None else final,
+            device,
+            _compute_type(asr.final_compute_type, device),
+        ),
     ]
     if device == "cuda":
         return asr_vram_need_mb(choices)
@@ -152,6 +176,36 @@ def fit_for(need_mb: int, available: float | None) -> Fit | None:
     return "over"
 
 
+def installed_translation_models(info: HardwareInfo | None) -> list[str] | None:
+    """B 的翻譯伺服器已安裝的模型（偵測時 `GET /models` 的結果）；不知道時 None。
+
+    名稱照伺服器列的（A 選了之後原樣寫進 B 的設定）；A 收不下的名稱略過，最多
+    `MAX_TRANSLATION_MODELS` 筆，A 端驗證才不會因為一台裝了很多模型的 B 把清單丟掉。
+    """
+    if info is None or info.translation_server.models is None:
+        return None
+    names = [
+        name
+        for name in dict.fromkeys(info.translation_server.models)
+        if is_portable_model_name(name)
+    ]
+    return names[:MAX_TRANSLATION_MODELS]
+
+
+def current_translation(settings: Settings) -> dict[str, str] | None:
+    """`current.translation`：B 設定的 `{fast, final}` 翻譯模型；A 收不下時整組 None。
+
+    空字串（沒設那一路）照送。不送半組：A 的選單會把缺的那一路當成「沒設」，誤導使用者。
+    """
+    pair = {
+        "fast": settings.translation.fast_model,
+        "final": settings.translation.final_model,
+    }
+    if all(name == "" or is_portable_model_name(name) for name in pair.values()):
+        return pair
+    return None
+
+
 def build_host_info(
     settings: Settings,
     info: HardwareInfo | None,
@@ -191,7 +245,11 @@ def build_host_info(
         },
         "device": device,
         "compute_type": final_type,
-        "current": {"fast": settings.asr.fast_model, "final": settings.asr.final_model},
+        "current": {
+            "fast": settings.asr.fast_model,
+            "final": settings.asr.final_model,
+            "translation": current_translation(settings),
+        },
         "recommended": None
         if recommendation is None
         else {
@@ -203,13 +261,19 @@ def build_host_info(
                 "id": spec.id,
                 "downloaded": spec.id in have,
                 "need_mb": model_need_mb(spec.id, device, final_type),
-                "fit": fit_for(combined_need_mb(settings, device, spec.id), available),
+                "fit": fit_for(
+                    combined_need_mb(settings, device, final=spec.id), available
+                ),
+                "fit_as_fast": fit_for(
+                    combined_need_mb(settings, device, fast=spec.id), available
+                ),
             }
             for spec in MODELS.values()
         ],
-        "translation_model": settings.translation.final_model[
-            :MAX_TRANSLATION_MODEL_CHARS
-        ],
+        "translation_model": settings.translation.final_model
+        if is_portable_model_name(settings.translation.final_model)
+        else None,
+        "translation_models": installed_translation_models(info),
     }
 
 
@@ -221,6 +285,9 @@ class HostCapacitySource(Protocol):
 
     def downloaded_models(self) -> frozenset[str]:
         """已下載的 ASR 模型 id；讀不到時丟 `OSError`。"""
+
+    def invalidate(self) -> None:
+        """丟掉快取的偵測結果（翻譯模型清單可能剛變過）。"""
 
 
 class HostCapacity:

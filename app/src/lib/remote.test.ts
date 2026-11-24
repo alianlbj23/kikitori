@@ -6,6 +6,7 @@ import {
   DEFAULT_COMPUTE,
   DEFAULT_COMPUTE_PORT,
   MAX_HOST_MODELS,
+  MAX_HOST_TRANSLATION_MODELS,
   PAIRING_FAILURES,
   addressKind,
   addressLabel,
@@ -18,16 +19,13 @@ import {
   formatDigits,
   formatFingerprint,
   formatHostPort,
-  hostHasMoreModels,
   hostInfoErrorText,
-  hostModelOptions,
   hostSummary,
   isPairDialogFinished,
   isPairingDigits,
   isValidHost,
   listenHostOptions,
   needsLocalModels,
-  needsOverConfirm,
   normalizeDigits,
   openPairDialog,
   pairAnswering,
@@ -49,7 +47,6 @@ import {
   remoteFormDiffers,
   remoteFormFromSettings,
   remoteFormPatch,
-  remoteModelPatch,
   roleChange,
   serverPeerText,
   serverStateText,
@@ -115,6 +112,7 @@ describe("settings.compute", () => {
         server_enabled: true,
         listen_host: "fd7a::1",
         listen_port: 47300,
+        // Removed by compute-capacity.md 七; an engine that still sends them is not an error.
         remote_fast_model: "",
         remote_final_model: "large-v3",
       },
@@ -129,28 +127,7 @@ describe("settings.compute", () => {
       server_enabled: true,
       listen_host: "fd7a::1",
       listen_port: 47300,
-      remote_fast_model: "",
-      remote_final_model: "large-v3",
     });
-  });
-
-  it("reads the models asked of the compute host, defaulting to its own setting", () => {
-    const quiet = () => {
-      throw new Error("no warning expected");
-    };
-    expect(DEFAULT_COMPUTE.remote_fast_model).toBe("");
-    expect(DEFAULT_COMPUTE.remote_final_model).toBe("");
-    expect(computeFromSettings({ mode: "remote" }, quiet).remote_final_model).toBe("");
-    expect(computeFromSettings({ remote_fast_model: "large-v3-turbo" }, quiet).remote_fast_model).toBe("large-v3-turbo");
-    const warnings: string[] = [];
-    const c = computeFromSettings(
-      { remote_fast_model: "../x", remote_final_model: 3 },
-      (f) => warnings.push(f),
-    );
-    expect([c.remote_fast_model, c.remote_final_model]).toEqual(["", ""]);
-    expect(warnings).toEqual(["compute.remote_fast_model", "compute.remote_final_model"]);
-    expect(remoteModelPatch("large-v3")).toEqual({ compute: { remote_final_model: "large-v3" } });
-    expect(remoteModelPatch("")).toEqual({ compute: { remote_final_model: "" } });
   });
 
   it("keeps the listening port apart from the port this computer connects to", () => {
@@ -676,7 +653,16 @@ describe("compute host capacity", () => {
     // The compute host could not measure its hardware: fit is unknown, the report is kept.
     const unknown = parseHostInfo({ ...hostPayload(), models: [{ id: "large-v3", downloaded: true, need_mb: 2140, fit: null }] });
     expect(unknown?.models[0]?.fit).toBeNull();
-    expect(hostModelOptions(unknown, "").map((o) => o.label).join(" ")).toContain("無法判斷負荷");
+    // The real-time label as the compute host counts it; an older compute host sends none (無法判斷).
+    expect(host?.models.map((m) => m.fit_as_fast)).toEqual([null, null, null, null]);
+    const labelled = parseHostInfo({
+      ...hostPayload(),
+      models: [
+        { id: "large-v3", downloaded: true, need_mb: 2140, fit: "ok", fit_as_fast: "tight" },
+        { id: "small", downloaded: true, need_mb: 600, fit: "ok", fit_as_fast: null },
+      ],
+    });
+    expect(labelled?.models.map((m) => m.fit_as_fast)).toEqual(["tight", null]);
     expect(parseHostInfoResult({ host: hostPayload() })).toEqual(host);
     const cpu = parseHostInfo(hostPayload({ gpu: null, device: "cpu", recommended: null, translation_model: null }));
     expect([cpu?.gpu, cpu?.recommended, cpu?.translation_model]).toEqual([null, null, null]);
@@ -685,7 +671,7 @@ describe("compute host capacity", () => {
     expect(parseHostInfo(hostPayload({ gpu: { name: "🎮".repeat(65), vram_total_mb: 1 } }))).toBeNull();
   });
 
-  it("drops the whole report when any field is malformed", () => {
+  it("drops the whole report when a recognition field is malformed", () => {
     const bad: Record<string, unknown>[] = [
       { gpu: { name: "x".repeat(65), vram_total_mb: 1 } },
       { gpu: { name: "GPU", vram_total_mb: -1 } },
@@ -699,8 +685,9 @@ describe("compute host capacity", () => {
       { models: [{ id: "large-v3", downloaded: "yes", need_mb: 1, fit: "ok" }] },
       { models: [{ id: "large-v3", downloaded: true, need_mb: Number.NaN, fit: "ok" }] },
       { models: [{ id: "large-v3", downloaded: true, need_mb: 1, fit: "maybe" }] },
+      { models: [{ id: "large-v3", downloaded: true, need_mb: 1 }] },
+      { models: [{ id: "large-v3", downloaded: true, need_mb: 1, fit: "ok", fit_as_fast: "maybe" }] },
       { models: Array.from({ length: MAX_HOST_MODELS + 1 }, (_, i) => ({ id: `m${i}`, downloaded: true, need_mb: 1, fit: "ok" })) },
-      { translation_model: "../x" },
     ];
     for (const over of bad) expect(parseHostInfo(hostPayload(over)), JSON.stringify(over)).toBeNull();
     for (const none of [null, undefined, "host", []]) expect(parseHostInfo(none)).toBeNull();
@@ -717,37 +704,6 @@ describe("compute host capacity", () => {
     expect(hostSummary({ ...host, gpu: null, device: "cpu" })).toBe(t("host.cpu"));
   });
 
-  it("offers the compute host's setting and its downloaded models, labelled", () => {
-    const host = parseHostInfo(hostPayload())!;
-    const options = hostModelOptions(host, "");
-    expect(options.map((o) => o.value)).toEqual(["", "large-v3", "kotoba-whisper-v2.0", "huge-model"]);
-    expect(options.map((o) => o.label)).toEqual([
-      "照運算主機的設定（large-v3）",
-      "large-v3（跑得動）",
-      "kotoba-whisper-v2.0（建議・可能吃緊）",
-      "huge-model（超出負荷）",
-    ]);
-    expect(options.map((o) => o.fit)).toEqual([null, "ok", "tight", "over"]);
-    expect(hostHasMoreModels(host)).toBe(true);
-    expect(hostHasMoreModels({ ...host, models: host.models.filter((m) => m.downloaded) })).toBe(false);
-    expect(hostHasMoreModels(null)).toBe(false);
-  });
-
-  it("keeps a saved choice the compute host no longer has, marked", () => {
-    const host = parseHostInfo(hostPayload())!;
-    expect(hostModelOptions(host, "small").at(-1)).toEqual({ value: "small", label: "small（運算主機上沒有）", fit: null });
-    expect(hostModelOptions(null, "")).toEqual([{ value: "", label: "照運算主機的設定", fit: null }]);
-    expect(hostModelOptions(null, "large-v3").map((o) => o.value)).toEqual(["", "large-v3"]);
-  });
-
-  it("asks again only for a model reported as too heavy", () => {
-    const host = parseHostInfo(hostPayload())!;
-    expect(needsOverConfirm(host, "huge-model")).toBe(true);
-    expect(needsOverConfirm(host, "kotoba-whisper-v2.0")).toBe(false);
-    expect(needsOverConfirm(host, "")).toBe(false);
-    expect(needsOverConfirm(null, "huge-model")).toBe(false);
-  });
-
   it("explains a failed query with the session's words for the remote codes", () => {
     for (const code of ["remote_not_configured", "remote_unreachable", "remote_not_paired", "remote_incompatible", "remote_identity_error"]) {
       expect(hostInfoErrorText(code, "fallback")).toBe(describeStatusError(code, null));
@@ -756,10 +712,114 @@ describe("compute host capacity", () => {
     expect(hostInfoErrorText("internal_error", "fallback")).toBe("fallback");
     expect(hostInfoErrorText(null, "fallback")).toBe("fallback");
   });
+});
 
-  it("has every label in every interface language", () => {
-    setLocale("en");
-    const host = parseHostInfo(hostPayload())!;
-    expect(hostModelOptions(host, "")[2]!.label).toBe("kotoba-whisper-v2.0 (recommended · May be tight)");
+describe("compute host report: translation models (compute-capacity.md 七)", () => {
+  it("reads the compute host's translation models and what is installed", () => {
+    const host = parseHostInfo(
+      hostPayload({
+        current: { fast: "large-v3-turbo", final: "large-v3", translation: { fast: "qwen3.5:4b", final: "qwen3.5:9b" } },
+        translation_models: ["qwen3.5:4b", "qwen3.5:9b", "hf.co/x/y:Q4"],
+      }),
+    );
+    expect(host?.current).toEqual({
+      fast: "large-v3-turbo",
+      final: "large-v3",
+      translation: { fast: "qwen3.5:4b", final: "qwen3.5:9b" },
+    });
+    expect(host?.translation_models).toEqual(["qwen3.5:4b", "qwen3.5:9b", "hf.co/x/y:Q4"]);
+    // An older compute host sends neither.
+    const older = parseHostInfo(hostPayload());
+    expect([older?.current.translation, older?.translation_models]).toEqual([null, null]);
+    // None set yet is "", not malformed.
+    const unset = parseHostInfo(hostPayload({ current: { fast: "a", final: "b", translation: { fast: "", final: "" } } }));
+    expect(unset?.current.translation).toEqual({ fast: "", final: "" });
+  });
+
+  it("drops only the malformed translation field or entry, keeping the rest of the report", () => {
+    const current = (translation: unknown) => ({ current: { fast: "a", final: "b", translation } });
+    for (const bad of [{ fast: "../x", final: "q" }, { fast: "q" }, { fast: 1, final: "q" }, "qwen3.5:9b"]) {
+      const host = parseHostInfo(hostPayload({ ...current(bad), translation_models: ["q"] }));
+      expect(host?.current, JSON.stringify(bad)).toEqual({ fast: "a", final: "b", translation: null });
+      // The other fields are still there.
+      expect(host?.models.length).toBe(4);
+      expect(host?.translation_models).toEqual(["q"]);
+    }
+    // A bad entry is skipped; the good ones stay.
+    expect(parseHostInfo(hostPayload({ translation_models: ["ok", "a b", 3, "../x", "q:1"] }))?.translation_models).toEqual([
+      "ok",
+      "q:1",
+    ]);
+    for (const list of [
+      "qwen3.5:9b",
+      { a: 1 },
+      Array.from({ length: MAX_HOST_TRANSLATION_MODELS + 1 }, (_, i) => `m${i}`),
+    ]) {
+      const host = parseHostInfo(hostPayload({ translation_models: list }));
+      expect(host?.translation_models, JSON.stringify(list).slice(0, 40)).toBeNull();
+      expect(host?.translation_model).toBe("qwen3.5:9b");
+    }
+    for (const name of ["../x", "a b", 7, "x".repeat(201), ""]) {
+      const host = parseHostInfo(hostPayload({ translation_model: name }));
+      expect(host?.translation_model, String(name).slice(0, 20)).toBeNull();
+      expect(host?.gpu?.name).toBe("NVIDIA GeForce GTX 1080 Ti");
+    }
+    expect(parseHostInfo(hostPayload({ translation_model: "x".repeat(200) }))?.translation_model).toBe("x".repeat(200));
+  });
+});
+
+describe("engine://remote events of compute-capacity.md 七、八", () => {
+  it("parses host_download progress", () => {
+    const ev = { kind: "host_download", model: "large-v3", downloaded_bytes: 10, total_bytes: 100, state: "downloading", error: null };
+    expect(parseRemoteEvent(ev)).toEqual(ev);
+    expect(parseRemoteEvent({ ...ev, state: "error", error: "disk full" })).toMatchObject({ state: "error", error: "disk full" });
+    for (const over of [{ model: "../x" }, { state: "paused" }, { downloaded_bytes: -1 }, { total_bytes: 1.5 }]) {
+      expect(() => parseRemoteEvent({ ...ev, ...over }), JSON.stringify(over)).toThrow(ValidationError);
+    }
+  });
+
+  it("parses host_changed", () => {
+    const ev = {
+      kind: "host_changed",
+      by: "DESKTOP-A",
+      asr: { fast: "large-v3-turbo", final: "large-v3" },
+      translation: { fast: "qwen3.5:4b", final: "" },
+    };
+    expect(parseRemoteEvent(ev)).toEqual(ev);
+    for (const over of [{ by: "x".repeat(65) }, { asr: { fast: "a b", final: "x" } }, { translation: { fast: "../x", final: "" } }]) {
+      expect(() => parseRemoteEvent({ ...ev, ...over }), JSON.stringify(over)).toThrow(ValidationError);
+    }
+  });
+
+  it("parses serving, with nothing but the kind when nobody is connected", () => {
+    const ev = {
+      kind: "serving",
+      peer: { name: "A-PC", fingerprint: "aaaa bbbb", state: "connected" },
+      session: { started_at_ms: 1_795_000_000_000, sentences: 3, mode: "media" },
+      metrics: { final_busy: 0.5, rtf: 0.3, backlog: 0, gpu: { name: "GTX", vram_used_mb: 6000, vram_total_mb: 11264, util_pct: null } },
+    };
+    expect(parseRemoteEvent(ev)).toEqual(ev);
+    expect(parseRemoteEvent({ kind: "serving", peer: null, session: null, metrics: null })).toEqual({
+      kind: "serving",
+      peer: null,
+      session: null,
+      metrics: null,
+    });
+    // Unknown load fields are null.
+    expect(parseRemoteEvent({ ...ev, metrics: { backlog: 1 } })).toMatchObject({
+      metrics: { final_busy: null, rtf: null, backlog: 1, gpu: null },
+    });
+    const bad: Record<string, unknown>[] = [
+      { session: { ...ev.session, sentences: -1 } },
+      { session: { ...ev.session, started_at_ms: 1e16 } },
+      { session: { ...ev.session, mode: "Media" } },
+      { metrics: { ...ev.metrics, final_busy: 1.5 } },
+      { metrics: { ...ev.metrics, rtf: 5000 } },
+      { metrics: { ...ev.metrics, backlog: 2.5 } },
+      { metrics: { ...ev.metrics, gpu: { name: "GTX", vram_used_mb: -1, vram_total_mb: 1, util_pct: 1 } } },
+      { metrics: { ...ev.metrics, gpu: { name: "GTX", vram_used_mb: 1, vram_total_mb: 1, util_pct: 120 } } },
+      { peer: { name: "A", fingerprint: "<img>", state: "connected" } },
+    ];
+    for (const over of bad) expect(() => parseRemoteEvent({ ...ev, ...over }), JSON.stringify(over)).toThrow(ValidationError);
   });
 });

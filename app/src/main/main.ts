@@ -120,7 +120,37 @@ import {
   type MetricsState,
   type MetricsWarning,
 } from "../lib/metrics";
-import { applyLoad, emptyLoad, loadView, type LoadState } from "../lib/load";
+import { applyLoad, emptyLoad, loadView, type LoadState, type LoadView } from "../lib/load";
+import {
+  applyHostDownload,
+  comboWarning,
+  currentTranslation,
+  downloadPercent,
+  downloadText,
+  fitText,
+  hostDownloadRows,
+  hostManageErrorText,
+  hostSlotOptions,
+  needsOverConfirm,
+  overConfirmText,
+  setModelArgs,
+  tightHint,
+  translationOptions,
+  type HostModelOption,
+  type ModelKind,
+  type ModelSlot,
+} from "../lib/host-models";
+import { modeBarView } from "../lib/mode-bar";
+import {
+  applyServing,
+  emptyServing,
+  hostChangedText,
+  servePanelView,
+  startBlocked,
+  type ServeModels,
+  type ServePanelView,
+  type ServingState,
+} from "../lib/serve";
 import { deleteBlockedText, deleteConfirmText, deleteOffer } from "../lib/model-delete";
 import {
   FURIGANA_DICTIONARY_ID,
@@ -140,14 +170,11 @@ import {
   computeRole,
   digitsInputError,
   formatHostPort,
-  hostHasMoreModels,
   hostInfoErrorText,
-  hostModelOptions,
   hostSummary,
   isPairDialogFinished,
   listenHostOptions,
   needsLocalModels,
-  needsOverConfirm,
   normalizeDigits,
   openPairDialog,
   pairAnswering,
@@ -163,7 +190,6 @@ import {
   remoteFormDiffers,
   remoteFormFromSettings,
   remoteFormPatch,
-  remoteModelPatch,
   roleChange,
   serverPeerText,
   serverStateText,
@@ -171,6 +197,8 @@ import {
   withServerEvent,
   type ComputeRole,
   type ComputeSettings,
+  type HostChangedEvent,
+  type HostDownloadProgress,
   type HostInfo,
   type PairAction,
   type PairDialog,
@@ -394,13 +422,24 @@ interface State {
   load: LoadState;
   /** The compute host's capacity report (`remote_host_info`, compute-capacity.md). */
   hostInfo: HostInfoState;
-  /** A model reported as 超出負荷, waiting for the second yes. */
-  hostModelConfirm: string | null;
-  /** A `settings.set` of `compute.remote_final_model` is in flight. */
+  /** A 超出負荷 model (to use, or to download on the compute host) waiting for the second yes. */
+  hostConfirm: HostConfirm | null;
+  /** A `remote_host_set_models` is in flight. */
   hostModelSaving: boolean;
-  /** What saving the model choice did ("已儲存…"); null before, or after a failure (a notice says why). */
+  /** What applying a model did ("已套用…"); null before, or after a failure (a notice says why). */
   hostModelStatus: string | null;
+  /** Downloads this computer asked the compute host for (`host_download` events), by model. */
+  hostDownloads: Map<string, HostDownloadProgress>;
+  /** This computer as a compute host: the latest `serving` events (lib/serve.ts). */
+  serving: ServingState;
+  /** The running remote session lost its link and is reconnecting (the mode bar's dot). */
+  reconnecting: boolean;
 }
+
+/** The second "yes" a 超出負荷 choice needs (lib/host-models.ts). */
+type HostConfirm =
+  | { kind: "set"; model: ModelKind; slot: ModelSlot; id: string }
+  | { kind: "download"; id: string };
 
 /** `remote_host_info` as the screens need it: never asked, in flight, answered or failed. */
 interface HostInfoState {
@@ -509,9 +548,12 @@ const state: State = {
   rttMs: null,
   load: emptyLoad(),
   hostInfo: { status: "idle", host: null, error: null },
-  hostModelConfirm: null,
+  hostConfirm: null,
   hostModelSaving: false,
   hostModelStatus: null,
+  hostDownloads: new Map(),
+  serving: emptyServing(),
+  reconnecting: false,
 };
 
 /** Last engine messages for "複製診斷資訊". */
@@ -532,6 +574,25 @@ const el = {
   device: byId<HTMLSelectElement>("device"),
   deviceHint: byId("device-hint"),
   start: byId<HTMLButtonElement>("start"),
+  startNote: byId("start-note"),
+  modeBar: byId("mode-bar"),
+  modeIcons: Array.from(document.querySelectorAll<SVGElement>(".mode-icon")),
+  modeText: byId("mode-text"),
+  modeLink: byId("mode-link"),
+  modeLinkText: byId("mode-link-text"),
+  servePanel: byId("serve-panel"),
+  serveTitle: byId("serve-title"),
+  serveDetail: byId("serve-detail"),
+  serveLoad: byId("serve-load"),
+  serveLoadBar: byId("serve-load-bar"),
+  serveLoadFill: byId("serve-load-fill"),
+  serveLoadLine: svgPathById("serve-load-line"),
+  serveLoadText: byId("serve-load-text"),
+  serveLoadDetail: byId("serve-load-detail"),
+  serveAsr: byId("serve-asr"),
+  serveTranslation: byId("serve-translation"),
+  servePair: byId<HTMLButtonElement>("serve-pair"),
+  serveStop: byId<HTMLButtonElement>("serve-stop"),
   navItems: Array.from(document.querySelectorAll<HTMLButtonElement>(".nav-item")),
   statusDot: byId("status-dot"),
   statusLabel: byId("status-label"),
@@ -673,7 +734,8 @@ const el = {
   loadLine: svgPathById("load-line"),
   loadText: byId("load-text"),
   loadDetail: byId("load-detail"),
-  modelsRemote: byId("models-remote"),
+  modelsHost: byId("models-host"),
+  modelsHostBody: byId("models-host-body"),
   remoteForm: byId<HTMLFormElement>("remote-form"),
   remoteBlock: byId("remote-block"),
   remoteHost: byId<HTMLInputElement>("f-remote-host"),
@@ -839,6 +901,7 @@ function setSessionState(next: EngineState, fromEngine: boolean): void {
   if (!sessionActive()) {
     // A remote session that ended cannot be reconnecting any more, and its round trip is history.
     noticeFor(RECONNECT_NOTICE)?.remove();
+    state.reconnecting = false;
     state.rttMs = null;
     state.load = emptyLoad();
   }
@@ -859,7 +922,11 @@ function renderStatus(): void {
   const ready = engineReady();
   // While models are downloaded for a start, the start happens by itself.
   const waiting = startFlow.active;
-  el.start.disabled = !ready || state.busy || waiting;
+  // Another computer holds this one's GPU (compute-capacity.md 八): starting here would only fail.
+  const lent = !sessionActive() && computeRole(computeSettings()) === "serve" && startBlocked(state.serving, state.remote?.server ?? null);
+  el.start.disabled = !ready || state.busy || waiting || lent;
+  el.startNote.hidden = !lent;
+  setIfChanged(el.startNote, "textContent", lent ? t("serve.startBlocked") : "");
   el.start.dataset.state = state.busy || waiting ? "busy" : sessionActive() ? "running" : "idle";
   el.start.textContent = sessionActive() ? t("start.stop") : t("start.start");
   for (const button of el.modes) {
@@ -1314,7 +1381,8 @@ function renderTranscript(): void {
       lineElements.delete(id);
     }
   }
-  el.transcriptEmpty.hidden = state.subtitles.lines.length > 0;
+  // In the serve role the 運算主機 panel takes the empty hint's place.
+  el.transcriptEmpty.hidden = state.subtitles.lines.length > 0 || computeRole(computeSettings()) === "serve";
   if (nearBottom && scroller) scroller.scrollTop = scroller.scrollHeight;
   renderExport();
 }
@@ -3901,6 +3969,7 @@ function renderComputeRail(): void {
   el.computePair.disabled = !engineReady() || state.pairDialog !== null;
   renderAddressChoice(locked);
   renderHostInfo();
+  renderModeBar();
 }
 
 /** The rail's "which network" question (several addresses), or why serving cannot start (none). */
@@ -3929,8 +3998,12 @@ function renderAddressChoice(locked: boolean): void {
   replace(el.computeAddresses, h("p", { class: "rail-hint" }, t("compute.chooseAddress")), ...options, cancel);
 }
 
+/** The models page manages the compute host's models while another computer computes (compute-capacity.md 七). */
 function renderModelsRemote(): void {
-  el.modelsRemote.hidden = needsLocalModels(computeSettings());
+  const remote = !needsLocalModels(computeSettings());
+  el.modelsHost.hidden = !remote;
+  if (remote) el.pages.models.dataset.compute = "remote";
+  else delete el.pages.models.dataset.compute;
 }
 
 /**
@@ -4009,10 +4082,12 @@ function afterComputeChange(): void {
 /** The "重新連線中" notice follows `status running {reconnecting}` (lib/remote.ts reconnectNotice). */
 function onReconnectStatus(next: EngineState, reconnecting: boolean | null): void {
   const action = reconnectNotice(next, reconnecting);
+  if (action !== "keep") state.reconnecting = action === "show";
   if (action === "clear") noticeFor(RECONNECT_NOTICE)?.remove();
   else if (action === "show" && !noticeFor(RECONNECT_NOTICE)) {
     notify(t("remote.reconnecting"), "info", [], { key: RECONNECT_NOTICE });
   }
+  renderModeBar();
 }
 
 /** A session error, with "改用這台電腦處理" / "設定運算主機" when the compute host is the problem. */
@@ -4075,6 +4150,19 @@ function onRemoteEvent(ev: RemoteEvent): void {
     if (ev.pairing.state === "done" && ev.pairing.role === "client") void refreshHostInfo();
     return;
   }
+  if (ev.kind === "host_download") {
+    onHostDownload(ev);
+    return;
+  }
+  if (ev.kind === "host_changed") {
+    void onHostChanged(ev);
+    return;
+  }
+  if (ev.kind === "serving") {
+    state.serving = applyServing(state.serving, ev);
+    renderServe();
+    return;
+  }
   if (state.remote) {
     state.remote = withServerEvent(state.remote, ev);
     renderRemote();
@@ -4087,6 +4175,7 @@ function renderRemote(): void {
   renderModelsRemote();
   renderRemoteSection();
   renderServeSection();
+  renderServe();
 }
 
 /** The paired compute hosts (A) or computers (B), each with 移除 and an in-place confirmation. */
@@ -4194,7 +4283,8 @@ async function saveRemoteForm(form: RemoteForm, requireHost: boolean): Promise<b
     // Another compute host: the report of the previous one says nothing about it.
     hostReads.invalidate();
     state.hostInfo = { status: "idle", host: null, error: null };
-    state.hostModelConfirm = null;
+    state.hostConfirm = null;
+    state.hostDownloads = new Map();
     void refreshHostInfo();
     // Typed more while saving: keep the newer text (it is still unsaved).
     if (el.remoteHost.value === form.host && el.remotePort.value === form.port) state.remoteDirty = false;
@@ -4257,17 +4347,19 @@ function renderRemoteSection(): void {
   renderTrustedList(el.remoteServers, state.remote?.servers ?? null, "server", "remote.serversEmpty");
 }
 
-// ----- A: what the compute host can run (docs/specs/compute-capacity.md 五, lib/remote.ts)
+// ----- A: the compute host's models (docs/specs/compute-capacity.md 五、七, lib/remote.ts, lib/host-models.ts)
 
 /** Answers of `remote_host_info`; one that arrives after a newer request is dropped. */
 const hostReads = new Latest();
 /** What each host-info container last drew, so a re-render with the same inputs (every second) is skipped. */
 const hostInfoDrawn = new WeakMap<HTMLElement, string>();
+const HOST_CHANGED_NOTICE = "host-changed";
 
 /**
  * Asks the compute host what it can run (one probe; it does not take its GPU).
- * Called when "用另一台電腦處理" is chosen, when the settings page opens and from
- * 重新整理. A failure is shown in plain words and never blocks 開始.
+ * Called when "用另一台電腦處理" is chosen, at start-up in that role, when the
+ * settings or models page opens and from 重新整理. A failure is shown in plain
+ * words and never blocks 開始.
  */
 async function refreshHostInfo(): Promise<void> {
   if (!engineReady() || computeSettings().host === "") return;
@@ -4287,16 +4379,18 @@ async function refreshHostInfo(): Promise<void> {
   renderHostInfo();
 }
 
-/** The rail's compute host line and model menu (remote role only) and the settings section's copy. */
+/** The rail's compute host line and model menu, the settings section's copy, the models page and the mode bar. */
 function renderHostInfo(): void {
   const c = computeSettings();
   const inRail = computeRole(c) === "remote" && c.host !== "" && state.addressChoice === null;
   el.computeHostInfo.hidden = !inRail;
   if (inRail) drawHostInfo(el.computeHostInfo, "rail");
   drawHostInfo(el.remoteHostInfo, "settings");
+  if (!needsLocalModels(c)) drawHostModels();
+  renderModeBar();
 }
 
-/** The status line above the menu: the card ("GTX 1080 Ti・11 GB"), or why it is not known. */
+/** The status line above the menus: the card ("GTX 1080 Ti・11 GB"), or why it is not known. */
 function hostInfoLine(c: ComputeSettings): { text: string; error: boolean } {
   if (c.host === "") return { text: hostInfoErrorText("remote_not_configured", ""), error: false };
   const s = state.hostInfo;
@@ -4312,119 +4406,455 @@ function hostInfoLine(c: ComputeSettings): { text: string; error: boolean } {
   }
 }
 
-function drawHostInfo(container: HTMLElement, where: "rail" | "settings"): void {
+/** Menus and buttons wait while a change is applied (and without an engine or a compute host). */
+function hostLocked(): boolean {
+  return (
+    !engineReady() || !state.settings || state.computeBusy || state.hostModelSaving || computeSettings().host === ""
+  );
+}
+
+/** True when `container` already shows these inputs (the rail re-renders every second while a session runs). */
+function hostDrawnAlready(container: HTMLElement, extra: unknown): boolean {
   const c = computeSettings();
-  const ready = engineReady();
-  // Locked like the rail's roles too: a start in progress reads the settings this would change.
-  const locked =
-    !ready ||
-    !state.settings ||
-    sessionActive() ||
-    state.busy ||
-    state.computeBusy ||
-    startFlow.active ||
-    state.hostModelSaving ||
-    c.host === "";
   const signature = JSON.stringify([
     getLocale(),
     c.host,
-    c.remote_final_model,
+    c.port,
     state.hostInfo,
-    state.hostModelConfirm,
+    state.hostConfirm,
     state.hostModelStatus,
-    locked,
-    ready,
+    [...state.hostDownloads.values()],
+    hostLocked(),
+    engineReady(),
+    extra,
   ]);
-  if (hostInfoDrawn.get(container) === signature) return;
+  if (hostInfoDrawn.get(container) === signature) return true;
   hostInfoDrawn.set(container, signature);
+  return false;
+}
 
-  const rail = where === "rail";
+function hostRefreshButton(): HTMLButtonElement {
+  const c = computeSettings();
+  const refresh = h("button", { type: "button", class: "link-button host-refresh" }, t("host.refresh"));
+  refresh.disabled = !engineReady() || c.host === "" || state.hostInfo.status === "loading";
+  refresh.addEventListener("click", () => void refreshHostInfo());
+  return refresh;
+}
+
+function hostSummaryLine(rail: boolean): HTMLElement {
+  const line = hostInfoLine(computeSettings());
   const hint = rail ? "rail-hint" : "field-help";
-  const host = state.hostInfo.host;
-  const line = hostInfoLine(c);
-  const summary = h(
+  return h(
     "p",
     { class: `${hint} host-summary${line.error ? (rail ? " compute-hint-error" : " host-error") : ""}` },
     line.text,
   );
+}
 
-  const id = `host-model-${where}`;
-  const select = h("select", { id, class: rail ? "rail-select" : null });
-  const pending = state.hostModelConfirm;
-  for (const option of hostModelOptions(host, c.remote_final_model)) {
-    select.append(h("option", { value: option.value }, option.label));
+/** The red (or quiet) line for as long as the current combination may not keep up. */
+function hostWarning(host: HostInfo): HTMLElement | null {
+  const warning = comboWarning(host);
+  return warning
+    ? h("p", { class: "host-warning", "data-tone": warning.tone, role: warning.tone === "bad" ? "alert" : null }, warning.text)
+    : null;
+}
+
+interface ModelFieldSpec {
+  kind: ModelKind;
+  slot: ModelSlot;
+  /** Element id prefix: the rail, the settings section and the models page each have their own copy. */
+  where: string;
+  label: string;
+  help: string | null;
+  options: HostModelOption[];
+  value: string;
+  rail: boolean;
+  host: HostInfo;
+  container: HTMLElement;
+}
+
+/** One menu with its label, the second "yes" for a 超出負荷 choice and the 可能吃緊 line under it. */
+function hostModelField(spec: ModelFieldSpec): HTMLElement {
+  const id = `host-${spec.where}-${spec.kind}-${spec.slot}`;
+  const hint = spec.rail ? "rail-hint" : "field-help";
+  const select = h("select", { id, class: spec.rail ? "rail-select" : null });
+  for (const option of spec.options) {
+    select.append(h("option", { value: option.value, "data-fit": option.fit }, option.label));
   }
-  select.value = pending ?? c.remote_final_model;
-  select.disabled = locked;
-  select.addEventListener("change", () => chooseHostModel(select.value, container));
+  const pending = state.hostConfirm;
+  const asking = pending?.kind === "set" && pending.model === spec.kind && pending.slot === spec.slot ? pending : null;
+  select.value = asking?.id ?? spec.value;
+  select.disabled = hostLocked();
+  select.addEventListener("change", () => chooseHostModel(spec.kind, spec.slot, select.value, spec.container));
 
   let confirm: HTMLElement | null = null;
-  if (pending) {
+  if (asking) {
     const yes = h("button", { type: "button", class: "danger" }, t("host.overYes"));
-    yes.disabled = locked;
-    yes.addEventListener("click", () => void saveHostModel(pending));
+    yes.disabled = hostLocked();
+    yes.addEventListener("click", () => void applyHostModel(asking.model, asking.slot, asking.id));
     const no = h("button", { type: "button", class: "ghost" }, t("host.overNo"));
     no.addEventListener("click", () => {
-      state.hostModelConfirm = null;
+      state.hostConfirm = null;
       renderHostInfo();
     });
     confirm = h(
       "div",
-      { class: "delete-confirm host-confirm", role: "group" },
-      h("p", {}, t("host.overConfirm", { model: pending })),
+      { class: "delete-confirm host-confirm", role: "alertdialog", "aria-labelledby": `${id}-confirm` },
+      h("p", { id: `${id}-confirm` }, overConfirmText(spec.host, asking.id)),
       h("div", { class: "gpu-actions" }, yes, no),
     );
   }
-
-  const refresh = h("button", { type: "button", class: "link-button host-refresh" }, t("host.refresh"));
-  refresh.disabled = !ready || c.host === "" || state.hostInfo.status === "loading";
-  refresh.addEventListener("click", () => void refreshHostInfo());
-
-  replace(
-    container,
-    summary,
-    !rail && host?.translation_model ? h("p", { class: hint }, t("host.translation", { model: host.translation_model })) : null,
-    h("label", { for: id, class: rail ? "rail-hint host-label" : "host-label" }, t("host.model")),
+  const tight = spec.kind === "asr" ? tightHint(spec.host, spec.slot) : null;
+  return h(
+    "div",
+    { class: spec.rail ? "host-field" : "field" },
+    h("label", { for: id, class: spec.rail ? "rail-hint host-label" : "host-label" }, spec.label),
+    spec.help ? h("p", { class: hint }, spec.help) : null,
     select,
     confirm,
-    hostHasMoreModels(host) ? h("p", { class: hint }, t("host.downloadOnHost")) : null,
-    state.hostModelStatus ? h("p", { class: hint, role: "status" }, state.hostModelStatus) : null,
-    refresh,
+    tight ? h("p", { class: `${hint} host-tight`, role: "status" }, tight) : null,
   );
 }
 
-/** A model picked from the menu: a "超出負荷" one asks once more before it is saved. */
-function chooseHostModel(id: string, container: HTMLElement): void {
+function hostStatusLine(rail: boolean): HTMLElement | null {
+  return state.hostModelStatus
+    ? h("p", { class: rail ? "rail-hint" : "field-help", role: "status" }, state.hostModelStatus)
+    : null;
+}
+
+/** The rail (and the settings section): the card, the combination warning and the full recognition model. */
+function drawHostInfo(container: HTMLElement, where: "rail" | "settings"): void {
+  if (hostDrawnAlready(container, where)) return;
+  const rail = where === "rail";
+  const hint = rail ? "rail-hint" : "field-help";
+  const host = state.hostInfo.host;
+  const manage = h("button", { type: "button", class: "link-button" }, t("hostModels.manage"));
+  manage.addEventListener("click", () => void showPage("models"));
+  replace(
+    container,
+    hostSummaryLine(rail),
+    !rail && host?.translation_model ? h("p", { class: hint }, t("host.translation", { model: host.translation_model })) : null,
+    host ? hostWarning(host) : null,
+    host
+      ? hostModelField({
+          kind: "asr",
+          slot: "final",
+          where,
+          label: t("host.model"),
+          help: null,
+          options: hostSlotOptions(host, "final"),
+          value: host.current.final,
+          rail,
+          host,
+          container,
+        })
+      : null,
+    hostStatusLine(rail),
+    host ? manage : null,
+    hostRefreshButton(),
+  );
+}
+
+/** The models page while another computer computes: everything about the compute host's models. */
+function drawHostModels(): void {
+  const container = el.modelsHostBody;
+  const c = computeSettings();
+  if (hostDrawnAlready(container, "page")) return;
+  if (c.host === "") {
+    const go = h("button", { type: "button", class: "ghost" }, t("compute.openSettings"));
+    go.addEventListener("click", () => void openRemoteSettings());
+    replace(container, h("p", { class: "field-help" }, t("hostModels.noHost")), h("div", {}, go));
+    return;
+  }
+  const host = state.hostInfo.host;
+  const toolbar = h(
+    "div",
+    { class: "host-toolbar" },
+    hostSummaryLine(false),
+    h("span", { class: "field-help" }, formatHostPort(c.host, c.port)),
+    hostRefreshButton(),
+  );
+  if (!host) {
+    replace(container, toolbar, hostStatusLine(false));
+    return;
+  }
+  const field = (kind: ModelKind, slot: ModelSlot, label: StringKey, help: StringKey | null, options: HostModelOption[]) =>
+    hostModelField({
+      kind,
+      slot,
+      where: "page",
+      label: t(label),
+      help: help ? t(help) : null,
+      options,
+      value: kind === "asr" ? host.current[slot] : currentTranslation(host, slot),
+      rail: false,
+      host,
+      container,
+    });
+  const trFast = translationOptions(host, "fast");
+  const trFinal = translationOptions(host, "final");
+  replace(
+    container,
+    toolbar,
+    hostWarning(host),
+    h("h3", { class: "host-subhead" }, t("hostModels.asrHeading")),
+    field("asr", "fast", "hostModels.fast", "hostModels.fastHelp", hostSlotOptions(host, "fast")),
+    field("asr", "final", "hostModels.final", "hostModels.finalHelp", hostSlotOptions(host, "final")),
+    h("h3", { class: "host-subhead" }, t("hostModels.translationHeading")),
+    trFast && trFinal
+      ? h(
+          "div",
+          { class: "field-row" },
+          field("translation", "fast", "hostModels.translationFast", null, trFast),
+          field("translation", "final", "hostModels.translationFinal", null, trFinal),
+        )
+      : h("p", { class: "field-help" }, t("hostModels.translationNone")),
+    hostStatusLine(false),
+    h("h3", { class: "host-subhead" }, t("hostModels.more")),
+    hostDownloadList(host),
+  );
+}
+
+/** The models the compute host has not downloaded, each with 在運算主機下載 or its progress. */
+function hostDownloadList(host: HostInfo): HTMLElement {
+  const rows = hostDownloadRows(host, state.hostDownloads);
+  if (!rows.length) return h("p", { class: "field-help" }, t("hostModels.moreNone"));
+  const list = h("ul", { class: "host-downloads" });
+  for (const row of rows) {
+    const p = row.progress;
+    let action: HTMLElement;
+    if (p && p.state === "downloading") {
+      action = h(
+        "div",
+        { class: "progress" },
+        h("progress", { max: 100, value: downloadPercent(p) ?? 0, "aria-label": t("asr.progressLabel", { model: row.id }) }),
+        h("span", {}, downloadText(p)),
+      );
+    } else {
+      const button = h("button", { type: "button", class: "ghost" }, t("hostModels.download"));
+      button.disabled = hostLocked();
+      button.addEventListener("click", () => void downloadOnHost(row.id, false));
+      action = h("div", {}, p?.state === "error" ? h("p", { class: "field-error" }, downloadText(p)) : null, button);
+    }
+    const pending = state.hostConfirm;
+    let confirm: HTMLElement | null = null;
+    if (pending?.kind === "download" && pending.id === row.id) {
+      const yes = h("button", { type: "button", class: "danger" }, t("hostModels.downloadYes"));
+      yes.disabled = hostLocked();
+      yes.addEventListener("click", () => void downloadOnHost(row.id, true));
+      const no = h("button", { type: "button", class: "ghost" }, t("host.overNo"));
+      no.addEventListener("click", () => {
+        state.hostConfirm = null;
+        renderHostInfo();
+      });
+      confirm = h(
+        "div",
+        { class: "delete-confirm host-confirm", role: "alertdialog" },
+        h("p", {}, t("hostModels.downloadHeavy", { model: row.id })),
+        h("div", { class: "gpu-actions" }, yes, no),
+      );
+    }
+    list.append(
+      h(
+        "li",
+        {},
+        h("span", { class: "model-id" }, row.id),
+        row.need ? h("span", { class: "field-help" }, row.need) : null,
+        h("span", { class: "host-fit", "data-fit": row.fit }, (row.heavy ? "⚠ " : "") + fitText(row.fit)),
+        action,
+        confirm,
+      ),
+    );
+  }
+  return list;
+}
+
+/**
+ * A model picked from a menu. A 超出負荷 recognition model asks once more
+ * (the user may still choose it: the compute host never refuses for load);
+ * anything else is applied to the compute host at once.
+ */
+function chooseHostModel(kind: ModelKind, slot: ModelSlot, id: string, container: HTMLElement): void {
+  const host = state.hostInfo.host;
+  if (!host) return;
   state.hostModelStatus = null;
-  if (needsOverConfirm(state.hostInfo.host, id)) {
-    state.hostModelConfirm = id;
+  const current = kind === "asr" ? host.current[slot] : currentTranslation(host, slot);
+  if (id === current) {
+    state.hostConfirm = null;
     renderHostInfo();
-    // Both copies show the question; the one the user is working in takes the focus.
+    return;
+  }
+  if (kind === "asr" && needsOverConfirm(host, slot, id)) {
+    state.hostConfirm = { kind: "set", model: kind, slot, id };
+    renderHostInfo();
+    // Every copy shows the question; the one the user is working in takes the focus.
     container.querySelector<HTMLButtonElement>(".host-confirm .ghost")?.focus();
     return;
   }
-  state.hostModelConfirm = null;
-  void saveHostModel(id);
+  state.hostConfirm = null;
+  void applyHostModel(kind, slot, id);
 }
 
-/** Saves `compute.remote_final_model`; the next remote session asks the compute host for it. */
-async function saveHostModel(id: string): Promise<void> {
+/** `remote_host_set_models`: saved on the compute host, used from its next session. */
+async function applyHostModel(kind: ModelKind, slot: ModelSlot, id: string): Promise<void> {
   if (state.hostModelSaving) return;
-  state.hostModelConfirm = null;
+  state.hostConfirm = null;
   state.hostModelSaving = true;
-  state.hostModelStatus = t("common.saving");
+  state.hostModelStatus = t("hostModels.applying");
   renderHostInfo();
+  let reread = false;
   try {
-    const { settings, revision } = await api.settingsSet(remoteModelPatch(id));
-    adoptSettings(settings, revision);
-    state.hostModelStatus = t("host.saved");
+    const host = await api.remoteHostSetModels(setModelArgs(kind, slot, id));
+    // Its answer is newer than any report still on the way.
+    hostReads.invalidate();
+    if (host) state.hostInfo = { status: "ready", host, error: null };
+    else reread = true;
+    state.hostModelStatus = t("hostModels.applied");
   } catch (e) {
-    reportError("error.saveHostModel", e);
+    console.error("remote_host_set_models failed:", e);
+    notify(
+      t("common.withReason", {
+        context: t("error.setHostModels"),
+        reason: hostManageErrorText(engineCode(e), describeError(e)),
+      }),
+      "bad",
+    );
     state.hostModelStatus = null;
   } finally {
     state.hostModelSaving = false;
     renderHostInfo();
   }
+  if (reread) void refreshHostInfo();
+}
+
+/** 在運算主機下載: a 超出負荷 model asks once (downloading it is still allowed). */
+async function downloadOnHost(id: string, confirmed: boolean): Promise<void> {
+  const host = state.hostInfo.host;
+  if (!host) return;
+  if (!confirmed && host.models.find((m) => m.id === id)?.fit === "over") {
+    state.hostConfirm = { kind: "download", id };
+    renderHostInfo();
+    el.modelsHostBody.querySelector<HTMLButtonElement>(".host-confirm .ghost")?.focus();
+    return;
+  }
+  state.hostConfirm = null;
+  // Shown at once; the compute host's events take over from here.
+  state.hostDownloads = applyHostDownload(state.hostDownloads, {
+    model: id,
+    downloaded_bytes: 0,
+    total_bytes: 0,
+    state: "downloading",
+    error: null,
+  });
+  renderHostInfo();
+  try {
+    await api.remoteHostDownload(id);
+  } catch (e) {
+    console.error("remote_host_download failed:", e);
+    const next = new Map(state.hostDownloads);
+    next.delete(id);
+    state.hostDownloads = next;
+    notify(
+      t("common.withReason", {
+        context: t("error.hostDownload"),
+        reason: hostManageErrorText(engineCode(e), describeError(e)),
+      }),
+      "bad",
+    );
+    renderHostInfo();
+  }
+}
+
+/** `host_download`: progress of a download on the compute host; when done, its report lists the model. */
+function onHostDownload(ev: HostDownloadProgress): void {
+  state.hostDownloads = applyHostDownload(state.hostDownloads, ev);
+  if (ev.state === "done") {
+    notify(t("hostModels.downloadDone", { model: ev.model }), "info", [], { autoDismiss: true });
+    void refreshHostInfo();
+  }
+  renderHostInfo();
+}
+
+// ----- B: what this computer does for other computers (docs/specs/compute-capacity.md 八, lib/serve.ts)
+
+/** `host_changed`: another computer changed this one's models; say who and what, then show the new settings. */
+async function onHostChanged(ev: HostChangedEvent): Promise<void> {
+  notify(hostChangedText(state.settings, ev), "info", [], { key: HOST_CHANGED_NOTICE });
+  await reloadSettings();
+  renderServe();
+}
+
+/** The models this computer uses for other computers: its own settings. */
+function serveModels(): ServeModels {
+  const s = state.settings ?? DEFAULT_SETTINGS;
+  return {
+    asr: { fast: s.asr.fast_model, final: s.asr.final_model },
+    translation: { fast: s.translation.fast_model, final: s.translation.final_model },
+  };
+}
+
+function servePanel(): ServePanelView {
+  return servePanelView({
+    serving: state.serving,
+    status: state.remote?.server ?? null,
+    models: serveModels(),
+    nowMs: Date.now(),
+  });
+}
+
+/** The subtitle page's 運算主機 panel (serve role only), Start's state and the mode bar. */
+function renderServe(): void {
+  const serving = computeRole(computeSettings()) === "serve";
+  // A later serving must not start from this one's last peer.
+  if (!serving && state.serving.received) state.serving = emptyServing();
+  el.servePanel.hidden = !serving;
+  // The panel takes the empty hint's place.
+  el.transcriptEmpty.hidden = serving || state.subtitles.lines.length > 0;
+  if (serving) {
+    const view = servePanel();
+    setIfChanged(el.servePanel.dataset, "tone", view.tone);
+    setIfChanged(el.serveTitle, "textContent", view.title);
+    el.serveDetail.hidden = view.detail === null;
+    setIfChanged(el.serveDetail, "textContent", view.detail ?? "");
+    el.serveLoad.hidden = view.load === null;
+    if (view.load) {
+      drawLoadView(view.load, {
+        block: el.serveLoad,
+        bar: el.serveLoadBar,
+        fill: el.serveLoadFill,
+        line: el.serveLoadLine,
+        text: el.serveLoadText,
+        detail: el.serveLoadDetail,
+      });
+    }
+    setIfChanged(el.serveAsr, "textContent", view.asrModels);
+    setIfChanged(el.serveTranslation, "textContent", view.translationModels);
+    el.servePair.hidden = !view.canPair;
+    el.servePair.disabled = !engineReady() || state.pairDialog !== null;
+    el.serveStop.disabled = !engineReady() || !state.settings || sessionActive() || state.computeBusy || state.serveBusy;
+  }
+  renderStatus();
+  // The mode bar repeats the panel's headline (已處理 N 句), so every `serving` event must reach it too.
+  renderModeBar();
+}
+
+/** The bar along the top: which role this computer is in (lib/mode-bar.ts). */
+function renderModeBar(): void {
+  const c = computeSettings();
+  const view = modeBarView({
+    compute: c,
+    host: state.hostInfo.host,
+    rttMs: state.rttMs,
+    sessionActive: sessionActive(),
+    reconnecting: state.reconnecting,
+    serveHeadline: computeRole(c) === "serve" ? servePanel().headline : "",
+  });
+  setIfChanged(document.body.dataset, "mode", view.tone);
+  for (const icon of el.modeIcons) icon.toggleAttribute("hidden", icon.dataset.icon !== view.icon);
+  setIfChanged(el.modeText, "textContent", view.text);
+  el.modeLink.hidden = view.link === null;
+  if (view.link) setIfChanged(el.modeLink.dataset, "link", view.link);
+  setIfChanged(el.modeLinkText, "textContent", view.linkText ?? "");
 }
 
 // ---------------------------------------------------------------- computing load (lib/load.ts)
@@ -4437,24 +4867,44 @@ function renderLoad(): void {
   const running = state.sessionState === "running";
   el.loadBlock.hidden = !running;
   if (!running) return;
-  const view = loadView(state.load);
   const remote = computeRole(computeSettings()) === "remote";
   setIfChanged(el.loadHeading, "textContent", t(remote ? "rail.loadRemote" : "rail.load"));
-  setIfChanged(el.loadBlock.dataset, "level", view.level);
+  drawLoadView(loadView(state.load), {
+    block: el.loadBlock,
+    bar: el.loadBar,
+    fill: el.loadFill,
+    line: el.loadLine,
+    text: el.loadText,
+    detail: el.loadDetail,
+  });
+}
+
+/** The elements of one load view: the rail's, or the 運算主機 panel's (the same component). */
+interface LoadParts {
+  block: HTMLElement;
+  bar: HTMLElement;
+  fill: HTMLElement;
+  line: SVGPathElement;
+  text: HTMLElement;
+  detail: HTMLElement;
+}
+
+function drawLoadView(view: LoadView, parts: LoadParts): void {
+  setIfChanged(parts.block.dataset, "level", view.level);
   // Scaled, not resized (see .meter-fill): this runs once a second.
-  setIfChanged(el.loadFill.style, "transform", `scaleX(${(view.percent ?? 0) / 100})`);
-  setAttributeIfChanged(el.loadBar, "aria-valuenow", String(view.percent ?? 0));
+  setIfChanged(parts.fill.style, "transform", `scaleX(${(view.percent ?? 0) / 100})`);
+  setAttributeIfChanged(parts.bar, "aria-valuenow", String(view.percent ?? 0));
   setAttributeIfChanged(
-    el.loadBar,
+    parts.bar,
     "aria-valuetext",
     view.percent === null ? view.text : `${t("load.percent", { percent: view.percent })} ${view.text}`,
   );
-  setAttributeIfChanged(el.loadBar, "aria-label", t("load.chart"));
-  setAttributeIfChanged(el.loadLine, "d", view.path);
-  setIfChanged(el.loadText, "textContent", view.text);
-  el.loadDetail.hidden = view.detail === null;
-  setIfChanged(el.loadDetail, "textContent", view.detail ?? "");
-  setIfChanged(el.loadDetail, "title", t("load.speedHelp"));
+  setAttributeIfChanged(parts.bar, "aria-label", t("load.chart"));
+  setAttributeIfChanged(parts.line, "d", view.path);
+  setIfChanged(parts.text, "textContent", view.text);
+  parts.detail.hidden = view.detail === null;
+  setIfChanged(parts.detail, "textContent", view.detail ?? "");
+  setIfChanged(parts.detail, "title", t("load.speedHelp"));
 }
 
 // ----- B: providing compute to other computers
@@ -4763,6 +5213,8 @@ function wireRemote(): void {
     if (state.remote?.server.enabled) void applyServe(true);
   });
   el.servePairOpen.addEventListener("click", () => void openServerPairing());
+  el.servePair.addEventListener("click", () => void openServerPairing());
+  el.serveStop.addEventListener("click", () => void setComputeRole("local"));
   // Esc: a finished dialog just closes; an open pairing is cancelled, never left running unseen.
   el.pairDialog.addEventListener("cancel", (e) => {
     e.preventDefault();
@@ -4983,6 +5435,8 @@ function showPage(page: Page): Promise<void> {
   if (page === "settings" && engineReady()) void refreshRemote();
   // The 遠端運算 section shows what the compute host can run.
   if (page === "settings" && engineReady()) void refreshHostInfo();
+  // The models page manages the compute host's models while another computer computes.
+  if (page === "models" && engineReady() && !needsLocalModels(computeSettings())) void refreshHostInfo();
   return page === "models" ? loadModels().then(checkRecommendation) : Promise.resolve();
 }
 
@@ -5055,6 +5509,8 @@ async function loadEngineData(): Promise<void> {
   renderStatus();
   if (state.page === "models") void loadModels();
   void refreshRemote();
+  // The mode bar names the compute host's card, and the models page lists its models.
+  if (computeRole(computeSettings()) === "remote") void refreshHostInfo();
   // Runs on every engine (re)start, e.g. after the GPU runtime install restarts it.
   if (firstRunGate.claim({ isNew, userChoseModels: state.userChoseModels })) void firstRunFlow();
   else void checkRecommendation();
@@ -5319,7 +5775,10 @@ function wire(): void {
     e.preventDefault();
     void submitGlossary();
   });
-  el.modelsRefresh.addEventListener("click", () => void loadModels().then(checkRecommendation));
+  el.modelsRefresh.addEventListener("click", () => {
+    if (!needsLocalModels(computeSettings())) void refreshHostInfo();
+    void loadModels().then(checkRecommendation);
+  });
   for (const field of TRANSLATION_FIELDS) {
     translationSelect(field).addEventListener("input", () => onTranslationPicked(field));
   }

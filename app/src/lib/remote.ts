@@ -7,7 +7,9 @@
  * input, the pairing dialog's state machine and its wording, the left rail's
  * "運算位置" text, and which extra actions a remote session status offers;
  * and the compute host's capacity report (`remote.host_info`,
- * docs/specs/compute-capacity.md) with the model menu built from it.
+ * docs/specs/compute-capacity.md) plus the `host_download`, `host_changed` and
+ * `serving` events of its sections 七、八. The menus built from the report are
+ * in `host-models.ts`, the serve panel in `serve.ts`, the mode bar in `mode-bar.ts`.
  * `main.ts` only renders these views and calls the Tauri commands.
  *
  * Rust validates every command argument and event again; the checks here exist
@@ -18,7 +20,7 @@
 import { describeStatusError } from "./format";
 import { t, type StringKey } from "./i18n";
 import { formatGb } from "./load";
-import type { EngineState } from "./types";
+import type { EngineState, GpuUsage } from "./types";
 import { ValidationError } from "./validate";
 
 // ---------------------------------------------------------------- settings `compute`
@@ -39,13 +41,6 @@ export interface ComputeSettings {
   listen_host: string;
   /** This computer's listening port as a compute host (B); pairing uses the next port. */
   listen_port: number;
-  /**
-   * compute-capacity.md: the models this computer asks the compute host for
-   * (`session.start` `settings.asr`); "" = the compute host's own setting. Only
-   * the compute host knows which are downloaded, so only the id format is checked here.
-   */
-  remote_fast_model: string;
-  remote_final_model: string;
 }
 
 export const DEFAULT_COMPUTE_PORT = 47100;
@@ -65,8 +60,6 @@ export const DEFAULT_COMPUTE: ComputeSettings = {
   server_enabled: false,
   listen_host: "",
   listen_port: DEFAULT_COMPUTE_PORT,
-  remote_fast_model: "",
-  remote_final_model: "",
 };
 
 /** The engine's ASR model id format (registry ids such as `large-v3-turbo`). */
@@ -124,12 +117,6 @@ export function computeFromSettings(v: unknown, warn: (field: string) => void): 
   let listenPort = isValidListenPort(port) ? port : d.listen_port;
   if (isValidListenPort(o.listen_port)) listenPort = o.listen_port;
   else if (o.listen_port !== undefined) warn("compute.listen_port");
-  const model = (key: "remote_fast_model" | "remote_final_model"): string => {
-    const v = o[key];
-    if (v === "" || isModelId(v)) return v;
-    if (v !== undefined) warn(`compute.${key}`);
-    return d[key];
-  };
   return {
     mode,
     host,
@@ -137,8 +124,6 @@ export function computeFromSettings(v: unknown, warn: (field: string) => void): 
     server_enabled: serverEnabled,
     listen_host: listenHost,
     listen_port: listenPort,
-    remote_fast_model: model("remote_fast_model"),
-    remote_final_model: model("remote_final_model"),
   };
 }
 
@@ -402,9 +387,52 @@ export interface RemoteStatus {
   pairing: PairingState | null;
 }
 
+/** `host_download` (A): a download this computer asked the compute host for (compute-capacity.md 七). */
+export interface HostDownloadProgress {
+  model: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  state: "downloading" | "done" | "error";
+  error: string | null;
+}
+
+/** `serving.session`: another computer's subtitles running here; never their text. */
+export interface ServingSession {
+  /** Unix time in ms. */
+  started_at_ms: number;
+  /** Final sentences sent back this session. */
+  sentences: number;
+  mode: string;
+}
+
+/** `serving.metrics`: this compute host's load (the `metrics` load hints). */
+export interface ServingMetrics {
+  final_busy: number | null;
+  rtf: number | null;
+  backlog: number;
+  gpu: GpuUsage | null;
+}
+
+/** `serving` (B): what this compute host is doing (compute-capacity.md 八). */
+export interface ServingEvent {
+  peer: ServerPeer | null;
+  session: ServingSession | null;
+  metrics: ServingMetrics | null;
+}
+
+/** `host_changed` (B): another computer changed this compute host's models. */
+export interface HostChangedEvent {
+  by: string;
+  asr: ModelPair;
+  translation: TranslationPair;
+}
+
 export type RemoteEvent =
   | { kind: "pairing"; pairing: PairingState }
-  | { kind: "server"; listening: boolean; peer: ServerPeer | null; error: string | null };
+  | { kind: "server"; listening: boolean; peer: ServerPeer | null; error: string | null }
+  | ({ kind: "host_download" } & HostDownloadProgress)
+  | ({ kind: "host_changed" } & HostChangedEvent)
+  | ({ kind: "serving" } & ServingEvent);
 
 const MAX_NAME_CHARS = 64;
 const MAX_ERROR_CHARS = 500;
@@ -543,7 +571,94 @@ export function parseRemoteEvent(v: unknown): RemoteEvent {
       error: optBoundedStr(o, "error", p, MAX_ERROR_CHARS),
     };
   }
-  throw new ValidationError(`${p}.kind`, "expected pairing or server");
+  if (o.kind === "host_download") return { kind: "host_download", ...parseHostDownload(o, p) };
+  if (o.kind === "host_changed") {
+    return {
+      kind: "host_changed",
+      by: boundedStr(o, "by", p, MAX_NAME_CHARS),
+      asr: modelPair(o.asr, `${p}.asr`),
+      translation: translationPair(o.translation, `${p}.translation`),
+    };
+  }
+  if (o.kind === "serving") {
+    return {
+      kind: "serving",
+      peer: parsePeer(o.peer, `${p}.peer`),
+      session: o.session === null || o.session === undefined ? null : parseServingSession(o.session, `${p}.session`),
+      metrics: o.metrics === null || o.metrics === undefined ? null : parseServingMetrics(o.metrics, `${p}.metrics`),
+    };
+  }
+  throw new ValidationError(`${p}.kind`, "expected pairing, server, host_download, host_changed or serving");
+}
+
+const DOWNLOAD_STATES = ["downloading", "done", "error"] as const;
+/** Same bounds as Rust (protocol.rs): later than 2286 or more sentences than this is a broken counter. */
+const MAX_EPOCH_MS = 10_000_000_000_000;
+const MAX_SENTENCES = 100_000_000;
+const MAX_BACKLOG = 1_000_000;
+
+function count(o: Obj, key: string, path: string, max: number): number {
+  const v = o[key];
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > max) {
+    throw new ValidationError(`${path}.${key}`, `expected an integer in 0–${max}`);
+  }
+  return v;
+}
+
+function ratio(o: Obj, key: string, path: string, max: number): number | null {
+  const v = o[key];
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max) {
+    throw new ValidationError(`${path}.${key}`, `expected a number in 0–${max}`);
+  }
+  return v;
+}
+
+function parseHostDownload(o: Obj, p: string): HostDownloadProgress {
+  const state = o.state;
+  if (!(DOWNLOAD_STATES as readonly unknown[]).includes(state)) {
+    throw new ValidationError(`${p}.state`, "expected downloading, done or error");
+  }
+  return {
+    model: modelId(o, "model", p),
+    downloaded_bytes: count(o, "downloaded_bytes", p, Number.MAX_SAFE_INTEGER),
+    total_bytes: count(o, "total_bytes", p, Number.MAX_SAFE_INTEGER),
+    state: state as HostDownloadProgress["state"],
+    error: optBoundedStr(o, "error", p, MAX_ERROR_CHARS),
+  };
+}
+
+function parseServingSession(v: unknown, p: string): ServingSession {
+  const o = obj(v, p);
+  const mode = boundedStr(o, "mode", p, 32);
+  if (!/^[a-z_]+$/.test(mode)) throw new ValidationError(`${p}.mode`, "not an identifier");
+  return {
+    started_at_ms: count(o, "started_at_ms", p, MAX_EPOCH_MS),
+    sentences: count(o, "sentences", p, MAX_SENTENCES),
+    mode,
+  };
+}
+
+function parseServingMetrics(v: unknown, p: string): ServingMetrics {
+  const o = obj(v, p);
+  let gpu: GpuUsage | null = null;
+  if (o.gpu !== null && o.gpu !== undefined) {
+    const g = obj(o.gpu, `${p}.gpu`);
+    const name = boundedStr(g, "name", `${p}.gpu`, MAX_NAME_CHARS * 2);
+    if ([...name].length > MAX_NAME_CHARS) throw new ValidationError(`${p}.gpu.name`, `longer than ${MAX_NAME_CHARS}`);
+    gpu = {
+      name,
+      vram_used_mb: megabytes(g, "vram_used_mb", `${p}.gpu`),
+      vram_total_mb: megabytes(g, "vram_total_mb", `${p}.gpu`),
+      util_pct: ratio(g, "util_pct", `${p}.gpu`, 100),
+    };
+  }
+  return {
+    final_busy: ratio(o, "final_busy", p, 1),
+    rtf: ratio(o, "rtf", p, 1000),
+    backlog: count(o, "backlog", p, MAX_BACKLOG),
+    gpu,
+  };
 }
 
 /** A `server` event applied to the last status, so the section updates before `remote.status` answers. */
@@ -850,8 +965,14 @@ export interface HostModel {
   downloaded: boolean;
   /** Memory this model needs on the compute host (GPU memory on CUDA, RAM on CPU), MiB. */
   need_mb: number;
-  /** Null when the compute host could not measure its hardware. */
+  /** As the final pass next to the current real-time model; null when the compute host could not measure its hardware. */
   fit: ModelFit | null;
+  /**
+   * As the real-time pass next to the current final model, as the compute host
+   * counts it; null when it could not measure its hardware, or an older compute
+   * host that does not report it.
+   */
+  fit_as_fast: ModelFit | null;
 }
 
 /** `remote.host_info` → `host`: what the compute host can run, asked before connecting. */
@@ -861,12 +982,30 @@ export interface HostInfo {
   device: "cuda" | "cpu";
   compute_type: string;
   /** The compute host's own settings. */
-  current: ModelPair;
+  current: HostCurrent;
   /** Its hardware recommendation; null when detection failed. */
   recommended: ModelPair | null;
   models: HostModel[];
   translation_model: string | null;
+  /**
+   * compute-capacity.md 七: the models installed on the compute host's
+   * translation server; null when it could not be reached (or an older compute host).
+   */
+  translation_models: string[] | null;
 }
+
+/** Translation models; "" = none set on the compute host. */
+export interface TranslationPair {
+  fast: string;
+  final: string;
+}
+
+export interface HostCurrent extends ModelPair {
+  /** null from compute hosts older than compute-capacity.md 七. */
+  translation: TranslationPair | null;
+}
+
+export const MAX_HOST_TRANSLATION_MODELS = 64;
 
 export const MAX_HOST_MODELS = 32;
 /** Same bound as `metrics.gpu` (1 TiB in MiB): anything larger is not a GPU. */
@@ -893,18 +1032,86 @@ function modelPair(v: unknown, path: string): ModelPair {
   return { fast: modelId(o, "fast", path), final: modelId(o, "final", path) };
 }
 
+export function isTranslationModelName(v: unknown): v is string {
+  return typeof v === "string" && TRANSLATION_MODEL_PATTERN.test(v);
+}
+
+function translationName(o: Obj, key: string, path: string): string {
+  const v = o[key];
+  if (v === "" || isTranslationModelName(v)) return v;
+  throw new ValidationError(`${path}.${key}`, "not a translation model name");
+}
+
+function translationPair(v: unknown, path: string): TranslationPair {
+  const o = obj(v, path);
+  return { fast: translationName(o, "fast", path), final: translationName(o, "final", path) };
+}
+
+/** Why a translation field of the report was left out (the rest of the report is kept). */
+function dropTranslationField(path: string, reason: string): null {
+  console.warn(`ignoring ${path} of the compute host's capacity report: ${reason}`);
+  return null;
+}
+
+/**
+ * The installed translation models; a malformed entry is skipped and a
+ * malformed list is dropped (null), so the recognition part still shows.
+ */
+function translationModels(v: unknown, path: string): string[] | null {
+  if (v === null || v === undefined) return null;
+  if (!Array.isArray(v)) return dropTranslationField(path, "expected an array");
+  if (v.length > MAX_HOST_TRANSLATION_MODELS) {
+    return dropTranslationField(path, `more than ${MAX_HOST_TRANSLATION_MODELS} entries`);
+  }
+  return v.filter((m, i): m is string => {
+    if (isTranslationModelName(m)) return true;
+    dropTranslationField(`${path}[${i}]`, "not a model name");
+    return false;
+  });
+}
+
+/** Missing (an older compute host) or null reads as null (無法判斷). */
+function modelFit(o: Obj, key: string, path: string): ModelFit | null {
+  const fit = o[key];
+  if (fit === undefined || fit === null) return null;
+  if (!(MODEL_FITS as readonly unknown[]).includes(fit)) {
+    throw new ValidationError(`${path}.${key}`, "expected ok, tight, over or null");
+  }
+  return fit as ModelFit;
+}
+
 function hostModel(v: unknown, path: string): HostModel {
   const o = obj(v, path);
-  const fit = o.fit;
-  if (fit !== null && !(MODEL_FITS as readonly unknown[]).includes(fit)) {
-    throw new ValidationError(`${path}.fit`, "expected ok, tight, over or null");
-  }
+  if (o.fit === undefined) throw new ValidationError(`${path}.fit`, "missing");
   return {
     id: modelId(o, "id", path),
     downloaded: flag(o, "downloaded", path),
     need_mb: megabytes(o, "need_mb", path),
-    fit: fit as ModelFit | null,
+    fit: modelFit(o, "fit", path),
+    fit_as_fast: modelFit(o, "fit_as_fast", path),
   };
+}
+
+/** The current translation models; null (dropped alone) when malformed. */
+function currentTranslation(v: unknown, path: string): TranslationPair | null {
+  if (v === null || v === undefined) return null;
+  try {
+    return translationPair(v, path);
+  } catch (e) {
+    if (!(e instanceof ValidationError)) throw e;
+    return dropTranslationField(path, e.message);
+  }
+}
+
+function hostCurrent(v: unknown, path: string): HostCurrent {
+  const pair = modelPair(v, path);
+  return { ...pair, translation: currentTranslation(obj(v, path).translation, `${path}.translation`) };
+}
+
+/** The translation model; null (dropped alone) when it is not a model name. */
+function hostTranslationModel(v: unknown, path: string): string | null {
+  if (v === null || v === undefined) return null;
+  return isTranslationModelName(v) ? v : dropTranslationField(path, "not a model name");
 }
 
 function hostInfoStrict(v: unknown): HostInfo {
@@ -930,26 +1137,27 @@ function hostInfoStrict(v: unknown): HostInfo {
   const models = o.models;
   if (!Array.isArray(models)) throw new ValidationError(`${p}.models`, "expected an array");
   if (models.length > MAX_HOST_MODELS) throw new ValidationError(`${p}.models`, `more than ${MAX_HOST_MODELS} entries`);
-  const translation = optBoundedStr(o, "translation_model", p, 200);
-  if (translation !== null && !TRANSLATION_MODEL_PATTERN.test(translation)) {
-    throw new ValidationError(`${p}.translation_model`, "not a model name");
-  }
   return {
     gpu,
     device,
     compute_type: computeType,
-    current: modelPair(o.current, `${p}.current`),
+    current: hostCurrent(o.current, `${p}.current`),
     recommended:
       o.recommended === null || o.recommended === undefined ? null : modelPair(o.recommended, `${p}.recommended`),
     models: models.map((m, i) => hostModel(m, `${p}.models[${i}]`)),
-    translation_model: translation,
+    translation_model: hostTranslationModel(o.translation_model, `${p}.translation_model`),
+    translation_models: translationModels(o.translation_models, `${p}.translation_models`),
   };
 }
 
 /**
- * A `HostInfo` from the compute host, or null when any field is malformed:
- * half a capacity report would label models wrongly, so it is all or nothing
- * (the spec's rule for `welcome.host` too). The reason is logged.
+ * A `HostInfo` from the compute host, or null when a recognition field is
+ * malformed: half a capacity report would label models wrongly, so that part
+ * is all or nothing (the spec's rule for `welcome.host` too). The translation
+ * fields are dropped one by one instead (`current.translation` and
+ * `translation_model` → null, a bad `translation_models` entry skipped): they
+ * label nothing, and a translation server's odd model name should not hide
+ * the recognition models. Every reason is logged.
  */
 export function parseHostInfo(v: unknown): HostInfo | null {
   if (v === null || v === undefined) return null;
@@ -980,65 +1188,6 @@ export function shortGpuName(name: string): string {
 export function hostSummary(host: HostInfo): string {
   if (!host.gpu) return t("host.cpu");
   return t("host.gpu", { name: shortGpuName(host.gpu.name), memory: formatGb(host.gpu.vram_total_mb) });
-}
-
-const FIT_TEXT: Readonly<Record<ModelFit, StringKey>> = {
-  ok: "host.fit.ok",
-  tight: "host.fit.tight",
-  over: "host.fit.over",
-};
-
-export interface HostModelOption {
-  /** "" = the compute host's own setting. */
-  value: string;
-  label: string;
-  fit: ModelFit | null;
-}
-
-/**
- * The 辨識模型 menu: "照運算主機的設定（large-v3）", then the models the compute
- * host has downloaded, each labelled 建議 and how well it fits. A saved choice
- * the compute host no longer has stays listed (marked so) rather than the menu
- * silently showing another value; without a report only the saved choice is listed.
- */
-export function hostModelOptions(host: HostInfo | null, selected: string): HostModelOption[] {
-  const follow: HostModelOption = {
-    value: "",
-    label: host ? t("host.followHost", { model: host.current.final }) : t("host.followHostUnknown"),
-    fit: null,
-  };
-  if (!host) return selected ? [follow, { value: selected, label: selected, fit: null }] : [follow];
-  const options = host.models
-    .filter((m) => m.downloaded)
-    .map(
-      (m): HostModelOption => ({
-        value: m.id,
-        label: t(host.recommended?.final === m.id ? "host.optionRecommended" : "host.option", {
-          model: m.id,
-          fit: t(m.fit ? FIT_TEXT[m.fit] : "host.fit.unknown"),
-        }),
-        fit: m.fit,
-      }),
-    );
-  if (selected && !options.some((o) => o.value === selected)) {
-    options.push({ value: selected, label: t("host.optionMissing", { model: selected }), fit: null });
-  }
-  return [follow, ...options];
-}
-
-/** Some models are only on the compute host's list, not on its disk: say where to get them. */
-export function hostHasMoreModels(host: HostInfo | null): boolean {
-  return host?.models.some((m) => !m.downloaded) ?? false;
-}
-
-/** Choosing this model needs a second "yes": the compute host reports it would not keep up. */
-export function needsOverConfirm(host: HostInfo | null, id: string): boolean {
-  return id !== "" && host?.models.find((m) => m.id === id)?.fit === "over";
-}
-
-/** Patch for the final model asked of the compute host ("" = its own); the real-time model stays its own. */
-export function remoteModelPatch(finalModel: string): Record<string, unknown> {
-  return { compute: { remote_final_model: finalModel } };
 }
 
 /** `remote.host_info` failures that already have plain words (the same as a session's). */

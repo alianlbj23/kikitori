@@ -652,13 +652,36 @@ pub struct ModelPair {
     pub r#final: String,
 }
 
+/// The compute host's translation models (compute-capacity.md 七); "" = none set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranslationPair {
+    pub fast: String,
+    pub r#final: String,
+}
+
+/// `HostInfo.current`: the compute host's own settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostCurrent {
+    pub fast: String,
+    pub r#final: String,
+    /// Absent from compute hosts older than compute-capacity.md 七; `None`
+    /// too when malformed (dropped alone, see [`check_host_info`]).
+    #[serde(default, deserialize_with = "lenient_current_translation")]
+    pub translation: Option<TranslationPair>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostModel {
     pub id: String,
     pub downloaded: bool,
     pub need_mb: f64,
-    /// `None` when the compute host could not measure its hardware.
+    /// As the final model next to the current real-time model; `None` when
+    /// the compute host could not measure its hardware.
     pub fit: Option<ModelFit>,
+    /// As the real-time model next to the current final model, as the compute
+    /// host counts it; `None` when it could not tell or is older than this field.
+    #[serde(default)]
+    pub fit_as_fast: Option<ModelFit>,
 }
 
 /// `HostInfo`: what the compute host can run. It comes from another computer
@@ -669,20 +692,110 @@ pub struct HostInfo {
     pub gpu: Option<HostGpu>,
     pub device: HostDevice,
     pub compute_type: String,
-    pub current: ModelPair,
+    pub current: HostCurrent,
     pub recommended: Option<ModelPair>,
     pub models: Vec<HostModel>,
+    /// `None` too when it is not a model name (dropped alone).
+    #[serde(default, deserialize_with = "lenient_translation_model")]
     pub translation_model: Option<String>,
+    /// The models installed on the compute host's translation server; `None`
+    /// when it could not be reached (or the compute host is older), or when the
+    /// list itself is malformed. A malformed entry is skipped.
+    #[serde(default, deserialize_with = "lenient_translation_models")]
+    pub translation_models: Option<Vec<String>>,
 }
 
-fn check_model_pair(pair: &ModelPair, field: &str) -> Result<(), String> {
-    for (name, id) in [("fast", &pair.fast), ("final", &pair.r#final)] {
+/// More translation models than a translation server lists in practice.
+const MAX_HOST_TRANSLATION_MODELS: usize = 64;
+
+// The translation fields of a `HostInfo` are dropped one by one when malformed
+// instead of losing the whole report: they label no recognition model, and an
+// odd name from the compute host's translation server should not hide its
+// recognition models. Each drop is logged. Same rules as the UI's `parseHostInfo`.
+
+fn drop_translation_field<T>(field: &str, reason: impl std::fmt::Display) -> Option<T> {
+    log::warn!("ignoring {field} of the compute host's capacity report: {reason}");
+    None
+}
+
+/// A translation model name, or "" (none set) when `allow_unset`.
+fn is_translation_name(model: &str, allow_unset: bool) -> bool {
+    (allow_unset && model.is_empty()) || validate_translation_model(model).is_ok()
+}
+
+fn current_translation_from(value: Value) -> Option<TranslationPair> {
+    if value.is_null() {
+        return None;
+    }
+    let pair: TranslationPair = match serde_json::from_value(value) {
+        Ok(pair) => pair,
+        Err(e) => return drop_translation_field("current.translation", e),
+    };
+    if !is_translation_name(&pair.fast, true) || !is_translation_name(&pair.r#final, true) {
+        return drop_translation_field("current.translation", "not a model name");
+    }
+    Some(pair)
+}
+
+fn translation_model_from(value: Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(model) if is_translation_name(&model, false) => Some(model),
+        _ => drop_translation_field("translation_model", "not a model name"),
+    }
+}
+
+fn translation_models_from(value: Value) -> Option<Vec<String>> {
+    let models = match value {
+        Value::Null => return None,
+        Value::Array(models) => models,
+        _ => return drop_translation_field("translation_models", "expected an array"),
+    };
+    if models.len() > MAX_HOST_TRANSLATION_MODELS {
+        return drop_translation_field(
+            "translation_models",
+            format!("more than {MAX_HOST_TRANSLATION_MODELS} entries"),
+        );
+    }
+    let kept = models
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, model)| match model {
+            Value::String(model) if is_translation_name(&model, false) => Some(model),
+            _ => drop_translation_field(&format!("translation_models[{i}]"), "not a model name"),
+        })
+        .collect();
+    Some(kept)
+}
+
+fn lenient_current_translation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<TranslationPair>, D::Error> {
+    Value::deserialize(deserializer).map(current_translation_from)
+}
+
+fn lenient_translation_model<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Value::deserialize(deserializer).map(translation_model_from)
+}
+
+fn lenient_translation_models<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    Value::deserialize(deserializer).map(translation_models_from)
+}
+
+fn check_model_pair(fast: &str, r#final: &str, field: &str) -> Result<(), String> {
+    for (name, id) in [("fast", fast), ("final", r#final)] {
         validate_model_id(id).map_err(|e| format!("{field}.{name}: {e}"))?;
     }
     Ok(())
 }
 
-/// The shape and ranges of a `HostInfo` (the same rules as the UI's `parseHostInfo`).
+/// The shape and ranges of a `HostInfo` (the same rules as the UI's
+/// `parseHostInfo`): a malformed recognition field fails the whole report, a
+/// malformed translation field is already dropped alone while deserializing.
 pub fn check_host_info(value: Value) -> Result<HostInfo, String> {
     let host: HostInfo = serde_json::from_value(value).map_err(|e| e.to_string())?;
     if let Some(gpu) = &host.gpu {
@@ -704,9 +817,9 @@ pub fn check_host_info(value: Value) -> Result<HostInfo, String> {
     {
         return Err("compute_type is not a precision name".into());
     }
-    check_model_pair(&host.current, "current")?;
+    check_model_pair(&host.current.fast, &host.current.r#final, "current")?;
     if let Some(recommended) = &host.recommended {
-        check_model_pair(recommended, "recommended")?;
+        check_model_pair(&recommended.fast, &recommended.r#final, "recommended")?;
     }
     if host.models.len() > MAX_HOST_MODELS {
         return Err(format!("more than {MAX_HOST_MODELS} models"));
@@ -716,9 +829,6 @@ pub fn check_host_info(value: Value) -> Result<HostInfo, String> {
         if !HOST_MB_RANGE.contains(&model.need_mb) {
             return Err(format!("models[{i}].need_mb is out of range"));
         }
-    }
-    if let Some(model) = &host.translation_model {
-        validate_translation_model(model).map_err(|e| format!("translation_model: {e}"))?;
     }
     Ok(host)
 }
@@ -751,6 +861,99 @@ pub async fn remote_host_info(bridge: State<'_, EngineBridge>) -> CmdResult<Valu
         .request("remote.host_info", json!({}), REMOTE_SOCKETS)
         .await?;
     Ok(host_info_result(result))
+}
+
+/// One side of `remote.host_set_models`: the real-time and/or the final model
+/// (compute-capacity.md 七). A missing field keeps the compute host's value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelChoice {
+    pub fast_model: Option<String>,
+    pub final_model: Option<String>,
+}
+
+fn model_choice_params(
+    choice: &ModelChoice,
+    field: &str,
+    check: fn(&str) -> Result<(), RequestError>,
+) -> Result<Option<Value>, RequestError> {
+    let mut out = Map::new();
+    for (name, value) in [
+        ("fast_model", &choice.fast_model),
+        ("final_model", &choice.final_model),
+    ] {
+        if let Some(model) = value {
+            check(model).map_err(|e| invalid(format!("{field}.{name}: {e}")))?;
+            out.insert(name.into(), json!(model));
+        }
+    }
+    Ok((!out.is_empty()).then_some(Value::Object(out)))
+}
+
+/// `remote.host_set_models` parameters: ASR ids and translation model names in
+/// the commands' formats. Whether the compute host has them is its own check.
+pub fn host_set_models_params(
+    asr: Option<&ModelChoice>,
+    translation: Option<&ModelChoice>,
+) -> Result<Value, RequestError> {
+    let mut params = Map::new();
+    if let Some(choice) = asr
+        && let Some(v) = model_choice_params(choice, "asr", validate_model_id)?
+    {
+        params.insert("asr".into(), v);
+    }
+    if let Some(choice) = translation
+        && let Some(v) = model_choice_params(choice, "translation", validate_translation_model)?
+    {
+        params.insert("translation".into(), v);
+    }
+    if params.is_empty() {
+        return Err(invalid("no model to change"));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `remote.host_download` parameters: only speech recognition models can be
+/// downloaded on the compute host.
+pub fn host_download_params(model: &str) -> Result<Value, RequestError> {
+    validate_model_id(model)?;
+    if model == GPU_RUNTIME_ID {
+        return Err(invalid(
+            "remote.host_download only applies to speech recognition models",
+        ));
+    }
+    Ok(json!({ "model": model }))
+}
+
+/// Changes the compute host's own models (saved there; its next session uses
+/// them). Answers with its updated `HostInfo`, checked like `remote_host_info`.
+#[tauri::command]
+pub async fn remote_host_set_models(
+    bridge: State<'_, EngineBridge>,
+    asr: Option<ModelChoice>,
+    translation: Option<ModelChoice>,
+) -> CmdResult<Value> {
+    let params = host_set_models_params(asr.as_ref(), translation.as_ref())?;
+    let result = bridge
+        .request("remote.host_set_models", params, REMOTE_SOCKETS)
+        .await?;
+    Ok(host_info_result(result))
+}
+
+/// Starts a model download on the compute host; progress arrives as
+/// `engine://remote` events of kind `host_download`.
+#[tauri::command]
+pub async fn remote_host_download(
+    bridge: State<'_, EngineBridge>,
+    model: String,
+) -> CmdResult<Value> {
+    let params = host_download_params(&model)?;
+    let result = bridge
+        .request("remote.host_download", params, REMOTE_SOCKETS)
+        .await?;
+    // Only the flag is passed on; the progress comes as events.
+    let started = result.get("started").and_then(Value::as_bool) == Some(true);
+    Ok(json!({ "started": started }))
 }
 
 #[tauri::command]
@@ -1635,7 +1838,7 @@ mod tests {
             "current": {"fast": "large-v3-turbo", "final": "large-v3"},
             "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
             "models": [
-                {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok"},
+                {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok", "fit_as_fast": "tight"},
                 {"id": "kotoba-whisper-v2.0", "downloaded": false, "need_mb": 1600.5, "fit": "tight"}
             ],
             "translation_model": "qwen3.5:9b",
@@ -1651,6 +1854,9 @@ mod tests {
         assert_eq!(host["device"], json!("cuda"));
         assert_eq!(host["current"]["final"], json!("large-v3"));
         assert_eq!(host["models"][1]["fit"], json!("tight"));
+        // The real-time label is forwarded; an older compute host's absent one is null.
+        assert_eq!(host["models"][0]["fit_as_fast"], json!("tight"));
+        assert!(host["models"][1]["fit_as_fast"].is_null());
         assert_eq!(host["translation_model"], json!("qwen3.5:9b"));
         // Fields this app does not know are not forwarded.
         assert!(host.get("newer_field").is_none());
@@ -1694,7 +1900,7 @@ mod tests {
             ("/models/0/downloaded", json!("yes")),
             ("/models/0/need_mb", json!(-5)),
             ("/models/0/fit", json!("maybe")),
-            ("/translation_model", json!("../x")),
+            ("/models/0/fit_as_fast", json!("maybe")),
         ];
         for (pointer, bad) in cases {
             let mut host = host_info_example();
@@ -1723,9 +1929,161 @@ mod tests {
         );
     }
 
-    const REMOTE_COMMANDS: [&str; 10] = [
+    #[test]
+    fn host_info_carries_the_translation_models() {
+        let mut host = host_info_example();
+        host["current"]["translation"] = json!({"fast": "qwen3.5:4b", "final": "qwen3.5:9b"});
+        host["translation_models"] = json!(["qwen3.5:4b", "qwen3.5:9b"]);
+        let out = host_info_result(json!({ "host": host }));
+        assert_eq!(
+            out["host"]["current"]["translation"]["final"],
+            json!("qwen3.5:9b")
+        );
+        assert_eq!(out["host"]["translation_models"][1], json!("qwen3.5:9b"));
+
+        // An older compute host: both absent, forwarded as null.
+        let out = host_info_result(json!({ "host": host_info_example() }));
+        assert!(out["host"]["current"]["translation"].is_null());
+        assert!(out["host"]["translation_models"].is_null());
+
+        // No translation model set yet is "", not malformed.
+        let mut unset = host_info_example();
+        unset["current"]["translation"] = json!({"fast": "", "final": ""});
+        unset["translation_models"] = Value::Null;
+        assert!(!host_info_result(json!({ "host": unset }))["host"].is_null());
+    }
+
+    #[test]
+    fn host_info_drops_only_the_malformed_translation_field() {
+        let base = || {
+            let mut host = host_info_example();
+            host["current"]["translation"] = json!({"fast": "a", "final": "b"});
+            host["translation_models"] = json!(["a", "b"]);
+            host
+        };
+        let check = |host: Value| {
+            let out = host_info_result(json!({ "host": host }))["host"].clone();
+            // The recognition part is always kept.
+            assert_eq!(out["models"][0]["id"], json!("large-v3"));
+            assert_eq!(out["current"]["final"], json!("large-v3"));
+            out
+        };
+
+        for bad in [
+            json!({"fast": "../x", "final": "qwen3.5:9b"}),
+            json!({"fast": "qwen3.5:4b"}),
+            json!({"fast": 1, "final": "b"}),
+            json!("qwen3.5:9b"),
+        ] {
+            let mut host = base();
+            host["current"]["translation"] = bad.clone();
+            let out = check(host);
+            assert!(out["current"]["translation"].is_null(), "{bad}");
+            assert_eq!(out["translation_models"], json!(["a", "b"]), "{bad}");
+            assert_eq!(out["translation_model"], json!("qwen3.5:9b"), "{bad}");
+        }
+
+        // A bad entry is skipped, the good ones stay.
+        let mut host = base();
+        host["translation_models"] = json!(["ok", "a b", 3, "../x", "q:1"]);
+        assert_eq!(check(host)["translation_models"], json!(["ok", "q:1"]));
+        for bad in [
+            json!("qwen3.5:9b"),
+            json!({"a": 1}),
+            Value::Array(
+                (0..=MAX_HOST_TRANSLATION_MODELS)
+                    .map(|i| json!(format!("m{i}")))
+                    .collect(),
+            ),
+        ] {
+            let mut host = base();
+            host["translation_models"] = bad;
+            let out = check(host);
+            assert!(out["translation_models"].is_null());
+            assert_eq!(out["current"]["translation"]["fast"], json!("a"));
+        }
+
+        for bad in [
+            json!("../x"),
+            json!("a b"),
+            json!(7),
+            json!("x".repeat(201)),
+            json!(""),
+        ] {
+            let mut host = base();
+            host["translation_model"] = bad.clone();
+            let out = check(host);
+            assert!(out["translation_model"].is_null(), "{bad}");
+            assert_eq!(out["translation_models"], json!(["a", "b"]), "{bad}");
+        }
+        let mut host = base();
+        host["translation_model"] = json!("x".repeat(200));
+        assert_eq!(check(host)["translation_model"], json!("x".repeat(200)));
+    }
+
+    fn choice(fast: Option<&str>, r#final: Option<&str>) -> ModelChoice {
+        ModelChoice {
+            fast_model: fast.map(str::to_owned),
+            final_model: r#final.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn host_set_models_params_checks_each_model() {
+        assert_eq!(
+            host_set_models_params(Some(&choice(None, Some("large-v3"))), None).unwrap(),
+            json!({"asr": {"final_model": "large-v3"}})
+        );
+        assert_eq!(
+            host_set_models_params(
+                Some(&choice(Some("large-v3-turbo"), Some("large-v3"))),
+                Some(&choice(Some("qwen3.5:4b"), Some("hf.co/x/y:Q4"))),
+            )
+            .unwrap(),
+            json!({
+                "asr": {"fast_model": "large-v3-turbo", "final_model": "large-v3"},
+                "translation": {"fast_model": "qwen3.5:4b", "final_model": "hf.co/x/y:Q4"}
+            })
+        );
+        // Nothing to change at all is a mistake of the caller.
+        assert!(is_invalid_input(host_set_models_params(None, None)));
+        assert!(is_invalid_input(host_set_models_params(
+            Some(&choice(None, None)),
+            Some(&choice(None, None)),
+        )));
+        // ASR ids and translation names each follow their own rule.
+        for bad in ["", "../x", "a b", "qwen3.5:9b"] {
+            assert!(
+                is_invalid_input(host_set_models_params(Some(&choice(Some(bad), None)), None)),
+                "{bad:?}"
+            );
+        }
+        for bad in ["", "../x", "a b", ":x"] {
+            assert!(
+                is_invalid_input(host_set_models_params(None, Some(&choice(None, Some(bad))))),
+                "{bad:?}"
+            );
+        }
+        // Unknown fields are refused rather than silently dropped.
+        assert!(serde_json::from_value::<ModelChoice>(json!({"model": "x"})).is_err());
+    }
+
+    #[test]
+    fn host_download_params_only_takes_speech_models() {
+        assert_eq!(
+            host_download_params("large-v3").unwrap(),
+            json!({"model": "large-v3"})
+        );
+        for bad in ["", "../x", GPU_RUNTIME_ID] {
+            assert!(is_invalid_input(host_download_params(bad)), "{bad:?}");
+        }
+    }
+
+    const REMOTE_COMMANDS: [&str; 12] = [
         "remote_status",
         "remote_host_info",
+        "remote_host_set_models",
+        "remote_host_download",
         "remote_server_set",
         "remote_identity_reset",
         "remote_disconnect",

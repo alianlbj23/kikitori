@@ -4,6 +4,7 @@ fit 的計算（CUDA／CPU、同一個模型只算一次）、偵測失敗時仍
 下載」都是注入的假資料，不跑 nvidia-smi、不碰磁碟。
 """
 
+import dataclasses
 import unittest
 from typing import Any
 
@@ -64,6 +65,10 @@ def fits(info: dict[str, Any]) -> dict[str, Any]:
     return {m["id"]: m["fit"] for m in info["models"]}
 
 
+def fits_as_fast(info: dict[str, Any]) -> dict[str, Any]:
+    return {m["id"]: m["fit_as_fast"] for m in info["models"]}
+
+
 class BuildHostInfoTest(unittest.TestCase):
     def test_cuda_uses_the_vram_minus_the_desktop_reserve(self) -> None:
         # 1080 Ti（11 GiB）：可用 11264 − 1024 = 10240，80% = 8192
@@ -84,8 +89,17 @@ class BuildHostInfoTest(unittest.TestCase):
         self.assertEqual(
             (info["device"], info["compute_type"]), ("cuda", "int8_float16")
         )
+        translation = Settings().translation
         self.assertEqual(
-            info["current"], {"fast": "large-v3-turbo", "final": "large-v3"}
+            info["current"],
+            {
+                "fast": "large-v3-turbo",
+                "final": "large-v3",
+                "translation": {
+                    "fast": translation.fast_model,
+                    "final": translation.final_model,
+                },
+            },
         )
         models = {m["id"]: m for m in info["models"]}
         self.assertEqual(list(models), list(MODELS))
@@ -96,6 +110,7 @@ class BuildHostInfoTest(unittest.TestCase):
                 "downloaded": True,
                 "need_mb": MODELS["large-v3"].approx_gpu_vram_int8_mb,
                 "fit": "ok",
+                "fit_as_fast": "ok",
             },
         )
         self.assertFalse(models["small"]["downloaded"])
@@ -133,7 +148,7 @@ class BuildHostInfoTest(unittest.TestCase):
                 final_compute_type="int8_float16",
             ),
             "cuda",
-            "large-v3-turbo",
+            final="large-v3-turbo",
         )
         turbo = MODELS["large-v3-turbo"].approx_gpu_vram_int8_mb
         self.assertEqual(same, turbo + 512)
@@ -198,6 +213,76 @@ class BuildHostInfoTest(unittest.TestCase):
             {"fast": rec.fast_asr.model, "final": rec.final_asr.model},
         )
 
+    def test_fit_as_fast_pairs_each_model_with_the_current_final_model(self) -> None:
+        # 3800 MiB 的卡（可用 2776、80% = 2220.8）、目前即時 base＋完整 small：
+        # fit 是「候選當完整＋base」，fit_as_fast 是「候選當即時＋small」
+        info = c.build_host_info(
+            settings(device="cuda", fast_model="base", final_model="small"),
+            hardware(vram_mb=3800, cc="8.6"),
+            set(),
+        )
+        self.assertEqual(
+            fits_as_fast(info),
+            {
+                "tiny": "ok",  # 1000
+                "base": "ok",  # 1100
+                "small": "ok",  # 同一個模型只算一次：1512
+                "medium": "tight",  # 2640
+                "large-v3-turbo": "over",  # 2800（當完整搭 base 只是 tight）
+                "large-v3": "over",
+            },
+        )
+        self.assertEqual(fits(info)["large-v3-turbo"], "tight")
+
+    def test_fit_as_fast_uses_the_fast_precision(self) -> None:
+        # 候選當即時：用即時路徑的精度（int8 比 float16 省），不是完整路徑的
+        def as_fast(fast_type: str) -> Any:
+            return fits_as_fast(
+                c.build_host_info(
+                    settings(
+                        device="cuda",
+                        fast_model="base",
+                        final_model="small",
+                        fast_compute_type=fast_type,
+                        final_compute_type="float16",
+                    ),
+                    hardware(vram_mb=3800, cc="8.6"),
+                    set(),
+                )
+            )["large-v3-turbo"]
+
+        self.assertEqual(as_fast("float16"), "over")
+        self.assertIn(as_fast("int8_float16"), ("ok", "tight"))
+
+    def test_fit_as_fast_leaves_room_for_a_local_translation_model(self) -> None:
+        base = {
+            "asr": {
+                "device": "cuda",
+                "fast_model": "base",
+                "final_model": "small",
+            },
+        }
+        local = Settings().merged(
+            {
+                **base,
+                "translation": {
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "fast_model": "qwen3.5:9b",
+                    "final_model": "qwen3.5:9b",
+                },
+            }
+        )
+        far = Settings().merged(
+            {**base, "translation": {"base_url": REMOTE_TRANSLATION}}
+        )
+        card = hardware(vram_mb=8192)
+        self.assertEqual(
+            fits_as_fast(c.build_host_info(far, card, set()))["base"], "ok"
+        )
+        self.assertEqual(
+            fits_as_fast(c.build_host_info(local, card, set()))["large-v3"], "over"
+        )
+
     def test_detection_failure_still_answers(self) -> None:
         info = c.build_host_info(settings(), None, {"base"})
         self.assertIsNone(info["gpu"])
@@ -205,6 +290,7 @@ class BuildHostInfoTest(unittest.TestCase):
         self.assertEqual(info["device"], "cpu")
         # 不知道可用量：不猜跑不跑得動
         self.assertTrue(all(m["fit"] is None for m in info["models"]))
+        self.assertTrue(all(m["fit_as_fast"] is None for m in info["models"]))
         self.assertTrue(
             next(m for m in info["models"] if m["id"] == "base")["downloaded"]
         )
@@ -213,6 +299,101 @@ class BuildHostInfoTest(unittest.TestCase):
         info = c.build_host_info(settings(device="cuda"), hardware(), set())
         self.assertEqual(info["device"], "cuda")
         self.assertTrue(all(m["fit"] is None for m in info["models"]))
+
+    def test_changing_the_fast_model_changes_every_fit(self) -> None:
+        # compute-capacity 七：fit 是「這個模型當完整辨識＋B 目前的即時模型」，A 改了即時模型
+        # 之後 host.updated 的 fit 要跟著變（3800 MiB 的卡：base 搭 large-v3 吃緊、搭 turbo 超出）
+        small_card = hardware(vram_mb=3800, cc="8.6")
+        light = c.build_host_info(
+            settings(device="cuda", fast_model="base"), small_card, set()
+        )
+        heavy = c.build_host_info(
+            settings(device="cuda", fast_model="large-v3-turbo"), small_card, set()
+        )
+        self.assertNotEqual(fits(light), fits(heavy))
+        self.assertEqual(fits(heavy)["large-v3"], "over")
+
+
+class TranslationModelsTest(unittest.TestCase):
+    """compute-capacity 七：B 的翻譯伺服器已安裝的模型（給 A 的翻譯模型選單）。"""
+
+    def with_models(self, models: tuple[str, ...] | None) -> HardwareInfo:
+        return dataclasses.replace(
+            hardware(vram_mb=11264),
+            translation_server=TranslationServerInfo(
+                "http://127.0.0.1:11434/v1", True, models is not None, models
+            ),
+        )
+
+    def test_installed_models_come_from_the_detection(self) -> None:
+        info = c.build_host_info(
+            settings(), self.with_models(("qwen3.5:4b", "qwen3.5:9b")), set()
+        )
+        self.assertEqual(info["translation_models"], ["qwen3.5:4b", "qwen3.5:9b"])
+
+    def test_unknown_when_unreachable_or_undetected(self) -> None:
+        unreachable = c.build_host_info(settings(), self.with_models(None), set())
+        self.assertIsNone(unreachable["translation_models"])
+        self.assertIsNone(
+            c.build_host_info(settings(), None, set())["translation_models"]
+        )
+
+    def test_the_list_is_capped_and_odd_names_are_dropped(self) -> None:
+        many = tuple(f"model-{i}" for i in range(100))
+        info = c.build_host_info(
+            settings(), self.with_models((" padded", "bad\nname", *many)), set()
+        )
+        self.assertEqual(len(info["translation_models"]), c.MAX_TRANSLATION_MODELS)
+        self.assertEqual(info["translation_models"][0], "model-0")
+
+    def test_only_names_the_client_accepts_are_listed(self) -> None:
+        # A 的 Rust／TS 只收「英數開頭、英數與 ._:/-、不含 ..、≤ 200 字」：其他的 A 選了也存不回來
+        info = c.build_host_info(
+            settings(),
+            self.with_models(
+                (
+                    "qwen3.5:4b",
+                    "my model",
+                    "gpt-4o@2024",
+                    "a..b",
+                    "-lead",
+                    "通訳",
+                    "x" * 201,
+                    "hf.co/x/y:Q4_K_M",
+                )
+            ),
+            set(),
+        )
+        self.assertEqual(info["translation_models"], ["qwen3.5:4b", "hf.co/x/y:Q4_K_M"])
+
+    def odd_current(self, fast: str, final: str) -> dict[str, Any]:
+        s = Settings().merged(
+            {
+                "translation": {
+                    "base_url": REMOTE_TRANSLATION,
+                    "fast_model": fast,
+                    "final_model": final,
+                }
+            }
+        )
+        return c.build_host_info(s, self.with_models(("qwen3.5:4b",)), set())
+
+    def test_current_translation_needs_names_the_client_accepts(self) -> None:
+        good = self.odd_current("qwen3.5:4b", "hf.co/x/y:Q4_K_M")
+        self.assertEqual(
+            good["current"]["translation"],
+            {"fast": "qwen3.5:4b", "final": "hf.co/x/y:Q4_K_M"},
+        )
+        self.assertEqual(good["translation_model"], "hf.co/x/y:Q4_K_M")
+        # 任一個不合格：整個 current.translation 為 null（不送半組）
+        odd_fast = self.odd_current("my model", "qwen3.5:4b")
+        self.assertIsNone(odd_fast["current"]["translation"])
+        self.assertEqual(odd_fast["translation_model"], "qwen3.5:4b")
+        odd_final = self.odd_current("qwen3.5:4b", "gpt-4o@2024")
+        self.assertIsNone(odd_final["current"]["translation"])
+        self.assertIsNone(odd_final["translation_model"])
+        # 辨識的部分不受影響
+        self.assertEqual(odd_final["current"]["final"], Settings().asr.final_model)
 
 
 class FakeClock:

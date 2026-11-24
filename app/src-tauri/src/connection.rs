@@ -243,6 +243,9 @@ fn dispatch(bytes: &[u8], pending: &Pending, sink: &dyn EventSink) {
             log::warn!("ignoring unknown engine event {name:?}");
         }
         Ok(Some(Incoming::Event(event))) => sink.engine_event(event),
+        Err(e @ protocol::ParseError::Dropped(_)) => {
+            log::warn!("{e}; line: {}", protocol::preview(bytes));
+        }
         Err(e) => {
             log::error!(
                 "rejected engine line: {e}; line: {}",

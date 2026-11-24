@@ -12,7 +12,8 @@
 7. 重建這台電腦的身分
 
 「選擇模型」與連進來的電腦看到的是同一份能力（`remote.capacity`，docs/specs/compute-capacity.md
-「六」）。
+「六」）。提供運算中，配對過的電腦也可以改這台的模型、請這台下載（「七」，`_HeadlessManager`）：
+寫進同一個設定檔、直接用 ASR 的下載函式，並在終端機印出誰改了什麼與下載進度。
 """
 
 import json
@@ -41,6 +42,14 @@ from kikitori.remote.identity import (
     IdentityError,
     load_or_create_identity,
     reset_identity,
+)
+from kikitori.remote.manage import (
+    DOWNLOAD_FAILED_DETAIL,
+    DOWNLOAD_START_DETAIL,
+    SETTINGS_INVALID_DETAIL,
+    SETTINGS_SAVE_DETAIL,
+    HostManageError,
+    ProgressFn,
 )
 from kikitori.remote.network import is_allowed_listen_host, is_allowed_source
 from kikitori.remote.pair_net import (
@@ -85,6 +94,19 @@ _FIT_LABELS = {"ok": "跑得動", "tight": "可能吃緊", "over": "超出負荷
 
 VramFn = Callable[[], tuple[int, int] | None]
 """目前顯示卡記憶體 `(已用, 總量)`（MiB）；沒有 NVIDIA 或查不到時 None。"""
+DownloadFn = Callable[[str, Callable[[int, int], None], threading.Event], None]
+"""`(model_id, on_bytes(downloaded, total), cancel)`：下載並驗證一個 ASR 模型（阻塞）。"""
+RELAY_SECS = 1.0
+"""轉給另一台電腦的下載進度最多每秒一則（下載函式每 1 MiB 回報一次）。"""
+
+
+def default_download_asr(
+    model_id: str, on_bytes: Callable[[int, int], None], cancel: threading.Event
+) -> None:
+    """真的下載 ASR 模型（`pipeline.factory` 是 ASR 唯一的接縫；延後載入，依賴較重）。"""
+    from kikitori.pipeline.factory import download_asr_model
+
+    download_asr_model(model_id, on_bytes, cancel)
 
 
 def fingerprint(spki: bytes) -> str:
@@ -190,6 +212,7 @@ class ComputeHost:
         *,
         capacity: HostCapacitySource | None = None,
         vram: VramFn = query_vram,
+        download_asr: DownloadFn = default_download_asr,
     ) -> None:
         """
         Args:
@@ -200,6 +223,7 @@ class ComputeHost:
             capacity: 這台的能力（連進來的電腦與「選擇模型」看到的同一份）；None 時用真的
                 硬體偵測與模型快取。
             vram: 目前顯示卡記憶體（「目前負荷」用）。
+            download_asr: 別台請這台下載 ASR 模型時用的下載函式。
         """
         self.store = store
         self.identity = identity
@@ -209,7 +233,15 @@ class ComputeHost:
             self.reload_settings, detect=default_detect, downloaded=default_downloaded
         )
         self.vram = vram
+        self.download_asr = download_asr
         self.server: Any = None  # RemoteServer（延後載入：pipeline 依賴較重）
+        # 「重讀設定檔」與「重讀＋寫入」互斥：連線執行緒（能力查詢、別台改模型）各自重讀，
+        # 一條重讀到一半時另一條寫入，前者會把舊內容放回記憶體，之後的寫入就蓋掉別人剛存的。
+        # 可重入：set_models 拿著鎖時呼叫 reload_settings。
+        self.settings_lock = threading.RLock()
+        self._downloads_lock = threading.Lock()
+        self._downloads: dict[str, threading.Event] = {}
+        """別台請這台下載、還在進行的 ASR 模型 → 取消用的事件。"""
 
     @property
     def settings(self) -> Settings:
@@ -218,13 +250,21 @@ class ComputeHost:
 
     def reload_settings(self) -> Settings:
         """重新讀設定檔；讀不進來時記 warning（store 用預設值，不會覆寫檔案）。"""
-        warning = self.store.load()
-        if warning:
-            logger.warning("settings: %s", warning)
-        return self.store.get()
+        with self.settings_lock:
+            warning = self.store.load()
+            if warning:
+                logger.warning("settings: %s", warning)
+            return self.store.get()
 
-    def start_server(self) -> None:
+    def manager(self, out: OutFn) -> "_HeadlessManager":
+        """別台電腦改這台的模型、請這台下載時的處理（訊息印到 `out`）。"""
+        return _HeadlessManager(self, out)
+
+    def start_server(self, out: OutFn = print) -> None:
         """依 `compute.listen_host`／`listen_port` 開始監聽。
+
+        Args:
+            out: 別台改這台的模型、請這台下載時，在終端機印出的地方。
 
         Raises:
             ValueError: 還沒選監聽位址。
@@ -249,14 +289,43 @@ class ComputeHost:
             port=compute.listen_port,
             app_version=self.app_version,
             capacity=self.capacity,
+            manager=self.manager(out),
         )
         self.server.start()
 
     def stop_server(self) -> None:
-        """停止監聽並斷開目前的電腦。"""
+        """停止監聽、斷開目前的電腦，並取消別台請這台做的下載。
+
+        無介面主機的下載在提供運算的畫面裡進行：使用者按 q 離開之後不該還在背景下載、
+        把進度印進選單裡。
+        """
         server, self.server = self.server, None
         if server is not None:
             server.stop()
+        with self._downloads_lock:
+            cancels = list(self._downloads.values())
+        for cancel in cancels:
+            cancel.set()
+
+    def begin_download(self, model: str) -> threading.Event:
+        """登記一個下載，回傳取消用的事件。
+
+        Raises:
+            HostManageError: `download_in_progress`（同一個模型已在下載）。
+        """
+        with self._downloads_lock:
+            if model in self._downloads:
+                raise HostManageError(
+                    "download_in_progress", f"{model} is already downloading"
+                )
+            cancel = threading.Event()
+            self._downloads[model] = cancel
+            return cancel
+
+    def end_download(self, model: str) -> None:
+        """下載結束（成功、失敗或取消）。"""
+        with self._downloads_lock:
+            self._downloads.pop(model, None)
 
     def trust_changed(self) -> None:
         """配對或移除之後：通知執行中的伺服器。"""
@@ -274,6 +343,114 @@ class ComputeHost:
         self.stop_server()
         _forget_pairings(self.trust)
         self.identity = reset_identity(compute_dir())
+
+
+class _HeadlessManager:
+    """別台電腦改無介面主機的模型（`remote.manage.HostManager`）：寫設定檔、直接下載、印在終端機。"""
+
+    def __init__(self, host: ComputeHost, out: OutFn) -> None:
+        self._host = host
+        self._out = out
+
+    def set_models(
+        self, by: str, asr: Mapping[str, str], translation: Mapping[str, str]
+    ) -> None:
+        """寫進設定檔（下一場字幕生效），並印出「〇〇 把辨識模型改成 …」。
+
+        設定檔壞掉時不寫（「預設值＋那台的修改」會蓋掉這台使用者原本的設定）。回給那台的
+        `detail` 是固定字句：例外原文含這台的路徑，只寫進 log。
+
+        Raises:
+            HostManageError: `settings_error`。
+        """
+        patch: dict[str, Any] = {}
+        if asr:
+            patch["asr"] = dict(asr)
+        if translation:
+            patch["translation"] = dict(translation)
+        with self._host.settings_lock:
+            # 先重讀：GUI 與這裡共用設定檔，不能用這個行程裡較舊的內容蓋掉別人剛存的
+            self._host.reload_settings()
+            if self._host.store.file_invalid:
+                logger.warning(
+                    "%s asked to change the models, but the settings file is invalid",
+                    by,
+                )
+                raise HostManageError("settings_error", SETTINGS_INVALID_DETAIL)
+            try:
+                settings = self._host.store.update(patch)
+            except (OSError, SettingsError) as exc:
+                logger.error("cannot save the models %s chose: %s", by, exc)
+                raise HostManageError("settings_error", SETTINGS_SAVE_DETAIL) from exc
+        if asr:
+            self._say(
+                f"「{by}」把辨識模型改成：即時 {settings.asr.fast_model}、"
+                f"完整 {settings.asr.final_model}（下一場字幕開始生效）。"
+            )
+        if translation:
+            self._say(
+                f"「{by}」把翻譯模型改成：即時 {settings.translation.fast_model}、"
+                f"完整 {settings.translation.final_model}（下一場字幕開始生效）。"
+            )
+
+    def start_download(self, by: str, model: str, progress: ProgressFn) -> None:
+        """在背景下載（不管提出要求的電腦還在不在），進度印在終端機並回報給 `progress`。
+
+        Raises:
+            HostManageError: `download_in_progress`；`settings_error`（下載執行緒開不起來，
+                登記已撤銷）。
+        """
+        cancel = self._host.begin_download(model)
+        try:
+            threading.Thread(
+                target=self._run,
+                args=(model, progress, cancel),
+                name=f"host-download-{model}",
+                daemon=True,
+            ).start()
+        except RuntimeError as exc:
+            # 開不了執行緒（資源耗盡）：不撤銷登記的話，這個模型之後永遠是「已在下載」
+            logger.error("cannot start downloading %s for %s: %s", model, by, exc)
+            self._host.end_download(model)
+            raise HostManageError("settings_error", DOWNLOAD_START_DETAIL) from exc
+        self._say(f"「{by}」要這台下載辨識模型 {model}…")
+
+    def _say(self, line: str) -> None:
+        """印到終端機；終端機壞掉（例如 SSH 斷了）只記 log，不能讓提出要求的電腦收不到結果。"""
+        try:
+            self._out(line)
+        except Exception:
+            logger.exception("cannot print to the terminal: %s", line)
+
+    def _run(self, model: str, progress: ProgressFn, cancel: threading.Event) -> None:
+        last_relay = 0.0
+        last_percent = -10
+        total = 0
+
+        def report(downloaded: int, reported_total: int) -> None:
+            nonlocal last_relay, last_percent, total
+            total = reported_total
+            now = time.monotonic()
+            if now - last_relay >= RELAY_SECS:
+                last_relay = now
+                progress(downloaded, reported_total, "downloading", None)
+            percent = downloaded * 100 // reported_total if reported_total else 0
+            if percent >= last_percent + 10:
+                last_percent = percent
+                self._say(f"  {model}：{percent}%")
+
+        try:
+            self._host.download_asr(model, report, cancel)
+        except Exception as exc:
+            logger.exception("downloading %s for another computer failed", model)
+            self._host.end_download(model)
+            self._say(f"  {model}：下載失敗（{exc}）")
+            # 例外原文可能含這台的檔案路徑：回給那台只用通用字句（完整原因在上面的 log）
+            progress(0, total, "error", DOWNLOAD_FAILED_DETAIL)
+            return
+        self._host.end_download(model)
+        self._say(f"  {model}：完成")
+        progress(total, total, "done", None)
 
 
 def _forget_pairings(trust: TrustStore) -> None:
@@ -417,7 +594,7 @@ def serve(host: ComputeHost, input_fn: InputFn, out: OutFn) -> None:
     if not host.trust.peers():
         out("還沒有配對過任何電腦：先用「允許新的電腦配對」，或在執行中按 p。")
     try:
-        host.start_server()
+        host.start_server(out)
     except OSError as exc:
         out(f"無法開始監聽（埠被佔用？）：{exc}")
         return

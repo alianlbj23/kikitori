@@ -5,13 +5,18 @@
 - **B 的角色**：在引擎行程裡開關 `RemoteServer`（GPU 使用權與本機 session 共用，由
   `EngineServer` 提供 `acquire_gpu`／`release_gpu`）、開配對窗口、管理允許連進來的電腦。
 - **A 的角色**：連到運算主機的配對埠、管理配對過的運算主機、查詢運算主機的能力
-  （`remote.host_info`，docs/specs/compute-capacity.md「四」）。遠端 session 本身在
+  （`remote.host_info`，docs/specs/compute-capacity.md「四」），以及改運算主機的模型、請它
+  下載（`remote.host_set_models`／`remote.host_download`，「七」）。遠端 session 本身在
   `EngineServer._load_remote_session`。
 - B 的能力（`welcome.host`）由 `remote.capacity.HostCapacity` 組出，用引擎的硬體偵測與模型清單。
+- 別台改這台的模型時（`_EngineHostManager`）：寫這台的設定檔、下載走引擎既有的下載機制
+  （這台的介面照樣收到 `download_progress`），並送 `remote` 事件 `host_changed`。
+- 提供運算時每秒（沒有電腦連著時每 5 秒、狀態改變時立即）送 `remote` 事件 `serving`：
+  正在替誰處理、這場處理了幾句、這台的負荷（「八」；只有句數，不含別人的字幕內容）。
 
 配對狀態與伺服器狀態以 `remote` 事件送給介面。所有方法都可以在 stdio 請求執行緒上呼叫；
-開伺服器或配對埠只是開 socket，不會阻塞太久。例外是 `host_info()`（連線運算主機，最多
-`HOST_INFO_TIMEOUT` 秒），引擎在背景工作執行緒上呼叫它。
+開伺服器或配對埠只是開 socket，不會阻塞太久。例外是會連線運算主機的 `host_info()`、
+`host_set_models()`、`start_host_download()`（最多十幾秒），引擎在背景工作執行緒上呼叫它們。
 """
 
 import ipaddress
@@ -25,14 +30,28 @@ from kikitori.config import Settings, SettingsError, SettingsStore
 from kikitori.engine import protocol as p
 from kikitori.hardware import HardwareInfo
 from kikitori.pipeline.types import PipelineComponents
+from kikitori.remote import protocol as rp
 from kikitori.remote.capacity import HostCapacity
-from kikitori.remote.client import PROBE_TIMEOUT, RemoteError, probe_host_info
+from kikitori.remote.client import (
+    MANAGE_TIMEOUT,
+    PROBE_TIMEOUT,
+    HostDownload,
+    RemoteError,
+    probe_host_info,
+    set_host_models,
+)
 from kikitori.remote.host import fingerprint, local_addresses
 from kikitori.remote.identity import (
     Identity,
     IdentityError,
     load_or_create_identity,
     reset_identity,
+)
+from kikitori.remote.manage import (
+    SETTINGS_INVALID_DETAIL,
+    SETTINGS_SAVE_DETAIL,
+    HostManageError,
+    ProgressFn,
 )
 from kikitori.remote.network import is_allowed_listen_host
 from kikitori.remote.pair_net import (
@@ -57,9 +76,97 @@ REMOTE_NOT_FOUND = "remote_not_found"
 PAIRING_JOIN = 5.0
 HOST_INFO_TIMEOUT = PROBE_TIMEOUT
 """`remote.host_info` 最多等運算主機多久（秒）。"""
+HOST_SET_MODELS_TIMEOUT = MANAGE_TIMEOUT
+"""`remote.host_set_models`、`remote.host_download`（到 B 開始下載為止）最多等多久（秒）。"""
+SERVING_SECS = 1.0
+"""有電腦連著（或它的 session 等待續接）時 `serving` 事件的間隔。"""
+SERVING_IDLE_SECS = 5.0
+"""提供運算、但沒有電腦連著時 `serving` 事件的間隔。"""
+FOLLOW_JOIN = 5.0
 
 SendEvent = Callable[[str, Mapping[str, Any]], None]
 ComponentBuilder = Callable[..., PipelineComponents]
+StartDownload = Callable[[str, ProgressFn], None]
+"""`(model, progress)`：用引擎的下載機制在背景下載 ASR 模型（`EngineServer`）。
+
+Raises:
+    HostManageError: `unknown_model`、`download_in_progress`。
+"""
+
+
+class _EngineHostManager:
+    """別台電腦改這台的模型（`remote.manage.HostManager`，GUI 引擎的實作）。"""
+
+    def __init__(
+        self, store: SettingsStore, send_event: SendEvent, start_download: StartDownload
+    ) -> None:
+        self._store = store
+        self._send_event = send_event
+        self._start_download = start_download
+
+    def set_models(
+        self, by: str, asr: Mapping[str, str], translation: Mapping[str, str]
+    ) -> None:
+        """寫進設定檔（下一場生效），送 `host_changed` 讓這台的介面重讀設定並通知使用者。
+
+        設定檔壞掉（引擎以預設值運作）時不寫：「預設值＋那台的修改」會蓋掉這台使用者原本的
+        設定，要由這台的使用者自己處理。回給那台的 `detail` 是固定字句（例外原文含路徑）。
+        """
+        if self._store.file_invalid:
+            logger.warning(
+                "%s asked to change the models, but the settings file is invalid", by
+            )
+            raise HostManageError("settings_error", SETTINGS_INVALID_DETAIL)
+        patch: dict[str, Any] = {}
+        if asr:
+            patch["asr"] = dict(asr)
+        if translation:
+            patch["translation"] = dict(translation)
+        try:
+            settings = self._store.update(patch)
+        except (SettingsError, OSError) as exc:
+            logger.error("cannot save the models %s chose: %s", by, exc)
+            raise HostManageError("settings_error", SETTINGS_SAVE_DETAIL) from exc
+        try:
+            self._send_event(
+                "remote",
+                {
+                    "kind": "host_changed",
+                    "by": by,
+                    "asr": {
+                        "fast": settings.asr.fast_model,
+                        "final": settings.asr.final_model,
+                    },
+                    "translation": {
+                        "fast": settings.translation.fast_model,
+                        "final": settings.translation.final_model,
+                    },
+                },
+            )
+        except Exception:
+            # 設定已經存好：通知失敗（例如 stdout 已關）不能讓 A 以為沒套用
+            logger.exception("cannot report the models another computer chose")
+
+    def start_download(self, by: str, model: str, progress: ProgressFn) -> None:
+        """走引擎的下載機制（這台的介面也看得到進度）。"""
+        self._start_download(model, progress)
+
+
+def _check_set_models(params: dict[str, Any]) -> rp.HostSetModels:
+    """`remote.host_set_models` 的參數（格式與 B 收到的 `host.set_models` 相同）。"""
+    p.reject_unknown_params(params, ("asr", "translation"))
+    try:
+        return rp.check_set_models(params.get("asr"), params.get("translation"))
+    except rp.ProtocolViolation as exc:
+        raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
+
+
+def _check_download(params: dict[str, Any]) -> str:
+    p.reject_unknown_params(params, ("model",))
+    try:
+        return rp.check_download_model(params.get("model"))
+    except rp.ProtocolViolation as exc:
+        raise p.ProtocolError(p.INVALID_PARAMS, str(exc)) from exc
 
 
 def _entry(peer: TrustedPeer) -> dict[str, Any]:
@@ -103,6 +210,7 @@ class RemoteService:
         app_version: str,
         detect_hardware: Callable[[Settings], HardwareInfo],
         downloaded_models: Callable[[], Collection[str]],
+        start_download: StartDownload,
     ) -> None:
         """
         Args:
@@ -113,7 +221,8 @@ class RemoteService:
             release_gpu: 歸還 GPU 使用權。
             app_version: 握手時告訴對方的版本。
             detect_hardware: 硬體偵測（替別台運算時告訴它這台的顯示卡與建議）。
-            downloaded_models: 這台已下載的 ASR 模型 id（別台指定模型時檢查）。
+            downloaded_models: 這台已下載的 ASR 模型 id（別台改這台的模型時檢查）。
+            start_download: 別台請這台下載 ASR 模型時，用引擎的下載機制開始下載。
         """
         self._store = store
         self._send_event = send_event
@@ -125,6 +234,7 @@ class RemoteService:
         self._capacity = HostCapacity(
             store.get, detect=detect_hardware, downloaded=downloaded_models
         )
+        self._manager = _EngineHostManager(store, send_event, start_download)
         self._lock = threading.Lock()
         self._identity: Identity | None = None
         self._identity_error: str | None = None
@@ -133,6 +243,12 @@ class RemoteService:
         self._pairing: PairingServer | PairingClient | None = None
         self._pairing_role: str | None = None
         self._pairing_state: dict[str, Any] | None = None
+        # serving 事件（compute-capacity 八）：伺服器開著時一條執行緒；狀態改變時叫醒它
+        self._serving_stop: threading.Event | None = None
+        self._serving_wake = threading.Event()
+        self._serving_thread: threading.Thread | None = None
+        # A：還在追蹤進度的「在運算主機下載」（引擎結束時中斷）
+        self._host_downloads: set[HostDownload] = set()
 
     @property
     def trust(self) -> TrustStore:
@@ -211,6 +327,7 @@ class RemoteService:
         return {"name": name, "fingerprint": fingerprint(spki), "state": state}
 
     def _server_event(self) -> None:
+        self._serving_wake.set()  # 連線的電腦或它的 session 變了：serving 事件立刻送一次
         with self._lock:
             server = self._server
             error = self._server_error
@@ -296,6 +413,7 @@ class RemoteService:
             app_version=self._app_version,
             on_change=self._server_event,
             capacity=self._capacity,
+            manager=self._manager,
         )
         try:
             server.start()
@@ -311,6 +429,58 @@ class RemoteService:
             self._server = server
             self._server_error = None
         self._server_event()
+        # 在通知之後才開始：迴圈的第一則就是「開始提供運算」這次狀態改變，不會連送兩則
+        self._start_serving_events(server)
+
+    # --- serving 事件（B 的畫面，compute-capacity 八） --------------------------------
+
+    def _start_serving_events(self, server: Any) -> None:
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=self._serving_loop,
+            args=(server, stop),
+            name="remote-serving-events",
+            daemon=True,
+        )
+        with self._lock:
+            self._serving_stop = stop
+            self._serving_thread = thread
+        thread.start()
+
+    def _stop_serving_events(self) -> None:
+        with self._lock:
+            stop, self._serving_stop = self._serving_stop, None
+            thread, self._serving_thread = self._serving_thread, None
+        if stop is not None:
+            stop.set()
+            self._serving_wake.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(FOLLOW_JOIN)
+
+    def _serving_loop(self, server: Any, stop: threading.Event) -> None:
+        """有電腦連著時每秒、沒有時每 5 秒送一次；`_server_event` 叫醒時立刻送。"""
+        while not stop.is_set():
+            self._serving_wake.clear()
+            try:
+                data = self._serving_data(server)
+                if stop.is_set():
+                    return
+                self._send_event("remote", data)
+            except Exception:
+                # 只是給畫面的資訊：出錯（例如 stdout 已關）不能影響提供運算
+                logger.exception("cannot report what this computer is serving")
+                return
+            busy = data["peer"] is not None or data["session"] is not None
+            self._serving_wake.wait(SERVING_SECS if busy else SERVING_IDLE_SECS)
+
+    def _serving_data(self, server: Any) -> dict[str, Any]:
+        """`{kind: serving, peer, session, metrics}`；不含字幕內容（只有句數）。"""
+        return {
+            "kind": "serving",
+            "peer": self._peer_info(server),
+            "session": server.session_info(),
+            "metrics": server.current_load(),
+        }
 
     def _set_server_error(self, message: str) -> None:
         with self._lock:
@@ -322,6 +492,7 @@ class RemoteService:
         with self._lock:
             server, self._server = self._server, None
             self._server_error = None
+        self._stop_serving_events()
         if server is not None:
             server.stop()
             self._server_event()
@@ -331,7 +502,10 @@ class RemoteService:
         self._capacity.invalidate()
 
     def session_models(self) -> tuple[str, ...]:
-        """替別台運算的那一場用的 ASR 模型（那台可以指定，不一定是這台設定的）；沒有時空的。"""
+        """替別台運算的那一場載入的 ASR 模型；沒有時空的。
+
+        是那場開始時這台設定的模型：場中別台可以改這台的設定（下一場生效），所以不一定是現在的。
+        """
         with self._lock:
             server = self._server
         return () if server is None else tuple(server.session_models())
@@ -374,6 +548,105 @@ class RemoteService:
             logger.info("cannot ask the compute host what it can do: %s", exc)
             raise p.ProtocolError(exc.code, str(exc)) from exc
         return {"host": host}
+
+    # --- 管理運算主機的模型（A，compute-capacity 七） ---------------------------------
+
+    def _manage_target(self) -> tuple[Identity, str, int]:
+        compute = self._store.get().compute
+        if not compute.host:
+            raise p.ProtocolError("remote_not_configured", "no compute host is set")
+        return self.identity(), compute.host, compute.port
+
+    @staticmethod
+    def check_host_set_models(params: dict[str, Any]) -> rp.HostSetModels:
+        """`remote.host_set_models` 的參數（不合格回 `invalid_params`）；連線前先在請求執行緒檢查。"""
+        return _check_set_models(params)
+
+    def host_set_models(self, request: rp.HostSetModels) -> dict[str, Any]:
+        """`remote.host_set_models`：改運算主機設定檔裡的模型（連線，要在背景工作執行緒上呼叫）。
+
+        Returns:
+            `{"host": HostInfo | None}`：運算主機套用後的能力（fit 依新的組合重算）。
+
+        Raises:
+            p.ProtocolError: 同 `host_info()`，另加 `remote_unknown_model`、
+                `remote_model_not_downloaded`、`remote_translation_model_missing`。
+        """
+        identity, host, port = self._manage_target()
+        try:
+            info = set_host_models(
+                identity=identity,
+                servers=self.servers,
+                host=host,
+                port=port,
+                app_version=self._app_version,
+                asr=request.asr,
+                translation=request.translation,
+                timeout=HOST_SET_MODELS_TIMEOUT,
+            )
+        except RemoteError as exc:
+            logger.info("cannot change the compute host's models: %s", exc)
+            raise p.ProtocolError(exc.code, str(exc)) from exc
+        return {"host": info}
+
+    @staticmethod
+    def check_host_download(params: dict[str, Any]) -> str:
+        """`remote.host_download` 的參數（模型 id 的格式）。"""
+        return _check_download(params)
+
+    def start_host_download(self, model: str) -> HostDownload:
+        """請運算主機下載 `model`，等到它開始（連線，要在背景工作執行緒上呼叫）。
+
+        Raises:
+            p.ProtocolError: 連線錯誤、`remote_unknown_model`、`remote_download_in_progress`、
+                `remote_error`。
+        """
+        identity, host, port = self._manage_target()
+        download = HostDownload(
+            identity=identity,
+            servers=self.servers,
+            host=host,
+            port=port,
+            app_version=self._app_version,
+            model=model,
+            timeout=HOST_SET_MODELS_TIMEOUT,
+        )
+        try:
+            download.start()
+        except RemoteError as exc:
+            logger.info("the compute host cannot download %s: %s", model, exc)
+            raise p.ProtocolError(exc.code, str(exc)) from exc
+        with self._lock:
+            self._host_downloads.add(download)
+        return download
+
+    def follow_host_download(self, download: HostDownload) -> None:
+        """在背景讀運算主機的下載進度，以 `remote` 事件 `host_download` 送給介面。"""
+        threading.Thread(
+            target=self._follow,
+            args=(download,),
+            name="remote-host-download",
+            daemon=True,
+        ).start()
+
+    def drop_host_download(self, download: HostDownload) -> None:
+        """不追蹤（`remote.host_download` 的回應沒送出）：中斷連線；運算主機照樣下載。"""
+        download.cancel()
+        with self._lock:
+            self._host_downloads.discard(download)
+
+    def _follow(self, download: HostDownload) -> None:
+        def report(progress: dict[str, Any]) -> None:
+            self._send_event("remote", {"kind": "host_download", **progress})
+
+        try:
+            download.follow(report)
+        except Exception:
+            # 送事件失敗（stdout 已關）或程式錯誤：記下來，運算主機的下載不受影響
+            logger.exception("following the compute host's download failed")
+        finally:
+            with self._lock:
+                self._host_downloads.discard(download)
 
     # --- 配對 -------------------------------------------------------------------
 
@@ -624,6 +897,11 @@ class RemoteService:
             self._clear_pairing(pairing)
 
     def close(self) -> None:
-        """引擎結束：取消配對、停止伺服器。"""
+        """引擎結束：取消配對、停止伺服器、不再追蹤運算主機的下載。"""
         self._end_pairing()
         self.stop_server()
+        with self._lock:
+            downloads = list(self._host_downloads)
+            self._host_downloads.clear()
+        for download in downloads:
+            download.cancel()

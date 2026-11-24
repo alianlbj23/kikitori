@@ -23,6 +23,8 @@ fn main() {
             "session_set_furigana",
             "remote_status",
             "remote_host_info",
+            "remote_host_set_models",
+            "remote_host_download",
             "remote_server_set",
             "remote_identity_reset",
             "remote_disconnect",
