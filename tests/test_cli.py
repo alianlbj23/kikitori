@@ -36,7 +36,7 @@ class MenuTest(unittest.TestCase):
         return code
 
     def test_quit(self) -> None:
-        self.assertEqual(self.run_menu("4"), 0)
+        self.assertEqual(self.run_menu("5"), 0)
         self.engine.assert_not_called()
 
     def test_eof_quits(self) -> None:
@@ -47,7 +47,7 @@ class MenuTest(unittest.TestCase):
         self.engine.assert_called_once()
 
     def test_invalid_choice_then_quit(self) -> None:
-        self.assertEqual(self.run_menu("9", "4"), 0)
+        self.assertEqual(self.run_menu("9", "5"), 0)
         self.assertTrue(any("無效" in line for line in self.lines))
 
     def test_show_settings_path(self) -> None:
@@ -55,7 +55,7 @@ class MenuTest(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.dict(os.environ, {"KIKITORI_CONFIG_DIR": tmp}),
         ):
-            self.run_menu("3", "4")
+            self.run_menu("3", "5")
         self.assertTrue(
             any(tmp in line and "settings.json" in line for line in self.lines)
         )
@@ -63,17 +63,23 @@ class MenuTest(unittest.TestCase):
     def test_list_devices(self) -> None:
         devices = [DeviceInfo("x:loopback:1", "Speakers", "loopback", True)]
         with mock.patch("kikitori.capture.list_devices", return_value=devices):
-            self.run_menu("2", "4")
+            self.run_menu("2", "5")
         self.assertTrue(
             any("Speakers" in line and "x:loopback:1" in line for line in self.lines)
         )
+
+    def test_compute_host_submenu(self) -> None:
+        # 「運算主機」子選單：返回後回到主選單
+        with mock.patch("kikitori.remote.host.host_menu", return_value=0) as host:
+            self.assertEqual(self.run_menu("4", "5"), 0)
+        host.assert_called_once()
 
     def test_list_devices_error_is_shown(self) -> None:
         with mock.patch(
             "kikitori.capture.list_devices",
             side_effect=BackendUnavailableError("no PulseAudio"),
         ):
-            self.assertEqual(self.run_menu("2", "4"), 0)
+            self.assertEqual(self.run_menu("2", "5"), 0)
         self.assertTrue(any("no PulseAudio" in line for line in self.lines))
 
 

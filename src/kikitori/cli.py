@@ -15,7 +15,8 @@ kikitori
   1) 啟動引擎（stdio NDJSON，給 Tauri 或手動測試）
   2) 列出音訊裝置
   3) 顯示設定檔路徑
-  4) 離開
+  4) 運算主機（替其他電腦跑辨識與翻譯）
+  5) 離開
 """
 
 
@@ -69,6 +70,10 @@ def menu(
         elif choice == "3":
             _show_settings_path(out)
         elif choice == "4":
+            from kikitori.remote.host import host_menu
+
+            host_menu(input_fn, out)
+        elif choice == "5":
             return 0
         else:
             out(f"無效的選項：{choice!r}")

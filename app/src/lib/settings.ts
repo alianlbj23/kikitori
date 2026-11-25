@@ -10,8 +10,9 @@
  * combination on the models page (ASR and translation models, device,
  * precision, threads). How a hardware recommendation becomes settings is not
  * here on purpose: `settings.apply_recommendation` keeps that rule in the engine.
- * The language section has its own module (`languages.ts`), and so has the
- * glossary editor (`glossary.ts`, `translation.glossary`).
+ * The language section has its own module (`languages.ts`), and so have the
+ * glossary editor (`glossary.ts`, `translation.glossary`) and remote compute
+ * (`remote.ts`, `compute`).
  * Overlay appearance, reading rhythm and the OBS text choice live in the
  * engine's opaque `subtitle` object, the UI's own state (dismissed
  * recommendation offers, interface language, transcript auto-save) in the
@@ -21,6 +22,7 @@
 import { DEFAULT_GLOSSARY, glossaryFromSettings } from "./glossary";
 import { isUiLocale, t, type UiLocalePreference } from "./i18n";
 import { isLanguageCode } from "./languages";
+import { DEFAULT_COMPUTE, computeFromSettings } from "./remote";
 
 import type {
   AppliedRecommendation,
@@ -110,6 +112,7 @@ export const DEFAULT_SETTINGS: Settings = {
   speakers: { enabled: false, count: null },
   subtitle: DEFAULT_OVERLAY_STYLE,
   obs_output: "off",
+  compute: DEFAULT_COMPUTE,
   ui: { dismissed_recommendations: [], locale: "system", auto_save_transcripts: false, gpu_reminder_dismissed: false },
 };
 
@@ -344,6 +347,7 @@ export function parseSettingsResult(result: unknown): SettingsResult {
       },
       subtitle: overlayStyleFromSubtitle(root.subtitle),
       obs_output: pickEnum(asObj(root.subtitle), "obs_output", OBS_CONTENTS, d.obs_output, warn, "subtitle."),
+      compute: computeFromSettings(root.compute, warn),
       ui: uiStateFromSettings(root.ui, warn),
     },
     path,

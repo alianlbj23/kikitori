@@ -37,10 +37,19 @@ select {
   display: none !important;
 }
 
+/* The mode bar sits above the two columns; the columns fill the rest of the window. */
+body {
+  display: flex;
+  flex-direction: column;
+}
+
 .app {
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
-  height: 100vh;
+  /* One row as tall as the window below the bar, so the rail and the content scroll on their own. */
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* ---------- Rail ---------- */
@@ -1264,7 +1273,9 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     transition: none !important;
     animation: none !important;
   }
@@ -1434,4 +1445,760 @@ textarea {
   font-size: 13px;
   resize: vertical;
   color-scheme: dark;
+}
+
+/* ---------- Remote compute (docs/specs/remote-compute.md) ---------- */
+
+/* The rail's 運算位置: two small radio buttons, quieter than the mode choice above. */
+/* Three roles in plain words: one per row, so the longer labels never wrap mid-grid. */
+.compute-choices {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.compute-choice {
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.compute-choice:hover {
+  background: rgb(255 255 255 / 0.05);
+}
+
+.compute-choice[aria-checked="true"] {
+  background: var(--ai-deep);
+  border-color: rgb(255 255 255 / 0.32);
+  font-weight: 700;
+}
+
+.compute-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.compute-rtt {
+  font-variant-numeric: tabular-nums;
+}
+
+.compute-addresses {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.compute-addresses .rail-hint {
+  margin: 0;
+}
+
+/* The rail is indigo in both themes, so a light rose reads as a problem there. */
+.compute-hint-error {
+  color: #f4b6c1;
+  font-weight: 600;
+}
+
+/* ---------- The compute host's capacity and the model asked of it (compute-capacity.md) ---------- */
+
+.host-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.host-info-rail {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(255 255 255 / 0.12);
+}
+
+.host-info p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.host-summary {
+  font-variant-numeric: tabular-nums;
+}
+
+.host-info-rail .host-summary {
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+}
+
+.host-info .host-label {
+  margin-top: 2px;
+}
+
+/* Model ids and labels can be long; the menu never pushes the rail wider. */
+.host-info select {
+  max-width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.host-info .link-button {
+  align-self: flex-start;
+}
+
+.host-info .link-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.content .host-info .link-button {
+  color: var(--ai-soft);
+}
+
+.host-error {
+  color: var(--beni);
+}
+
+/* The rail's confirmation sits on indigo: a dark rose panel instead of the content's light one. */
+.host-info-rail .host-confirm {
+  background: rgb(224 106 126 / 0.18);
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+}
+
+.host-info-rail .host-confirm .gpu-actions {
+  margin-top: 4px;
+  gap: 8px;
+}
+
+.host-info-rail .host-confirm .ghost {
+  color: var(--on-ai);
+  border-color: rgb(255 255 255 / 0.32);
+}
+
+/* ---------- Computing load while subtitles run (lib/load.ts) ---------- */
+
+/* The rail is indigo in both themes, so the three colours are chosen against indigo only. */
+.load {
+  --load-ok: #7fd6a2;
+  --load-tight: var(--kihada);
+  --load-over: #ff8a9c;
+  --load-color: var(--on-ai-dim);
+}
+
+.load[data-level="ok"] {
+  --load-color: var(--load-ok);
+}
+
+.load[data-level="tight"] {
+  --load-color: var(--load-tight);
+}
+
+.load[data-level="over"] {
+  --load-color: var(--load-over);
+}
+
+.load-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.14);
+  overflow: hidden;
+}
+
+/* Scaled, not resized (as .meter-fill): it changes once a second. */
+.load-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--load-color);
+  transition: transform 300ms linear;
+}
+
+.load-chart {
+  display: block;
+  width: 100%;
+  height: 40px;
+  border-radius: var(--radius-s);
+  background: rgb(0 0 0 / 0.16);
+  overflow: hidden;
+}
+
+.load-guide {
+  stroke: rgb(255 255 255 / 0.16);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.load-guide-over {
+  stroke: rgb(255 138 156 / 0.35);
+}
+
+.load-line {
+  fill: none;
+  stroke: var(--load-color);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.load-text {
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--load-color);
+  overflow-wrap: anywhere;
+}
+
+.load[data-level="unknown"] .load-text {
+  font-weight: 400;
+}
+
+.load-detail {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.serve-identity-actions {
+  margin: 4px 0 8px;
+}
+
+/* Both sections follow another form, where `.block + .block` draws no rule line. */
+.remote-section > .block,
+fieldset.remote-section {
+  border-top: 1px solid var(--rule);
+  margin-top: 22px;
+}
+
+.remote-subhead {
+  margin: 18px 0 6px;
+  font-size: var(--t-md);
+}
+
+.remote-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-width: 70ch;
+}
+
+.remote-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  background: var(--paper);
+}
+
+.remote-list > li.remote-empty {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--nezumi);
+}
+
+.remote-entry {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.remote-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.remote-meta {
+  font-size: var(--t-xs);
+  color: var(--nezumi);
+}
+
+/* Fingerprints are compared character by character between two screens. */
+.remote-fingerprint {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.remote-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.remote-current p {
+  margin: 0;
+}
+
+.pair-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 22px 24px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  background: var(--paper);
+  color: var(--sumi);
+}
+
+.pair-dialog::backdrop {
+  background: rgb(10 14 30 / 0.55);
+}
+
+.pair-dialog h2 {
+  margin: 0 0 10px;
+  font-size: var(--t-lg);
+}
+
+.pair-dialog[data-tone="bad"] #pair-text {
+  color: var(--beni);
+}
+
+/* The digits the user compares: large, monospaced, two groups ("123 456"). */
+.pair-digits {
+  margin: 14px 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--t-2xl);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+#pair-digits-input {
+  width: 100%;
+  font-size: var(--t-xl);
+  letter-spacing: 0.2em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pair-dialog .form-actions {
+  justify-content: flex-end;
+  padding-top: 14px;
+}
+
+/* ---------- The three roles at a glance (compute-capacity.md 九, lib/mode-bar.ts) ---------- */
+
+/*
+ * One colour per role, set on body[data-mode]: indigo (this computer), sky
+ * (using a compute host), purple (being one). None of them is the load chart's
+ * green, yellow or red. The `--mode-bar-*` pairs keep text at 4.5:1 or better
+ * in both themes; `--mode-rail-*` are the same roles against the indigo rail.
+ */
+:root {
+  --mode-indigo: #3a4a7f;
+  --mode-sky: #0b6a9c;
+  --mode-purple: #6a3d9a;
+  --mode-bar-indigo-bg: #e4e8f2;
+  --mode-bar-indigo-fg: #22305c;
+  --mode-bar-sky-bg: #dcf0fa;
+  --mode-bar-sky-fg: #08466a;
+  --mode-bar-purple-bg: #eee4f8;
+  --mode-bar-purple-fg: #47226d;
+  --mode-rail-indigo: #a9b3d1;
+  --mode-rail-sky: #6cc7f2;
+  --mode-rail-purple: #c6a9f4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mode-indigo: #6373ad;
+    --mode-sky: #4fb3e6;
+    --mode-purple: #a987e6;
+    --mode-bar-indigo-bg: #1b2547;
+    --mode-bar-indigo-fg: #c9d1ec;
+    --mode-bar-sky-bg: #0c2d42;
+    --mode-bar-sky-fg: #bfe6fa;
+    --mode-bar-purple-bg: #2b1c46;
+    --mode-bar-purple-fg: #e2d4fb;
+  }
+}
+
+body,
+body[data-mode="local"] {
+  --mode-color: var(--mode-indigo);
+  --mode-bar-bg: var(--mode-bar-indigo-bg);
+  --mode-bar-fg: var(--mode-bar-indigo-fg);
+  --mode-rail: var(--mode-rail-indigo);
+  /* Low-key: this computer alone is the usual case. */
+  --mode-edge: 2px;
+}
+
+body[data-mode="client"] {
+  --mode-color: var(--mode-sky);
+  --mode-bar-bg: var(--mode-bar-sky-bg);
+  --mode-bar-fg: var(--mode-bar-sky-fg);
+  --mode-rail: var(--mode-rail-sky);
+  --mode-edge: 3px;
+}
+
+body[data-mode="serve"] {
+  --mode-color: var(--mode-purple);
+  --mode-bar-bg: var(--mode-bar-purple-bg);
+  --mode-bar-fg: var(--mode-bar-purple-fg);
+  --mode-rail: var(--mode-rail-purple);
+  --mode-edge: 3px;
+}
+
+/* The window edge: a thin frame in the role colour, drawn above everything but never in the way. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  border: var(--mode-edge) solid var(--mode-color);
+  transition: border-color 250ms ease;
+}
+
+.mode-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-height: 34px;
+  padding: 5px 16px 5px 12px;
+  background: var(--mode-bar-bg);
+  color: var(--mode-bar-fg);
+  border-bottom: 2px solid var(--mode-color);
+  font-size: var(--t-sm);
+  transition:
+    background-color 250ms ease,
+    color 250ms ease,
+    border-color 250ms ease;
+}
+
+body[data-mode="client"] .mode-bar,
+body[data-mode="serve"] .mode-bar {
+  font-weight: 700;
+}
+
+.mode-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mode-text {
+  flex: 1 1 12em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The client link: filled (connected), ring (reconnecting), dashed ring (not connected); the word says it too. */
+.mode-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-weight: 400;
+}
+
+.mode-link-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+}
+
+.mode-link[data-link="connected"] .mode-link-dot {
+  background: currentColor;
+}
+
+.mode-link[data-link="reconnecting"] .mode-link-dot {
+  animation: mode-link-pulse 1.2s ease-in-out infinite;
+}
+
+.mode-link[data-link="offline"] .mode-link-dot {
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+@keyframes mode-link-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* The chosen role and Start carry the role colour too (both sit on the indigo rail). */
+.compute-choice[aria-checked="true"] {
+  border-color: var(--mode-rail);
+  box-shadow: inset 4px 0 0 var(--mode-rail);
+  transition:
+    border-color 250ms ease,
+    box-shadow 250ms ease;
+}
+
+body[data-mode="client"] .start,
+body[data-mode="serve"] .start {
+  outline: 3px solid var(--mode-rail);
+  outline-offset: 3px;
+}
+
+/* The keyboard focus still shows on top of the role ring. */
+body[data-mode="client"] .start:focus-visible,
+body[data-mode="serve"] .start:focus-visible {
+  outline-color: #fff;
+}
+
+.start-note {
+  margin: -8px 0 0;
+  color: var(--on-ai);
+}
+
+/* ---------- This computer as a compute host (compute-capacity.md 八, lib/serve.ts) ---------- */
+
+/* Indigo in both themes like the rail, so the load view (lib/load.ts, .load) reads the same here. */
+.serve-panel {
+  margin: 18px 0 6px;
+  padding: 16px 18px 18px;
+  border-radius: var(--radius-m);
+  border-left: 6px solid var(--mode-rail-purple);
+  background: var(--ai);
+  color: var(--on-ai);
+  display: grid;
+  gap: 10px;
+}
+
+.serve-panel-label {
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: 400;
+  color: var(--on-ai-dim);
+}
+
+.serve-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.serve-title {
+  margin: 0;
+  font-size: var(--t-xl);
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The dot repeats the headline: a ring when waiting, filled when working, dashed when the link dropped. */
+.serve-dot {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--mode-rail-purple);
+}
+
+.serve-panel[data-tone="busy"] .serve-dot {
+  background: var(--mode-rail-purple);
+  box-shadow: 0 0 0 4px rgb(198 169 244 / 0.25);
+}
+
+.serve-panel[data-tone="reconnect"] .serve-dot {
+  border-style: dashed;
+  animation: mode-link-pulse 1.2s ease-in-out infinite;
+}
+
+.serve-panel[data-tone="error"] .serve-dot {
+  border-color: #f4b6c1;
+  background: #f4b6c1;
+}
+
+.serve-panel[data-tone="error"] .serve-detail {
+  color: #f4b6c1;
+}
+
+.serve-panel[data-tone="off"] .serve-dot {
+  border-color: var(--on-ai-dim);
+}
+
+.serve-detail {
+  margin: 0;
+  color: var(--on-ai-dim);
+  overflow-wrap: anywhere;
+}
+
+.serve-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 12px 24px;
+}
+
+.serve-load,
+.serve-models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.serve-models p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.serve-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.serve-button {
+  padding: 8px 16px;
+  border-radius: var(--radius-s);
+  border: 1px solid rgb(255 255 255 / 0.32);
+  background: transparent;
+  color: var(--on-ai);
+  cursor: pointer;
+}
+
+.serve-button:hover {
+  background: rgb(255 255 255 / 0.08);
+}
+
+.serve-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- Models page while another computer computes (compute-capacity.md 七, lib/host-models.ts) ---------- */
+
+#page-models[data-compute="remote"] .local-only {
+  display: none;
+}
+
+/* While hidden, the compute host block must not give the first local block a rule line. */
+#models-host[hidden] + .block {
+  border-top: 0;
+  margin-top: 0;
+}
+
+/* One menu with its label, confirmation and hint on the rail. */
+.host-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.host-info-page {
+  gap: 10px;
+  max-width: 70ch;
+}
+
+.host-info-page .field {
+  margin-bottom: 4px;
+}
+
+.host-subhead {
+  margin: 14px 0 2px;
+  font-size: var(--t-md);
+}
+
+.host-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+}
+
+/* A combination that may not keep up: stays until a lighter one is chosen. */
+.host-warning {
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 4px solid var(--beni);
+  border-radius: var(--radius-s);
+  background: var(--beni-soft);
+  color: var(--sumi);
+  font-weight: 700;
+}
+
+.host-warning[data-tone="info"] {
+  border-left-color: var(--ai-soft);
+  background: var(--paper);
+  font-weight: 400;
+}
+
+/* On the rail (indigo in both themes). */
+.host-info-rail .host-warning {
+  background: rgb(224 106 126 / 0.18);
+  border-left-color: #f4b6c1;
+  color: var(--on-ai);
+  font-size: var(--t-sm);
+}
+
+.host-info-rail .host-warning[data-tone="info"] {
+  background: rgb(255 255 255 / 0.06);
+  border-left-color: var(--on-ai-dim);
+}
+
+.host-tight {
+  color: var(--nezumi);
+}
+
+.host-info-rail .host-tight {
+  color: var(--on-ai);
+}
+
+/* A 超出負荷 choice in the menu (where the platform styles options at all; the text is marked too). */
+.host-info option[data-fit="over"] {
+  color: var(--beni);
+  font-weight: 700;
+}
+
+.host-downloads {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.host-downloads > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.host-downloads .model-id {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.host-downloads .host-fit {
+  font-size: var(--t-sm);
+  color: var(--nezumi);
+}
+
+.host-downloads .host-fit[data-fit="over"] {
+  color: var(--beni);
+  font-weight: 700;
+}
+
+.host-downloads .progress {
+  flex: 1 1 220px;
+}
+
+.host-downloads .delete-confirm {
+  flex-basis: 100%;
 }

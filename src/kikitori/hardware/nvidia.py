@@ -2,7 +2,7 @@
 
 位於 hardware 模組的偵測層。`nvidia-smi` 隨 NVIDIA 驅動安裝，是不需要 CUDA Toolkit
 就能查 VRAM 與 compute capability 的方式；它是外部程式，所以有 timeout、輸出逐欄
-驗證。cuBLAS 只檢查檔案存在（不載入），因為 CTranslate2 只在建立 CUDA 模型時才以
+驗證。session 執行中的負荷圖也用它定期取樣 VRAM 與使用率（`sample_gpu_usage`）。cuBLAS 只檢查檔案存在（不載入），因為 CTranslate2 只在建立 CUDA 模型時才以
 檔名載入它，而 `asr.load_transcriber(cuda_library_dirs=...)` 會先用完整路徑預載。
 """
 
@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from kikitori.hardware.types import CublasInfo, CublasSource, GpuInfo, OsName
@@ -30,6 +31,11 @@ GPU_QUERY_FIELDS = (
 MAX_GPUS = 64
 MAX_GPU_NAME_CHARS = 200
 MAX_VRAM_MB = 10_000_000
+GPU_USAGE_FIELDS = ("name", "memory.used", "memory.total", "utilization.gpu")
+GPU_USAGE_TIMEOUT_SECS = 2.0
+"""取樣的逾時比偵測短：它在 metrics 執行緒上定期執行，卡住時寧可這一次沒有資料。"""
+MAX_USAGE_VRAM_MB = 1_048_576
+"""取樣值的上限（1 TiB）：與遠端協定 A 端的驗證範圍一致，超出就不是合理的讀數。"""
 _NA_VALUES = frozenset(
     {"[N/A]", "N/A", "[Not Supported]", "[Insufficient Permissions]"}
 )
@@ -42,6 +48,23 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 class NvidiaSmiError(RuntimeError):
     """`nvidia-smi` 執行失敗、逾時或輸出不合法。"""
+
+
+@dataclass(frozen=True)
+class GpuUsage:
+    """某一刻一張 GPU 的使用量（`sample_gpu_usage`），給 `metrics` 事件的 `gpu` 欄位。
+
+    Attributes:
+        name: 型號，例如 "NVIDIA GeForce GTX 1080 Ti"。
+        vram_used_mb: 已用 VRAM（MiB），含其他程式（例如 Ollama 的翻譯模型）。
+        vram_total_mb: VRAM 總量（MiB），> 0。
+        util_pct: GPU 使用率（%），[0, 100]。
+    """
+
+    name: str
+    vram_used_mb: int
+    vram_total_mb: int
+    util_pct: int
 
 
 def cublas_platform_supported(name: OsName, machine: str) -> bool:
@@ -165,7 +188,11 @@ def parse_nvidia_smi_csv(
 
 
 def _run_query(
-    executable: Path, fields: Sequence[str], run: Runner, timeout: float
+    executable: Path,
+    fields: Sequence[str],
+    run: Runner,
+    timeout: float,
+    extra: Sequence[str] = (),
 ) -> "subprocess.CompletedProcess[str]":
     # 引擎是無主控台的 sidecar：不加 CREATE_NO_WINDOW 時 Windows 會為子行程彈出主控台視窗
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
@@ -174,6 +201,7 @@ def _run_query(
             os.fspath(executable),
             f"--query-gpu={','.join(fields)}",
             "--format=csv,noheader,nounits",
+            *extra,
         ],
         capture_output=True,
         text=True,
@@ -222,6 +250,84 @@ def query_nvidia_gpus(
     if not gpus and stdout.strip():
         raise NvidiaSmiError("; ".join(errors) or "unrecognised nvidia-smi output")
     return gpus, errors
+
+
+def parse_gpu_usage(text: str) -> GpuUsage:
+    """解析 `GPU_USAGE_FIELDS` 查詢一張 GPU（`--id=`）的輸出。
+
+    任何一欄不可用（`[N/A]` 等）都視為失敗：負荷圖寧可沒有這筆資料，也不要顯示半筆。
+
+    Raises:
+        ValueError: 不是剛好一行，或欄位不合法。
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise ValueError(f"expected one line, got {len(lines)}")
+    fields = len(GPU_USAGE_FIELDS)
+    parts = [p.strip() for p in lines[0].rsplit(",", fields - 1)]
+    if len(parts) != fields:
+        raise ValueError(f"expected {fields} fields, got {len(parts)}")
+    name = " ".join(parts[0].split())
+    if not name or len(name) > MAX_GPU_NAME_CHARS or not name.isprintable():
+        raise ValueError("invalid GPU name")
+    values: list[int] = []
+    for field, value in zip(GPU_USAGE_FIELDS[1:], parts[1:], strict=True):
+        number = _optional_int(value, field)
+        if number is None:
+            raise ValueError(f"{field} is not available")
+        values.append(number)
+    used, total, util = values
+    if not 0 < total <= MAX_USAGE_VRAM_MB or used > MAX_USAGE_VRAM_MB:
+        raise ValueError(f"memory out of range: {used} / {total}")
+    if util > 100:
+        raise ValueError(f"utilization.gpu out of range: {util}")
+    return GpuUsage(name=name, vram_used_mb=used, vram_total_mb=total, util_pct=util)
+
+
+def sample_gpu_usage(
+    index: int,
+    *,
+    executable: Path,
+    run: Runner = subprocess.run,
+    timeout: float = GPU_USAGE_TIMEOUT_SECS,
+) -> GpuUsage | None:
+    """取樣第 `index` 張 GPU（`nvidia-smi` 的順序）目前的 VRAM 與使用率。
+
+    失敗（逾時、無法執行、結束碼非 0、輸出不合法）時回傳 None 並記 debug：取樣每幾秒
+    一次、只是輔助顯示，不該讓 session 失敗，也不該每次都留 warning。
+
+    Raises:
+        ValueError: `index` 不是 [0, `MAX_GPUS`) 的整數（呼叫端的程式錯誤）。
+    """
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or not 0 <= index < MAX_GPUS
+    ):
+        raise ValueError(f"index must be an integer in [0, {MAX_GPUS}), got {index!r}")
+    try:
+        result = _run_query(
+            executable, GPU_USAGE_FIELDS, run, timeout, extra=(f"--id={index}",)
+        )
+    except subprocess.TimeoutExpired:
+        logger.debug("GPU usage: nvidia-smi timed out after %g s", timeout)
+        return None
+    except OSError as exc:
+        logger.debug("GPU usage: cannot run nvidia-smi: %s", exc)
+        return None
+    if result.returncode != 0:
+        detail = " ".join(((result.stderr or "") + " " + (result.stdout or "")).split())
+        logger.debug(
+            "GPU usage: nvidia-smi exited with %d: %s",
+            result.returncode,
+            detail[:300] or "(no output)",
+        )
+        return None
+    try:
+        return parse_gpu_usage((result.stdout or "")[:65536])
+    except ValueError as exc:
+        logger.debug("GPU usage: unrecognised nvidia-smi output: %s", exc)
+        return None
 
 
 # --- cuBLAS ------------------------------------------------------------------

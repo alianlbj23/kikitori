@@ -35,6 +35,9 @@ describe("showGpuReminder", () => {
     expect(showGpuReminder(input({ runtime: { ...RUNTIME, installed: true } }))).toBe(false);
     expect(showGpuReminder(input({ runtime: { ...RUNTIME, supported: false } }))).toBe(false); // macOS
     expect(showGpuReminder(input({ downloading: true }))).toBe(false);
+    // Recognition runs on another computer: this one's GPU is not used.
+    expect(showGpuReminder(input({ remote: true }))).toBe(false);
+    expect(showGpuReminder(input({ remote: false }))).toBe(true);
   });
 
   it("respects the permanent dismissal and closing it for this launch", () => {

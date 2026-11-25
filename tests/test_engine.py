@@ -1027,6 +1027,9 @@ class SessionProtocolTest(EngineTestCase):
                 "backlog": 0,
                 "latency_ms_median": None,
                 "speech_level_dbfs": None,
+                "final_busy": None,
+                "rtf": None,
+                "gpu": None,
             },
         )
         self.engine.request("session.stop")

@@ -35,6 +35,11 @@ const BACKGROUND: Duration = Duration::from_secs(45);
 const SESSION_START: Duration = Duration::from_secs(30);
 /// The engine joins its worker threads with a 5 s timeout.
 const SESSION_STOP: Duration = Duration::from_secs(15);
+/// `remote.server_set`, `remote.pair_open` and `remote.pair` open listening or
+/// outgoing sockets (and may create the TLS identity on first use), which can
+/// take a few seconds beyond the usual quick answer. `remote.host_info` gives
+/// up on the compute host after 10 s itself, so this leaves it room to answer.
+const REMOTE_SOCKETS: Duration = Duration::from_secs(20);
 
 const MAX_MODEL_ID_CHARS: usize = 100;
 /// Translation model names follow the engine's rule (`models.pull_translation`).
@@ -409,6 +414,546 @@ pub async fn session_set_furigana(
     bridge
         .request("session.set_furigana", json!({ "enabled": enabled }), QUICK)
         .await
+}
+
+// --- Remote compute (T13 contract, docs/specs/remote-compute.md) -------------
+//
+// The engine validates these again; checking here as well means a misbehaving
+// webview cannot even hand the engine a malformed host, port or confirmation.
+
+/// Ports below 1024 need administrator rights on Linux and belong to system
+/// services; the compute host never uses them.
+/// The main port + 1 is the pairing port, so the main port stops at 65534 (as in the engine).
+const REMOTE_PORTS: std::ops::RangeInclusive<u16> = 1024..=65534;
+/// Longest DNS name.
+const MAX_HOST_CHARS: usize = 253;
+const SPKI_HEX_CHARS: usize = 64;
+const PAIRING_DIGITS: usize = 6;
+
+fn validate_port(port: Option<u16>) -> Result<(), RequestError> {
+    match port {
+        Some(p) if !REMOTE_PORTS.contains(&p) => Err(invalid(format!(
+            "port must be {}–{}",
+            REMOTE_PORTS.start(),
+            REMOTE_PORTS.end()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// A compute host is an IP address (v4 or v6) or a host name: letters, digits,
+/// `.`, `:` and `-` only, so no URL, path, user info or whitespace gets through.
+pub fn validate_host(host: &str) -> Result<(), RequestError> {
+    if host.is_empty()
+        || host.len() > MAX_HOST_CHARS
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b':' | b'-'))
+    {
+        return Err(invalid(format!(
+            "host must be 1–{MAX_HOST_CHARS} letters, digits, '.', ':' or '-'"
+        )));
+    }
+    Ok(())
+}
+
+/// `remote.server_set` parameters. The listen address must be one IP address:
+/// the user picks one of this computer's addresses, never a host name that
+/// could resolve elsewhere.
+pub fn remote_server_set_params(
+    enabled: bool,
+    listen_host: Option<&str>,
+    port: Option<u16>,
+) -> Result<Value, RequestError> {
+    let mut params = Map::new();
+    params.insert("enabled".into(), json!(enabled));
+    if let Some(host) = listen_host {
+        if host.parse::<std::net::IpAddr>().is_err() {
+            return Err(invalid("listen host must be an IP address"));
+        }
+        params.insert("listen_host".into(), json!(host));
+    }
+    validate_port(port)?;
+    if let Some(port) = port {
+        params.insert("port".into(), json!(port));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `remote.pair` parameters: the compute host and its main port (the engine
+/// pairs on port + 1).
+pub fn remote_pair_params(host: &str, port: Option<u16>) -> Result<Value, RequestError> {
+    validate_host(host)?;
+    validate_port(port)?;
+    let mut params = Map::new();
+    params.insert("host".into(), json!(host));
+    if let Some(port) = port {
+        params.insert("port".into(), json!(port));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `remote.pair_confirm` parameters: the compute host sends the digits the
+/// user typed, the other computer sends whether both screens show success.
+/// Exactly one of the two, so a confirmation is never ambiguous.
+pub fn remote_pair_confirm_params(
+    digits: Option<&str>,
+    same: Option<bool>,
+) -> Result<Value, RequestError> {
+    match (digits, same) {
+        (Some(digits), None) => {
+            // The digits are shown as `123 456`; full-width digits are
+            // converted by the UI, anything else is refused.
+            let digits: String = digits.chars().filter(|c| !c.is_whitespace()).collect();
+            if digits.len() != PAIRING_DIGITS || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid("pairing code must be exactly 6 digits"));
+            }
+            Ok(json!({ "digits": digits }))
+        }
+        (None, Some(same)) => Ok(json!({ "same": same })),
+        _ => Err(invalid("give exactly one of digits or same")),
+    }
+}
+
+/// `remote.unpair` parameters: which trusted computer (its SPKI SHA-256) and
+/// in which list (`peer` = may connect here, `server` = a paired compute host).
+pub fn remote_unpair_params(spki: &str, role: &str) -> Result<Value, RequestError> {
+    if spki.len() != SPKI_HEX_CHARS
+        || !spki
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(invalid("spki must be 64 lowercase hex digits"));
+    }
+    if !matches!(role, "peer" | "server") {
+        return Err(invalid("role must be \"peer\" or \"server\""));
+    }
+    Ok(json!({ "spki": spki, "role": role }))
+}
+
+/// This computer's identity, compute-host server state, trusted computers and
+/// any pairing in progress (`RemoteStatus`).
+#[tauri::command]
+pub async fn remote_status(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("remote.status", json!({}), QUICK).await
+}
+
+/// Turns the compute-host server on or off (saved as `compute.server_enabled`).
+#[tauri::command]
+pub async fn remote_server_set(
+    bridge: State<'_, EngineBridge>,
+    enabled: bool,
+    listen_host: Option<String>,
+    port: Option<u16>,
+) -> CmdResult<Value> {
+    let params = remote_server_set_params(enabled, listen_host.as_deref(), port)?;
+    bridge
+        .request("remote.server_set", params, REMOTE_SOCKETS)
+        .await
+}
+
+/// Replaces this computer's identity (key and certificate) with a new one and
+/// clears both lists of paired computers, which no longer recognise it. The
+/// way out of a damaged identity (`identity_error`); refused with
+/// `session_active` while subtitles run on this computer or another computer
+/// is using it.
+#[tauri::command]
+pub async fn remote_identity_reset(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge
+        .request("remote.identity_reset", json!({}), REMOTE_SOCKETS)
+        .await
+}
+
+/// Drops the computer currently using this compute host.
+#[tauri::command]
+pub async fn remote_disconnect(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("remote.disconnect", json!({}), QUICK).await
+}
+
+/// Lets a new computer pair with this compute host; progress arrives as
+/// `engine://remote` events.
+#[tauri::command]
+pub async fn remote_pair_open(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge
+        .request("remote.pair_open", json!({}), REMOTE_SOCKETS)
+        .await
+}
+
+/// Starts pairing with a compute host; progress arrives as `engine://remote`.
+#[tauri::command]
+pub async fn remote_pair(
+    bridge: State<'_, EngineBridge>,
+    host: String,
+    port: Option<u16>,
+) -> CmdResult<Value> {
+    let params = remote_pair_params(&host, port)?;
+    bridge.request("remote.pair", params, REMOTE_SOCKETS).await
+}
+
+#[tauri::command]
+pub async fn remote_pair_confirm(
+    bridge: State<'_, EngineBridge>,
+    digits: Option<String>,
+    same: Option<bool>,
+) -> CmdResult<Value> {
+    let params = remote_pair_confirm_params(digits.as_deref(), same)?;
+    bridge.request("remote.pair_confirm", params, QUICK).await
+}
+
+#[tauri::command]
+pub async fn remote_pair_cancel(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    bridge.request("remote.pair_cancel", json!({}), QUICK).await
+}
+
+#[tauri::command]
+pub async fn remote_unpair(
+    bridge: State<'_, EngineBridge>,
+    spki: String,
+    role: String,
+) -> CmdResult<Value> {
+    let params = remote_unpair_params(&spki, &role)?;
+    bridge.request("remote.unpair", params, QUICK).await
+}
+
+// --- The compute host's capacity (docs/specs/compute-capacity.md 二) -------
+
+/// More models than the engine's registry will ever list.
+const MAX_HOST_MODELS: usize = 32;
+const MAX_HOST_GPU_NAME_CHARS: usize = 64;
+const MAX_HOST_COMPUTE_TYPE_CHARS: usize = 32;
+/// 1 TiB in MiB: no GPU or model needs more than this.
+const HOST_MB_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1_048_576.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostDevice {
+    Cuda,
+    Cpu,
+}
+
+/// Whether a model fits the compute host's memory next to its real-time model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelFit {
+    Ok,
+    Tight,
+    Over,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostGpu {
+    pub name: String,
+    pub vram_total_mb: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPair {
+    pub fast: String,
+    pub r#final: String,
+}
+
+/// The compute host's translation models (compute-capacity.md 七); "" = none set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranslationPair {
+    pub fast: String,
+    pub r#final: String,
+}
+
+/// `HostInfo.current`: the compute host's own settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostCurrent {
+    pub fast: String,
+    pub r#final: String,
+    /// Absent from compute hosts older than compute-capacity.md 七; `None`
+    /// too when malformed (dropped alone, see [`check_host_info`]).
+    #[serde(default, deserialize_with = "lenient_current_translation")]
+    pub translation: Option<TranslationPair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostModel {
+    pub id: String,
+    pub downloaded: bool,
+    pub need_mb: f64,
+    /// As the final model next to the current real-time model; `None` when
+    /// the compute host could not measure its hardware.
+    pub fit: Option<ModelFit>,
+    /// As the real-time model next to the current final model, as the compute
+    /// host counts it; `None` when it could not tell or is older than this field.
+    #[serde(default)]
+    pub fit_as_fast: Option<ModelFit>,
+}
+
+/// `HostInfo`: what the compute host can run. It comes from another computer
+/// through the engine, so it is checked here like any engine output; fields
+/// this app does not know are dropped when it is serialized again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub gpu: Option<HostGpu>,
+    pub device: HostDevice,
+    pub compute_type: String,
+    pub current: HostCurrent,
+    pub recommended: Option<ModelPair>,
+    pub models: Vec<HostModel>,
+    /// `None` too when it is not a model name (dropped alone).
+    #[serde(default, deserialize_with = "lenient_translation_model")]
+    pub translation_model: Option<String>,
+    /// The models installed on the compute host's translation server; `None`
+    /// when it could not be reached (or the compute host is older), or when the
+    /// list itself is malformed. A malformed entry is skipped.
+    #[serde(default, deserialize_with = "lenient_translation_models")]
+    pub translation_models: Option<Vec<String>>,
+}
+
+/// More translation models than a translation server lists in practice.
+const MAX_HOST_TRANSLATION_MODELS: usize = 64;
+
+// The translation fields of a `HostInfo` are dropped one by one when malformed
+// instead of losing the whole report: they label no recognition model, and an
+// odd name from the compute host's translation server should not hide its
+// recognition models. Each drop is logged. Same rules as the UI's `parseHostInfo`.
+
+fn drop_translation_field<T>(field: &str, reason: impl std::fmt::Display) -> Option<T> {
+    log::warn!("ignoring {field} of the compute host's capacity report: {reason}");
+    None
+}
+
+/// A translation model name, or "" (none set) when `allow_unset`.
+fn is_translation_name(model: &str, allow_unset: bool) -> bool {
+    (allow_unset && model.is_empty()) || validate_translation_model(model).is_ok()
+}
+
+fn current_translation_from(value: Value) -> Option<TranslationPair> {
+    if value.is_null() {
+        return None;
+    }
+    let pair: TranslationPair = match serde_json::from_value(value) {
+        Ok(pair) => pair,
+        Err(e) => return drop_translation_field("current.translation", e),
+    };
+    if !is_translation_name(&pair.fast, true) || !is_translation_name(&pair.r#final, true) {
+        return drop_translation_field("current.translation", "not a model name");
+    }
+    Some(pair)
+}
+
+fn translation_model_from(value: Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(model) if is_translation_name(&model, false) => Some(model),
+        _ => drop_translation_field("translation_model", "not a model name"),
+    }
+}
+
+fn translation_models_from(value: Value) -> Option<Vec<String>> {
+    let models = match value {
+        Value::Null => return None,
+        Value::Array(models) => models,
+        _ => return drop_translation_field("translation_models", "expected an array"),
+    };
+    if models.len() > MAX_HOST_TRANSLATION_MODELS {
+        return drop_translation_field(
+            "translation_models",
+            format!("more than {MAX_HOST_TRANSLATION_MODELS} entries"),
+        );
+    }
+    let kept = models
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, model)| match model {
+            Value::String(model) if is_translation_name(&model, false) => Some(model),
+            _ => drop_translation_field(&format!("translation_models[{i}]"), "not a model name"),
+        })
+        .collect();
+    Some(kept)
+}
+
+fn lenient_current_translation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<TranslationPair>, D::Error> {
+    Value::deserialize(deserializer).map(current_translation_from)
+}
+
+fn lenient_translation_model<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Value::deserialize(deserializer).map(translation_model_from)
+}
+
+fn lenient_translation_models<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    Value::deserialize(deserializer).map(translation_models_from)
+}
+
+fn check_model_pair(fast: &str, r#final: &str, field: &str) -> Result<(), String> {
+    for (name, id) in [("fast", fast), ("final", r#final)] {
+        validate_model_id(id).map_err(|e| format!("{field}.{name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The shape and ranges of a `HostInfo` (the same rules as the UI's
+/// `parseHostInfo`): a malformed recognition field fails the whole report, a
+/// malformed translation field is already dropped alone while deserializing.
+pub fn check_host_info(value: Value) -> Result<HostInfo, String> {
+    let host: HostInfo = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if let Some(gpu) = &host.gpu {
+        if gpu.name.chars().count() > MAX_HOST_GPU_NAME_CHARS {
+            return Err(format!(
+                "gpu.name is longer than {MAX_HOST_GPU_NAME_CHARS} characters"
+            ));
+        }
+        if !HOST_MB_RANGE.contains(&gpu.vram_total_mb) {
+            return Err("gpu.vram_total_mb is out of range".into());
+        }
+    }
+    if host.compute_type.is_empty()
+        || host.compute_type.len() > MAX_HOST_COMPUTE_TYPE_CHARS
+        || !host
+            .compute_type
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err("compute_type is not a precision name".into());
+    }
+    check_model_pair(&host.current.fast, &host.current.r#final, "current")?;
+    if let Some(recommended) = &host.recommended {
+        check_model_pair(&recommended.fast, &recommended.r#final, "recommended")?;
+    }
+    if host.models.len() > MAX_HOST_MODELS {
+        return Err(format!("more than {MAX_HOST_MODELS} models"));
+    }
+    for (i, model) in host.models.iter().enumerate() {
+        validate_model_id(&model.id).map_err(|e| format!("models[{i}].id: {e}"))?;
+        if !HOST_MB_RANGE.contains(&model.need_mb) {
+            return Err(format!("models[{i}].need_mb is out of range"));
+        }
+    }
+    Ok(host)
+}
+
+/// `remote.host_info` result as the UI receives it: `{host}` with a checked
+/// `HostInfo`, or `host: null` when the compute host sent none or a malformed
+/// one. A bad report only loses the capacity labels, so it is not an error.
+pub fn host_info_result(result: Value) -> Value {
+    let host = match result {
+        Value::Object(mut o) => o.remove("host").unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    if host.is_null() {
+        return json!({ "host": null });
+    }
+    match check_host_info(host) {
+        Ok(host) => json!({ "host": host }),
+        Err(e) => {
+            log::warn!("ignoring the compute host's capacity report: {e}");
+            json!({ "host": null })
+        }
+    }
+}
+
+/// What the configured compute host can run, asked with one probe connection
+/// that does not take its GPU (it answers while busy too).
+#[tauri::command]
+pub async fn remote_host_info(bridge: State<'_, EngineBridge>) -> CmdResult<Value> {
+    let result = bridge
+        .request("remote.host_info", json!({}), REMOTE_SOCKETS)
+        .await?;
+    Ok(host_info_result(result))
+}
+
+/// One side of `remote.host_set_models`: the real-time and/or the final model
+/// (compute-capacity.md 七). A missing field keeps the compute host's value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelChoice {
+    pub fast_model: Option<String>,
+    pub final_model: Option<String>,
+}
+
+fn model_choice_params(
+    choice: &ModelChoice,
+    field: &str,
+    check: fn(&str) -> Result<(), RequestError>,
+) -> Result<Option<Value>, RequestError> {
+    let mut out = Map::new();
+    for (name, value) in [
+        ("fast_model", &choice.fast_model),
+        ("final_model", &choice.final_model),
+    ] {
+        if let Some(model) = value {
+            check(model).map_err(|e| invalid(format!("{field}.{name}: {e}")))?;
+            out.insert(name.into(), json!(model));
+        }
+    }
+    Ok((!out.is_empty()).then_some(Value::Object(out)))
+}
+
+/// `remote.host_set_models` parameters: ASR ids and translation model names in
+/// the commands' formats. Whether the compute host has them is its own check.
+pub fn host_set_models_params(
+    asr: Option<&ModelChoice>,
+    translation: Option<&ModelChoice>,
+) -> Result<Value, RequestError> {
+    let mut params = Map::new();
+    if let Some(choice) = asr
+        && let Some(v) = model_choice_params(choice, "asr", validate_model_id)?
+    {
+        params.insert("asr".into(), v);
+    }
+    if let Some(choice) = translation
+        && let Some(v) = model_choice_params(choice, "translation", validate_translation_model)?
+    {
+        params.insert("translation".into(), v);
+    }
+    if params.is_empty() {
+        return Err(invalid("no model to change"));
+    }
+    Ok(Value::Object(params))
+}
+
+/// `remote.host_download` parameters: only speech recognition models can be
+/// downloaded on the compute host.
+pub fn host_download_params(model: &str) -> Result<Value, RequestError> {
+    validate_model_id(model)?;
+    if model == GPU_RUNTIME_ID {
+        return Err(invalid(
+            "remote.host_download only applies to speech recognition models",
+        ));
+    }
+    Ok(json!({ "model": model }))
+}
+
+/// Changes the compute host's own models (saved there; its next session uses
+/// them). Answers with its updated `HostInfo`, checked like `remote_host_info`.
+#[tauri::command]
+pub async fn remote_host_set_models(
+    bridge: State<'_, EngineBridge>,
+    asr: Option<ModelChoice>,
+    translation: Option<ModelChoice>,
+) -> CmdResult<Value> {
+    let params = host_set_models_params(asr.as_ref(), translation.as_ref())?;
+    let result = bridge
+        .request("remote.host_set_models", params, REMOTE_SOCKETS)
+        .await?;
+    Ok(host_info_result(result))
+}
+
+/// Starts a model download on the compute host; progress arrives as
+/// `engine://remote` events of kind `host_download`.
+#[tauri::command]
+pub async fn remote_host_download(
+    bridge: State<'_, EngineBridge>,
+    model: String,
+) -> CmdResult<Value> {
+    let params = host_download_params(&model)?;
+    let result = bridge
+        .request("remote.host_download", params, REMOTE_SOCKETS)
+        .await?;
+    // Only the flag is passed on; the progress comes as events.
+    let started = result.get("started").and_then(Value::as_bool) == Some(true);
+    Ok(json!({ "started": started }))
 }
 
 #[tauri::command]
@@ -1132,6 +1677,450 @@ mod tests {
             json!({"mode": "interpret", "device_id": "mic-1"})
         );
         assert!(serde_json::from_value::<Mode>(json!("karaoke")).is_err());
+    }
+
+    fn is_invalid_input(result: Result<Value, RequestError>) -> bool {
+        matches!(result, Err(RequestError::InvalidInput { .. }))
+    }
+
+    #[test]
+    fn remote_server_set_params_send_snake_case_and_check_values() {
+        assert_eq!(
+            remote_server_set_params(false, None, None).unwrap(),
+            json!({"enabled": false})
+        );
+        assert_eq!(
+            remote_server_set_params(true, Some("192.168.8.236"), Some(47100)).unwrap(),
+            json!({"enabled": true, "listen_host": "192.168.8.236", "port": 47100})
+        );
+        for ok in ["100.88.94.10", "::1", "fe80::1", "0.0.0.0"] {
+            assert!(
+                remote_server_set_params(true, Some(ok), None).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "",
+            "localhost",
+            "alian_server",
+            "192.168.8.256",
+            " 192.168.8.236",
+            "192.168.8.236:47100",
+            "fe80::1%3",
+            "http://1.2.3.4",
+        ] {
+            assert!(
+                is_invalid_input(remote_server_set_params(true, Some(bad), None)),
+                "{bad:?}"
+            );
+        }
+        for port in [0, 80, 1023] {
+            assert!(is_invalid_input(remote_server_set_params(
+                true,
+                None,
+                Some(port)
+            )));
+        }
+        for port in [1024, 65534] {
+            assert!(remote_server_set_params(true, None, Some(port)).is_ok());
+        }
+        assert!(is_invalid_input(remote_server_set_params(
+            true,
+            None,
+            Some(65535)
+        )));
+    }
+
+    #[test]
+    fn remote_pair_params_check_host_and_port() {
+        assert_eq!(
+            remote_pair_params("192.168.8.236", None).unwrap(),
+            json!({"host": "192.168.8.236"})
+        );
+        assert_eq!(
+            remote_pair_params("alian-server.tailnet.ts.net", Some(47100)).unwrap(),
+            json!({"host": "alian-server.tailnet.ts.net", "port": 47100})
+        );
+        for ok in ["::1", "fe80::1", "a", "a".repeat(MAX_HOST_CHARS).as_str()] {
+            assert!(remote_pair_params(ok, None).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "a".repeat(MAX_HOST_CHARS + 1).as_str(),
+            "alian_server",
+            "host name",
+            "http://host",
+            "user@host",
+            "host/path",
+            "[::1]",
+            "host\n",
+            "ホスト",
+        ] {
+            assert!(is_invalid_input(remote_pair_params(bad, None)), "{bad:?}");
+        }
+        assert!(is_invalid_input(remote_pair_params("host", Some(1023))));
+        assert!(remote_pair_params("host", Some(65534)).is_ok());
+        assert!(is_invalid_input(remote_pair_params("host", Some(65535))));
+    }
+
+    #[test]
+    fn remote_pair_confirm_params_take_exactly_one_answer() {
+        assert_eq!(
+            remote_pair_confirm_params(Some("166425"), None).unwrap(),
+            json!({"digits": "166425"})
+        );
+        // Spaces as shown on screen are removed before sending.
+        assert_eq!(
+            remote_pair_confirm_params(Some(" 166 425 "), None).unwrap(),
+            json!({"digits": "166425"})
+        );
+        assert_eq!(
+            remote_pair_confirm_params(None, Some(true)).unwrap(),
+            json!({"same": true})
+        );
+        assert_eq!(
+            remote_pair_confirm_params(None, Some(false)).unwrap(),
+            json!({"same": false})
+        );
+        assert!(is_invalid_input(remote_pair_confirm_params(None, None)));
+        assert!(is_invalid_input(remote_pair_confirm_params(
+            Some("166425"),
+            Some(true)
+        )));
+        for bad in [
+            "",
+            "12345",
+            "1234567",
+            "12345a",
+            "１２３４５６",
+            "123-456",
+            "   ",
+        ] {
+            assert!(
+                is_invalid_input(remote_pair_confirm_params(Some(bad), None)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_unpair_params_check_spki_and_role() {
+        let spki = "05aa3f394a539a2362d9a1e4cd57cba2".repeat(2);
+        for role in ["peer", "server"] {
+            assert_eq!(
+                remote_unpair_params(&spki, role).unwrap(),
+                json!({"spki": spki, "role": role})
+            );
+        }
+        for bad_role in ["", "client", "Peer", "peers"] {
+            assert!(is_invalid_input(remote_unpair_params(&spki, bad_role)));
+        }
+        for bad in [
+            String::new(),
+            spki[..63].to_owned(),
+            format!("{spki}0"),
+            spki.to_uppercase(),
+            format!("{}g", &spki[..63]),
+            "05aa 3f39 4a53 9a23 62d9 a1e4 cd57 cba2".to_owned(),
+        ] {
+            assert!(
+                is_invalid_input(remote_unpair_params(&bad, "peer")),
+                "{bad:?}"
+            );
+        }
+    }
+
+    fn host_info_example() -> Value {
+        json!({
+            "gpu": {"name": "NVIDIA GeForce GTX 1080 Ti", "vram_total_mb": 11264},
+            "device": "cuda",
+            "compute_type": "int8",
+            "current": {"fast": "large-v3-turbo", "final": "large-v3"},
+            "recommended": {"fast": "large-v3-turbo", "final": "large-v3"},
+            "models": [
+                {"id": "large-v3", "downloaded": true, "need_mb": 2140, "fit": "ok", "fit_as_fast": "tight"},
+                {"id": "kotoba-whisper-v2.0", "downloaded": false, "need_mb": 1600.5, "fit": "tight"}
+            ],
+            "translation_model": "qwen3.5:9b",
+            "newer_field": true
+        })
+    }
+
+    #[test]
+    fn host_info_result_keeps_a_valid_report() {
+        let out = host_info_result(json!({ "host": host_info_example() }));
+        let host = &out["host"];
+        assert_eq!(host["gpu"]["name"], json!("NVIDIA GeForce GTX 1080 Ti"));
+        assert_eq!(host["device"], json!("cuda"));
+        assert_eq!(host["current"]["final"], json!("large-v3"));
+        assert_eq!(host["models"][1]["fit"], json!("tight"));
+        // The real-time label is forwarded; an older compute host's absent one is null.
+        assert_eq!(host["models"][0]["fit_as_fast"], json!("tight"));
+        assert!(host["models"][1]["fit_as_fast"].is_null());
+        assert_eq!(host["translation_model"], json!("qwen3.5:9b"));
+        // Fields this app does not know are not forwarded.
+        assert!(host.get("newer_field").is_none());
+
+        // No GPU, no recommendation, no translation model.
+        let mut cpu = host_info_example();
+        cpu["gpu"] = Value::Null;
+        cpu["device"] = json!("cpu");
+        cpu["recommended"] = Value::Null;
+        cpu["translation_model"] = Value::Null;
+        cpu["models"] = json!([]);
+        let out = host_info_result(json!({ "host": cpu }));
+        assert!(out["host"]["gpu"].is_null() && out["host"]["recommended"].is_null());
+        assert_eq!(out["host"]["device"], json!("cpu"));
+
+        // The compute host could not measure its hardware: fit is unknown, the report stays.
+        let mut unknown = host_info_example();
+        unknown["models"][0]["fit"] = Value::Null;
+        let out = host_info_result(json!({ "host": unknown }));
+        assert!(out["host"]["models"][0]["fit"].is_null());
+        assert_eq!(out["host"]["models"][1]["fit"], json!("tight"));
+
+        for none in [json!({"host": null}), json!({}), json!(null), json!("host")] {
+            assert_eq!(host_info_result(none), json!({"host": null}));
+        }
+    }
+
+    #[test]
+    fn host_info_result_drops_a_malformed_report_whole() {
+        let cases: Vec<(&str, Value)> = vec![
+            ("/gpu/name", json!("x".repeat(65))),
+            ("/gpu/vram_total_mb", json!(-1)),
+            ("/gpu/vram_total_mb", json!(2_000_000)),
+            ("/device", json!("rocm")),
+            ("/compute_type", json!("INT8; rm")),
+            ("/compute_type", json!("")),
+            ("/current/final", json!("../etc")),
+            ("/current/fast", json!(3)),
+            ("/recommended/final", json!("a b")),
+            ("/models/0/id", json!("")),
+            ("/models/0/downloaded", json!("yes")),
+            ("/models/0/need_mb", json!(-5)),
+            ("/models/0/fit", json!("maybe")),
+            ("/models/0/fit_as_fast", json!("maybe")),
+        ];
+        for (pointer, bad) in cases {
+            let mut host = host_info_example();
+            *host.pointer_mut(pointer).unwrap() = bad.clone();
+            assert_eq!(
+                host_info_result(json!({ "host": host })),
+                json!({"host": null}),
+                "{pointer} = {bad}"
+            );
+        }
+        let mut many = host_info_example();
+        many["models"] = Value::Array(
+            (0..=MAX_HOST_MODELS)
+                .map(|i| json!({"id": format!("m{i}"), "downloaded": true, "need_mb": 1, "fit": "ok"}))
+                .collect(),
+        );
+        assert_eq!(
+            host_info_result(json!({ "host": many })),
+            json!({"host": null})
+        );
+        let mut missing = host_info_example();
+        missing.as_object_mut().unwrap().remove("current");
+        assert_eq!(
+            host_info_result(json!({ "host": missing })),
+            json!({"host": null})
+        );
+    }
+
+    #[test]
+    fn host_info_carries_the_translation_models() {
+        let mut host = host_info_example();
+        host["current"]["translation"] = json!({"fast": "qwen3.5:4b", "final": "qwen3.5:9b"});
+        host["translation_models"] = json!(["qwen3.5:4b", "qwen3.5:9b"]);
+        let out = host_info_result(json!({ "host": host }));
+        assert_eq!(
+            out["host"]["current"]["translation"]["final"],
+            json!("qwen3.5:9b")
+        );
+        assert_eq!(out["host"]["translation_models"][1], json!("qwen3.5:9b"));
+
+        // An older compute host: both absent, forwarded as null.
+        let out = host_info_result(json!({ "host": host_info_example() }));
+        assert!(out["host"]["current"]["translation"].is_null());
+        assert!(out["host"]["translation_models"].is_null());
+
+        // No translation model set yet is "", not malformed.
+        let mut unset = host_info_example();
+        unset["current"]["translation"] = json!({"fast": "", "final": ""});
+        unset["translation_models"] = Value::Null;
+        assert!(!host_info_result(json!({ "host": unset }))["host"].is_null());
+    }
+
+    #[test]
+    fn host_info_drops_only_the_malformed_translation_field() {
+        let base = || {
+            let mut host = host_info_example();
+            host["current"]["translation"] = json!({"fast": "a", "final": "b"});
+            host["translation_models"] = json!(["a", "b"]);
+            host
+        };
+        let check = |host: Value| {
+            let out = host_info_result(json!({ "host": host }))["host"].clone();
+            // The recognition part is always kept.
+            assert_eq!(out["models"][0]["id"], json!("large-v3"));
+            assert_eq!(out["current"]["final"], json!("large-v3"));
+            out
+        };
+
+        for bad in [
+            json!({"fast": "../x", "final": "qwen3.5:9b"}),
+            json!({"fast": "qwen3.5:4b"}),
+            json!({"fast": 1, "final": "b"}),
+            json!("qwen3.5:9b"),
+        ] {
+            let mut host = base();
+            host["current"]["translation"] = bad.clone();
+            let out = check(host);
+            assert!(out["current"]["translation"].is_null(), "{bad}");
+            assert_eq!(out["translation_models"], json!(["a", "b"]), "{bad}");
+            assert_eq!(out["translation_model"], json!("qwen3.5:9b"), "{bad}");
+        }
+
+        // A bad entry is skipped, the good ones stay.
+        let mut host = base();
+        host["translation_models"] = json!(["ok", "a b", 3, "../x", "q:1"]);
+        assert_eq!(check(host)["translation_models"], json!(["ok", "q:1"]));
+        for bad in [
+            json!("qwen3.5:9b"),
+            json!({"a": 1}),
+            Value::Array(
+                (0..=MAX_HOST_TRANSLATION_MODELS)
+                    .map(|i| json!(format!("m{i}")))
+                    .collect(),
+            ),
+        ] {
+            let mut host = base();
+            host["translation_models"] = bad;
+            let out = check(host);
+            assert!(out["translation_models"].is_null());
+            assert_eq!(out["current"]["translation"]["fast"], json!("a"));
+        }
+
+        for bad in [
+            json!("../x"),
+            json!("a b"),
+            json!(7),
+            json!("x".repeat(201)),
+            json!(""),
+        ] {
+            let mut host = base();
+            host["translation_model"] = bad.clone();
+            let out = check(host);
+            assert!(out["translation_model"].is_null(), "{bad}");
+            assert_eq!(out["translation_models"], json!(["a", "b"]), "{bad}");
+        }
+        let mut host = base();
+        host["translation_model"] = json!("x".repeat(200));
+        assert_eq!(check(host)["translation_model"], json!("x".repeat(200)));
+    }
+
+    fn choice(fast: Option<&str>, r#final: Option<&str>) -> ModelChoice {
+        ModelChoice {
+            fast_model: fast.map(str::to_owned),
+            final_model: r#final.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn host_set_models_params_checks_each_model() {
+        assert_eq!(
+            host_set_models_params(Some(&choice(None, Some("large-v3"))), None).unwrap(),
+            json!({"asr": {"final_model": "large-v3"}})
+        );
+        assert_eq!(
+            host_set_models_params(
+                Some(&choice(Some("large-v3-turbo"), Some("large-v3"))),
+                Some(&choice(Some("qwen3.5:4b"), Some("hf.co/x/y:Q4"))),
+            )
+            .unwrap(),
+            json!({
+                "asr": {"fast_model": "large-v3-turbo", "final_model": "large-v3"},
+                "translation": {"fast_model": "qwen3.5:4b", "final_model": "hf.co/x/y:Q4"}
+            })
+        );
+        // Nothing to change at all is a mistake of the caller.
+        assert!(is_invalid_input(host_set_models_params(None, None)));
+        assert!(is_invalid_input(host_set_models_params(
+            Some(&choice(None, None)),
+            Some(&choice(None, None)),
+        )));
+        // ASR ids and translation names each follow their own rule.
+        for bad in ["", "../x", "a b", "qwen3.5:9b"] {
+            assert!(
+                is_invalid_input(host_set_models_params(Some(&choice(Some(bad), None)), None)),
+                "{bad:?}"
+            );
+        }
+        for bad in ["", "../x", "a b", ":x"] {
+            assert!(
+                is_invalid_input(host_set_models_params(None, Some(&choice(None, Some(bad))))),
+                "{bad:?}"
+            );
+        }
+        // Unknown fields are refused rather than silently dropped.
+        assert!(serde_json::from_value::<ModelChoice>(json!({"model": "x"})).is_err());
+    }
+
+    #[test]
+    fn host_download_params_only_takes_speech_models() {
+        assert_eq!(
+            host_download_params("large-v3").unwrap(),
+            json!({"model": "large-v3"})
+        );
+        for bad in ["", "../x", GPU_RUNTIME_ID] {
+            assert!(is_invalid_input(host_download_params(bad)), "{bad:?}");
+        }
+    }
+
+    const REMOTE_COMMANDS: [&str; 12] = [
+        "remote_status",
+        "remote_host_info",
+        "remote_host_set_models",
+        "remote_host_download",
+        "remote_server_set",
+        "remote_identity_reset",
+        "remote_disconnect",
+        "remote_pair_open",
+        "remote_pair",
+        "remote_pair_confirm",
+        "remote_pair_cancel",
+        "remote_unpair",
+    ];
+
+    fn granted(capability: &str) -> Vec<String> {
+        let v: Value = serde_json::from_str(capability).unwrap();
+        v["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str().or_else(|| p["identifier"].as_str()))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn remote_commands_are_granted_to_the_main_window_only() {
+        let main = granted(include_str!("../capabilities/main.json"));
+        let overlay = granted(include_str!("../capabilities/overlay.json"));
+        let build = include_str!("../build.rs");
+        for command in REMOTE_COMMANDS {
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert!(main.contains(&permission), "main.json lacks {permission}");
+            assert!(
+                build.contains(&format!("\"{command}\"")),
+                "build.rs does not declare {command}"
+            );
+        }
+        // The overlay can be captured on stream and has no engine control.
+        let remote: Vec<_> = overlay.iter().filter(|p| p.contains("remote")).collect();
+        assert!(remote.is_empty(), "overlay.json grants {remote:?}");
     }
 
     #[test]

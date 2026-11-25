@@ -120,6 +120,17 @@ class SettingsStore:
         with self._lock:
             return self._is_new
 
+    @property
+    def file_invalid(self) -> bool:
+        """上次 `load()` 時設定檔存在但無效，目前以預設值運作（還沒有成功的 `update()`）。
+
+        使用者在這台自己存設定時，`update()` 會把壞掉的原檔改名保留；但別台電腦遠端改模型
+        （compute-capacity 七）不該替使用者做這個決定——「預設值＋那台的修改」會蓋掉使用者
+        原本的設定。這類呼叫端先查這個屬性再寫入。
+        """
+        with self._lock:
+            return self._file_invalid
+
     def load(self) -> str | None:
         """從檔案載入設定。
 

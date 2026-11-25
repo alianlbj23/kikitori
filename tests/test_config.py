@@ -364,6 +364,103 @@ class ValidationTest(unittest.TestCase):
                     Settings.from_dict(_with("furigana", value))
                 self.assertIn(path, str(ctx.exception))
 
+    def test_compute_defaults_round_trip_and_missing(self) -> None:
+        # 遠端運算（docs/specs/remote-compute.md）：預設在本機、不接受連線；沒有 compute 的檔案照樣讀得進來
+        s = Settings()
+        self.assertEqual(
+            s.to_dict()["compute"],
+            {
+                "mode": "local",
+                "host": "",
+                "port": 47100,
+                "server_enabled": False,
+                "listen_host": "",
+                "listen_port": 47100,
+            },
+        )
+        data = s.to_dict()
+        del data["compute"]
+        self.assertEqual(Settings.from_dict(data), Settings())
+        for host in (
+            "192.168.1.20",
+            "gpu-box",
+            "gpu-box.tail1234.ts.net",
+            "fd7a:115c:a1e0::1",
+        ):
+            with self.subTest(host=host):
+                on = Settings.from_dict(
+                    _with("compute", {"mode": "remote", "host": host, "port": 50000})
+                )
+                self.assertEqual((on.compute.mode, on.compute.host), ("remote", host))
+                self.assertEqual(Settings.from_dict(on.to_dict()), on)
+        # 前後空白去掉
+        self.assertEqual(
+            Settings.from_dict(_with("compute", {"host": "  gpu-box "})).compute.host,
+            "gpu-box",
+        )
+
+    def test_compute_listen_host_is_an_ip_address(self) -> None:
+        # 運算主機的監聽位址：使用者從這台電腦的私有網段／Tailscale 位址選一個（不預設 0.0.0.0）
+        for host in ("192.168.8.236", "100.88.94.10", "fd7a:115c:a1e0::5", ""):
+            with self.subTest(host=host):
+                s = Settings.from_dict(_with("compute", {"listen_host": host}))
+                self.assertEqual(s.compute.listen_host, host)
+                self.assertEqual(Settings.from_dict(s.to_dict()), s)
+
+    def test_compute_listen_port_is_separate_from_the_host_port(self) -> None:
+        # A 連線用的埠（port）與這台當運算主機時監聽的埠（listen_port）各自設定
+        s = Settings.from_dict(_with("compute", {"port": 50000, "listen_port": 50010}))
+        self.assertEqual((s.compute.port, s.compute.listen_port), (50000, 50010))
+        self.assertEqual(Settings.from_dict(s.to_dict()), s)
+        # 舊設定檔沒有 listen_port：沿用原本共用的 port，已在提供運算的主機不必重設
+        old = Settings.from_dict(_with("compute", {"port": 50000}))
+        self.assertEqual(old.compute.listen_port, 50000)
+        # 舊的 port 是 65535（當時合法、但不能再當監聽埠）：用預設值，整份設定不因此讀不進來
+        edge = Settings.from_dict(_with("compute", {"port": 65535}))
+        self.assertEqual((edge.compute.port, edge.compute.listen_port), (65535, 47100))
+        # 配對埠是監聽埠＋1，所以監聽埠最大 65534
+        for value in (65535, 1023, "47100", True):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as ctx:
+                    Settings.from_dict(_with("compute", {"listen_port": value}))
+                self.assertIn("compute.listen_port", str(ctx.exception))
+
+    def test_retired_remote_model_keys_are_ignored(self) -> None:
+        # compute-capacity 七取代「四」：A 不再指定這場的模型。開發中版本寫過的這兩欄讀得進來、
+        # 不保留（下次存檔就消失），整份設定不會因為未知欄位而用預設值
+        s = Settings.from_dict(
+            _with(
+                "compute",
+                {"remote_fast_model": "base", "remote_final_model": "large-v3"},
+            )
+        )
+        self.assertEqual(s, Settings())
+        self.assertNotIn("remote_final_model", s.to_dict()["compute"])
+        self.assertFalse(hasattr(s.compute, "remote_final_model"))
+
+    def test_compute_validation(self) -> None:
+        for value, path in (
+            ({"listen_host": "gpu-box"}, "compute.listen_host"),
+            ({"listen_host": "999.1.1.1"}, "compute.listen_host"),
+            ({"listen_host": 5}, "compute.listen_host"),
+            ({"mode": "cloud"}, "compute.mode"),
+            ({"host": "http://gpu-box"}, "compute.host"),
+            ({"host": "gpu box"}, "compute.host"),
+            ({"host": "gpu-box/x"}, "compute.host"),
+            ({"host": "a" * 254}, "compute.host"),
+            ({"host": 5}, "compute.host"),
+            ({"port": 80}, "compute.port"),
+            ({"port": 70000}, "compute.port"),
+            ({"port": "47100"}, "compute.port"),
+            ({"server_enabled": "yes"}, "compute.server_enabled"),
+            ({"token": "x"}, "compute.token"),
+            ([], "compute"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as ctx:
+                    Settings.from_dict(_with("compute", value))
+                self.assertIn(path, str(ctx.exception))
+
     def test_speakers_defaults_round_trip_and_missing(self) -> None:
         # 說話者標籤：預設關閉、自動判斷人數；沒有 speakers 的檔案照樣讀得進來（不升 schema）
         s = Settings()
@@ -976,6 +1073,24 @@ class StoreTest(unittest.TestCase):
         with self.assertLogs("kikitori.config.store", "WARNING"):
             store.load()
         self.assertFalse(store.is_new)
+
+    def test_file_invalid_tells_whether_defaults_stand_in_for_a_broken_file(
+        self,
+    ) -> None:
+        # 遠端改模型（compute-capacity 七）要先問：壞掉的設定檔不能被「預設值＋patch」蓋掉
+        store = SettingsStore(self.path)
+        self.assertFalse(store.file_invalid)
+        store.load()
+        self.assertFalse(store.file_invalid)  # 檔案不存在不算壞掉
+        self.path.write_text("{broken", encoding="utf-8")
+        with self.assertLogs("kikitori.config.store", "WARNING"):
+            store.load()
+        self.assertTrue(store.file_invalid)
+        with self.assertLogs("kikitori.config.store", "WARNING"):
+            store.update({"mode": "interpret"})  # 使用者自己存：原檔改名保留
+        self.assertFalse(store.file_invalid)
+        self.assertIsNone(store.load())
+        self.assertFalse(store.file_invalid)
 
     def test_failed_update_changes_nothing(self) -> None:
         store = SettingsStore(self.path)

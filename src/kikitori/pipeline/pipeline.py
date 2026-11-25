@@ -5,8 +5,8 @@
 （較準的模型、帶前文）送出最終版。設計與保證（順序、不丟完整結果、背壓、錯誤）
 見 `docs/specs/pipeline-engine.md`。
 
-時間一律用樣本計數；pipeline 本身不讀牆鐘時間（注入的時鐘只用來排程即時辨識與量測
-完整字幕的延遲）。除了引擎用的執行緒模式，
+時間一律用樣本計數；pipeline 本身不讀牆鐘時間（注入的時鐘只用來排程即時辨識、量測
+完整字幕的延遲與完整辨識的負荷）。除了引擎用的執行緒模式，
 另有不開執行緒的逐步模式（`feed()`／`end_of_stream()`／`run_pending()`），
 讓測試能決定性地重現排程情境。
 """
@@ -34,9 +34,11 @@ from kikitori.pipeline.languages import (
 )
 from kikitori.pipeline.metrics import (
     BACKGROUND_WINDOW,
+    BusyMeter,
     LatencyWindow,
     LevelMeter,
     PipelineMetrics,
+    RtfMeter,
     SplitLevelMeter,
 )
 from kikitori.pipeline.scheduler import FinalQueue, Job, LatestSlot
@@ -116,8 +118,8 @@ class Pipeline:
             on_subtitle: 每則字幕更新；在 worker 執行緒上呼叫，丟出例外視為致命錯誤。
             on_status: 狀態改變（"running"、"idle"、"error" + 說明）。
             on_log: 可恢復的警告（例如翻譯失敗）。
-            clock: 量測即時辨識耗時（觸發間隔）與完整字幕延遲（`latency_ms`）用的時鐘
-                （秒）；不影響音訊位置。測試可注入假時鐘。
+            clock: 量測即時辨識耗時（觸發間隔）、完整字幕延遲（`latency_ms`）與完整辨識
+                負荷（`final_busy`、`rtf`）用的時鐘（秒）；不影響音訊位置。測試可注入假時鐘。
         """
         self._components = components
         self._config = config
@@ -154,6 +156,9 @@ class Pipeline:
         # G8：句子進行中與句子之外的音量，給「背景音太大聲」提示
         self._split_level = SplitLevelMeter(BACKGROUND_WINDOW)
         self._latencies = LatencyWindow()
+        # 完整辨識的負荷（完整 worker 寫、回報執行緒讀）：給「會不會超出負荷」的負荷圖
+        self._busy = BusyMeter(clock=clock)
+        self._rtf = RtfMeter()
 
         # 送出字幕與前文都在這把鎖下，保證同一句的即時結果不會晚於完整結果。
         self._emit_lock = threading.Lock()
@@ -236,7 +241,7 @@ class Pipeline:
             )
 
     def metrics(self) -> PipelineMetrics:
-        """目前的音量、待處理的完整句數與延遲中位數（執行緒安全，任何時候都可呼叫）。"""
+        """目前的音量、待處理的完整句數、延遲中位數與完整辨識負荷（執行緒安全，任何時候都可呼叫）。"""
         speech, background = self._split_level.levels()
         return PipelineMetrics(
             level_dbfs=self._level.dbfs(),
@@ -244,6 +249,8 @@ class Pipeline:
             latency_ms_median=self._latencies.median(),
             speech_level_dbfs=speech,
             background_level_dbfs=background,
+            final_busy=self._busy.ratio(),
+            rtf=self._rtf.median(),
         )
 
     @property
@@ -607,9 +614,16 @@ class Pipeline:
         if self._stop.is_set():
             return
         prompt = self._asr_prompt()
-        transcript = self._components.final_transcriber.transcribe(
-            job.audio, prompt=prompt
-        )
+        # 只量 transcribe 本身：翻譯另有自己的伺服器，負荷圖只回答「辨識跟不跟得上」。
+        # 失敗也要結束忙碌期，否則忙碌度會一直停在 100%。
+        self._busy.begin()
+        try:
+            transcript = self._components.final_transcriber.transcribe(
+                job.audio, prompt=prompt
+            )
+        finally:
+            elapsed = self._busy.end()
+        self._rtf.add(elapsed, len(job.audio) / SAMPLE_RATE)
         reason = self._components.transcript_filter(self._for_filter(job, transcript))
         if reason is not None:
             logger.debug("final %d filtered: %s", job.utterance_id, reason)

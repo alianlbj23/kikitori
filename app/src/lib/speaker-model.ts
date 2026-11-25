@@ -67,6 +67,11 @@ export interface SpeakerSelectInput {
   /** A `settings.set` is in flight. */
   busy: boolean;
   engineReady: boolean;
+  /**
+   * Sessions run on another computer (`compute.mode` remote): the labels are
+   * made there, so this computer's model does not matter.
+   */
+  remote?: boolean;
 }
 
 export interface SpeakerSelectView {
@@ -106,6 +111,14 @@ export function speakerSelectView(input: SpeakerSelectInput): SpeakerSelectView 
     download?.state === "error"
       ? { key: "speakers.downloadFailed", params: { error: download.error ?? "" }, error: true }
       : null;
+  if (input.remote) {
+    return {
+      value: saved,
+      disabled: !input.engineReady || input.busy || model === null,
+      percent: null,
+      status: failed ?? (saved === "off" ? null : { key: "speakers.remoteHelp", params: {}, error: false }),
+    };
+  }
   return {
     // Saved as on but the model is gone (deleted elsewhere): shown off; choosing again downloads it.
     value: model === null || model.installed ? saved : "off",
@@ -115,11 +128,18 @@ export function speakerSelectView(input: SpeakerSelectInput): SpeakerSelectView 
   };
 }
 
-/** What choosing an option does: save at once, or download the model first. */
-export function speakerChoiceAction(choice: SpeakerChoice, model: SpeakerModel | null): "save" | "download" | "unsupported" {
+/**
+ * What choosing an option does: save at once, or download the model first.
+ * With `remote` the compute host makes the labels, so nothing is downloaded here.
+ */
+export function speakerChoiceAction(
+  choice: SpeakerChoice,
+  model: SpeakerModel | null,
+  remote = false,
+): "save" | "download" | "unsupported" {
   if (choice === "off") return "save";
   if (model === null) return "unsupported";
-  return model.installed ? "save" : "download";
+  return model.installed || remote ? "save" : "download";
 }
 
 /** Whether a `download_progress` event is about the speaker model. */

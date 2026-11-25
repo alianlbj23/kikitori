@@ -45,6 +45,15 @@ import type {
   UpdateInfo,
 } from "./types";
 import { parseLanguageList, parseLanguagePreview } from "./languages";
+import {
+  parseHostInfoResult,
+  parseRemoteEvent,
+  parseRemoteStatus,
+  type HostInfo,
+  type RemoteEvent,
+  type RemoteStatus,
+  type UnpairRole,
+} from "./remote";
 import { parseAppliedRecommendation, parseSettingsResult, type SettingsResult } from "./settings";
 import {
   asCommandError,
@@ -88,6 +97,8 @@ export const EVENTS = {
   overlayAction: "overlay://action",
   /** A short message the overlay shows for a few seconds (G3 "say that again"). */
   overlayNotice: "overlay://notice",
+  /** Remote compute: pairing steps and the compute host's state (main window only; remote-compute.md T13). */
+  remote: "engine://remote",
 } as const;
 
 export const api = {
@@ -275,6 +286,79 @@ export const api = {
   async overlayResetPosition(): Promise<OverlaySnapshot> {
     return parseOverlaySnapshot(await invoke("overlay_reset_position"));
   },
+  /** Remote compute (docs/specs/remote-compute.md T13): identity, server, paired lists, pairing. */
+  async remoteStatus(): Promise<RemoteStatus> {
+    return parseRemoteStatus(await invoke("remote_status"));
+  },
+  /**
+   * Turns "提供運算給其他電腦" on or off. `listenHost` (an IP of this computer)
+   * and `port` are sent only when given; the engine saves them in `compute`.
+   */
+  async remoteServerSet(enabled: boolean, listenHost: string | null, port: number | null): Promise<RemoteStatus> {
+    const args: Record<string, unknown> = { enabled };
+    if (listenHost) args.listenHost = listenHost;
+    if (port !== null) args.port = port;
+    return parseRemoteStatus(await invoke("remote_server_set", args));
+  },
+  /** Drops the computer connected to this compute host; resolves to whether one was connected. */
+  /**
+   * Replaces this computer's identity with a new one and clears both lists of
+   * paired computers (they no longer recognise it). Fails with `session_active`
+   * while a session runs on a compute host.
+   */
+  async remoteIdentityReset(): Promise<RemoteStatus> {
+    return parseRemoteStatus(await invoke("remote_identity_reset"));
+  },
+  async remoteDisconnect(): Promise<boolean> {
+    const result = (await invoke("remote_disconnect")) as Record<string, unknown> | null;
+    return result?.disconnected === true;
+  },
+  /** Opens this compute host's pairing window (5 minutes, one computer); steps arrive as `remote` events. */
+  async remotePairOpen(): Promise<RemoteStatus> {
+    return parseRemoteStatus(await invoke("remote_pair_open"));
+  },
+  /** Starts pairing with the compute host at `host` (`port` = its main port); steps arrive as `remote` events. */
+  async remotePair(host: string, port: number | null): Promise<void> {
+    await invoke("remote_pair", port === null ? { host } : { host, port });
+  },
+  /** Compute host: the 6 digits shown on the other computer (ASCII, see `normalizeDigits`). */
+  async remotePairConfirmDigits(digits: string): Promise<void> {
+    await invoke("remote_pair_confirm", { digits });
+  },
+  /** Other computer: whether the compute host showed "paired". */
+  async remotePairConfirmSame(same: boolean): Promise<void> {
+    await invoke("remote_pair_confirm", { same });
+  },
+  async remotePairCancel(): Promise<void> {
+    await invoke("remote_pair_cancel");
+  },
+  /**
+   * What the configured compute host can run (docs/specs/compute-capacity.md):
+   * one probe connection that does not take its GPU, so it also answers while
+   * the compute host is busy. null when the compute host sent no usable report
+   * (an older version, or a malformed one).
+   */
+  async remoteHostInfo(): Promise<HostInfo | null> {
+    return parseHostInfoResult(await invoke("remote_host_info"));
+  },
+  /**
+   * Changes the compute host's own models (compute-capacity.md 七): saved on
+   * the compute host, used from its next session. `args` is built by
+   * lib/host-models.ts `setModelArgs` (`{asr?: {fast_model?, final_model?},
+   * translation?: {…}}`). Resolves to its updated report (null when it sent no usable one).
+   */
+  async remoteHostSetModels(args: Record<string, unknown>): Promise<HostInfo | null> {
+    return parseHostInfoResult(await invoke("remote_host_set_models", args));
+  },
+  /** Starts downloading a speech model on the compute host; progress arrives as `host_download` events. */
+  async remoteHostDownload(model: string): Promise<boolean> {
+    const result = (await invoke("remote_host_download", { model })) as Record<string, unknown> | null;
+    return result?.started === true;
+  },
+  /** Removes a paired computer (`peer`) or compute host (`server`). */
+  async remoteUnpair(spki: string, role: UnpairRole): Promise<RemoteStatus> {
+    return parseRemoteStatus(await invoke("remote_unpair", { spki, role }));
+  },
 };
 
 /**
@@ -306,6 +390,7 @@ export const events = {
   overlayClear: (h: () => void) => on(EVENTS.overlayClear, () => undefined, () => h()),
   overlayAction: (h: (v: ShortcutAction) => void) => on(EVENTS.overlayAction, parseShortcutAction, h),
   overlayNotice: (h: (v: OverlayNotice) => void) => on(EVENTS.overlayNotice, parseOverlayNotice, h),
+  remote: (h: (v: RemoteEvent) => void) => on(EVENTS.remote, parseRemoteEvent, h),
 };
 
 const ENGINE_CODES: Readonly<Record<string, StringKey>> = {
@@ -328,6 +413,12 @@ const ENGINE_CODES: Readonly<Record<string, StringKey>> = {
   invalid_params: "error.code.invalid_params",
   invalid_request: "error.code.invalid_request",
   internal_error: "error.code.internal_error",
+  remote_no_listen_host: "error.code.remote_no_listen_host",
+  remote_port_in_use: "error.code.remote_port_in_use",
+  remote_pairing_busy: "error.code.remote_pairing_busy",
+  remote_identity_error: "error.code.remote_identity_error",
+  remote_pairing_closed: "error.code.remote_pairing_closed",
+  remote_not_found: "error.code.remote_not_found",
 };
 
 /** User-facing explanation for any error thrown by the wrappers above. */

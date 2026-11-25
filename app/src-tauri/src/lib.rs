@@ -36,6 +36,8 @@ const EVENT_DOWNLOAD: &str = "engine://download-progress";
 const EVENT_LOG: &str = "engine://log";
 /// Input level, backlog and latency once a second (main window status bar).
 const EVENT_METRICS: &str = "engine://metrics";
+/// Pairing steps and the compute-host server state (T13, docs/specs/remote-compute.md).
+const EVENT_REMOTE: &str = "engine://remote";
 const EVENT_BRIDGE: &str = "bridge://state";
 /// Sent to the main window by the "toggle translation" shortcut: switching
 /// needs an engine call and the settings, which live there.
@@ -87,6 +89,13 @@ impl EventSink for TauriSink {
             EngineEvent::Metrics(p) => {
                 if let Err(e) = self.app.emit_to(MAIN_LABEL, EVENT_METRICS, p) {
                     log::error!("cannot emit {EVENT_METRICS}: {e}");
+                }
+            }
+            // Main window only: the pairing digits and peer names are for the
+            // settings page, and the overlay may be captured by OBS on stream.
+            EngineEvent::Remote(p) => {
+                if let Err(e) = self.app.emit_to(MAIN_LABEL, EVENT_REMOTE, p) {
+                    log::error!("cannot emit {EVENT_REMOTE}: {e}");
                 }
             }
             // Filtered out by the connection already; nothing to forward.
@@ -246,6 +255,18 @@ pub fn run() {
             commands::session_stop,
             commands::session_set_translation,
             commands::session_set_furigana,
+            commands::remote_status,
+            commands::remote_host_info,
+            commands::remote_host_set_models,
+            commands::remote_host_download,
+            commands::remote_server_set,
+            commands::remote_identity_reset,
+            commands::remote_disconnect,
+            commands::remote_pair_open,
+            commands::remote_pair,
+            commands::remote_pair_confirm,
+            commands::remote_pair_cancel,
+            commands::remote_unpair,
             commands::engine_shutdown,
             commands::engine_restart,
             commands::bridge_status,

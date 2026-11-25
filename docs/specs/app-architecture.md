@@ -53,8 +53,11 @@
 ```python
 class AudioSource(Protocol):
     def start(self) -> None: ...
-    def read(self, timeout: float) -> np.ndarray: ...   # int16、16 kHz、單聲道、一維；逾時回傳空陣列
+    def read(
+        self, timeout: float
+    ) -> np.ndarray: ...  # int16、16 kHz、單聲道、一維；逾時回傳空陣列
     def stop(self) -> None: ...
+
 
 @dataclass(frozen=True)
 class DeviceInfo:
@@ -74,14 +77,16 @@ class DeviceInfo:
 @dataclass(frozen=True)
 class Transcript:
     text: str
-    language: str              # ISO 639-1，例如 "ja"
+    language: str  # ISO 639-1，例如 "ja"
     language_probability: float
     no_speech_probability: float
     avg_logprob: float
 
+
 class Transcriber(Protocol):
-    def transcribe(self, audio: np.ndarray, language: str | None = None,
-                   prompt: str | None = None) -> Transcript: ...
+    def transcribe(
+        self, audio: np.ndarray, language: str | None = None, prompt: str | None = None
+    ) -> Transcript: ...
 ```
 
 - 不依賴 PyTorch。模型於第一次使用時下載到使用者快取目錄（有進度回報、timeout、可指定本機路徑）。
@@ -93,12 +98,15 @@ class Transcriber(Protocol):
 class TranslationRequest:
     text: str
     source_language: str
-    target_language: str        # 預設 "zh-TW"
-    context: tuple[str, ...] = ()   # 前幾句原文，提升連貫性
+    target_language: str  # 預設 "zh-TW"
+    context: tuple[str, ...] = ()  # 前幾句原文，提升連貫性
+
 
 class Translator(Protocol):
     def translate(self, request: TranslationRequest) -> str: ...
-    def stream(self, request: TranslationRequest) -> Iterator[str]: ...   # 逐段回傳累積中的譯文片段
+    def stream(
+        self, request: TranslationRequest
+    ) -> Iterator[str]: ...  # 逐段回傳累積中的譯文片段
 ```
 
 - OpenAI 相容 Chat Completions API；預設 `base_url = http://localhost:11434/v1`（本機 Ollama）。
@@ -115,7 +123,7 @@ class SubtitleUpdate:
     translation: str
     source_language: str
     target_language: str
-    is_final: bool              # False = 即時字幕（會被取代）；True = 完整翻譯（最終版）
+    is_final: bool  # False = 即時字幕（會被取代）；True = 完整翻譯（最終版）
     start_sample: int
     end_sample: int
 ```

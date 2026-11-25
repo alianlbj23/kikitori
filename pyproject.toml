@@ -1,6 +1,6 @@
 [project]
 name = "kikitori"
-version = "0.3.1"
+version = "0.4.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography==50.0.2",
     "ctranslate2==4.8.5",
     "numpy==2.5.4",
     "onnxruntime==1.31.1",
@@ -19,6 +20,7 @@ dependencies = [
     "pyobjc-framework-screencapturekit==13.0 ; sys_platform == 'darwin'",
     "soundcard==0.4.6 ; sys_platform != 'win32'",
     "sudachipy==0.6.11",
+    "websockets==17.4",
 ]
 
 [project.scripts]

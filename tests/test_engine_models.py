@@ -22,6 +22,7 @@ from kikitori.asr.types import Transcript
 from kikitori.capture import AudioSource, DeviceKind
 from kikitori.capture.errors import DeviceNotFoundError
 from kikitori.config import Settings
+from kikitori.engine import events as events_module
 from kikitori.engine import server as server_module
 from kikitori.engine.io import MessageWriter
 from kikitori.engine.server import EngineServer, _MetricsReporter, subtitle_event
@@ -33,6 +34,7 @@ from kikitori.engine.testing import (
     fake_services,
 )
 from kikitori.pipeline import PipelineComponents, SubtitleUpdate
+from kikitori.pipeline.metrics import PipelineMetrics
 from kikitori.pipeline.types import Mode
 
 WAIT = 10.0
@@ -260,6 +262,9 @@ class MetricsEventTest(EngineCase):
                     "backlog": 0,
                     "latency_ms_median": None,
                     "speech_level_dbfs": None,
+                    "final_busy": None,
+                    "rtf": None,
+                    "gpu": None,
                 },
             )
 
@@ -442,7 +447,7 @@ class _StuckPipeline:
         return False
 
     def metrics(self) -> Any:
-        return mock.Mock(level_dbfs=-20.0, backlog=0, latency_ms_median=None)
+        return PipelineMetrics(level_dbfs=-20.0, backlog=0, latency_ms_median=None)
 
 
 class MetricsReporterStopTest(unittest.TestCase):
@@ -460,8 +465,8 @@ class MetricsReporterStopTest(unittest.TestCase):
         reporter.start()
         self.assertTrue(entered.wait(WAIT))
         with (
-            mock.patch.object(server_module, "METRICS_JOIN_TIMEOUT", 0.05),
-            self.assertLogs("kikitori.engine.server", "WARNING"),
+            mock.patch.object(events_module, "METRICS_JOIN_TIMEOUT", 0.05),
+            self.assertLogs("kikitori.engine.events", "WARNING"),
         ):
             started = time.monotonic()
             reporter.stop()

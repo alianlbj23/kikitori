@@ -9,6 +9,7 @@
 
 import type { UiLocalePreference } from "./i18n";
 import type { EngineMessage } from "./messages";
+import type { ComputeSettings } from "./remote";
 import type { RubySpan } from "./ruby";
 
 export type Mode = "media" | "interpret";
@@ -72,6 +73,27 @@ export interface MetricsEvent {
   speech_level_dbfs?: number | null;
   /** v0.3 G8: level between sentences (music, game sounds) over the same window. */
   background_level_dbfs?: number | null;
+  /** Remote compute: round trip to the compute host in ms; null/absent when local or unknown. */
+  rtt_ms?: number | null;
+  /**
+   * compute-capacity.md: share of the last 30 s the final pass spent computing (0–1);
+   * null before the first final sentence, from an older engine, or when out of range.
+   */
+  final_busy?: number | null;
+  /** Median compute seconds per audio second of the last 10 finals (< 1 keeps up); null when unknown. */
+  rtf?: number | null;
+  /** The recognition GPU's memory and load; null on CPU, when sampling failed, or when malformed. */
+  gpu?: GpuUsage | null;
+}
+
+/** `metrics.gpu` (compute-capacity.md): one `nvidia-smi` sample, every 5 s. */
+export interface GpuUsage {
+  /** ≤ 64 characters, e.g. "NVIDIA GeForce GTX 1080 Ti". */
+  name: string;
+  vram_used_mb: number;
+  vram_total_mb: number;
+  /** 0–100; null when the driver does not report it. */
+  util_pct: number | null;
 }
 
 export type EngineState = "idle" | "loading" | "running" | "error";
@@ -86,6 +108,11 @@ export interface StatusEvent {
    * (`code: "translation_model_missing"`, `data.models`); empty otherwise.
    */
   missing_translation_models: string[];
+  /**
+   * Remote compute, `running` only: true while the link to the compute host is
+   * being re-established, false once it is back (`data.reconnecting`); null otherwise.
+   */
+  reconnecting: boolean | null;
 }
 
 export type DownloadState = "downloading" | "done" | "error";
@@ -483,6 +510,8 @@ export interface Settings {
   subtitle: OverlayStyle;
   /** `subtitle.obs_output`: the OBS text file (stored next to the style, but not sent as style). */
   obs_output: ObsContent;
+  /** Where recognition and translation run (docs/specs/remote-compute.md; lib/remote.ts). */
+  compute: ComputeSettings;
   /** The UI's own state in the engine's opaque `ui` object (the engine never reads it). */
   ui: UiState;
 }

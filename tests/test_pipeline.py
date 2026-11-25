@@ -880,6 +880,47 @@ class LatencyMetricsTest(unittest.TestCase):
         # 最後 20 句是 600…2500 ms，中位數 (1500 + 1600) / 2
         self.assertEqual(h.pipeline.metrics().latency_ms_median, 1550)
 
+    def test_final_busy_and_rtf_measure_the_final_transcriber(self) -> None:
+        # compute-capacity 一：完整辨識的耗時 → 忙碌度與即時倍率
+        now = [100.0]
+        h = Harness(clock=lambda: now[0])
+
+        def slow_final(n: int) -> Transcript:
+            now[0] += (
+                5.0  # 完整辨識 5 秒（忙碌度的分母至少 10 秒，見 BUSY_MIN_SPAN_SECS）
+            )
+            return transcript(f"final{n}")
+
+        h.final.script = slow_final
+        m = h.pipeline.metrics()
+        self.assertIsNone(m.final_busy)
+        self.assertIsNone(m.rtf)
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        audio_secs = h.final.calls[0].samples / SR
+        now[0] += 5.0  # 之後閒 5 秒
+        m = h.pipeline.metrics()
+        self.assertAlmostEqual(m.final_busy, 0.5, places=3)
+        self.assertAlmostEqual(m.rtf, 5.0 / audio_secs, places=3)
+
+    def test_final_failure_still_ends_the_busy_period(self) -> None:
+        now = [0.0]
+        h = Harness(clock=lambda: now[0])
+
+        def failing(n: int) -> Transcript:
+            now[0] += 5.0
+            raise RuntimeError("model crashed")
+
+        h.final.script = failing
+        h.pipeline.feed(ONE_UTTERANCE)
+        h.pipeline.run_pending()
+        self.assertEqual(h.statuses[-1][0], "error")
+        now[0] += 5.0
+        m = h.pipeline.metrics()
+        # 失敗的那次算過忙碌（之後不再算），但沒有結果就不算進倍率
+        self.assertAlmostEqual(m.final_busy, 0.5, places=3)
+        self.assertIsNone(m.rtf)
+
     def test_cleared_final_has_latency_but_is_not_in_the_median(self) -> None:
         h = Harness()
         h.final.script = lambda n: transcript("", no_speech=0.99)

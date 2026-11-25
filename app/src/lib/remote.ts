@@ -1,0 +1,1212 @@
+/**
+ * Remote compute (docs/specs/remote-compute.md, T14): the UI's pure logic.
+ *
+ * Role: everything the main window needs to decide about remote compute
+ * without touching the DOM — validating the untrusted `remote.status` result
+ * and `engine://remote` events (T13 contract), host/port and pairing-digit
+ * input, the pairing dialog's state machine and its wording, the left rail's
+ * "運算位置" text, and which extra actions a remote session status offers;
+ * and the compute host's capacity report (`remote.host_info`,
+ * docs/specs/compute-capacity.md) plus the `host_download`, `host_changed` and
+ * `serving` events of its sections 七、八. The menus built from the report are
+ * in `host-models.ts`, the serve panel in `serve.ts`, the mode bar in `mode-bar.ts`.
+ * `main.ts` only renders these views and calls the Tauri commands.
+ *
+ * Rust validates every command argument and event again; the checks here exist
+ * so a mistake is pointed at the right field at once (and as defence in depth,
+ * like `validate.ts`).
+ */
+
+import { describeStatusError } from "./format";
+import { t, type StringKey } from "./i18n";
+import { formatGb } from "./load";
+import type { EngineState, GpuUsage } from "./types";
+import { ValidationError } from "./validate";
+
+// ---------------------------------------------------------------- settings `compute`
+
+export type ComputeMode = "local" | "remote";
+export const COMPUTE_MODES: readonly ComputeMode[] = ["local", "remote"];
+
+/** `settings.compute` (engine `ComputeSettings`). */
+export interface ComputeSettings {
+  mode: ComputeMode;
+  /** The compute host (IP or host name); "" = not set yet. */
+  host: string;
+  /** The compute host's main port (A: where this computer connects). */
+  port: number;
+  /** This computer accepts other computers (B). */
+  server_enabled: boolean;
+  /** The IP this computer listens on as a compute host; "" = not chosen. */
+  listen_host: string;
+  /** This computer's listening port as a compute host (B); pairing uses the next port. */
+  listen_port: number;
+}
+
+export const DEFAULT_COMPUTE_PORT = 47100;
+export const COMPUTE_PORT_RANGE: readonly [number, number] = [1024, 65535];
+/** The listening port's range: pairing listens on the next port, so 65535 itself is out. */
+export const LISTEN_PORT_RANGE: readonly [number, number] = [1024, 65534];
+export const MAX_HOST_CHARS = 253;
+/** Same character set as the engine (`_COMPUTE_HOST`) and Rust: no scheme, path, spaces or credentials. */
+const HOST_PATTERN = /^[A-Za-z0-9.:-]+$/;
+/** IPv4 or IPv6 text; the exact form is the engine's to check (`ipaddress.ip_address`). */
+const LISTEN_HOST_PATTERN = /^[0-9A-Fa-f.:]{2,45}$/;
+
+export const DEFAULT_COMPUTE: ComputeSettings = {
+  mode: "local",
+  host: "",
+  port: DEFAULT_COMPUTE_PORT,
+  server_enabled: false,
+  listen_host: "",
+  listen_port: DEFAULT_COMPUTE_PORT,
+};
+
+/** The engine's ASR model id format (registry ids such as `large-v3-turbo`). */
+const MODEL_ID_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
+
+export function isModelId(v: unknown): v is string {
+  return typeof v === "string" && MODEL_ID_PATTERN.test(v);
+}
+
+export function isValidHost(host: string): boolean {
+  return host.length >= 1 && host.length <= MAX_HOST_CHARS && HOST_PATTERN.test(host);
+}
+
+export function isValidPort(port: unknown): port is number {
+  return (
+    typeof port === "number" && Number.isInteger(port) && port >= COMPUTE_PORT_RANGE[0] && port <= COMPUTE_PORT_RANGE[1]
+  );
+}
+
+export function isValidListenPort(port: unknown): port is number {
+  return isValidPort(port) && port <= LISTEN_PORT_RANGE[1];
+}
+
+type Obj = Record<string, unknown>;
+
+function asObj(v: unknown): Obj {
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Obj) : {};
+}
+
+/**
+ * `settings.compute`, falling back field by field like the rest of
+ * `parseSettingsResult` (`warn` names each malformed field). A missing section
+ * (an engine without remote compute) is the default, not a warning.
+ */
+export function computeFromSettings(v: unknown, warn: (field: string) => void): ComputeSettings {
+  if (v === undefined) return { ...DEFAULT_COMPUTE };
+  const o = asObj(v);
+  const d = DEFAULT_COMPUTE;
+  const mode = (COMPUTE_MODES as readonly unknown[]).includes(o.mode) ? (o.mode as ComputeMode) : d.mode;
+  if (o.mode !== undefined && mode !== o.mode) warn("compute.mode");
+  let host = d.host;
+  if (typeof o.host === "string" && (o.host === "" || isValidHost(o.host))) host = o.host;
+  else if (o.host !== undefined) warn("compute.host");
+  let port = d.port;
+  if (isValidPort(o.port)) port = o.port;
+  else if (o.port !== undefined) warn("compute.port");
+  let serverEnabled = d.server_enabled;
+  if (typeof o.server_enabled === "boolean") serverEnabled = o.server_enabled;
+  else if (o.server_enabled !== undefined) warn("compute.server_enabled");
+  let listenHost = d.listen_host;
+  if (typeof o.listen_host === "string" && (o.listen_host === "" || LISTEN_HOST_PATTERN.test(o.listen_host))) {
+    listenHost = o.listen_host;
+  } else if (o.listen_host !== undefined) warn("compute.listen_host");
+  // An engine from before `listen_port` listened on `port`.
+  let listenPort = isValidListenPort(port) ? port : d.listen_port;
+  if (isValidListenPort(o.listen_port)) listenPort = o.listen_port;
+  else if (o.listen_port !== undefined) warn("compute.listen_port");
+  return {
+    mode,
+    host,
+    port,
+    server_enabled: serverEnabled,
+    listen_host: listenHost,
+    listen_port: listenPort,
+  };
+}
+
+// ---------------------------------------------------------------- the rail's three roles
+
+/**
+ * What this computer does, as the rail offers it: only itself (`local`), its
+ * audio handled by another computer (`remote`), or handling other computers'
+ * audio (`serve`; the user can still run sessions here while nobody is connected).
+ */
+export type ComputeRole = "local" | "remote" | "serve";
+export const COMPUTE_ROLES: readonly ComputeRole[] = ["local", "remote", "serve"];
+
+export function computeRole(c: ComputeSettings): ComputeRole {
+  // The engine sets `mode` to local when serving starts. A hand-edited file with both on still sends
+  // this computer's sessions away (the engine reads `mode`), so the rail says so rather than "serve".
+  if (c.mode === "remote") return "remote";
+  return c.server_enabled ? "serve" : "local";
+}
+
+/** What choosing a role has to do (`roleChange`). */
+export type RoleChange =
+  | { kind: "none" }
+  /** Save `compute.mode`, after turning serving off when it is on. */
+  | { kind: "set_mode"; mode: ComputeMode; stopServing: boolean }
+  /** `remote_server_set(true, listenHost)`. */
+  | { kind: "serve"; listenHost: string }
+  /** Several addresses and none chosen yet: the user picks one. */
+  | { kind: "choose_address"; addresses: string[] }
+  /** No private-network or Tailscale address to listen on. */
+  | { kind: "no_address" };
+
+/**
+ * The steps behind a role choice. Serving needs a listen address: the saved
+ * one, else this computer's only address; with several the user chooses (the
+ * engine never listens on every interface by default).
+ */
+export function roleChange(target: ComputeRole, c: ComputeSettings, status: RemoteStatus | null): RoleChange {
+  const serving = c.server_enabled || (status?.server.enabled ?? false);
+  if (target !== "serve") {
+    if (!serving && c.mode === target) return { kind: "none" };
+    return { kind: "set_mode", mode: target, stopServing: serving };
+  }
+  if (serving) return { kind: "none" };
+  const saved = status?.server.listen_host || c.listen_host;
+  if (saved) return { kind: "serve", listenHost: saved };
+  const addresses = status?.addresses ?? [];
+  if (addresses.length === 1) return { kind: "serve", listenHost: addresses[0]! };
+  if (addresses.length > 1) return { kind: "choose_address", addresses: [...addresses] };
+  return { kind: "no_address" };
+}
+
+/** Where an address reaches: Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48) or the local network. */
+export type AddressKind = "tailscale" | "lan";
+
+export function addressKind(address: string): AddressKind {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(address);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    return a === 100 && b >= 64 && b <= 127 ? "tailscale" : "lan";
+  }
+  return address.toLowerCase().startsWith("fd7a:115c:a1e0:") ? "tailscale" : "lan";
+}
+
+/** "這個網路（家裡或公司）：192.168.1.20": the address with where it reaches, in plain words. */
+export function addressLabel(address: string): string {
+  const label = t(addressKind(address) === "tailscale" ? "address.tailscale" : "address.lan");
+  return t("address.option", { label, address });
+}
+
+/** Patch that switches where recognition and translation run (the engine deep-merges `compute`). */
+export function computeModePatch(mode: ComputeMode): Record<string, unknown> {
+  return { compute: { mode } };
+}
+
+// ---------------------------------------------------------------- A: compute host form
+
+/** Raw values of the "遠端運算" form (strings straight from the inputs). */
+export interface RemoteForm {
+  host: string;
+  port: string;
+}
+
+export type RemoteFormErrors = Partial<Record<keyof RemoteForm, string>>;
+
+export function remoteFormFromSettings(c: ComputeSettings): RemoteForm {
+  return { host: c.host, port: String(c.port) };
+}
+
+/** The port typed into a form, or null when it is not an integer in range. */
+export function parsePort(raw: string): number | null {
+  const text = raw.trim();
+  if (!/^\d{1,5}$/.test(text)) return null;
+  const n = Number.parseInt(text, 10);
+  return isValidPort(n) ? n : null;
+}
+
+/** The listening port typed on the compute-host side, or null outside `LISTEN_PORT_RANGE`. */
+export function parseListenPort(raw: string): number | null {
+  const n = parsePort(raw);
+  return n !== null && isValidListenPort(n) ? n : null;
+}
+
+/** Checks the form; `requireHost` is for 配對 (saving an empty host means "not set"). */
+export function validateRemoteForm(form: RemoteForm, requireHost: boolean): RemoteFormErrors {
+  const errors: RemoteFormErrors = {};
+  const host = form.host.trim();
+  if (host === "") {
+    if (requireHost) errors.host = t("validation.remoteHostEmpty");
+  } else if (!isValidHost(host)) {
+    errors.host = t("validation.remoteHost", { max: MAX_HOST_CHARS });
+  }
+  if (parsePort(form.port) === null) {
+    errors.port = t("validation.remotePort", { min: COMPUTE_PORT_RANGE[0], max: COMPUTE_PORT_RANGE[1] });
+  }
+  return errors;
+}
+
+/** Patch for `settings.set`; call only after `validateRemoteForm` passed. */
+export function remoteFormPatch(form: RemoteForm): Record<string, unknown> {
+  return { compute: { host: form.host.trim(), port: parsePort(form.port) ?? DEFAULT_COMPUTE_PORT } };
+}
+
+/** The form holds something other than the saved settings. */
+export function remoteFormDiffers(form: RemoteForm, c: ComputeSettings): boolean {
+  return form.host.trim() !== c.host || parsePort(form.port) !== c.port;
+}
+
+/** Maps the engine's `"compute.host: …"` rejection back to the form field. */
+export function remoteFieldForEnginePath(message: string): keyof RemoteForm | null {
+  const path = message.split(":", 1)[0]?.trim() ?? "";
+  if (path === "compute.host") return "host";
+  if (path === "compute.port") return "port";
+  return null;
+}
+
+/** `host` or `host:port` (`[v6]:port`) when the port is not the default. */
+export function formatHostPort(host: string, port: number): string {
+  if (port === DEFAULT_COMPUTE_PORT) return host;
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+// ---------------------------------------------------------------- pairing digits and fingerprints
+
+const FULLWIDTH_ZERO = 0xff10;
+const FULLWIDTH_NINE = 0xff19;
+
+/**
+ * Pairing digits as typed: full-width digits (an IME left on) become ASCII and
+ * every kind of space is removed, so "１２３ ４５６" is "123456". Anything else
+ * is kept, so `isPairingDigits` can reject it instead of silently dropping it.
+ */
+export function normalizeDigits(raw: string): string {
+  let out = "";
+  for (const ch of raw) {
+    const cp = ch.codePointAt(0)!;
+    if (cp >= FULLWIDTH_ZERO && cp <= FULLWIDTH_NINE) out += String.fromCharCode(0x30 + cp - FULLWIDTH_ZERO);
+    else if (!/\s/u.test(ch)) out += ch;
+  }
+  return out;
+}
+
+export function isPairingDigits(v: unknown): v is string {
+  return typeof v === "string" && /^[0-9]{6}$/.test(v);
+}
+
+/** "123456" → "123 456": two groups are easier to compare between two screens. */
+export function formatDigits(digits: string): string {
+  return isPairingDigits(digits) ? `${digits.slice(0, 3)} ${digits.slice(3)}` : digits;
+}
+
+const SPKI_PATTERN = /^[0-9a-f]{64}$/;
+const FINGERPRINT_PATTERN = /^[0-9a-f]{4}( [0-9a-f]{4}){0,15}$/;
+
+/**
+ * A SPKI hash (64 hex) as the contract's fingerprint: the first 16 bytes in
+ * groups of four hex characters. An already grouped fingerprint is returned as is.
+ */
+export function formatFingerprint(value: string): string {
+  const v = value.trim().toLowerCase();
+  if (SPKI_PATTERN.test(v)) return (v.slice(0, 32).match(/.{4}/g) ?? []).join(" ");
+  return v;
+}
+
+// ---------------------------------------------------------------- remote.status / engine://remote
+
+export type PairingRole = "server" | "client";
+/** `remote_unpair` role: `peer` = a computer allowed in (B), `server` = a paired compute host (A). */
+export type UnpairRole = "peer" | "server";
+export const PAIRING_STATES = ["waiting", "enter_digits", "show_digits", "confirm", "done", "failed"] as const;
+export type PairingStep = (typeof PAIRING_STATES)[number];
+
+/** Failure codes of `PairingState.code` (T13). */
+export const PAIRING_FAILURES = [
+  "pairing_closed",
+  "concurrent_pairing",
+  "mismatch",
+  "rejected",
+  "timeout",
+  "protocol_error",
+  "bad_commitment",
+  "bad_signature",
+  "bad_certificate",
+  "cancelled",
+  "connection_lost",
+  "unreachable",
+  "refused",
+  "expired",
+  "trust_store_error",
+  "identity_error",
+  "internal_error",
+] as const;
+export type PairingFailure = (typeof PAIRING_FAILURES)[number];
+
+export interface PairingState {
+  role: PairingRole;
+  state: PairingStep;
+  /** `show_digits` (client): the 6 digits to type on the compute host. */
+  digits: string | null;
+  /** The other computer's name, ≤ 64 characters. */
+  peer_name: string | null;
+  /** `failed` only: a known failure code or another identifier from a newer engine. */
+  code: string | null;
+}
+
+export interface TrustedEntry {
+  spki: string;
+  name: string;
+  fingerprint: string;
+  /** ISO 8601 UTC. */
+  paired_at: string;
+}
+
+export type PeerState = "connected" | "waiting_resume";
+
+export interface ServerPeer {
+  name: string;
+  fingerprint: string;
+  state: PeerState;
+}
+
+export interface RemoteServerStatus {
+  enabled: boolean;
+  listening: boolean;
+  listen_host: string;
+  port: number;
+  error: string | null;
+  peer: ServerPeer | null;
+}
+
+export interface RemoteStatus {
+  identity: { fingerprint: string } | null;
+  identity_error: string | null;
+  server: RemoteServerStatus;
+  addresses: string[];
+  /** Computers allowed to connect to this one (B). */
+  peers: TrustedEntry[];
+  /** Compute hosts this computer paired with (A). */
+  servers: TrustedEntry[];
+  pairing: PairingState | null;
+}
+
+/** `host_download` (A): a download this computer asked the compute host for (compute-capacity.md 七). */
+export interface HostDownloadProgress {
+  model: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  state: "downloading" | "done" | "error";
+  error: string | null;
+}
+
+/** `serving.session`: another computer's subtitles running here; never their text. */
+export interface ServingSession {
+  /** Unix time in ms. */
+  started_at_ms: number;
+  /** Final sentences sent back this session. */
+  sentences: number;
+  mode: string;
+}
+
+/** `serving.metrics`: this compute host's load (the `metrics` load hints). */
+export interface ServingMetrics {
+  final_busy: number | null;
+  rtf: number | null;
+  backlog: number;
+  gpu: GpuUsage | null;
+}
+
+/** `serving` (B): what this compute host is doing (compute-capacity.md 八). */
+export interface ServingEvent {
+  peer: ServerPeer | null;
+  session: ServingSession | null;
+  metrics: ServingMetrics | null;
+}
+
+/** `host_changed` (B): another computer changed this compute host's models. */
+export interface HostChangedEvent {
+  by: string;
+  asr: ModelPair;
+  translation: TranslationPair;
+}
+
+export type RemoteEvent =
+  | { kind: "pairing"; pairing: PairingState }
+  | { kind: "server"; listening: boolean; peer: ServerPeer | null; error: string | null }
+  | ({ kind: "host_download" } & HostDownloadProgress)
+  | ({ kind: "host_changed" } & HostChangedEvent)
+  | ({ kind: "serving" } & ServingEvent);
+
+const MAX_NAME_CHARS = 64;
+const MAX_ERROR_CHARS = 500;
+const MAX_LIST = 256;
+const IDENTIFIER = /^[a-z][a-z0-9_]{0,63}$/;
+
+function obj(v: unknown, path: string): Obj {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new ValidationError(path, "expected an object");
+  return v as Obj;
+}
+
+function boundedStr(o: Obj, key: string, path: string, max: number): string {
+  const v = o[key];
+  if (typeof v !== "string") throw new ValidationError(`${path}.${key}`, "expected a string");
+  if (v.length > max) throw new ValidationError(`${path}.${key}`, `longer than ${max}`);
+  return v;
+}
+
+function optBoundedStr(o: Obj, key: string, path: string, max: number): string | null {
+  if (o[key] === undefined || o[key] === null) return null;
+  return boundedStr(o, key, path, max);
+}
+
+function flag(o: Obj, key: string, path: string): boolean {
+  if (typeof o[key] !== "boolean") throw new ValidationError(`${path}.${key}`, "expected a boolean");
+  return o[key] as boolean;
+}
+
+function fingerprint(o: Obj, key: string, path: string): string {
+  const v = boundedStr(o, key, path, 80);
+  if (!FINGERPRINT_PATTERN.test(v)) throw new ValidationError(`${path}.${key}`, "not a fingerprint");
+  return v;
+}
+
+function list(o: Obj, key: string, path: string): unknown[] {
+  const v = o[key];
+  if (!Array.isArray(v)) throw new ValidationError(`${path}.${key}`, "expected an array");
+  if (v.length > MAX_LIST) throw new ValidationError(`${path}.${key}`, `more than ${MAX_LIST} entries`);
+  return v;
+}
+
+export function parseTrustedEntry(v: unknown, path: string): TrustedEntry {
+  const o = obj(v, path);
+  const spki = boundedStr(o, "spki", path, 64);
+  if (!SPKI_PATTERN.test(spki)) throw new ValidationError(`${path}.spki`, "expected 64 lowercase hex characters");
+  return {
+    spki,
+    name: boundedStr(o, "name", path, MAX_NAME_CHARS),
+    fingerprint: fingerprint(o, "fingerprint", path),
+    paired_at: boundedStr(o, "paired_at", path, 40),
+  };
+}
+
+function parsePeer(v: unknown, path: string): ServerPeer | null {
+  if (v === null || v === undefined) return null;
+  const o = obj(v, path);
+  const state = o.state;
+  if (state !== "connected" && state !== "waiting_resume") {
+    throw new ValidationError(`${path}.state`, "expected connected or waiting_resume");
+  }
+  return { name: boundedStr(o, "name", path, MAX_NAME_CHARS), fingerprint: fingerprint(o, "fingerprint", path), state };
+}
+
+/** `PairingState` (or the body of a `pairing` event). */
+export function parsePairingState(v: unknown, path = "pairing"): PairingState {
+  const o = obj(v, path);
+  const role = o.role;
+  if (role !== "server" && role !== "client") throw new ValidationError(`${path}.role`, "expected server or client");
+  const state = o.state;
+  if (typeof state !== "string" || !(PAIRING_STATES as readonly string[]).includes(state)) {
+    throw new ValidationError(`${path}.state`, "unknown pairing state");
+  }
+  const digits = o.digits === undefined || o.digits === null ? null : o.digits;
+  if (digits !== null && !isPairingDigits(digits)) throw new ValidationError(`${path}.digits`, "expected 6 digits");
+  const code = optBoundedStr(o, "code", path, 64);
+  if (code !== null && !IDENTIFIER.test(code)) throw new ValidationError(`${path}.code`, "not an identifier");
+  return {
+    role,
+    state: state as PairingStep,
+    digits,
+    peer_name: optBoundedStr(o, "peer_name", path, MAX_NAME_CHARS),
+    code,
+  };
+}
+
+/** `remote.status` (and the result of `server_set`, `pair_open`, `unpair`). */
+export function parseRemoteStatus(v: unknown): RemoteStatus {
+  const p = "remote.status";
+  const o = obj(v, p);
+  const identity =
+    o.identity === null || o.identity === undefined
+      ? null
+      : { fingerprint: fingerprint(obj(o.identity, `${p}.identity`), "fingerprint", `${p}.identity`) };
+  const s = obj(o.server, `${p}.server`);
+  const sp = `${p}.server`;
+  const port = s.port;
+  if (!isValidPort(port)) throw new ValidationError(`${sp}.port`, "expected a port number");
+  const listenHost = boundedStr(s, "listen_host", sp, 45);
+  if (listenHost !== "" && !LISTEN_HOST_PATTERN.test(listenHost)) {
+    throw new ValidationError(`${sp}.listen_host`, "not an IP address");
+  }
+  const addresses = list(o, "addresses", p).map((a, i) => {
+    if (typeof a !== "string" || !LISTEN_HOST_PATTERN.test(a)) {
+      throw new ValidationError(`${p}.addresses[${i}]`, "not an IP address");
+    }
+    return a;
+  });
+  return {
+    identity,
+    identity_error: optBoundedStr(o, "identity_error", p, MAX_ERROR_CHARS),
+    server: {
+      enabled: flag(s, "enabled", sp),
+      listening: flag(s, "listening", sp),
+      listen_host: listenHost,
+      port,
+      error: optBoundedStr(s, "error", sp, MAX_ERROR_CHARS),
+      peer: parsePeer(s.peer, `${sp}.peer`),
+    },
+    addresses: [...new Set(addresses)],
+    peers: list(o, "peers", p).map((e, i) => parseTrustedEntry(e, `${p}.peers[${i}]`)),
+    servers: list(o, "servers", p).map((e, i) => parseTrustedEntry(e, `${p}.servers[${i}]`)),
+    pairing: o.pairing === null || o.pairing === undefined ? null : parsePairingState(o.pairing, `${p}.pairing`),
+  };
+}
+
+/** `engine://remote` payload. */
+export function parseRemoteEvent(v: unknown): RemoteEvent {
+  const p = "remote";
+  const o = obj(v, p);
+  if (o.kind === "pairing") return { kind: "pairing", pairing: parsePairingState(o, p) };
+  if (o.kind === "server") {
+    return {
+      kind: "server",
+      listening: flag(o, "listening", p),
+      peer: parsePeer(o.peer, `${p}.peer`),
+      error: optBoundedStr(o, "error", p, MAX_ERROR_CHARS),
+    };
+  }
+  if (o.kind === "host_download") return { kind: "host_download", ...parseHostDownload(o, p) };
+  if (o.kind === "host_changed") {
+    return {
+      kind: "host_changed",
+      by: boundedStr(o, "by", p, MAX_NAME_CHARS),
+      asr: modelPair(o.asr, `${p}.asr`),
+      translation: translationPair(o.translation, `${p}.translation`),
+    };
+  }
+  if (o.kind === "serving") {
+    return {
+      kind: "serving",
+      peer: parsePeer(o.peer, `${p}.peer`),
+      session: o.session === null || o.session === undefined ? null : parseServingSession(o.session, `${p}.session`),
+      metrics: o.metrics === null || o.metrics === undefined ? null : parseServingMetrics(o.metrics, `${p}.metrics`),
+    };
+  }
+  throw new ValidationError(`${p}.kind`, "expected pairing, server, host_download, host_changed or serving");
+}
+
+const DOWNLOAD_STATES = ["downloading", "done", "error"] as const;
+/** Same bounds as Rust (protocol.rs): later than 2286 or more sentences than this is a broken counter. */
+const MAX_EPOCH_MS = 10_000_000_000_000;
+const MAX_SENTENCES = 100_000_000;
+const MAX_BACKLOG = 1_000_000;
+
+function count(o: Obj, key: string, path: string, max: number): number {
+  const v = o[key];
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > max) {
+    throw new ValidationError(`${path}.${key}`, `expected an integer in 0–${max}`);
+  }
+  return v;
+}
+
+function ratio(o: Obj, key: string, path: string, max: number): number | null {
+  const v = o[key];
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max) {
+    throw new ValidationError(`${path}.${key}`, `expected a number in 0–${max}`);
+  }
+  return v;
+}
+
+function parseHostDownload(o: Obj, p: string): HostDownloadProgress {
+  const state = o.state;
+  if (!(DOWNLOAD_STATES as readonly unknown[]).includes(state)) {
+    throw new ValidationError(`${p}.state`, "expected downloading, done or error");
+  }
+  return {
+    model: modelId(o, "model", p),
+    downloaded_bytes: count(o, "downloaded_bytes", p, Number.MAX_SAFE_INTEGER),
+    total_bytes: count(o, "total_bytes", p, Number.MAX_SAFE_INTEGER),
+    state: state as HostDownloadProgress["state"],
+    error: optBoundedStr(o, "error", p, MAX_ERROR_CHARS),
+  };
+}
+
+function parseServingSession(v: unknown, p: string): ServingSession {
+  const o = obj(v, p);
+  const mode = boundedStr(o, "mode", p, 32);
+  if (!/^[a-z_]+$/.test(mode)) throw new ValidationError(`${p}.mode`, "not an identifier");
+  return {
+    started_at_ms: count(o, "started_at_ms", p, MAX_EPOCH_MS),
+    sentences: count(o, "sentences", p, MAX_SENTENCES),
+    mode,
+  };
+}
+
+function parseServingMetrics(v: unknown, p: string): ServingMetrics {
+  const o = obj(v, p);
+  let gpu: GpuUsage | null = null;
+  if (o.gpu !== null && o.gpu !== undefined) {
+    const g = obj(o.gpu, `${p}.gpu`);
+    const name = boundedStr(g, "name", `${p}.gpu`, MAX_NAME_CHARS * 2);
+    if ([...name].length > MAX_NAME_CHARS) throw new ValidationError(`${p}.gpu.name`, `longer than ${MAX_NAME_CHARS}`);
+    gpu = {
+      name,
+      vram_used_mb: megabytes(g, "vram_used_mb", `${p}.gpu`),
+      vram_total_mb: megabytes(g, "vram_total_mb", `${p}.gpu`),
+      util_pct: ratio(g, "util_pct", `${p}.gpu`, 100),
+    };
+  }
+  return {
+    final_busy: ratio(o, "final_busy", p, 1),
+    rtf: ratio(o, "rtf", p, 1000),
+    backlog: count(o, "backlog", p, MAX_BACKLOG),
+    gpu,
+  };
+}
+
+/** A `server` event applied to the last status, so the section updates before `remote.status` answers. */
+export function withServerEvent(status: RemoteStatus, ev: Extract<RemoteEvent, { kind: "server" }>): RemoteStatus {
+  return { ...status, server: { ...status.server, listening: ev.listening, peer: ev.peer, error: ev.error } };
+}
+
+// ---------------------------------------------------------------- pairing dialog
+
+export type PairPhase = "starting" | PairingStep;
+
+export interface PairDialog {
+  role: PairingRole;
+  phase: PairPhase;
+  /** Client: the compute host being paired with (shown while connecting). */
+  target: string | null;
+  digits: string | null;
+  peerName: string | null;
+  /** `failed`: the engine's failure code, or null when `message` explains it. */
+  code: string | null;
+  /** `failed` because a command was rejected: its explanation (lib/api describeError). */
+  message: string | null;
+  /** A command for the current step is in flight; the step's buttons wait. */
+  busy: boolean;
+}
+
+/** The steps an engine reports for each role (T13 `PairingState`). */
+const ROLE_STEPS: Readonly<Record<PairingRole, readonly PairingStep[]>> = {
+  server: ["waiting", "enter_digits", "done", "failed"],
+  client: ["waiting", "show_digits", "confirm", "done", "failed"],
+};
+
+/** The dialog right after the user pressed 配對 / 允許新的電腦配對, before the command answers. */
+export function openPairDialog(role: PairingRole, target: string | null = null): PairDialog {
+  return { role, phase: "starting", target, digits: null, peerName: null, code: null, message: null, busy: true };
+}
+
+export function isPairDialogFinished(d: PairDialog): boolean {
+  return d.phase === "done" || d.phase === "failed";
+}
+
+/**
+ * Next dialog state for a `pairing` event. Events of the other role (this
+ * computer pairing in both directions is impossible, but a stale event is not)
+ * or a step that role never reports are ignored, and a finished dialog stays as
+ * it is until the user closes it, so a late event cannot overwrite the result.
+ * A closed dialog (null) stays closed: the dialog only opens from a button.
+ */
+export function applyPairingEvent(d: PairDialog | null, ev: PairingState): PairDialog | null {
+  if (!d || ev.role !== d.role || isPairDialogFinished(d)) return d;
+  if (!ROLE_STEPS[d.role].includes(ev.state)) return d;
+  return {
+    ...d,
+    phase: ev.state,
+    // `confirm` repeats no digits; the ones shown before stay next to the question.
+    digits: ev.digits ?? d.digits,
+    peerName: ev.peer_name ?? d.peerName,
+    code: ev.state === "failed" ? (ev.code ?? "internal_error") : null,
+    message: null,
+    busy: false,
+  };
+}
+
+/** The command that started or answered a step was accepted; the engine's events take it from here. */
+export function pairCommandDone(d: PairDialog | null): PairDialog | null {
+  if (!d || isPairDialogFinished(d)) return d;
+  return { ...d, busy: false, phase: d.phase === "starting" ? "waiting" : d.phase };
+}
+
+/** A pairing command was rejected (`message` is what to show). */
+export function pairCommandFailed(d: PairDialog | null, message: string): PairDialog | null {
+  if (!d || isPairDialogFinished(d)) return d;
+  return { ...d, phase: "failed", code: null, message, busy: false };
+}
+
+/** The user answered a step (yes/no, digits); its buttons wait for the engine. */
+export function pairAnswering(d: PairDialog | null): PairDialog | null {
+  return d && !isPairDialogFinished(d) ? { ...d, busy: true } : d;
+}
+
+export type PairAction = "yes" | "no" | "submit" | "cancel" | "close";
+
+export interface PairDialogView {
+  title: string;
+  text: string;
+  /** The digits to compare, as "123 456"; null when none are shown. */
+  digits: string | null;
+  /** Show the 6-digit input (server, `enter_digits`). */
+  digitsInput: boolean;
+  actions: PairAction[];
+  tone: "info" | "ok" | "bad";
+  busy: boolean;
+}
+
+const FAILURE_TEXT: Readonly<Record<PairingFailure, StringKey>> = {
+  pairing_closed: "pair.failed.pairing_closed",
+  concurrent_pairing: "pair.failed.concurrent_pairing",
+  mismatch: "pair.failed.mismatch",
+  rejected: "pair.failed.rejected",
+  timeout: "pair.failed.timeout",
+  protocol_error: "pair.failed.protocol_error",
+  bad_commitment: "pair.failed.bad_commitment",
+  bad_signature: "pair.failed.bad_signature",
+  bad_certificate: "pair.failed.bad_certificate",
+  cancelled: "pair.failed.cancelled",
+  connection_lost: "pair.failed.connection_lost",
+  unreachable: "pair.failed.unreachable",
+  refused: "pair.failed.refused",
+  expired: "pair.failed.expired",
+  trust_store_error: "pair.failed.trust_store_error",
+  identity_error: "pair.failed.identity_error",
+  internal_error: "pair.failed.internal_error",
+};
+
+/** Why pairing failed, in the interface language; unknown codes (a newer engine) are named. */
+export function pairFailureText(code: string | null): string {
+  const key = code && Object.hasOwn(FAILURE_TEXT, code) ? FAILURE_TEXT[code as PairingFailure] : null;
+  return key ? t(key) : t("pair.failedOther", { code: code ?? "?" });
+}
+
+function peerLabel(d: PairDialog): string {
+  return d.peerName && d.peerName.trim() !== "" ? d.peerName : t("pair.unknownPeer");
+}
+
+export function pairDialogView(d: PairDialog): PairDialogView {
+  const title = t(d.role === "client" ? "pair.titleClient" : "pair.titleServer");
+  const base = { title, digits: null, digitsInput: false, busy: d.busy };
+  switch (d.phase) {
+    case "starting":
+    case "waiting":
+      return {
+        ...base,
+        text:
+          d.role === "client"
+            ? t("pair.connecting", { host: d.target ?? t("pair.unknownPeer") })
+            : t("pair.waitingServer"),
+        actions: ["cancel"],
+        tone: "info",
+      };
+    case "show_digits":
+      return {
+        ...base,
+        text: t("pair.showDigits"),
+        digits: d.digits ? formatDigits(d.digits) : null,
+        actions: ["cancel"],
+        tone: "info",
+      };
+    case "confirm":
+      return {
+        ...base,
+        text: t("pair.confirm"),
+        digits: d.digits ? formatDigits(d.digits) : null,
+        actions: ["yes", "no"],
+        tone: "info",
+      };
+    case "enter_digits":
+      return { ...base, text: t("pair.enterDigits", { name: peerLabel(d) }), digitsInput: true, actions: ["submit", "cancel"], tone: "info" };
+    case "done":
+      return {
+        ...base,
+        text: d.role === "client" ? t("pair.doneClient") : t("pair.doneServer", { name: peerLabel(d) }),
+        actions: ["close"],
+        tone: "ok",
+        busy: false,
+      };
+    case "failed":
+      return { ...base, text: d.message ?? pairFailureText(d.code), actions: ["close"], tone: "bad", busy: false };
+  }
+}
+
+/** Message for the digit input, or null when it holds 6 digits (after `normalizeDigits`). */
+export function digitsInputError(raw: string): string | null {
+  return isPairingDigits(normalizeDigits(raw)) ? null : t("pair.digitsInvalid");
+}
+
+// ---------------------------------------------------------------- session and rail
+
+/** What the "重新連線中" notice should do for a `status` event. */
+export type ReconnectNotice = "show" | "clear" | "keep";
+
+/**
+ * `status running` carries `data.reconnecting` on a remote session (T13):
+ * true shows the notice, false clears it, no flag keeps it. Any other state
+ * ends the running session, so the notice goes too.
+ */
+export function reconnectNotice(state: EngineState, reconnecting: boolean | null): ReconnectNotice {
+  if (state !== "running") return "clear";
+  if (reconnecting === true) return "show";
+  if (reconnecting === false) return "clear";
+  return "keep";
+}
+
+/** Extra buttons on a session error notice. */
+export type RemoteErrorAction = "use_local" | "open_settings";
+
+export function remoteErrorActions(code: string | null): RemoteErrorAction[] {
+  switch (code) {
+    case "remote_lost":
+    case "remote_unreachable":
+      return ["use_local"];
+    case "remote_not_configured":
+    case "remote_not_paired":
+      return ["open_settings", "use_local"];
+    default:
+      return [];
+  }
+}
+
+export interface ComputeRailView {
+  hint: string;
+  /** The hint reports a problem. */
+  error: boolean;
+  /** "延遲 12 ms" while a remote session reports its round trip; null otherwise. */
+  rtt: string | null;
+  /**
+   * The shortcut under the hint: the settings section (no computer to send to
+   * yet) or pairing a new computer (serving and waiting).
+   */
+  action: "settings" | "pair" | null;
+}
+
+/** The plain-words line under the three roles. */
+export function computeRailView(c: ComputeSettings, rttMs: number | null, status: RemoteStatus | null): ComputeRailView {
+  const role = computeRole(c);
+  if (role === "local") return { hint: t("compute.hintLocal"), error: false, rtt: null, action: null };
+  if (role === "remote") {
+    if (c.host === "") return { hint: t("compute.hintNoHost"), error: false, rtt: null, action: "settings" };
+    return {
+      hint: t("compute.hintRemote", { host: formatHostPort(c.host, c.port) }),
+      error: false,
+      rtt: rttMs === null ? null : t("compute.rtt", { ms: Math.round(rttMs) }),
+      action: null,
+    };
+  }
+  const server = status?.server ?? null;
+  if (server?.error) {
+    return { hint: t("compute.hintServeError", { error: server.error }), error: true, rtt: null, action: null };
+  }
+  const peer = server?.peer ?? null;
+  if (peer) {
+    const key = peer.state === "connected" ? "compute.hintServeBusy" : "compute.hintServeReconnect";
+    return { hint: t(key, { name: peer.name }), error: false, rtt: null, action: null };
+  }
+  if (server?.listening) return { hint: t("compute.hintServeWaiting"), error: false, rtt: null, action: "pair" };
+  return { hint: t("compute.hintServeOff"), error: false, rtt: null, action: null };
+}
+
+/** Local ASR models (and the local translation server) are needed only when computing here. */
+export function needsLocalModels(c: ComputeSettings | null | undefined): boolean {
+  return (c?.mode ?? "local") === "local";
+}
+
+/** Text of the "目前連線中的電腦" line. */
+export function serverPeerText(peer: ServerPeer | null): string {
+  if (!peer) return t("serve.currentNone");
+  return t(peer.state === "connected" ? "serve.peerConnected" : "serve.peerWaiting", { name: peer.name });
+}
+
+/** Text of the compute host's listening state. */
+export function serverStateText(server: RemoteServerStatus): string {
+  if (server.error) return t("serve.error", { error: server.error });
+  if (server.listening) return t("serve.listening", { address: formatHostPort(server.listen_host, server.port) });
+  return t("serve.notListening");
+}
+
+/** The listen-address menu: the computer's addresses, plus a saved one no longer listed. */
+export function listenHostOptions(status: RemoteStatus | null, saved: string): string[] {
+  const addresses = status?.addresses ?? [];
+  const current = status?.server.listen_host || saved;
+  return current && !addresses.includes(current) ? [current, ...addresses] : addresses;
+}
+
+/** `paired_at` as a local date, or the raw text when it does not parse. */
+export function pairedDate(isoUtc: string, locale: string): string {
+  const ms = Date.parse(isoUtc);
+  if (!Number.isFinite(ms)) return isoUtc;
+  try {
+    return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(ms));
+  } catch (e) {
+    console.error("paired_at formatting failed:", e);
+    return isoUtc;
+  }
+}
+
+// ---------------------------------------------------------------- the compute host's capacity (compute-capacity.md 二、五)
+
+/** Whether a model, as the final pass next to the compute host's real-time model, fits its memory. */
+export type ModelFit = "ok" | "tight" | "over";
+const MODEL_FITS: readonly ModelFit[] = ["ok", "tight", "over"];
+
+export interface HostGpu {
+  /** ≤ 64 characters, e.g. "NVIDIA GeForce GTX 1080 Ti". */
+  name: string;
+  vram_total_mb: number;
+}
+
+export interface ModelPair {
+  fast: string;
+  final: string;
+}
+
+export interface HostModel {
+  id: string;
+  downloaded: boolean;
+  /** Memory this model needs on the compute host (GPU memory on CUDA, RAM on CPU), MiB. */
+  need_mb: number;
+  /** As the final pass next to the current real-time model; null when the compute host could not measure its hardware. */
+  fit: ModelFit | null;
+  /**
+   * As the real-time pass next to the current final model, as the compute host
+   * counts it; null when it could not measure its hardware, or an older compute
+   * host that does not report it.
+   */
+  fit_as_fast: ModelFit | null;
+}
+
+/** `remote.host_info` → `host`: what the compute host can run, asked before connecting. */
+export interface HostInfo {
+  /** null: no NVIDIA GPU (`device` is "cpu"). */
+  gpu: HostGpu | null;
+  device: "cuda" | "cpu";
+  compute_type: string;
+  /** The compute host's own settings. */
+  current: HostCurrent;
+  /** Its hardware recommendation; null when detection failed. */
+  recommended: ModelPair | null;
+  models: HostModel[];
+  translation_model: string | null;
+  /**
+   * compute-capacity.md 七: the models installed on the compute host's
+   * translation server; null when it could not be reached (or an older compute host).
+   */
+  translation_models: string[] | null;
+}
+
+/** Translation models; "" = none set on the compute host. */
+export interface TranslationPair {
+  fast: string;
+  final: string;
+}
+
+export interface HostCurrent extends ModelPair {
+  /** null from compute hosts older than compute-capacity.md 七. */
+  translation: TranslationPair | null;
+}
+
+export const MAX_HOST_TRANSLATION_MODELS = 64;
+
+export const MAX_HOST_MODELS = 32;
+/** Same bound as `metrics.gpu` (1 TiB in MiB): anything larger is not a GPU. */
+const MAX_MEMORY_MB = 1_048_576;
+const COMPUTE_TYPE_PATTERN = /^[a-z0-9_]{1,32}$/;
+const TRANSLATION_MODEL_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
+
+function modelId(o: Obj, key: string, path: string): string {
+  const v = o[key];
+  if (!isModelId(v)) throw new ValidationError(`${path}.${key}`, "not a model id");
+  return v;
+}
+
+function megabytes(o: Obj, key: string, path: string): number {
+  const v = o[key];
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > MAX_MEMORY_MB) {
+    throw new ValidationError(`${path}.${key}`, `expected a number in 0–${MAX_MEMORY_MB}`);
+  }
+  return v;
+}
+
+function modelPair(v: unknown, path: string): ModelPair {
+  const o = obj(v, path);
+  return { fast: modelId(o, "fast", path), final: modelId(o, "final", path) };
+}
+
+export function isTranslationModelName(v: unknown): v is string {
+  return typeof v === "string" && TRANSLATION_MODEL_PATTERN.test(v);
+}
+
+function translationName(o: Obj, key: string, path: string): string {
+  const v = o[key];
+  if (v === "" || isTranslationModelName(v)) return v;
+  throw new ValidationError(`${path}.${key}`, "not a translation model name");
+}
+
+function translationPair(v: unknown, path: string): TranslationPair {
+  const o = obj(v, path);
+  return { fast: translationName(o, "fast", path), final: translationName(o, "final", path) };
+}
+
+/** Why a translation field of the report was left out (the rest of the report is kept). */
+function dropTranslationField(path: string, reason: string): null {
+  console.warn(`ignoring ${path} of the compute host's capacity report: ${reason}`);
+  return null;
+}
+
+/**
+ * The installed translation models; a malformed entry is skipped and a
+ * malformed list is dropped (null), so the recognition part still shows.
+ */
+function translationModels(v: unknown, path: string): string[] | null {
+  if (v === null || v === undefined) return null;
+  if (!Array.isArray(v)) return dropTranslationField(path, "expected an array");
+  if (v.length > MAX_HOST_TRANSLATION_MODELS) {
+    return dropTranslationField(path, `more than ${MAX_HOST_TRANSLATION_MODELS} entries`);
+  }
+  return v.filter((m, i): m is string => {
+    if (isTranslationModelName(m)) return true;
+    dropTranslationField(`${path}[${i}]`, "not a model name");
+    return false;
+  });
+}
+
+/** Missing (an older compute host) or null reads as null (無法判斷). */
+function modelFit(o: Obj, key: string, path: string): ModelFit | null {
+  const fit = o[key];
+  if (fit === undefined || fit === null) return null;
+  if (!(MODEL_FITS as readonly unknown[]).includes(fit)) {
+    throw new ValidationError(`${path}.${key}`, "expected ok, tight, over or null");
+  }
+  return fit as ModelFit;
+}
+
+function hostModel(v: unknown, path: string): HostModel {
+  const o = obj(v, path);
+  if (o.fit === undefined) throw new ValidationError(`${path}.fit`, "missing");
+  return {
+    id: modelId(o, "id", path),
+    downloaded: flag(o, "downloaded", path),
+    need_mb: megabytes(o, "need_mb", path),
+    fit: modelFit(o, "fit", path),
+    fit_as_fast: modelFit(o, "fit_as_fast", path),
+  };
+}
+
+/** The current translation models; null (dropped alone) when malformed. */
+function currentTranslation(v: unknown, path: string): TranslationPair | null {
+  if (v === null || v === undefined) return null;
+  try {
+    return translationPair(v, path);
+  } catch (e) {
+    if (!(e instanceof ValidationError)) throw e;
+    return dropTranslationField(path, e.message);
+  }
+}
+
+function hostCurrent(v: unknown, path: string): HostCurrent {
+  const pair = modelPair(v, path);
+  return { ...pair, translation: currentTranslation(obj(v, path).translation, `${path}.translation`) };
+}
+
+/** The translation model; null (dropped alone) when it is not a model name. */
+function hostTranslationModel(v: unknown, path: string): string | null {
+  if (v === null || v === undefined) return null;
+  return isTranslationModelName(v) ? v : dropTranslationField(path, "not a model name");
+}
+
+function hostInfoStrict(v: unknown): HostInfo {
+  const p = "host";
+  const o = obj(v, p);
+  let gpu: HostGpu | null = null;
+  if (o.gpu !== null && o.gpu !== undefined) {
+    const g = obj(o.gpu, `${p}.gpu`);
+    // Counted in characters (code points), as Rust and the engine count them.
+    const name = boundedStr(g, "name", `${p}.gpu`, MAX_NAME_CHARS * 2);
+    if ([...name].length > MAX_NAME_CHARS) {
+      throw new ValidationError(`${p}.gpu.name`, `longer than ${MAX_NAME_CHARS}`);
+    }
+    gpu = {
+      name,
+      vram_total_mb: megabytes(g, "vram_total_mb", `${p}.gpu`),
+    };
+  }
+  const device = o.device;
+  if (device !== "cuda" && device !== "cpu") throw new ValidationError(`${p}.device`, "expected cuda or cpu");
+  const computeType = boundedStr(o, "compute_type", p, 32);
+  if (!COMPUTE_TYPE_PATTERN.test(computeType)) throw new ValidationError(`${p}.compute_type`, "not a precision name");
+  const models = o.models;
+  if (!Array.isArray(models)) throw new ValidationError(`${p}.models`, "expected an array");
+  if (models.length > MAX_HOST_MODELS) throw new ValidationError(`${p}.models`, `more than ${MAX_HOST_MODELS} entries`);
+  return {
+    gpu,
+    device,
+    compute_type: computeType,
+    current: hostCurrent(o.current, `${p}.current`),
+    recommended:
+      o.recommended === null || o.recommended === undefined ? null : modelPair(o.recommended, `${p}.recommended`),
+    models: models.map((m, i) => hostModel(m, `${p}.models[${i}]`)),
+    translation_model: hostTranslationModel(o.translation_model, `${p}.translation_model`),
+    translation_models: translationModels(o.translation_models, `${p}.translation_models`),
+  };
+}
+
+/**
+ * A `HostInfo` from the compute host, or null when a recognition field is
+ * malformed: half a capacity report would label models wrongly, so that part
+ * is all or nothing (the spec's rule for `welcome.host` too). The translation
+ * fields are dropped one by one instead (`current.translation` and
+ * `translation_model` → null, a bad `translation_models` entry skipped): they
+ * label nothing, and a translation server's odd model name should not hide
+ * the recognition models. Every reason is logged.
+ */
+export function parseHostInfo(v: unknown): HostInfo | null {
+  if (v === null || v === undefined) return null;
+  try {
+    return hostInfoStrict(v);
+  } catch (e) {
+    if (!(e instanceof ValidationError)) throw e;
+    console.warn("ignoring the compute host's capacity report:", e.message);
+    return null;
+  }
+}
+
+/** `remote.host_info` → `{host}`. */
+export function parseHostInfoResult(v: unknown): HostInfo | null {
+  return parseHostInfo(asObj(v).host);
+}
+
+/** "NVIDIA GeForce GTX 1080 Ti" → "GTX 1080 Ti": the brand words say nothing the user needs. */
+export function shortGpuName(name: string): string {
+  const short = name
+    .replace(/^\s*NVIDIA\s+/i, "")
+    .replace(/^GeForce\s+/i, "")
+    .trim();
+  return short === "" ? name.trim() : short;
+}
+
+/** "GTX 1080 Ti・11 GB", or that the compute host has no graphics card. */
+export function hostSummary(host: HostInfo): string {
+  if (!host.gpu) return t("host.cpu");
+  return t("host.gpu", { name: shortGpuName(host.gpu.name), memory: formatGb(host.gpu.vram_total_mb) });
+}
+
+/** `remote.host_info` failures that already have plain words (the same as a session's). */
+const HOST_INFO_CODES = [
+  "remote_not_configured",
+  "remote_unreachable",
+  "remote_not_paired",
+  "remote_incompatible",
+  "remote_identity_error",
+  // The compute host answered with an error or a malformed reply (engine `remote.host_info`).
+  "remote_error",
+] as const;
+
+/**
+ * Why the compute host could not be asked: the session's wording for the
+ * remote_* codes ("連不上運算主機…"), else `fallback` (lib/api describeError).
+ */
+export function hostInfoErrorText(code: string | null, fallback: string): string {
+  return code !== null && (HOST_INFO_CODES as readonly string[]).includes(code)
+    ? describeStatusError(code, null)
+    : fallback;
+}

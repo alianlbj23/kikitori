@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-pair-confirm"
+description = "Enables the remote_pair_confirm command without any pre-configured scope."
+commands.allow = ["remote_pair_confirm"]
+
+[[permission]]
+identifier = "deny-remote-pair-confirm"
+description = "Denies the remote_pair_confirm command without any pre-configured scope."
+commands.deny = ["remote_pair_confirm"]

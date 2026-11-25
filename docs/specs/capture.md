@@ -18,8 +18,11 @@
 ```python
 class AudioSource(Protocol):
     def start(self) -> None: ...
-    def read(self, timeout: float) -> np.ndarray: ...  # int16、16 kHz、單聲道、一維；逾時回傳空陣列
+    def read(
+        self, timeout: float
+    ) -> np.ndarray: ...  # int16、16 kHz、單聲道、一維；逾時回傳空陣列
     def stop(self) -> None: ...
+
 
 @dataclass(frozen=True)
 class DeviceInfo:
@@ -27,6 +30,7 @@ class DeviceInfo:
     name: str
     kind: Literal["loopback", "microphone"]
     is_default: bool
+
 
 def list_devices() -> list[DeviceInfo]: ...
 def open_source(device_id: str | None, kind: DeviceKind) -> AudioSource: ...

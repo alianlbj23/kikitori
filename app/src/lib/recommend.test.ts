@@ -203,6 +203,9 @@ describe("recommendation banner", () => {
 
   it("is hidden once applied (differs = false) or when there is no preview", () => {
     expect(shouldOfferRecommendation({ ...preview(), differs: false }, [])).toBe(false);
+    // Another computer does the work: this computer's hardware does not matter.
+    expect(shouldOfferRecommendation(preview(), [], true)).toBe(false);
+    expect(shouldOfferRecommendation(preview(), [], false)).toBe(true);
     expect(shouldOfferRecommendation(null, [])).toBe(false);
   });
 

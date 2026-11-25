@@ -26,11 +26,16 @@ export interface GpuReminderInput {
   dismissed: boolean;
   /** The user closed the notice during this launch. */
   closed: boolean;
+  /**
+   * Recognition runs on another computer (`compute.mode` remote): this
+   * computer's GPU is not used, so there is nothing to remind about.
+   */
+  remote?: boolean;
 }
 
 /** True when the startup reminder should be on screen. */
 export function showGpuReminder(input: GpuReminderInput): boolean {
-  if (input.runtimeMissing !== true || input.dismissed || input.closed || input.downloading) return false;
+  if (input.remote || input.runtimeMissing !== true || input.dismissed || input.closed || input.downloading) return false;
   const runtime = input.runtime;
   return runtime === null || (runtime.supported && !runtime.installed);
 }

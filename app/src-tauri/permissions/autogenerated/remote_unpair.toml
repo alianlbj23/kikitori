@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-unpair"
+description = "Enables the remote_unpair command without any pre-configured scope."
+commands.allow = ["remote_unpair"]
+
+[[permission]]
+identifier = "deny-remote-unpair"
+description = "Denies the remote_unpair command without any pre-configured scope."
+commands.deny = ["remote_unpair"]
