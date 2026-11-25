@@ -168,13 +168,26 @@ class MenuTest(Case):
         self.assertTrue(self.said("4"))  # 提示在選單選「運算主機」
 
     def test_open_the_app_with_the_current_code(self) -> None:
+        # 不依賴這台電腦裝了什麼（CI 的 Python 工作沒有 Node.js、Rust、app/node_modules）：
+        # 用假的 repo 根目錄放 Tauri CLI，工具查詢也換成「都找得到」
+        root = self.tmp / "repo"
+        tauri = root / "app" / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"
+        tauri.parent.mkdir(parents=True)
+        tauri.write_text("", encoding="utf-8")
         runner = FakeRunner()
-        self.menu(runner, "1", "5")
+        with mock.patch.object(rt.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            rt.menu(Script("1", "5"), self.out, runner, self.config, root)
         call = runner.calls[-1]
-        self.assertEqual(call["argv"][0], "node")
-        self.assertEqual(call["argv"][-1], "dev")
-        self.assertEqual(call["cwd"], ROOT / "app")
-        self.assertEqual(call["env"]["KIKITORI_ENGINE_CWD"], str(ROOT))
+        self.assertEqual(call["argv"], ["node", str(tauri), "dev"])
+        self.assertEqual(call["cwd"], root / "app")
+        self.assertEqual(call["env"]["KIKITORI_ENGINE_CWD"], str(root))
+
+    def test_a_missing_tauri_cli_is_explained(self) -> None:
+        runner = FakeRunner()
+        with mock.patch.object(rt.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            rt.menu(Script("1", "5"), self.out, runner, self.config, self.tmp)
+        self.assertEqual(runner.calls, [])
+        self.assertTrue(self.said("npm install"))
 
     def test_missing_build_tools_are_explained_instead_of_failing(self) -> None:
         # Linux 運算主機常沒有 Rust：直接跑 tauri dev 只會看到「cargo metadata」的英文錯誤
